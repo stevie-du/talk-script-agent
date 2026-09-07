@@ -29,48 +29,85 @@
 </header>
 
 <main>
-  <!-- 左栏：会话记录 -->
+  <!-- 左栏：导航（新建对话 / 会话记录）+ 底部设置 -->
   <aside id="left">
     <div class="left-scroll">
       <button id="btn-new-chat" class="primary new-chat">
-        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
         新建对话
       </button>
+
       <div class="group-lbl">会话记录 <span class="count" id="sess-count"></span></div>
       <div id="session-list"></div>
     </div>
     <div class="left-foot">
-      <button id="btn-settings" class="ghost foot-btn" title="全局设置：模型接口">
-        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-        全局设置
+      <!-- 设置入口（生成参数 + 模型接口合并为一个设置页，保留底部常驻位） -->
+      <button id="btn-nav-setup" class="nav-item" data-view="setup" title="打开设置">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/><circle cx="18" cy="18" r="2.2"/><circle cx="12" cy="6" r="2.2"/><circle cx="7" cy="12" r="2.2"/></svg>
+        <span class="nav-t">设置</span>
+        <span class="sum-hint" id="adv-hint">行业包 · 时长 · 风格</span>
       </button>
     </div>
   </aside>
 
-  <!-- 右栏：对话区 -->
+  <!-- 右栏：视图区（Trae Work 式：左侧导航，右侧切换内容页） -->
   <section id="right">
-    <div id="stale-banner" class="banner warn hidden"></div>
 
-    <!-- 生成设置（豆包式，折叠展开 → 完整参数） -->
-    <div id="cfg-wrap">
-      <details id="cfg" class="cfg">
-        <summary>
-          <span class="cfg-t">⚙ 生成设置</span>
-          <span class="sum-hint" id="adv-hint">行业包 · 细分 · 时长 · 风格 · 模式</span>
-        </summary>
-        <div class="cfg-body">
+    <!-- 视图：对话 -->
+    <div id="view-chat" class="view">
+      <div id="stale-banner" class="banner warn hidden"></div>
+
+      <div id="chat-stream">
+        <div id="empty" class="empty">
+          <span class="mono">
+            <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="#a0a3aa" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="9" width="3" height="6" rx="1.4"/><rect x="8" y="5" width="3" height="14" rx="1.4"/><rect x="13" y="2" width="3" height="20" rx="1.4"/><rect x="18" y="7" width="3" height="10" rx="1.4"/></svg>
+          </span>
+          <h3>生成口播脚本</h3>
+          <div class="guide">
+            <div class="g-item"><b>1</b> 在下方输入主题（如「加装电梯一楼不同意，怎么办」），回车发送</div>
+            <div class="g-item"><b>2</b> 左侧点开「设置」，在右侧调整行业包、细分、时长、风格与模型接口</div>
+            <div class="g-item"><b>3</b> 自动校验字数、时长与禁用词，不合格自动回炉</div>
+          </div>
+          <p class="hint">左侧为会话记录，点开即回看；生成参数在左侧「设置」入口打开</p>
+        </div>
+      </div>
+
+      <!-- 底部输入框（Trae Work 式：圆角容器 + 圆形发送） -->
+      <div id="composer">
+        <div id="composer-body">
+          <textarea id="topic" rows="1" placeholder="输入主题，回车生成口播脚本…"></textarea>
+          <button id="btn-generate" class="primary send" title="生成（Ctrl + Enter）">
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+          </button>
+        </div>
+        <div class="composer-foot">
+          <span class="hint">Enter 发送 · Shift+Enter 换行</span>
+          <span class="hint">参数：左栏「生成设置」</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 视图：设置（生成参数 + 模型接口） -->
+    <div id="view-setup" class="view hidden">
+      <div class="page">
+        <div class="page-head">
+          <h2>设置</h2>
+          <p class="hint">生成参数与模型接口，改动后对下一次生成生效</p>
+        </div>
+        <div class="page-card">
+          <h3 class="card-title">生成参数</h3>
           <div class="fg pack-row">
             <label class="lbl">行业包</label>
             <div class="row">
               <select id="pack"></select>
               <button id="btn-packinfo" class="ghost bordered" title="查看当前包的文件与配置">详情</button>
               <button id="btn-newpack" class="ghost bordered" title="用模型生成新行业包">
-                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+                <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
                 新建
               </button>
             </div>
           </div>
-          <div id="param-front" class="fg grid2"></div>
+          <div id="param-front" class="fg"></div>
           <div id="param-more" class="fg stack"></div>
           <details class="group" id="advanced">
             <summary><span>更多设置</span><span class="sum-hint">人味 · 生成方式 · 输出内容</span></summary>
@@ -106,40 +143,94 @@
             </div>
           </details>
         </div>
-      </details>
-    </div>
-
-    <!-- 消息流 -->
-    <div id="chat-stream">
-      <div id="empty" class="empty">
-        <span class="mono">
-          <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="#a0a3aa" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="9" width="3" height="6" rx="1.4"/><rect x="8" y="5" width="3" height="14" rx="1.4"/><rect x="13" y="2" width="3" height="20" rx="1.4"/><rect x="18" y="7" width="3" height="10" rx="1.4"/></svg>
-        </span>
-        <h3>生成口播脚本</h3>
-        <div class="guide">
-          <div class="g-item"><b>1</b> 在下方输入主题（如「加装电梯一楼不同意，怎么办」），回车发送</div>
-          <div class="g-item"><b>2</b> 展开「生成设置」可调行业包、细分、时长、风格等参数</div>
-          <div class="g-item"><b>3</b> 自动校验字数、时长与禁用词，不合格自动回炉</div>
+        <div class="page-card">
+          <h3 class="card-title">模型接口</h3>
+          <div>
+            <label class="lbl">Base URL（OpenAI 兼容）</label>
+            <input id="st-baseurl" placeholder="https://open.bigmodel.cn/api/paas/v4">
+          </div>
+          <div>
+            <label class="lbl">API Key</label>
+            <input id="st-apikey" type="password" placeholder="已配置时留空即保持不变">
+          </div>
+          <div>
+            <label class="lbl">模型名</label>
+            <input id="st-model" placeholder="glm-4.7 / deepseek-chat / …">
+          </div>
+          <p class="hint" id="st-status"></p>
+          <div class="page-actions">
+            <span class="spacer"></span>
+            <button class="primary slim" id="st-save">保存</button>
+          </div>
         </div>
-        <p class="hint">左侧为会话记录，点开即回看；「全局设置」在左栏底部</p>
       </div>
     </div>
 
-    <!-- 底部输入框 -->
-    <div id="composer">
-      <div id="composer-body">
-        <textarea id="topic" rows="1" placeholder="输入主题，回车生成口播脚本…"></textarea>
-        <button id="btn-generate" class="primary send" title="生成（Ctrl + Enter）">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M12 2l1.8 6.2L20 10l-6.2 1.8L12 18l-1.8-6.2L4 10l6.2-1.8L12 2zM19 15l.9 3.1L23 19l-3.1.9L19 23l-.9-3.1L15 19l3.1-.9L19 15z"/></svg>
-          生成
-        </button>
+    <!-- 视图：包详情 -->
+    <div id="view-packinfo" class="view hidden">
+      <div class="page">
+        <div class="page-head">
+          <h2 id="pi-title">包详情</h2>
+          <p class="hint" id="pi-desc"></p>
+        </div>
+        <div class="page-card">
+          <div id="pi-checklist-wrap" class="hidden">
+            <label class="lbl">校对清单（草稿包需逐项核实）</label>
+            <pre id="pi-checklist"></pre>
+          </div>
+          <div>
+            <label class="lbl">文件清单</label>
+            <div id="pi-files" class="tbl-wrap"></div>
+          </div>
+          <p class="hint">知识库与技能（skill.yaml）的配置方法见项目 docs/知识库与技能配置指南.md</p>
+          <p class="hint" id="pi-export-hint">「导出为 Agent 技能」会把本包转成 SKILL.md 技能目录（含独立校验工具），可复制进 WorkBuddy / ZCode / Claude 等支持技能的 agent 使用。</p>
+          <div class="page-actions">
+            <button class="ghost" id="pi-export">导出为 Agent 技能</button>
+            <span class="spacer"></span>
+            <button class="primary slim" id="pi-close">返回</button>
+          </div>
+        </div>
       </div>
-      <p class="hint composer-hint">Enter 发送 · Shift+Enter 换行 · Ctrl+\ 收起会话栏</p>
     </div>
+
+    <!-- 视图：新建行业包 -->
+    <div id="view-packgen" class="view hidden">
+      <div class="page">
+        <div class="page-head">
+          <h2>新建行业包 <span class="hint">· 模型生成初稿，生成后需人工校对</span></h2>
+        </div>
+        <div class="page-card">
+          <div id="pg-form">
+            <div>
+              <label class="lbl">行业名称</label>
+              <input id="pg-industry" placeholder="例：全屋定制/装修">
+            </div>
+            <div>
+              <label class="lbl">一句话业务描述</label>
+              <textarea id="pg-desc" rows="2" placeholder="例：全屋定制家居品牌，面向新房装修业主获客"></textarea>
+            </div>
+            <p class="hint">生成内容包括：细分领域、受众痛点、选题库、行业红线、行业增补词、待核实清单。</p>
+            <div class="page-actions">
+              <span class="spacer"></span>
+              <button class="ghost" id="pg-close">返回</button>
+              <button class="primary slim" id="pg-run">生成</button>
+            </div>
+          </div>
+          <div id="pg-result" class="hidden">
+            <pre id="pg-checklist"></pre>
+            <div class="page-actions">
+              <span class="spacer"></span>
+              <button class="primary slim" id="pg-done">完成</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
   </section>
 </main>
 
-<!-- 分步确认卡 -->
+<!-- 分步确认（生成流程中的确认卡，保留弹层） -->
 <div id="confirm-overlay" class="overlay hidden">
   <div class="dialog wide">
     <h3>选题确认 <span class="hint">· 分步模式：确认角度后再撰写文案</span></h3>
@@ -162,49 +253,6 @@
   </div>
 </div>
 
-<!-- 设置 -->
-<div id="settings-overlay" class="overlay hidden">
-  <div class="dialog">
-    <h3>设置 · 模型接口</h3>
-    <label class="lbl">Base URL（OpenAI 兼容）</label>
-    <input id="st-baseurl" placeholder="https://open.bigmodel.cn/api/paas/v4">
-    <label class="lbl">API Key</label>
-    <input id="st-apikey" type="password" placeholder="已配置时留空即保持不变">
-    <label class="lbl">模型名</label>
-    <input id="st-model" placeholder="glm-4.7 / deepseek-chat / …">
-    <p class="hint" id="st-status"></p>
-    <div class="dialog-actions">
-      <span class="spacer"></span>
-      <button class="ghost" id="st-close">关闭</button>
-      <button class="primary slim" id="st-save">保存</button>
-    </div>
-  </div>
-</div>
-
-<!-- 新建行业包 -->
-<div id="packgen-overlay" class="overlay hidden">
-  <div class="dialog wide">
-    <h3>新建行业包 <span class="hint">· 模型生成初稿，生成后需人工校对</span></h3>
-    <div id="pg-form">
-      <label class="lbl">行业名称</label>
-      <input id="pg-industry" placeholder="例：全屋定制/装修">
-      <label class="lbl">一句话业务描述</label>
-      <textarea id="pg-desc" rows="2" placeholder="例：全屋定制家居品牌，面向新房装修业主获客"></textarea>
-      <p class="hint">生成内容包括：细分领域、受众痛点、选题库、行业红线、行业增补词、待核实清单。</p>
-      <div class="dialog-actions">
-        <span class="spacer"></span>
-        <button class="ghost" id="pg-close">关闭</button>
-        <button class="primary slim" id="pg-run">生成</button>
-      </div>
-    </div>
-    <div id="pg-result" class="hidden">
-      <pre id="pg-checklist"></pre>
-      <div class="dialog-actions"><span class="spacer"></span>
-        <button class="primary slim" id="pg-done">完成</button></div>
-    </div>
-  </div>
-</div>
-
 <!-- 通用确认弹层（替代原生 confirm）-->
 <div id="confirm-dialog" class="overlay hidden">
   <div class="dialog small">
@@ -214,27 +262,6 @@
       <span class="spacer"></span>
       <button class="ghost" id="cd-no">取消</button>
       <button class="primary slim danger" id="cd-yes">确认</button>
-    </div>
-  </div>
-</div>
-
-<!-- 包详情 -->
-<div id="packinfo-overlay" class="overlay hidden">
-  <div class="dialog wide">
-    <h3 id="pi-title">包详情</h3>
-    <p class="hint" id="pi-desc"></p>
-    <div id="pi-checklist-wrap" class="hidden">
-      <label class="lbl">校对清单（草稿包需逐项核实）</label>
-      <pre id="pi-checklist"></pre>
-    </div>
-    <label class="lbl" style="margin-top:14px">文件清单</label>
-    <div id="pi-files" class="tbl-wrap"></div>
-    <p class="hint">知识库与技能（skill.yaml）的配置方法见项目 docs/知识库与技能配置指南.md</p>
-    <p class="hint" id="pi-export-hint">「导出为 Agent 技能」会把本包转成 SKILL.md 技能目录（含独立校验工具），可复制进 WorkBuddy / ZCode / Claude 等支持技能的 agent 使用。</p>
-    <div class="dialog-actions">
-      <button class="ghost" id="pi-export">导出为 Agent 技能</button>
-      <span class="spacer"></span>
-      <button class="primary slim" id="pi-close">关闭</button>
     </div>
   </div>
 </div>

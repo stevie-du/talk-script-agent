@@ -153,11 +153,14 @@ async function boot() {
   }
   sel.value = META.default_pack;
   if (!sel.value) sel.selectedIndex = 0;
-  sel.onchange = () => { renderPackParams(); updateStale(); };
+  sel.onchange = () => { renderPackParams(); updateStale(); updateCfgHint(); };
   renderPackParams();
+  updateCfgHint();
   loadSessions();
   bindStatic();
   refreshGate();
+  // 预填设置页的模型接口字段（生成参数区在 renderPackParams 已渲染）
+  openSettings().catch(() => {});
 }
 
 function currentPack() {
@@ -213,6 +216,19 @@ function getParam(key) {
   return s ? (s.value || null) : null;
 }
 
+// 生成设置条常显所选值（行业包 · 细分 · 时长 · 风格 · 模式）
+function updateCfgHint() {
+  const pack = currentPack();
+  const parts = [];
+  if (pack) parts.push(pack.display_name || pack.name);
+  if (getParam("segment")) parts.push(getParam("segment"));
+  if (getParam("duration")) parts.push(getParam("duration") + "s");
+  if (getParam("style")) parts.push(getParam("style"));
+  const mode = document.querySelector("input[name=mode]:checked");
+  if (mode) parts.push(mode.value === "step" ? "分步确认" : "一键直通");
+  $("adv-hint").textContent = parts.join(" · ") || "行业包 · 细分 · 时长 · 风格 · 模式";
+}
+
 // ── 自绘下拉：隐藏原生 select（仅作值容器），按钮 + 菜单替代其外观 ──
 function beautifySelects(scope = document) {
   scope.querySelectorAll("select:not([data-beauty])").forEach(sel => {
@@ -250,8 +266,26 @@ function beautifySelects(scope = document) {
       });
     };
     const isOpen = () => !menu.classList.contains("hidden");
-    const open = () => { build(); menu.classList.remove("hidden"); wrap.classList.add("open"); };
-    const close = () => { menu.classList.add("hidden"); wrap.classList.remove("open"); };
+    // 左栏滚动容器会裁剪绝对定位菜单：改用 fixed 定位于视口，并按可用空间决定向上/向下展开
+    const open = () => {
+      build();
+      menu.classList.remove("hidden");
+      wrap.classList.add("open");
+      const r = wrap.getBoundingClientRect();
+      const mh = Math.min(menu.offsetHeight || 264, 264);
+      menu.style.position = "fixed";
+      menu.style.left = r.left + "px";
+      menu.style.width = r.width + "px";
+      menu.style.top =
+        r.bottom + 6 + mh <= innerHeight - 8 || r.top - 6 < mh
+          ? (r.bottom + 6) + "px"
+          : (r.top - 6 - mh) + "px";
+    };
+    const close = () => {
+      menu.classList.add("hidden");
+      wrap.classList.remove("open");
+      menu.style.position = ""; menu.style.left = ""; menu.style.top = ""; menu.style.width = "";
+    };
     sel._syncDropdown = sync;
 
     btn.onclick = () => (isOpen() ? close() : open());
@@ -386,8 +420,8 @@ function setBusy(b, loading = false) {
   const btn = $("btn-generate");
   btn.classList.toggle("loading", loading);
   btn.innerHTML = loading
-    ? `<span class="spinner" style="border-top-color:#fff;border-color:#ffffff55;border-top-color:#fff"></span> 生成中…`
-    : `<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M12 2l1.8 6.2L20 10l-6.2 1.8L12 18l-1.8-6.2L4 10l6.2-1.8L12 2zM19 15l.9 3.1L23 19l-3.1.9L19 23l-.9-3.1L15 19l3.1-.9L19 15z"/></svg> 生成`;
+    ? `<span class="spinner" style="width:16px;height:16px;border-top-color:#fff;border-color:#ffffff55;border-top-color:#fff"></span>`
+    : `<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg>`;
   refreshGate();
 }
 
@@ -474,18 +508,22 @@ function renderResult(r, body) {
     const label = s.type === "point" ? `要点${++pi}` : TYPE_LABEL[s.type];
     const tm = (r.timings || [])[i];
     const chars = countCN(s.text);
+    const sec = (v) => (v === undefined || v === null ? "" : `${Math.round(v * 10) / 10}s`);
     const card = el("div", `card ${s.type}`);
     card.style.setProperty("--i", i);
+    const quota = s.type === "point"
+      ? `<span class="quota ${chars > bodyQuota ? "over" : ""}">${chars}/${bodyQuota} 字</span>`
+      : `<span class="quota">${chars} 字</span>`;
     card.innerHTML = `
       <div class="card-head">
         <span class="pill ${s.type}">${esc(label)}</span>
-        <span class="meta">${tm ? `${tm["start"]}-${tm["end"]} 秒` : ""} · 约 ${chars} 字 · 字幕：${esc(s.subtitle || "—")}</span>
+        ${quota}
+        <span class="meta">${tm ? sec(tm["start"]) + "–" + sec(tm["end"]) : ""}${tm ? " · " : ""}字幕：${esc(s.subtitle || "—")}</span>
       </div>
       <div class="card-text">${fmtText(s.text)}</div>
       <div class="card-foot">
-        <button class="ghost rw">✎ 重写本段</button>
+        <button class="ghost rw">✎ 重写</button>
         <input placeholder="给重写的反馈（可选），回车提交">
-        ${s.type === "point" ? `<span class="quota-tag">配额 ≈${bodyQuota} 字</span>` : ""}
       </div>`;
     const input = card.querySelector("input");
     card.querySelector(".rw").onclick = () => {
@@ -497,20 +535,26 @@ function renderResult(r, body) {
   });
   body.appendChild(segs);
 
-  // 4) 折叠：分镜 / 合规 / JSON / 日志
-  const acc = (title, contentHtml, open) => {
+  // 4) 折叠：分镜 / 合规 / JSON / 日志（标题带状态预览）
+  const acc = (title, contentHtml, open, badgeHtml = "") => {
     const d = el("details", "acc" + (open ? " open" : ""));
-    d.innerHTML = `<summary>${esc(title)}</summary>`;
+    d.innerHTML = `<summary><span class="acc-t">${esc(title)}</span>${badgeHtml}</summary>`;
     const inner = el("div", "acc-body");
     inner.innerHTML = contentHtml;
     d.appendChild(inner);
     return d;
   };
+  const sbN = (r.storyboard || []).length;
+  const hardN2 = (ch.hard_hits || []).reduce((a, h) => a + h.count, 0);
+  const logsN = (r.logs || []).length;
   const wrap = el("div", "acc-list");
-  if (hasSb) wrap.appendChild(acc("分镜", renderStoryboard(r), true));
-  wrap.appendChild(acc("合规检查", renderCompliance(r)));
+  const badge = (text, cls) => `<span class="acc-badge ${cls}">${text}</span>`;
+  if (hasSb) wrap.appendChild(acc("分镜", renderStoryboard(r), true, badge(`${sbN} 镜`, "info")));
+  const complyOk = (ch.passed ?? true) && hardN2 === 0;
+  wrap.appendChild(acc("合规检查", renderCompliance(r), !complyOk,
+    badge(complyOk ? "✓ 通过" : `✗ ${hardN2 ? hardN2 + " 处硬伤" : "未通过"}`, complyOk ? "ok" : "bad")));
   wrap.appendChild(acc("JSON", `<pre class="code">${esc(JSON.stringify(r, null, 2))}</pre>`));
-  wrap.appendChild(acc("日志", renderLogs(r.logs || [])));
+  wrap.appendChild(acc("日志", renderLogs(r.logs || []), false, badge(`${logsN} 条`, "info")));
   body.appendChild(wrap);
 
   // 5) 操作绑定（消息级）
@@ -618,7 +662,8 @@ async function loadSessions() {
     return;
   }
   for (const it of items) {
-    const row = el("div", "sess-item");
+    const isCur = currentResult && it.id === currentResult.id;
+    const row = el("div", "sess-item" + (isCur ? " active" : ""));
     const time = it.created_at.slice(5, 16).replace("T", " ");
     row.innerHTML = `
       <div class="sess-top"><span class="dot ${it.passed ? "" : "no"}"></span>
@@ -643,12 +688,14 @@ async function loadSessions() {
 async function openSession(id) {
   try {
     const r = await api(`/api/history/${id}`);
+    gotoView("chat");
     currentResult = r;
     currentJob = null;          // 历史回看不可再重写/轮询
     $("empty").classList.add("hidden");
     addUserMsg(r.params?.topic || "");
     const body = addAssistantMsg();
     renderResult(r, body);
+    loadSessions();          // 刷新左栏高亮
     scrollBottom();
   } catch (e) { toast("回看失败：" + e.message, 3500); }
 }
@@ -681,7 +728,6 @@ async function openSettings() {
   $("st-apikey").value = "";
   $("st-status").textContent = c.mock ? "当前为 mock 模式（未配置 Key）"
     : c.api_key_set ? `已配置 Key（模型 ${c.model}）` : "未配置 API Key";
-  $("settings-overlay").classList.remove("hidden");
 }
 
 async function saveSettings() {
@@ -693,7 +739,6 @@ async function saveSettings() {
   if (key) body.api_key = key;
   await api("/api/config", { method: "POST", body });
   toast("已保存，下次生成即生效");
-  $("settings-overlay").classList.add("hidden");
 }
 
 async function runPackgen() {
@@ -777,7 +822,17 @@ async function openPackInfo() {
   }
   tb.appendChild(body);
   box.appendChild(tb);
-  $("packinfo-overlay").classList.remove("hidden");
+}
+
+// ── 视图切换（Trae Work 式：左导航 → 右内容页）────────────
+let viewBack = "chat";   // 记录进入当前内容页前的视图，供「返回」跳回
+
+function gotoView(name, back) {
+  if (back !== undefined) viewBack = back;
+  document.querySelectorAll("#right > .view").forEach(v => v.classList.add("hidden"));
+  const v = $("view-" + name);
+  if (v) v.classList.remove("hidden");
+  document.querySelectorAll(".nav-item").forEach(n => n.classList.toggle("active", n.dataset.view === name));
 }
 
 // ── 事件绑定 ─────────────────────────────────────────────
@@ -792,7 +847,8 @@ function setLeftFolded(folded) {
 function bindStatic() {
   if (localStorage.getItem("ts.left.folded") === "1") setLeftFolded(true);
   $("btn-toggle-left").onclick = () => setLeftFolded(!$("left").classList.contains("folded"));
-  $("btn-new-chat").onclick = () => { clearChat(); $("topic").focus(); };
+  $("btn-new-chat").onclick = () => { gotoView("chat"); clearChat(); loadSessions(); $("topic").focus(); };
+  $("btn-nav-setup").onclick = () => gotoView("setup", "chat");
 
   // 发送：按钮 / Ctrl+Enter / Enter（非 Shift）
   $("btn-generate").onclick = send;
@@ -807,9 +863,9 @@ function bindStatic() {
     autoGrow();
   });
 
-  // 参数变更：检测结果过期
+  // 参数变更：检测结果过期 + 刷新左栏设置摘要
   document.addEventListener("change", e => {
-    if (e.target.closest("#cfg-wrap, #left")) updateStale();
+    if (e.target.closest("#view-setup")) { updateStale(); updateCfgHint(); }
   });
 
   // Enter 换行自动增高 / 恢复单行
@@ -833,11 +889,12 @@ function bindStatic() {
     }
   });
 
-  $("btn-settings").onclick = openSettings;
-  $("st-close").onclick = () => $("settings-overlay").classList.add("hidden");
-  $("st-save").onclick = saveSettings;
-  $("btn-packinfo").onclick = () => openPackInfo().catch(e => toast("读取失败：" + e.message, 3500));
-  $("pi-close").onclick = () => $("packinfo-overlay").classList.add("hidden");
+  $("st-save").onclick = async () => {
+    try { await saveSettings(); } catch (e) { toast("保存失败：" + e.message, 3500); }
+  };
+  $("btn-packinfo").onclick = () =>
+    openPackInfo().then(() => gotoView("packinfo", "setup")).catch(e => toast("读取失败：" + e.message, 3500));
+  $("pi-close").onclick = () => gotoView(viewBack || "setup");
   $("pi-export").onclick = async () => {
     const name = $("pack").value;
     $("pi-export").disabled = true;
@@ -851,12 +908,12 @@ function bindStatic() {
   $("btn-newpack").onclick = () => {
     $("pg-form").classList.remove("hidden");
     $("pg-result").classList.add("hidden");
-    $("packgen-overlay").classList.remove("hidden");
+    gotoView("packgen", "setup");
   };
-  $("pg-close").onclick = () => $("packgen-overlay").classList.add("hidden");
+  $("pg-close").onclick = () => gotoView(viewBack || "setup");
   $("pg-run").onclick = runPackgen;
   $("pg-done").onclick = async () => {
-    $("packgen-overlay").classList.add("hidden");
+    gotoView(viewBack || "chat");
     await boot();
     $("pack").value = $("pack").options[$("pack").options.length - 1].value;
     $("pack").dispatchEvent(new Event("change"));
