@@ -10,6 +10,7 @@ generated/
 # Electron 打包产物
 desktop/dist*/
 desktop/dist/
+desktop/release/
 
 # node
 node_modules/
