@@ -1,0 +1,41 @@
+{
+  "name": "talkscript",
+  "productName": "TalkScript",
+  "version": "0.1.0",
+  "description": "口播脚本智能体 — 本地引擎 + Electron 壳",
+  "main": "main.js",
+  "author": "talk-script-agent",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.talkscript.app",
+    "productName": "TalkScript",
+    "directories": {
+      "output": "dist2"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**"
+    ],
+    "extraResources": [
+      { "from": "../app", "to": "engine/app", "filter": ["**/*", "!__pycache__/**"] },
+      { "from": "../packs", "to": "engine/packs" },
+      { "from": "../config.yaml", "to": "engine/config.yaml" }
+    ],
+    "win": {
+      "target": ["nsis", "portable"]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

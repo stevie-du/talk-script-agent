@@ -1,0 +1,12 @@
+# TalkScript 引擎配置
+# api_key 也可用环境变量 TALKSCRIPT_API_KEY 提供（不落盘）
+# 开发调试可设 TALKSCRIPT_MOCK=1 跑通流程（不调模型）
+llm:
+  base_url: https://open.bigmodel.cn/api/paas/v4   # 任意 OpenAI 兼容接口
+  api_key: ""
+  model: glm-4.7
+  temperature: 0.7
+  retries: 2        # 请求失败（网络/超时/429/5xx）自动重试次数；0 = 不重试
+  timeout: 180      # 单次请求超时（秒），长输出模型可调大
+
+default_pack: elevator

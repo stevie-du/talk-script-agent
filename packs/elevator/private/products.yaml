@@ -1,0 +1,87 @@
+# 产品型号与参数库
+#
+# 填写说明：
+#   1. 带单位的必须写单位（kg / m/s / mm / 度）
+#   2. 不确定就留空，不要用估计值
+#   3. 每项填完更新 verified 日期
+#   4. 示例条目请整条替换，不要只在示例上改数字
+#
+# 只需填你实际在卖的品类，用不到的分组可整段删除
+
+# ── 乘客电梯 ──────────────────────────────
+passenger:
+  - brand: "示例：某某电梯"
+    model: "示例：XXX-1000"
+    rated_load_kg: 1050        # 额定载重
+    speed_ms: 1.75             # 额定速度
+    max_stops: 32              # 最大层站数
+    max_travel_m:              # 最大提升高度
+    machine_room: "无机房"       # 有机房 / 无机房 / 小机房
+    drive: "永磁同步无齿轮"       # 驱动方式
+    door_type: "中分"           # 中分 / 旁开 / 双折
+    door_width_mm: 900
+    car_size_mm: "1600×1500"   # 宽×深
+    control: "全集选控制"
+    highlights:                # 卖点，每条要能落到具体装置或数据
+      - "示例：能量回馈，制动电能可回送电网"
+      - "示例：永磁同步主机，免换油"
+    applicable: "住宅 / 写字楼 / 酒店"
+    source: "2026版产品手册"
+    verified: "2026-09-06"
+
+# ── 自动扶梯 / 人行道 ─────────────────────
+escalator:
+  - brand: ""
+    model: ""
+    rise_m:                    # 提升高度
+    angle_deg: 35              # 30 / 35
+    step_width_mm: 1000        # 600 / 800 / 1000
+    speed_ms: 0.5
+    indoor_outdoor: "室内"      # 室内 / 室外（室外需注明防护等级）
+    highlights:
+      - ""
+    applicable: "商场 / 地铁 / 医院"
+    source: ""
+    verified: ""
+
+# ── 家用电梯（别墅梯）──────────────────────
+home:
+  - brand: ""
+    model: ""
+    drive: "曳引"              # 曳引 / 螺杆 / 液压
+    rated_load_kg: 320
+    speed_ms: 0.4
+    min_pit_mm:                # 最小底坑，无底坑方案填 0
+    min_headroom_mm:           # 最小顶层高度
+    shaft_size_mm: ""          # 最小井道尺寸 宽×深
+    door_type: "自动中分"       # 自动中分 / 手拉门 / 平开门
+    power: "220V 家用电源"      # 是否需三相电
+    highlights:
+      - ""
+    source: ""
+    verified: ""
+
+# ── 载货电梯 ──────────────────────────────
+freight:
+  - brand: ""
+    model: ""
+    rated_load_kg: 2000
+    speed_ms: 0.5
+    car_size_mm: ""
+    door_type: "双折旁开"
+    control: "按钮控制 / 集选控制"
+    highlights:
+      - ""
+    source: ""
+    verified: ""
+
+# ── 加装 / 更新方案 ───────────────────────
+modernization:
+  - name: "示例：钢结构井道加装方案"
+    shaft_type: "钢结构"        # 钢结构 / 混凝土
+    entry: "平层入户"           # 平层入户 / 半层入户
+    applicable_floors: "6-9层"
+    cycle_days:                # 施工周期
+    notes: "需先做结构鉴定与管线迁改评估"
+    source: ""
+    verified: ""

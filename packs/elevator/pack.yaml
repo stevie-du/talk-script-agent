@@ -1,0 +1,94 @@
+# 行业包清单（引擎按此文件加载与归一参数）
+#
+# pack 是自包含的可分发单元：一个目录 = 一个行业，
+# 分享给同事 = 复制目录（不含 private/ 即不带商业信息）。
+# 向导生成的包结构与此文件同 schema。
+
+name: elevator
+display_name: 电梯
+draft: false          # true 时界面显示"草稿·需人工校对"角标
+version: 1
+description: 电梯/扶梯/加装/维保行业口播脚本知识包
+
+params:
+  segment:
+    label: 细分领域
+    options: [整机改造, 维保, 旧楼加装, 家用电梯, 扶梯, 零部件, 检验检测, 行业观察]
+    default: 维保
+  audience:
+    label: 受众
+    options: [业主乘客, 物业业委会, 维保公司, 开发商总包, 经销商渠道]
+    default: 业主乘客
+  duration:
+    label: 时长（秒）
+    options: [15, 30, 60, 90, 180]
+    default: 60
+  style:
+    label: 风格
+    options: [权威科普, 亲和接地气, 幽默玩梗, 严肃警示, 销售转化]
+    default: 亲和接地气
+  platform:
+    label: 平台
+    options: [抖音, 视频号, 小红书, B站]
+    default: 抖音
+  persona:
+    label: 人设
+    options: [维保老师傅, 产品经理, 行业观察者, 物业主管]
+    default: 维保老师傅
+  cta:
+    label: 结尾引导
+    options: [关注, 私信, 留资, 到店, 评论关键词]
+    default: 关注
+
+# 语速（字/秒）按风格自动选
+rate_by_style:
+  权威科普: 4.5
+  亲和接地气: 4.5
+  幽默玩梗: 5.0
+  严肃警示: 4.2
+  销售转化: 5.0
+
+# 字数配额表（基准语速 5.0 字/秒；其他语速按 rate/5.0 折算，见 rules/duration.md）
+quota_table:
+  15:  { total: 70,  hook: 15, body: 40,  cta: 15 }
+  30:  { total: 145, hook: 25, body: 90,  cta: 30 }
+  60:  { total: 290, hook: 45, body: 190, cta: 55 }
+  90:  { total: 430, hook: 60, body: 300, cta: 70 }
+  180: { total: 820, hook: 90, body: 600, cta: 130 }
+
+# 正文要点数上限
+points_by_duration:
+  15: 1
+  30: 2
+  60: 3
+  90: 3
+  180: 4
+
+# 参数值 → 知识文件章节标题关键词（按需切片注入，不全量加载）
+topics_map:
+  整机改造: 老旧电梯更新
+  维保: 维保
+  旧楼加装: 旧楼加装
+  家用电梯: 家用电梯
+  扶梯: 自动扶梯
+  零部件: 零部件
+  检验检测: 检验检测
+  行业观察: 行业趋势
+  通用: 安全科普
+
+audience_map:
+  业主乘客: 业主乘客
+  物业业委会: 物业 / 业委会
+  维保公司: 维保公司
+  开发商总包: 开发商 / 总包
+  经销商渠道: 经销商 / 渠道
+
+# 各阶段加载的文件（相对包目录）
+files:
+  select: [knowledge/topics.md, knowledge/audience.md, knowledge/ideas.md, patterns/hooks.md]
+  write: [patterns/hooks.md, patterns/growth.md, knowledge/voice.md, patterns/anti-ai-smell.md, rules/duration.md, rules/output-template.md]
+  compliance: [compliance/ad-law.md, compliance/platform.md, compliance/industry.md]
+  facts: [knowledge/standards.md]
+  private: [private/products.yaml, private/service.yaml, private/cases.yaml, private/faq.yaml]
+
+banwords: banwords.yaml

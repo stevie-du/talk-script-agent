@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TalkScript · 口播脚本智能体</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+      <rect x="2" y="9" width="3" height="6" rx="1.2" fill="currentColor" opacity=".55"/>
+      <rect x="7" y="5" width="3" height="14" rx="1.2" fill="currentColor" opacity=".75"/>
+      <rect x="12" y="2" width="3" height="20" rx="1.2" fill="currentColor"/>
+      <rect x="17" y="7" width="3" height="10" rx="1.2" fill="currentColor" opacity=".75"/>
+      <rect x="21" y="10" width="1.6" height="4" rx=".8" fill="currentColor" opacity=".55"/>
+    </svg>
+    <span>TalkScript</span>
+    <span class="sub">口播脚本智能体</span>
+  </div>
+  <div class="header-right">
+    <span id="pack-badge" class="badge hidden">草稿包 · 需校对</span>
+    <button id="btn-history" class="ghost on-dark icon-btn" title="历史记录">
+      <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l4 2"/></svg>
+      历史<span id="hist-count" class="count hidden"></span>
+    </button>
+    <button id="btn-settings" class="ghost on-dark icon-btn" title="设置">
+      <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      设置
+    </button>
+  </div>
+</header>
+
+<main>
+  <!-- 左栏：参数 -->
+  <aside id="left">
+    <div class="left-scroll">
+      <div class="block card-block">
+        <label class="lbl">行业包</label>
+      <div class="row">
+        <select id="pack"></select>
+        <button id="btn-packinfo" class="ghost bordered" title="查看当前包的文件与配置">详情</button>
+        <button id="btn-newpack" class="ghost bordered" title="用模型生成新行业包">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+          新建
+        </button>
+      </div>
+      </div>
+
+      <div class="block card-block">
+        <label class="lbl">主题 <span class="req">*</span></label>
+        <textarea id="topic" rows="2" placeholder="例：加装电梯一楼不同意，怎么办"></textarea>
+      </div>
+
+      <div class="lbl group-lbl">核心参数</div>
+      <div id="param-front" class="grid2"></div>
+
+      <details class="group" id="advanced">
+        <summary>
+          <span>更多设置</span>
+          <span class="sum-hint" id="adv-hint">风格 · 人设 · 人味 · 模式</span>
+        </summary>
+        <div class="group-body">
+          <div id="param-more" class="stack"></div>
+          <div class="block-inner">
+            <label class="lbl">生成方式</label>
+            <div class="row seg">
+              <label class="radio"><input type="radio" name="mode" value="auto" checked> 一键直通</label>
+              <label class="radio"><input type="radio" name="mode" value="step"> 分步确认</label>
+            </div>
+            <p class="hint">分步确认：选题后暂停，你确认角度再写文案</p>
+          </div>
+          <div class="block-inner">
+            <label class="lbl">输出内容</label>
+            <select id="format">
+              <option value="both" selected>口播 + 分镜（默认）</option>
+              <option value="voice">仅口播文案</option>
+            </select>
+            <p class="hint">仅口播：不生成拍摄用分镜表</p>
+          </div>
+          <div class="block-inner">
+            <label class="lbl">文案人味（去 AI 味档位）</label>
+            <select id="voice">
+              <option value="strong" selected>加强人味 — 口语音+具体细节+情绪（默认）</option>
+              <option value="standard">标准 — 只去 AI 腔，不加口头禅情绪</option>
+              <option value="off">关闭 — 模型原始文风（供对比）</option>
+            </select>
+          </div>
+          <div class="block-inner">
+            <label class="lbl">补充事实（产品手册/数据/案例，选填）</label>
+            <textarea id="facts" rows="3" placeholder="例：我们主力机型载重 1050kg，市区 2 小时内到场"></textarea>
+          </div>
+        </div>
+      </details>
+    </div>
+    <div class="left-foot">
+      <p class="hint key-hint">Ctrl + Enter 快捷生成</p>
+      <button id="btn-generate" class="primary">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M12 2l1.8 6.2L20 10l-6.2 1.8L12 18l-1.8-6.2L4 10l6.2-1.8L12 2zM19 15l.9 3.1L23 19l-3.1.9L19 23l-.9-3.1L15 19l3.1-.9L19 15z"/></svg>
+        生成脚本
+      </button>
+    </div>
+  </aside>
+
+  <!-- 右栏：结果 -->
+  <section id="right">
+    <div id="progress-panel" class="hidden"></div>
+
+    <div id="empty" class="empty">
+      <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="#c3cbd8" stroke-width="1.6" stroke-linecap="round"><rect x="3" y="9" width="3" height="6" rx="1.2"/><rect x="8" y="5" width="3" height="14" rx="1.2"/><rect x="13" y="2" width="3" height="20" rx="1.2"/><rect x="18" y="7" width="3" height="10" rx="1.2"/></svg>
+      <h3>生成口播脚本</h3>
+      <div class="guide">
+        <div class="g-item"><b>1</b> 左侧填写主题，参数已有默认值</div>
+        <div class="g-item"><b>2</b> 生成后自动校验字数、时长与禁用词，不合格自动回炉</div>
+        <div class="g-item"><b>3</b> 在「合规」页签核对结果，复制或另存</div>
+      </div>
+      <p class="hint">历史记录在右上角；「更多设置」可调风格、人味与生成方式</p>
+    </div>
+
+    <div id="stale-banner" class="banner warn hidden"></div>
+
+    <nav id="tabs" class="hidden">
+      <button data-tab="voice" class="tab active">口播</button>
+      <button data-tab="storyboard" class="tab">分镜</button>
+      <button data-tab="compliance" class="tab">合规</button>
+      <button data-tab="json" class="tab">JSON</button>
+      <button data-tab="logs" class="tab">日志</button>
+    </nav>
+
+    <div id="tab-voice" class="tabpane hidden">
+      <div id="metrics" class="metrics hidden"></div>
+      <div id="banners"></div>
+      <div id="seg-cards"></div>
+      <div class="actions hidden" id="result-actions">
+        <button class="ghost" id="btn-copy-voice">复制口播</button>
+        <button class="ghost" id="btn-copy-json">复制 JSON</button>
+        <button class="ghost" id="btn-save-md">另存 MD</button>
+        <button class="ghost" id="btn-rerun">重跑</button>
+      </div>
+    </div>
+    <div id="tab-storyboard" class="tabpane hidden"><div id="storyboard"></div></div>
+    <div id="tab-compliance" class="tabpane hidden"><div id="compliance"></div></div>
+    <div id="tab-json" class="tabpane hidden"><pre id="json-view"></pre></div>
+    <div id="tab-logs" class="tabpane hidden"><div id="logs"></div></div>
+
+    <div id="history-view" class="tabpane hidden">
+      <div class="view-head">
+        <h3>历史记录</h3>
+        <span class="hint" id="hist-sub"></span>
+        <span class="spacer"></span>
+        <button class="ghost" id="hist-back">← 返回</button>
+      </div>
+      <div id="history-list" class="tbl-wrap"></div>
+    </div>
+  </section>
+</main>
+
+<!-- 分步确认卡 -->
+<div id="confirm-overlay" class="overlay hidden">
+  <div class="dialog wide">
+    <h3>选题确认 <span class="hint">· 分步模式：确认角度后再撰写文案</span></h3>
+    <label class="lbl">角度（一句话）</label>
+    <textarea id="cf-angle" rows="2"></textarea>
+    <div class="grid2">
+      <div><label class="lbl">钩子类型</label><input id="cf-hooktype"></div>
+      <div><label class="lbl">结尾引导</label><input id="cf-cta"></div>
+    </div>
+    <label class="lbl">开场钩子句</label>
+    <textarea id="cf-hookline" rows="2"></textarea>
+    <label class="lbl">要点（每行一条）</label>
+    <textarea id="cf-points" rows="4"></textarea>
+    <div class="dialog-actions">
+      <button class="ghost" id="cf-reselect">换个角度重选</button>
+      <span class="spacer"></span>
+      <button class="ghost" id="cf-cancel">取消本次</button>
+      <button class="primary slim" id="cf-continue">确认并撰写文案</button>
+    </div>
+  </div>
+</div>
+
+<!-- 设置 -->
+<div id="settings-overlay" class="overlay hidden">
+  <div class="dialog">
+    <h3>设置 · 模型接口</h3>
+    <label class="lbl">Base URL（OpenAI 兼容）</label>
+    <input id="st-baseurl" placeholder="https://open.bigmodel.cn/api/paas/v4">
+    <label class="lbl">API Key</label>
+    <input id="st-apikey" type="password" placeholder="已配置时留空即保持不变">
+    <label class="lbl">模型名</label>
+    <input id="st-model" placeholder="glm-4.7 / deepseek-chat / …">
+    <p class="hint" id="st-status"></p>
+    <div class="dialog-actions">
+      <span class="spacer"></span>
+      <button class="ghost" id="st-close">关闭</button>
+      <button class="primary slim" id="st-save">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 新建行业包 -->
+<div id="packgen-overlay" class="overlay hidden">
+  <div class="dialog wide">
+    <h3>新建行业包 <span class="hint">· 模型生成初稿，生成后需人工校对</span></h3>
+    <div id="pg-form">
+      <label class="lbl">行业名称</label>
+      <input id="pg-industry" placeholder="例：全屋定制/装修">
+      <label class="lbl">一句话业务描述</label>
+      <textarea id="pg-desc" rows="2" placeholder="例：全屋定制家居品牌，面向新房装修业主获客"></textarea>
+      <p class="hint">生成内容包括：细分领域、受众痛点、选题库、行业红线、行业增补词、待核实清单。</p>
+      <div class="dialog-actions">
+        <span class="spacer"></span>
+        <button class="ghost" id="pg-close">关闭</button>
+        <button class="primary slim" id="pg-run">生成</button>
+      </div>
+    </div>
+    <div id="pg-result" class="hidden">
+      <pre id="pg-checklist"></pre>
+      <div class="dialog-actions"><span class="spacer"></span>
+        <button class="primary slim" id="pg-done">完成</button></div>
+    </div>
+  </div>
+</div>
+
+<!-- 通用确认弹层（替代原生 confirm）-->
+<div id="confirm-dialog" class="overlay hidden">
+  <div class="dialog small">
+    <h3 id="cd-title">确认操作</h3>
+    <p class="cd-msg" id="cd-msg"></p>
+    <div class="dialog-actions">
+      <span class="spacer"></span>
+      <button class="ghost" id="cd-no">取消</button>
+      <button class="primary slim danger" id="cd-yes">确认</button>
+    </div>
+  </div>
+</div>
+
+<!-- 包详情 -->
+<div id="packinfo-overlay" class="overlay hidden">
+  <div class="dialog wide">
+    <h3 id="pi-title">包详情</h3>
+    <p class="hint" id="pi-desc"></p>
+    <div id="pi-checklist-wrap" class="hidden">
+      <label class="lbl">校对清单（草稿包需逐项核实）</label>
+      <pre id="pi-checklist"></pre>
+    </div>
+    <label class="lbl" style="margin-top:14px">文件清单</label>
+    <div id="pi-files" class="tbl-wrap"></div>
+    <p class="hint">知识库与技能（skill.yaml）的配置方法见项目 docs/知识库与技能配置指南.md</p>
+    <p class="hint" id="pi-export-hint">「导出为 Agent 技能」会把本包转成 SKILL.md 技能目录（含独立校验工具），可复制进 WorkBuddy / ZCode / Claude 等支持技能的 agent 使用。</p>
+    <div class="dialog-actions">
+      <button class="ghost" id="pi-export">导出为 Agent 技能</button>
+      <span class="spacer"></span>
+      <button class="primary slim" id="pi-close">关闭</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+<script src="app.js"></script>
+</body>
+</html>

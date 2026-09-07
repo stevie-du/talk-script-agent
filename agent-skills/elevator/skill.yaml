@@ -1,0 +1,124 @@
+# 生成技能定义（本行业包"怎么写"的方法）
+#
+# 与 knowledge/（写什么）相对：本文件定义流水线各阶段的提示词、注入文件与回炉上限。
+# 占位符用 $var（string.Template 语法），渲染时由引擎填充；模板里的 { } 花括号原样保留。
+#
+# 可用占位符：
+#   公共   $industry $topic $segment $audience $platform $style $persona $duration $points $rate
+#   配额   $quota_total $quota_hook $quota_body_per $quota_cta
+#   选题   $topics_slice(按细分切片) $audience_slice(按受众切片) $hooks(stages.select.files.hooks 文件内容)
+#   撰写   $plan_json $facts_block(用户补充+私有资料) $voice_block(按人味档位组成) $feedback_block(回炉反馈)
+#   重写段 $context $seg_type $seg_text $seg_quota $seg_feedback
+#
+# 人味档位：anti_ai.levels 定义 strong/standard/off 三档分别注入的规则与文件；
+#           files 里不存在的文件会被静默跳过——新行业包不必照搬电梯的 voice.md。
+
+version: 1
+name: 通用口播流水线
+description: 参数归一 → 选题策划 → 文案撰写 → 校验回炉；口播语体 + 反 AI 味
+
+limits:
+  recheck_rounds: 2        # 校验不合格时的最大回炉次数
+
+stages:
+
+  select:
+    system: |
+      你是$industry行业资深的短视频内容策划。你懂行业，也懂短视频（前 3 秒定生死、完播率、转化引导）。你写的不是说明书，是能让人一口气听完并行动的口语。
+      只输出一个 JSON 对象，不要任何多余文字。
+    user_template: |
+      【任务】为主题策划一条口播脚本的角度与结构。
+
+      【主题】$topic
+      【细分领域】$segment　【受众】$audience
+      【平台】$platform　【风格】$style　【人设】$persona
+      【目标时长】$duration 秒，正文恰好 $points 个要点
+
+      【行业知识·当前细分】
+      $topics_slice
+
+      【受众痛点与话术】
+      $audience_slice
+
+      【钩子库（hook_type 必须从中选）】
+      $hooks
+
+      【要求】
+      1. angle：一句话角度，不站队、不说教
+      2. hook_type：从钩子库 10 类中选，hook_line 是可直接念的开场句
+      3. points：恰好 $points 条，每条一句可展开的核心观点
+      4. cta：结尾引导，动作唯一
+      5. 不出现绝对化承诺、权威背书、行业红线表述
+      输出 JSON 字段：angle, hook_type, hook_line, points, cta
+    files:
+      hooks: patterns/hooks.md
+
+  write:
+    system: |
+      你是$industry行业资深的短视频内容策划。你懂行业，也懂短视频（前 3 秒定生死、完播率、转化引导）。你写的不是说明书，是能让人一口气听完并行动的口语。
+      口语化硬规则：
+      1. 单句 ≤ 25 字，长句拆开
+      2. 不用书面语连接词（因此/由此可见/综上所述/值得注意的是）
+      3. 每段只讲一件事，必须有停顿节奏感（用 ／ 标注）
+      4. 需要重读的词用 **加粗**
+      5. 事实缺失处用 {{待补：xxx}} 占位，绝不估算填充
+      6. 不出现绝对化承诺（绝对安全/零事故/政府补贴类权威背书等）
+      7. 口语化 ≠ 俚语化：按人设/受众切档——专业受众与品牌场景"自然但克制"，不用俚语网梗、不情绪化攻击；只有幽默玩梗风格才放开
+      $anti_ai_rule
+      只输出一个 JSON 对象，不要任何多余文字。
+    user_template: |
+      【任务】按已确认的选题撰写口播脚本（含分镜）。
+      $feedback_block
+      【选题（照此执行，不改角度）】
+      $plan_json
+
+      【平台】$platform　【风格】$style　【人设】$persona
+      【字数配额（硬性）】总计≈$quota_total 字：开场钩子≈$quota_hook 字；正文 $points 个要点、每个≈$quota_body_per 字；结尾引导≈$quota_cta 字
+      $facts_block
+      $voice_block
+      【输出结构】JSON：
+      {
+        "sections": [
+          {"type": "hook", "text": "开场钩子文案", "subtitle": "字幕关键词"},
+          {"type": "point", "text": "要点文案", "subtitle": "字幕关键词"},
+          {"type": "cta", "text": "结尾引导文案", "subtitle": "字幕关键词"}
+        ],
+        "storyboard": [{"time": "0-4s", "shot": "画面/景别", "subtitle": "字幕关键词", "sfx": "音效/BGM", "note": "拍摄提示"}]
+      }
+
+      【要求】
+      1. sections 恰好 1 个 hook + $points 个 point + 1 个 cta，顺序固定
+      2. 每段 text 用 ／ 标注停顿，**重读词**加粗；口语化硬规则见系统提示
+      3. subtitle 每屏 ≤ 12 字，不是口播原文照搬
+      4. storyboard 覆盖整条片子的时间线，画面必须可实拍；涉及危险区域提示"需专业单位配合"
+      5. 私有知识库已填的数字优先使用；没有的事实用 {{待补：xxx}} 占位
+      6. $platform 平台合规：不出现该平台违禁词
+    # 人味（去 AI 味）档位：界面可选，引擎按档位组装 $anti_ai_rule 与 $voice_block
+    anti_ai:
+      rule: |
+        8. 反 AI 味：必有 ≥1 个具体细节（真实场景/数字），不排比三连，不口号式收尾，
+        收尾用大白话或互动反问；写完默念一遍，像念说明书就重写腔调
+      levels:
+        strong:
+          heading: 【人味与去 AI 味（写完逐条自检，念出声不像念稿才算完稿）】
+          files: [knowledge/voice.md, patterns/anti-ai-smell.md]
+        standard:
+          heading: 【去 AI 腔（只清理排比/口号/填充词，不加口头禅与情绪）】
+          files: [patterns/anti-ai-smell.md]
+        off:
+          heading: ""
+          files: []
+
+  rewrite_segment:
+    system: |
+      你是$industry行业资深的短视频内容策划。只改写指定段落，其余内容不得改动。
+      口语化与合规要求同主流程；只输出一个 JSON 对象，不要任何多余文字。
+    user_template: |
+      【任务】只改写脚本中的一段。
+      【全片其他段（不得改动，仅作上下文）】
+      $context
+      【待改写段（type=$seg_type）】
+      $seg_text
+      【该段字数配额】≈$seg_quota 字
+      【用户反馈】$seg_feedback
+      输出 JSON：{"text": "改写后的段落", "subtitle": "字幕关键词≤12字"}
