@@ -82,6 +82,41 @@ class StoryboardShot(BaseModel):
     voiceover: str = ""               # 缺省由组装器按段落填充
 
 
+# ── 场景序列契约（Scene[]）─────────────────────────────────
+# 统一产物模型：口播 = 旁白投影 · 分镜 = 表格投影 · 视频 = 连续投影
+# 约定见 docs/场景序列契约.md；先与 sections/storyboard/timings 并行输出，逐步迁移
+
+class SceneVisual(BaseModel):
+    prompt: str = ""                  # 画面描述 → 素材生成提示词 / 素材库检索 key
+    source: str = "generated"         # generated / stock / user
+    transition: str = "cut"           # cut / dissolve / fade
+
+    @field_validator("source")
+    @classmethod
+    def _valid_source(cls, v: str) -> str:
+        if v not in ("generated", "stock", "user"):
+            raise ValueError("source 必须是 generated/stock/user")
+        return v
+
+
+class SceneAudio(BaseModel):
+    bgm: str = ""                     # 空 = 沿用上一镜
+    sfx: str = ""
+
+
+class SceneItem(BaseModel):
+    scene_id: str
+    type: str = "point"               # hook / point / cta
+    start: float = 0.0                # 秒（语速+字数推算）
+    end: float = 0.0
+    narration: str = ""               # 口播旁白全文 → TTS / 配音
+    subtitle: str = ""                # 字幕关键词 ≤12 字
+    visual: SceneVisual = Field(default_factory=SceneVisual)
+    audio: SceneAudio = Field(default_factory=SceneAudio)
+    shot_type: str = ""               # closeup / medium / wide / detail
+    style: str = ""                   # 视觉风格标签
+
+
 class ScriptResult(BaseModel):
     id: str
     created_at: str
@@ -92,6 +127,7 @@ class ScriptResult(BaseModel):
     plan: TopicPlan
     sections: list[ScriptSection]
     storyboard: list[StoryboardShot]
+    scenes: list[SceneItem] = []      # 场景序列契约（v1：与旧字段并行输出）
     check: dict                       # checker 报告
     placeholders: list[str] = []
     revisions: list[dict] = []        # 回炉/重写记录

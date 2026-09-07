@@ -307,6 +307,38 @@ class Pipeline:
             t += dur
         return timings
 
+    @staticmethod
+    def _build_scenes(sections: list[dict], storyboard: list[dict],
+                      timings: list[dict]) -> list[dict]:
+        """组装统一产物「场景序列 Scene[]」。
+
+        投影关系：口播 = narration · 分镜 = visual.prompt / audio.sfx
+        契约见 docs/场景序列契约.md；与 sections/storyboard/timings 并行输出。
+        """
+        scenes = []
+        for i, (s, tm) in enumerate(zip(sections, timings)):
+            shot = storyboard[i] if i < len(storyboard) else {}
+            scenes.append({
+                "scene_id": f"s{i + 1}",
+                "type": s["type"],
+                "start": tm["start"],
+                "end": tm["end"],
+                "narration": s["text"],
+                "subtitle": s.get("subtitle", "") or "",
+                "visual": {
+                    "prompt": shot.get("shot", ""),
+                    "source": "generated",
+                    "transition": shot.get("transition", "cut"),
+                },
+                "audio": {
+                    "bgm": shot.get("bgm", ""),
+                    "sfx": shot.get("sfx", ""),
+                },
+                "shot_type": shot.get("shot_type", ""),
+                "style": shot.get("style", ""),
+            })
+        return scenes
+
     def _finalize(self, job: Job, pack: Pack, p: dict, plan: TopicPlan,
                   draft: dict, revisions: list[dict]) -> dict:
         sections = draft["sections"]
@@ -314,6 +346,7 @@ class Pipeline:
         if p.get("format") == "voice":
             storyboard = []                  # 仅口播：分镜不进入产物
         timings = self._compute_timings(sections, p["rate"])
+        scenes = self._build_scenes(sections, storyboard, timings)
         full_text = "\n".join(s["text"] for s in sections)
         placeholders = sorted(set(re.findall(r"\{\{([^}]+)\}\}", full_text)))
 
@@ -327,6 +360,7 @@ class Pipeline:
             "plan": plan.model_dump(),
             "sections": sections,
             "storyboard": storyboard,
+            "scenes": scenes,
             "check": draft["check"],
             "placeholders": placeholders,
             "revisions": revisions,
@@ -406,6 +440,8 @@ class Pipeline:
             report = check_script(sections, p["duration"], p["rate"], ban, p["platform"], quota)
             result["check"] = report
             result["timings"] = self._compute_timings(sections, p["rate"])   # 重算时间轴
+            result["scenes"] = self._build_scenes(sections, result["storyboard"],
+                                                  result["timings"])          # 场景序列同步刷新
             result["revisions"].append({"segment": index, "from": old,
                                         "to": new.text, "feedback": feedback})
             result["logs"] = job.steps                                        # 日志同步

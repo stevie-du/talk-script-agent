@@ -1,6 +1,6 @@
 // TalkScript — Electron 主进程
 // 职责：拉起 Python 引擎子进程（127.0.0.1）→ 等健康检查 → 开窗口 → 退出时回收子进程
-const { app, BrowserWindow, dialog } = require('electron');
+const { app, BrowserWindow, dialog, Menu } = require('electron');
 const { spawn } = require('child_process');
 const net = require('net');
 const path = require('path');
@@ -82,14 +82,24 @@ function killEngine() {
 }
 
 function createWindow() {
+  // 去掉 Electron 自带菜单栏（Windows/Linux 顶部菜单），产品 UI 内无菜单需求
+  Menu.setApplicationMenu(null);
   win = new BrowserWindow({
     width: 1320,
     height: 860,
     title: 'TalkScript · 口播脚本智能体',
+    autoHideMenuBar: true,            // 兜底：即使菜单存在也不常显（Alt 可临时唤出）
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
     },
+  });
+  // 菜单移除后 DevTools 快捷键失效，用 F12 保留开发调试入口
+  win.webContents.on('before-input-event', (_e, input) => {
+    if (input.type === 'keyDown' && input.key === 'F12') {
+      win.webContents.toggleDevTools();
+      _e.preventDefault();
+    }
   });
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'), {
     query: { port: String(enginePort) },
