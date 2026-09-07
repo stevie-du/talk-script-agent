@@ -240,7 +240,7 @@ async function generate(overrides) {
     $("metrics").classList.add("hidden");
     $("banners").innerHTML = "";
     $("result-actions").classList.add("hidden");
-    $("tabs").classList.remove("hidden");
+    $("tabsbar").classList.remove("hidden");
     $("empty").classList.add("hidden");
     setBusy(true, true);
     poll();
@@ -351,12 +351,12 @@ function showTab(name) {
   $("tab-" + name).classList.remove("hidden");
   $("empty").classList.add("hidden");
   $("history-view").classList.add("hidden");
-  $("tabs").classList.remove("hidden");
+  $("tabsbar").classList.remove("hidden");
 }
 
 function showEmptyView() {
   $("history-view").classList.add("hidden");
-  $("tabs").classList.add("hidden");
+  $("tabsbar").classList.add("hidden");
   document.querySelectorAll(".tabpane").forEach(p => { if (p.id !== "history-view") p.classList.add("hidden"); });
   $("empty").classList.remove("hidden");
 }
@@ -364,7 +364,7 @@ function showEmptyView() {
 function showResultView() {
   $("history-view").classList.add("hidden");
   $("empty").classList.add("hidden");
-  $("tabs").classList.remove("hidden");
+  $("tabsbar").classList.remove("hidden");
   const active = document.querySelector(".tab.active")?.dataset.tab || "voice";
   document.querySelectorAll(".tabpane").forEach(p => { if (p.id !== "history-view") p.classList.add("hidden"); });
   $("tab-" + active).classList.remove("hidden");
@@ -372,7 +372,7 @@ function showResultView() {
 
 async function showHistoryView() {
   $("empty").classList.add("hidden");
-  $("tabs").classList.add("hidden");
+  $("tabsbar").classList.add("hidden");
   document.querySelectorAll(".tabpane").forEach(p => { if (p.id !== "history-view") p.classList.add("hidden"); });
   $("history-view").classList.remove("hidden");
   await loadHistory();
@@ -735,7 +735,17 @@ async function openPackInfo() {
 }
 
 // ── 事件绑定 ─────────────────────────────────────────────
+// 左栏折叠：记忆偏好，Ctrl+\ 或顶栏按钮切换
+function setLeftFolded(folded) {
+  $("left").classList.toggle("folded", folded);
+  localStorage.setItem("ts.left.folded", folded ? "1" : "0");
+  const btn = $("btn-toggle-left");
+  btn.classList.toggle("on", folded);
+  btn.title = folded ? "展开参数面板（Ctrl+\\）" : "收起参数面板（Ctrl+\\）";
+}
 function bindStatic() {
+  if (localStorage.getItem("ts.left.folded") === "1") setLeftFolded(true);
+  $("btn-toggle-left").onclick = () => setLeftFolded(!$("left").classList.contains("folded"));
   $("btn-generate").onclick = () => generate();
   document.querySelectorAll(".tab").forEach(t => t.onclick = () => showTab(t.dataset.tab));
   // 防错：主题为空时生成按钮禁用；参数变更时检测结果过期
@@ -748,6 +758,10 @@ function bindStatic() {
     if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
       e.preventDefault();
       if (!busyNow && $("topic").value.trim()) generate();
+    }
+    if (e.ctrlKey && e.key === "\\") {
+      e.preventDefault();
+      setLeftFolded(!$("left").classList.contains("folded"));
     }
     if (e.key === "Escape") {
       document.querySelectorAll(".overlay:not(.hidden)").forEach(o => o.classList.add("hidden"));
