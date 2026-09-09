@@ -24,3 +24,8 @@ Thumbs.db
 # 本地工具目录（agent 工作记忆 / 计划）
 .workbuddy/
 .zcode/
+
+# 本地界面截图产物与临时验证脚本
+_shots/
+_shot*.js
+_probe.js
