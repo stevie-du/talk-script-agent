@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -25,6 +26,25 @@ from .schemas import (ConfirmRequest, GenerateRequest, PackCreateRequest,
                       RewriteSegmentRequest)
 
 VERSION = "0.1.0"
+
+# 路径参数白名单：作业 id 形如 20260910-010929-ddb666；
+# 行业包名为 slug（允许中英文、数字、下划线与连字符），两者都禁止 . / 等穿越字符。
+_JID_RE = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{6}$")
+_NAME_RE = re.compile(r"^[\w\u4e00-\u9fff-]+$")
+
+
+def _safe_jid(jid: str) -> str:
+    """校验作业 id：既防路径穿越，也防 glob 通配（如 jid=* 命中任意记录）。"""
+    if not _JID_RE.match(jid or ""):
+        raise HTTPException(400, "记录标识不合法")
+    return jid
+
+
+def _safe_name(name: str) -> str:
+    """校验行业包名：禁止 .. / \\ 等穿越字符。"""
+    if not _NAME_RE.match(name or "") or ".." in name:
+        raise HTTPException(400, "行业包名称不合法")
+    return name
 
 
 def create_app(root: Path) -> FastAPI:
@@ -68,6 +88,7 @@ def create_app(root: Path) -> FastAPI:
 
     @app.get("/api/packs/{name}")
     def get_pack(name: str):
+        _safe_name(name)
         try:
             pack = Pack(root, name)
         except Exception as e:
@@ -150,6 +171,7 @@ def create_app(root: Path) -> FastAPI:
     @app.post("/api/packs/{name}/undraft")
     def packs_undraft(name: str):
         """人工校对完成后，把 draft 改为 false"""
+        _safe_name(name)
         p = root / "packs" / name / "pack.yaml"
         if not p.exists():
             raise HTTPException(404, "行业包不存在")
@@ -180,12 +202,14 @@ def create_app(root: Path) -> FastAPI:
 
     @app.get("/api/history/{jid}")
     def history_item(jid: str):
+        jid = _safe_jid(jid)
         for f in root.glob(f"generated/*/{jid}/result.json"):
             return json.loads(f.read_text(encoding="utf-8"))
         raise HTTPException(404, "记录不存在")
 
     @app.delete("/api/history/{jid}")
     def history_delete(jid: str):
+        jid = _safe_jid(jid)
         for f in root.glob(f"generated/*/{jid}"):
             shutil.rmtree(f, ignore_errors=True)
             return {"ok": True, "id": jid}
