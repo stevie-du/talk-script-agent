@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import yaml
@@ -20,6 +23,7 @@ from pydantic import BaseModel
 
 from .config import load_config, save_config
 from .knowledge import Pack, list_packs
+from .llm import LLMClient
 from .packgen import create_pack
 from .pipeline import Pipeline
 from .schemas import (ConfirmRequest, GenerateRequest, PackCreateRequest,
@@ -215,6 +219,18 @@ def create_app(root: Path) -> FastAPI:
             return {"ok": True, "id": jid}
         raise HTTPException(404, "记录不存在")
 
+    @app.post("/api/history/{jid}/reveal")
+    def history_reveal(jid: str):
+        """在系统文件管理器里打开该条记录的产物目录（脚本.md / result.json 所在处）。"""
+        jid = _safe_jid(jid)
+        for f in root.glob(f"generated/*/{jid}"):
+            try:
+                _reveal_in_explorer(f)
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(500, f"打开失败：{e}")
+            return {"ok": True, "path": str(f.resolve())}
+        raise HTTPException(404, "记录不存在")
+
     # ── 设置 ────────────────────────────────────────────────
     @app.get("/api/config")
     def get_config():
@@ -236,7 +252,39 @@ def create_app(root: Path) -> FastAPI:
         save_config(root, updates)
         return {"ok": True}
 
+    @app.post("/api/config/test")
+    def test_config(body: ConfigIn | None = None):
+        """用当前配置发一个最小请求，验证 Key / 地址 / 模型名是否可用。
+
+        body 可选：传入界面上尚未保存的值做临时覆盖（Key 留空表示沿用已保存的），
+        这样用户填完就能测，不必先点保存。
+        """
+        fresh = load_config(root)
+        if body:
+            if body.base_url:
+                fresh.llm.base_url = str(body.base_url).rstrip("/")
+            if body.api_key:
+                fresh.llm.api_key = str(body.api_key)
+            if body.model:
+                fresh.llm.model = str(body.model)
+        if not (fresh.llm.api_key or fresh.mock):
+            raise HTTPException(400, "未配置模型 API Key，请先填写")
+        ok, detail = LLMClient(fresh.llm, mock=fresh.mock).ping()
+        return {"ok": ok, "detail": detail, "model": fresh.llm.model,
+                "base_url": fresh.llm.base_url}
+
     return app
+
+
+def _reveal_in_explorer(target: Path) -> None:
+    """在系统文件管理器中打开目录（跨平台）。"""
+    p = str(target.resolve())
+    if sys.platform == "win32":
+        os.startfile(p)          # noqa: S606
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", p])
+    else:
+        subprocess.Popen(["xdg-open", p])
 
 
 def main():

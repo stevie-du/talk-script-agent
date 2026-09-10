@@ -20,6 +20,7 @@ class GenerateRequest(BaseModel):
     rate: float | None = None         # 覆盖语速
     voice: str = "strong"             # 人味档位：strong=加强 / standard=仅去AI腔 / off=关闭
     format: str = "both"              # 输出内容：both=口播+分镜 / voice=仅口播
+    reroll: bool = False              # 「换一版」：同参数重掷，略提温度换取不同表达
 
     @field_validator("voice")
     @classmethod

@@ -221,6 +221,7 @@ class Pipeline:
             "mode": params.get("mode", "auto"), "rate": float(rate),
             "voice": params.get("voice") if params.get("voice") in ("strong", "standard", "off") else "strong",
             "format": params.get("format") if params.get("format") in ("both", "voice") else "both",
+            "reroll": bool(params.get("reroll")),
             "points": pack.points_limit(duration),
             "quota": quota.target(duration, float(rate)),
         }
@@ -268,8 +269,13 @@ class Pipeline:
             ctx["facts_block"] = facts_block
 
             system, user = self._render(skill, "write", ctx)
+            # 「换一版」：同主题同参数重掷，小幅提温换取不同表达（仍受校验约束）
+            temp = None
+            if p.get("reroll"):
+                temp = min(1.0, float(self.llm.cfg.temperature) + 0.25)
             draft = self.llm.chat_json("write", system, user, ScriptDraft,
-                                       on_retry=self._retry_logger(job)).model_dump()
+                                       on_retry=self._retry_logger(job),
+                                       temperature=temp).model_dump()
 
             job.update(state="checking")
             report = check_script(draft["sections"], p["duration"], p["rate"], ban, p["platform"], quota)

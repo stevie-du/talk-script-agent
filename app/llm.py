@@ -39,8 +39,11 @@ class LLMClient:
 
     # ── 公开入口 ────────────────────────────────────────────
     def chat_json(self, task: str, system: str, user: str, model_cls: type[BaseModel],
-                  max_retries: int = 1, on_retry=None) -> BaseModel:
-        """请求 JSON 输出并校验为 model_cls；校验失败带错误信息重试一次。"""
+                  max_retries: int = 1, on_retry=None, temperature: float | None = None) -> BaseModel:
+        """请求 JSON 输出并校验为 model_cls；校验失败带错误信息重试一次。
+
+        temperature 传入时覆盖本次调用的默认温度（「换一版」用它换取不同表达）。
+        """
         if self.mock:
             data = mock_fixtures.response_for(task, user)
             return model_cls.model_validate(data)
@@ -49,7 +52,7 @@ class LLMClient:
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
         last_err: Exception | None = None
         for attempt in range(max_retries + 1):
-            content = self._complete(messages, on_retry=on_retry)
+            content = self._complete(messages, on_retry=on_retry, temperature=temperature)
             try:
                 return model_cls.model_validate(_extract_json(content))
             except (ValueError, ValidationError) as e:
@@ -62,15 +65,35 @@ class LLMClient:
                                  f"只输出一个符合给定字段结构的 JSON 对象，不要多余文字。"})
         raise LLMError(f"模型输出无法解析为 {model_cls.__name__}: {last_err}")
 
+    def ping(self) -> tuple[bool, str]:
+        """最小连通性测试：不约束输出格式，返回 (是否连通, 说明)。
+
+        用于设置页「测试连接」——只验证 Key / 地址 / 模型名是否可用，
+        不消耗有意义的 token，也不要求模型支持 JSON 输出模式。
+        """
+        if self.mock:
+            return True, "mock 模式（未实际请求模型）"
+        try:
+            content = self._complete([{"role": "user", "content": "ping"}],
+                                     json_mode=False, max_tokens=16)
+        except Exception as e:  # noqa: BLE001
+            return False, str(e)
+        return True, (content or "").strip()[:80]
+
     # ── 底层调用（带网络重试）────────────────────────────────
-    def _complete(self, messages: list[dict], on_retry=None) -> str:
+    def _complete(self, messages: list[dict], on_retry=None,
+                  json_mode: bool = True, max_tokens: int | None = None,
+                  temperature: float | None = None) -> str:
         url = f"{self.cfg.base_url}/chat/completions"
         payload = {
             "model": self.cfg.model,
             "messages": messages,
-            "temperature": self.cfg.temperature,
-            "response_format": {"type": "json_object"},
+            "temperature": self.cfg.temperature if temperature is None else temperature,
         }
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
+        if max_tokens:
+            payload["max_tokens"] = max_tokens
         headers = {"Authorization": f"Bearer {self.cfg.api_key}"}
         attempts = max(1, int(self.cfg.retries) + 1)
         last_err: Exception | None = None

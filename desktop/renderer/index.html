@@ -22,7 +22,6 @@
       </svg>
     </span>
     <span class="name">TalkScript</span>
-    <span class="dot-sep"></span>
     <span class="sub">口播脚本智能体</span>
     <span id="pack-badge" class="badge hidden">草稿包 · 需校对</span>
   </div>
@@ -45,7 +44,6 @@
       <button id="btn-nav-setup" class="nav-item" data-view="setup" title="打开设置">
         <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/><circle cx="18" cy="18" r="2.2"/><circle cx="12" cy="6" r="2.2"/><circle cx="7" cy="12" r="2.2"/></svg>
         <span class="nav-t">设置</span>
-        <span class="sum-hint" id="adv-hint">行业包 · 时长 · 风格</span>
       </button>
     </div>
   </aside>
@@ -68,100 +66,109 @@
             <div class="g-item"><b>2</b> 左侧点开「设置」，在右侧调整行业包、细分、时长、风格与模型接口</div>
             <div class="g-item"><b>3</b> 自动校验字数、时长与禁用词，不合格自动回炉</div>
           </div>
-          <p class="hint">左侧为会话记录，点开即回看；生成参数在左侧「设置」入口打开</p>
+          <p class="hint">左侧为会话记录，点开即回看</p>
         </div>
       </div>
 
-      <!-- 底部输入框（Trae Work 式：圆角容器 + 圆形发送） -->
+      <!-- 底部输入区：高频参数直接放在输入框上方（豆包 / 千问式），不用进设置页 -->
       <div id="composer">
+        <div class="quick-bar" id="quick-params"></div>
         <div id="composer-body">
           <textarea id="topic" rows="1" placeholder="输入主题，回车生成口播脚本…"></textarea>
           <button id="btn-generate" class="primary send" title="生成（Ctrl + Enter）">
-            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+            <svg class="ic-send" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+            <svg class="ic-stop" viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="2.4"/></svg>
           </button>
         </div>
         <div class="composer-foot">
           <span class="hint">Enter 发送 · Shift+Enter 换行</span>
-          <span class="hint">参数：左栏「生成设置」</span>
+          <span class="hint gen-hint" id="composer-gen-hint"></span>
         </div>
       </div>
     </div>
 
-    <!-- 视图：设置（生成参数 + 模型接口） -->
+    <!-- 视图：设置（两级：一级分段切换，二级为各分区字段组） -->
     <div id="view-setup" class="view hidden">
-      <div class="page">
-        <div class="page-head">
-          <h2>设置</h2>
-          <p class="hint">生成参数与模型接口，改动后对下一次生成生效</p>
-        </div>
-        <div class="page-card">
-          <h3 class="card-title">生成参数</h3>
-          <div class="fg pack-row">
-            <label class="lbl">行业包</label>
-            <div class="row">
-              <select id="pack"></select>
-              <button id="btn-packinfo" class="ghost bordered" title="查看当前包的文件与配置">详情</button>
-              <button id="btn-newpack" class="ghost bordered" title="用模型生成新行业包">
-                <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-                新建
-              </button>
-            </div>
+      <div class="setup-wrap">
+        <div class="setup-head">
+          <div class="tabs">
+            <button class="tab active" data-tab="gen">生成参数</button>
+            <button class="tab" data-tab="llm">模型接口</button>
           </div>
-          <div id="param-front" class="fg"></div>
-          <div id="param-more" class="fg stack"></div>
-          <details class="group" id="advanced">
-            <summary><span>更多设置</span><span class="sum-hint">人味 · 生成方式 · 输出内容</span></summary>
-            <div class="group-body">
-              <div class="block-inner">
-                <label class="lbl">生成方式</label>
-                <div class="row seg">
-                  <label class="radio"><input type="radio" name="mode" value="auto" checked> 一键直通</label>
-                  <label class="radio"><input type="radio" name="mode" value="step"> 分步确认</label>
+        </div>
+        <div class="page">
+          <!-- 二级：生成参数 -->
+          <section class="pane" id="pane-gen">
+            <div class="pane-block">
+              <div class="fg pack-row">
+                <label class="lbl">行业包</label>
+                <div class="row">
+                  <select id="pack"></select>
+                  <button id="btn-packinfo" class="ghost bordered" title="查看当前包的文件与配置">详情</button>
+                  <button id="btn-newpack" class="ghost bordered" title="用模型生成新行业包">
+                    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+                    新建
+                  </button>
                 </div>
-                <p class="hint">分步确认：选题后暂停，你确认角度再写文案</p>
               </div>
-              <div class="block-inner">
-                <label class="lbl">输出内容</label>
-                <select id="format">
-                  <option value="both" selected>口播 + 分镜（默认）</option>
-                  <option value="voice">仅口播文案</option>
-                </select>
-                <p class="hint">仅口播：不生成拍摄用分镜表</p>
-              </div>
-              <div class="block-inner">
-                <label class="lbl">文案人味（去 AI 味档位）</label>
-                <select id="voice">
-                  <option value="strong" selected>加强人味 — 口语音+具体细节+情绪（默认）</option>
-                  <option value="standard">标准 — 只去 AI 腔，不加口头禅情绪</option>
-                  <option value="off">关闭 — 模型原始文风（供对比）</option>
-                </select>
-              </div>
-              <div class="block-inner">
-                <label class="lbl">补充事实（产品手册/数据/案例，选填）</label>
-                <textarea id="facts" rows="3" placeholder="例：我们主力机型载重 1050kg，市区 2 小时内到场"></textarea>
+              <div id="param-front" class="fg"></div>
+            </div>
+            <div class="pane-block">
+              <h3 class="card-title">进阶</h3>
+              <div class="fg">
+                <div class="block-inner">
+                  <label class="lbl">生成方式</label>
+                  <div class="row segmented">
+                    <label class="radio"><input type="radio" name="mode" value="auto" checked> 一键直通</label>
+                    <label class="radio"><input type="radio" name="mode" value="step"> 分步确认</label>
+                  </div>
+                </div>
+                <div class="block-inner">
+                  <label class="lbl">输出内容</label>
+                  <select id="format">
+                    <option value="both" selected>口播 + 分镜</option>
+                    <option value="voice">仅口播</option>
+                  </select>
+                </div>
+                <div class="block-inner">
+                  <label class="lbl">文案人味</label>
+                  <select id="voice">
+                    <option value="strong" selected>加强（口语 + 具体细节）</option>
+                    <option value="standard">标准（只去 AI 腔）</option>
+                    <option value="off">关闭（原始文风）</option>
+                  </select>
+                </div>
+                <div class="block-inner">
+                  <label class="lbl">补充资料</label>
+                  <textarea id="facts" rows="3" placeholder="产品手册 / 数据 / 案例，选填。例：主力机型载重 1050kg，市区 2 小时内到场"></textarea>
+                </div>
               </div>
             </div>
-          </details>
-        </div>
-        <div class="page-card">
-          <h3 class="card-title">模型接口</h3>
-          <div>
-            <label class="lbl">Base URL（OpenAI 兼容）</label>
-            <input id="st-baseurl" placeholder="https://open.bigmodel.cn/api/paas/v4">
-          </div>
-          <div>
-            <label class="lbl">API Key</label>
-            <input id="st-apikey" type="password" placeholder="已配置时留空即保持不变">
-          </div>
-          <div>
-            <label class="lbl">模型名</label>
-            <input id="st-model" placeholder="glm-4.7 / deepseek-chat / …">
-          </div>
-          <p class="hint" id="st-status"></p>
-          <div class="page-actions">
-            <span class="spacer"></span>
-            <button class="primary slim" id="st-save">保存</button>
-          </div>
+          </section>
+
+          <!-- 二级：模型接口 -->
+          <section class="pane hidden" id="pane-llm">
+            <div class="pane-block">
+              <div>
+                <label class="lbl">Base URL</label>
+                <input id="st-baseurl" placeholder="https://open.bigmodel.cn/api/paas/v4">
+              </div>
+              <div>
+                <label class="lbl">API Key</label>
+                <input id="st-apikey" type="password" placeholder="已配置时留空即保持不变">
+              </div>
+              <div>
+                <label class="lbl">模型名</label>
+                <input id="st-model" placeholder="glm-4.7 / deepseek-chat">
+              </div>
+              <p class="hint" id="st-status"></p>
+              <div class="page-actions">
+                <button class="ghost" id="st-test" title="用上面的配置发一个最小请求，验证是否连通">测试连接</button>
+                <span class="spacer"></span>
+                <button class="primary slim" id="st-save">保存</button>
+              </div>
+            </div>
+          </section>
         </div>
       </div>
     </div>
@@ -182,10 +189,11 @@
             <label class="lbl">文件清单</label>
             <div id="pi-files" class="tbl-wrap"></div>
           </div>
-          <p class="hint">知识库与技能（skill.yaml）的配置方法见项目 docs/知识库与技能配置指南.md</p>
-          <p class="hint" id="pi-export-hint">「导出为 Agent 技能」会把本包转成 SKILL.md 技能目录（含独立校验工具），可复制进 WorkBuddy / ZCode / Claude 等支持技能的 agent 使用。</p>
+          <p class="hint">配置方法见 docs/知识库与技能配置指南.md</p>
+          <p class="hint" id="pi-export-hint">导出为 SKILL.md 技能目录（含独立校验工具），可放入支持技能的 agent 使用。</p>
           <div class="page-actions">
             <button class="ghost" id="pi-export">导出为 Agent 技能</button>
+            <button class="ghost hidden" id="pi-undraft" title="人工校对完成后，去掉草稿标记">标记为已校对</button>
             <span class="spacer"></span>
             <button class="primary slim" id="pi-close">返回</button>
           </div>
@@ -209,7 +217,7 @@
               <label class="lbl">一句话业务描述</label>
               <textarea id="pg-desc" rows="2" placeholder="例：全屋定制家居品牌，面向新房装修业主获客"></textarea>
             </div>
-            <p class="hint">生成内容包括：细分领域、受众痛点、选题库、行业红线、行业增补词、待核实清单。</p>
+            <p class="hint">将生成细分领域、受众痛点、选题库、行业红线与待核实清单。</p>
             <div class="page-actions">
               <span class="spacer"></span>
               <button class="ghost" id="pg-close">返回</button>

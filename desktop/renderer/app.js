@@ -59,8 +59,17 @@ function toast(msg, ms = 2200) {
 function fmtText(s) {
   let h = esc(s);
   h = h.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-  h = h.replace(/\{\{([^}]+)\}\}/g, '<span class="over">{{待补：$1}}</span>');
+  // 占位事实标红并标记行号，便于点击定位（见 bindPlaceholderJump）
+  h = h.replace(/\{\{([^}]+)\}\}/g, (m, k) => `<span class="over jumpable">{{待补：${k}}}</span>`);
   return h;
+}
+
+// 占位事实「点击定位」：滚动到首个占位并高亮，方便逐处补全
+function jumpToFirstPlaceholder(body) {
+  const hit = body.querySelector(".script-card .over");
+  if (!hit) { toast("未找到占位事实"); return; }
+  hit.scrollIntoView({ behavior: "smooth", block: "center" });
+  hit.classList.remove("flash"); void hit.offsetWidth; hit.classList.add("flash");
 }
 
 // ── 消息流 ───────────────────────────────────────────────
@@ -182,28 +191,55 @@ function paramSelect(key, def) {
   return wrap;
 }
 
+// 高频参数：直接放在输入框上方（豆包 / 千问式），不进设置页
+// 沿用 p-<key> 作为 id，collectParams / getParam 无需改动
+function renderQuickParams() {
+  const pack = currentPack();
+  const box = $("quick-params");
+  if (!pack || !box) return;
+  box.innerHTML = "";
+  const params = pack.params || {};
+  for (const key of FRONT_KEYS) {
+    const def = params[key];
+    if (!def?.options?.length) continue;
+    const s = el("select", "qp");
+    s.id = `p-${key}`;
+    for (const opt of def.options) {
+      const o = el("option", "", key === "duration" ? `${opt}s` : String(opt));
+      o.value = String(opt);
+      s.appendChild(o);
+    }
+    s.value = String(def.default);
+    s.title = def.label || key;
+    s.onchange = updateCfgHint;
+    box.appendChild(s);
+  }
+  const more = el("button", "ghost qp-more", "更多设置");
+  more.title = "打开设置页（风格 / 人设 / 进阶 / 模型接口）";
+  more.onclick = () => gotoView("setup", "chat");
+  box.appendChild(more);
+}
+
 function renderPackParams() {
   const pack = currentPack();
   if (!pack) return;
   $("pack-badge").classList.toggle("hidden", !pack.draft);
-  const front = $("param-front"), more = $("param-more");
-  front.innerHTML = ""; more.innerHTML = "";
+  const front = $("param-front");
+  front.innerHTML = "";
   const params = pack.params || {};
   const placed = new Set();
-  for (const key of FRONT_KEYS) {
+  for (const key of MORE_KEYS) {
     if (!params[key]?.options?.length) continue;
     front.appendChild(paramSelect(key, params[key]));
     placed.add(key);
   }
-  for (const key of MORE_KEYS) {
-    if (!params[key]?.options?.length) continue;
-    more.appendChild(paramSelect(key, params[key]));
-    placed.add(key);
-  }
+  // 其余参数（自定义包可能新增）也放这里，FRONT_KEYS 已由快捷条渲染，不重复
   for (const key of Object.keys(params)) {
-    if (placed.has(key) || !params[key]?.options?.length) continue;
-    more.appendChild(paramSelect(key, params[key]));
+    if (placed.has(key) || FRONT_KEYS.includes(key)) continue;
+    if (!params[key]?.options?.length) continue;
+    front.appendChild(paramSelect(key, params[key]));
   }
+  renderQuickParams();
   beautifySelects();
 }
 
@@ -226,12 +262,15 @@ function updateCfgHint() {
   if (getParam("style")) parts.push(getParam("style"));
   const mode = document.querySelector("input[name=mode]:checked");
   if (mode) parts.push(mode.value === "step" ? "分步确认" : "一键直通");
-  $("adv-hint").textContent = parts.join(" · ") || "行业包 · 细分 · 时长 · 风格 · 模式";
+  // 摘要不再挂在侧栏入口上（保持左栏干净），改为 hover 提示
+  const nav = $("btn-nav-setup");
+  if (nav) nav.title = parts.join(" · ") || "设置";
 }
 
 // ── 自绘下拉：隐藏原生 select（仅作值容器），按钮 + 菜单替代其外观 ──
 function beautifySelects(scope = document) {
-  scope.querySelectorAll("select:not([data-beauty])").forEach(sel => {
+  // 快捷条（.qp）用原生下拉：紧凑胶囊场景下，原生菜单宽度自适应选项，比自绘更贴合
+  scope.querySelectorAll("select:not([data-beauty]):not(.qp)").forEach(sel => {
     sel.dataset.beauty = "1";
     sel.classList.add("native-hidden");
     const wrap = el("div", "select-wrap");
@@ -409,28 +448,55 @@ function poll() {
   }).catch(() => { pollTimer = setTimeout(poll, 1500); });
 }
 
+// 「放弃本次」：生成中的 LLM 请求无法真正掐断（阻塞在网络 IO），
+// 所以这里的语义是——停掉轮询、解锁界面、丢弃这个 job 的结果，
+// 后台线程自己跑完即作废。对用户而言等价于「停止」。
+async function abortGeneration() {
+  const job = currentJob;
+  if (!job) return;
+  clearTimeout(pollTimer);
+  try { await api(`/api/jobs/${job.id}/cancel`, { method: "POST", body: {} }); } catch (_) {}
+  currentJob = null;
+  const body = activeMsg;
+  if (body) body.innerHTML = `<div class="hint">已放弃本次生成</div>`;
+  activeMsg = null;
+  setBusy(false);
+  toast("已放弃本次生成");
+}
+
 function renderProgress(snap) {
   const body = activeMsg;
   if (!body) return;
   setThinking(snap);
 }
 
+// 生成中：发送键变「停止」，同时锁住输入框与快捷参数
+// 参数在发送瞬间已快照进 job，生成中改动不会生效——锁住比让用户白改更诚实
 function setBusy(b, loading = false) {
   busyNow = b;
   const btn = $("btn-generate");
   btn.classList.toggle("loading", loading);
-  btn.innerHTML = loading
-    ? `<span class="spinner" style="width:16px;height:16px;border-top-color:#fff;border-color:#ffffff55;border-top-color:#fff"></span>`
-    : `<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg>`;
+  btn.classList.toggle("stopping", b && loading);
+  $("composer-gen-hint").textContent = (b && loading) ? "生成中，参数已锁定" : "";
+  lockParams(b && loading);
   refreshGate();
+}
+
+function lockParams(lock) {
+  $("topic").disabled = lock;
+  $("quick-params").classList.toggle("locked", lock);
+  $("quick-params").querySelectorAll("select").forEach(s => { s.disabled = lock; });
 }
 
 // ── 防错与快捷键 ─────────────────────────────────────────
 function refreshGate() {
   const btn = $("btn-generate");
   const empty = !$("topic").value.trim();
-  btn.disabled = busyNow || empty;
-  btn.title = empty ? "输入主题后发送" : "回车 / Ctrl + Enter 发送";
+  const canStop = busyNow && currentJob;
+  btn.disabled = busyNow ? !canStop : empty;
+  btn.title = canStop ? "放弃本次生成"
+    : busyNow ? "生成中…"
+    : empty ? "输入主题后发送" : "回车 / Ctrl + Enter 发送";
 }
 
 function updateStale() {
@@ -475,9 +541,12 @@ function renderResult(r, body) {
       <div class="res-title">${esc(r.params?.topic || "")}</div>
       <div class="res-tools">
         <button class="ghost" data-act="copy-voice" title="复制口播文案">复制口播</button>
-        <button class="ghost" data-act="copy-json" title="复制结构化 JSON">复制 JSON</button>
+        <button class="ghost" data-act="save-srt" title="导出 SRT 字幕（可直接导入剪映 / PR）">导出 SRT</button>
         <button class="ghost" data-act="save-md" title="另存为 Markdown 文件">另存 MD</button>
-        <button class="ghost" data-act="rerun" title="用当前参数重新生成">重跑</button>
+        <button class="ghost" data-act="reveal" title="在文件管理器中打开产物目录">打开文件夹</button>
+        <button class="ghost" data-act="copy-json" title="复制结构化 JSON">JSON</button>
+        <button class="ghost" data-act="rerun" title="用当前参数重新生成（结果基本一致）">重跑</button>
+        <button class="ghost" data-act="revary" title="同主题同参数重掷一次，换一种表达">换一版</button>
       </div>
     </div>
     <div class="res-metric-list">
@@ -490,18 +559,28 @@ function renderResult(r, body) {
 
   // 2) 横幅
   const banners = [];
+  // 回炉说明前置：把"为什么又写了一遍"从日志里提到结果头部
+  const revs = (r.revisions || []).filter(v => v.action === "全文回炉");
+  if (revs.length) {
+    const why = [...new Set(revs.map(v => (v.report?.blockers || []).join("、")).filter(Boolean))].join("；") || "未通过校验";
+    banners.push(ch.passed
+      ? `<div class="banner info">首轮${esc(why)}，已自动回炉 ${revs.length} 轮并修正为合格版本</div>`
+      : `<div class="banner warn">首轮${esc(why)}，自动回炉 ${revs.length} 轮后仍未达标</div>`);
+  }
   if (!(ch.passed ?? true)) banners.push(`<div class="banner warn">⛔ ${esc((ch.blockers || []).join("；"))}——已达回炉上限，请人工调整或点「重跑」</div>`);
   if ((r.placeholders || []).length)
-    banners.push(`<div class="banner warn">⚠ 含 ${r.placeholders.length} 处占位事实：${r.placeholders.map(esc).join("、")}——补充后再发布</div>`);
+    banners.push(`<div class="banner warn jumpable" data-jump="placeholder">⚠ 含 ${r.placeholders.length} 处占位事实：${r.placeholders.map(esc).join("、")}——点击定位首处，补充后再发布</div>`);
   if ((ch.soft_hits || []).length)
     banners.push(`<div class="banner info">待确认 ${ch.soft_hits.length} 词：${ch.soft_hits.map(h => esc(h.word) + "×" + h.count).join("、")}（语境正常即可放行）</div>`);
   if (r.pack_draft) banners.push(`<div class="banner warn">⚠ 本结果来自草稿行业包，内容需人工校对</div>`);
   const bw = el("div", "res-banners");
   bw.innerHTML = banners.join("");
+  const jp = bw.querySelector('[data-jump="placeholder"]');
+  if (jp) { jp.onclick = () => jumpToFirstPlaceholder(body); }
   body.appendChild(bw);
 
   // 3) 口播分段卡片
-  const segs = el("div", "seg-list");
+  const segs = el("div", "script-list");
   let pi = 0;
   const bodyQuota = Math.floor((r.quota?.body || 0) / nPoints(r));
   r.sections.forEach((s, i) => {
@@ -509,7 +588,7 @@ function renderResult(r, body) {
     const tm = (r.timings || [])[i];
     const chars = countCN(s.text);
     const sec = (v) => (v === undefined || v === null ? "" : `${Math.round(v * 10) / 10}s`);
-    const card = el("div", `card ${s.type}`);
+    const card = el("div", `script-card ${s.type}`);
     card.style.setProperty("--i", i);
     const quota = s.type === "point"
       ? `<span class="quota ${chars > bodyQuota ? "over" : ""}">${chars}/${bodyQuota} 字</span>`
@@ -560,6 +639,20 @@ function renderResult(r, body) {
   // 5) 操作绑定（消息级）
   head.querySelector('[data-act="copy-voice"]').onclick = () =>
     copyText(r.sections.map(s => s.text).join("\n\n"), "口播已复制");
+  head.querySelector('[data-act="save-srt"]').onclick = () => {
+    const a = el("a");
+    a.href = URL.createObjectURL(new Blob([resultSrt(r)], { type: "text/plain;charset=utf-8" }));
+    a.download = `字幕_${(r.params?.topic || "").slice(0, 12)}.srt`;
+    a.click();
+    toast("SRT 字幕已导出");
+  };
+  head.querySelector('[data-act="reveal"]').onclick = async () => {
+    try {
+      const out = await api(`/api/history/${r.id}/reveal`, { method: "POST", body: {} });
+      toast("已打开产物目录");
+      console.log("[talkscript] output:", out.path);
+    } catch (e) { toast("打开失败：" + e.message, 3500); }
+  };
   head.querySelector('[data-act="copy-json"]').onclick = () =>
     copyText(JSON.stringify(r, null, 2), "JSON 已复制");
   head.querySelector('[data-act="save-md"]').onclick = () => {
@@ -572,6 +665,13 @@ function renderResult(r, body) {
   head.querySelector('[data-act="rerun"]').onclick = () => {
     $("topic").value = r.params?.topic || "";
     send({ topic: r.params?.topic || "", mode: r.params?.mode, voice: r.params?.voice, format: r.params?.format });
+  };
+  // 换一版：同主题同参数重掷一次，用于「内容没毛病但想再看看别的表达」
+  const rv = head.querySelector('[data-act="revary"]');
+  if (rv) rv.onclick = () => {
+    $("topic").value = r.params?.topic || "";
+    send({ topic: r.params?.topic || "", mode: r.params?.mode, voice: r.params?.voice,
+           format: r.params?.format, reroll: true });
   };
   scrollBottom();
 }
@@ -779,9 +879,50 @@ function resultMarkdown(r) {
   return lines.join("\n");
 }
 
+// SRT 字幕：时间轴取 timings，文本取每段 subtitle（缺则截取口播首句）
+function resultSrt(r) {
+  const ts = t => {
+    const ms = Math.max(0, Math.round((t || 0) * 1000));
+    const pad = (n, w) => String(n).padStart(w, "0");
+    return `${pad(Math.floor(ms / 3600000), 2)}:${pad(Math.floor(ms / 60000) % 60, 2)}`
+      + `:${pad(Math.floor(ms / 1000) % 60, 2)},${pad(ms % 1000, 3)}`;
+  };
+  const clean = s => s.replace(/\*\*/g, "").replace(/[／]/g, " ")
+    .replace(/\{\{[^}]*\}\}/g, "").replace(/\s+/g, " ").trim();
+  const lines = [];
+  let n = 0;
+  (r.sections || []).forEach((s, i) => {
+    const tm = (r.timings || [])[i] || { start: 0, end: 0 };
+    const text = clean(s.subtitle || "") || clean(s.text || "").slice(0, 16);
+    if (!text) return;
+    n += 1;
+    lines.push(String(n), `${ts(tm.start)} --> ${ts(tm.end)}`, text, "");
+  });
+  return lines.join("\r\n");
+}
+
 async function copyText(text, tip) {
   try { await navigator.clipboard.writeText(text); toast(tip); }
   catch (_) { toast("复制失败", 1500); }
+}
+
+// 重新拉取行业包列表（新建包 / 草稿标记变更后调用），保留当前选中项
+async function refreshPacks() {
+  META = await api("/api/meta");
+  const sel = $("pack");
+  const keep = sel.value;
+  sel.innerHTML = "";
+  for (const p of META.packs) {
+    const o = el("option", "", esc(p.display_name) + (p.draft ? "（草稿）" : ""));
+    o.value = p.name;
+    sel.appendChild(o);
+  }
+  sel.value = keep;
+  if (!sel.value) sel.selectedIndex = 0;
+  // 同步顶栏草稿徽标（不重建参数区，避免重置用户已选的细分/受众）
+  const cur = META.packs.find(p => p.name === sel.value);
+  $("pack-badge").classList.toggle("hidden", !(cur && cur.draft));
+  updateCfgHint();
 }
 
 async function openPackInfo() {
@@ -789,6 +930,7 @@ async function openPackInfo() {
   const p = await api(`/api/packs/${name}`);
   $("pi-title").textContent = `${p.display_name || name} · 包内容`;
   $("pi-desc").textContent = (p.description || "") + (p.draft ? "（草稿包：内容需人工校对后投产）" : "");
+  $("pi-undraft").classList.toggle("hidden", !p.draft);
   const cw = $("pi-checklist-wrap");
   if (p.checklist) {
     cw.classList.remove("hidden");
@@ -850,8 +992,18 @@ function bindStatic() {
   $("btn-new-chat").onclick = () => { gotoView("chat"); clearChat(); loadSessions(); $("topic").focus(); };
   $("btn-nav-setup").onclick = () => gotoView("setup", "chat");
 
+  // 设置页一级分段：生成参数 / 模型接口
+  document.querySelectorAll(".tab").forEach(btn => {
+    btn.onclick = () => {
+      document.querySelectorAll(".tab").forEach(b => b.classList.toggle("active", b === btn));
+      const t = btn.dataset.tab;
+      $("pane-gen").classList.toggle("hidden", t !== "gen");
+      $("pane-llm").classList.toggle("hidden", t !== "llm");
+    };
+  });
+
   // 发送：按钮 / Ctrl+Enter / Enter（非 Shift）
-  $("btn-generate").onclick = send;
+  $("btn-generate").onclick = () => { if (busyNow) abortGeneration(); else send(); };
   $("topic").addEventListener("keydown", e => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -892,6 +1044,28 @@ function bindStatic() {
   $("st-save").onclick = async () => {
     try { await saveSettings(); } catch (e) { toast("保存失败：" + e.message, 3500); }
   };
+  $("st-test").onclick = async () => {
+    const btn = $("st-test"), label = "测试连接";
+    btn.disabled = true; btn.textContent = "测试中…";
+    $("st-status").textContent = "正在连接…";
+    try {
+      // 带上界面当前值（Key 留空时后端沿用已保存的），未保存也能测
+      const body = {
+        base_url: $("st-baseurl").value.trim(),
+        api_key: $("st-apikey").value,
+        model: $("st-model").value.trim(),
+      };
+      const r = await api("/api/config/test", { method: "POST", body });
+      $("st-status").textContent = r.ok
+        ? `连接正常 · ${r.model}${r.detail ? " · " + r.detail : ""}`
+        : `连接失败：${r.detail}`;
+      toast(r.ok ? "连接正常" : "连接失败，请看下方提示", r.ok ? 2000 : 4000);
+    } catch (e) {
+      $("st-status").textContent = e.message;
+      toast("测试失败：" + e.message, 4000);
+    }
+    btn.disabled = false; btn.textContent = label;
+  };
   $("btn-packinfo").onclick = () =>
     openPackInfo().then(() => gotoView("packinfo", "setup")).catch(e => toast("读取失败：" + e.message, 3500));
   $("pi-close").onclick = () => gotoView(viewBack || "setup");
@@ -904,6 +1078,16 @@ function bindStatic() {
         `✅ 已导出 <b>${esc(out.files)}</b> 个文件到：<br><code>${esc(out.path)}</code><br>${esc(out.hints.join(" "))}`;
     } catch (e) { toast("导出失败：" + e.message, 4000); }
     $("pi-export").disabled = false;
+  };
+  $("pi-undraft").onclick = async () => {
+    const name = $("pack").value;
+    if (!(await appConfirm("标记为已校对", "确认该行业包已人工校对完毕？\n草稿标记会被移除，生成结果不再提示“需校对”。"))) return;
+    try {
+      await api(`/api/packs/${name}/undraft`, { method: "POST", body: {} });
+      toast("已标记为校对完成");
+      await refreshPacks();      // 刷新行业包列表（去掉「草稿」后缀与角标）
+      await openPackInfo();      // 重渲染详情页，隐藏该按钮
+    } catch (e) { toast("操作失败：" + e.message, 3500); }
   };
   $("btn-newpack").onclick = () => {
     $("pg-form").classList.remove("hidden");
