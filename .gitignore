@@ -29,3 +29,19 @@ Thumbs.db
 _shots/
 _shot*.js
 _probe.js
+_check.js
+_expr.js
+_final.js
+
+# 无头 Chrome 调试用临时 Profile
+_cprof*/
+_chrome-profile/
+_verify/_cprof/
+
+# UI 验证截图产物（脚本 _verify/verify.js 保留，便于回归自测）
+_verify/*.png
+
+# 一次性排查脚本的运行产物与临时批处理
+_verify/_*.txt
+_verify/_app.log
+_verify/_start.bat

@@ -34,6 +34,14 @@ let genParamsSnapshot = null;   // 上次生成时的参数快照（检测"参�
 let activeMsg = null;           // 当前正在生成/回写的消息节点（用于原地刷新状态与结果）
 let sentTopic = "";             // 本次发送的主题（重跑 / 换角度重选时复用）
 
+// 空状态示例卡：点一下直接起手，比空输入框更省心
+const SAMPLES = [
+  { t: "家用电梯怎么挑？", d: "老旧小区加装，预算 20 万", tag: "安全科普" },
+  { t: "电梯维保到底保什么", d: "业主最关心的 3 个问题", tag: "维保科普" },
+  { t: "加装电梯 5 个坑", d: "邻居沟通到验收全流程", tag: "旧楼加装" },
+  { t: "扶梯突然停了怎么办", d: "商场常见场景应急科普", tag: "安全科普" },
+];
+
 // ── 基础 ─────────────────────────────────────────────────
 async function api(path, opts) {
   const r = await fetch(API + path, {
@@ -143,6 +151,44 @@ function clearChat() {
   genParamsSnapshot = null;
   activeMsg = null;
   clearTimeout(pollTimer);
+  setHead("新对话", "", "");
+}
+
+// 内容区头部：标题 + 副标题 + 状态徽标
+function setHead(title, sub, state, stateCls) {
+  $("rh-title").textContent = title || "新对话";
+  $("rh-sub").textContent = sub || "";
+  const st = $("rh-state");
+  st.textContent = state || "";
+  st.className = "rh-state" + (stateCls ? " " + stateCls : "");
+}
+
+// 空状态示例卡
+function renderSamples() {
+  const box = $("empty-samples");
+  if (!box || box.dataset.done) return;
+  box.dataset.done = "1";
+  box.innerHTML = "";
+  for (const s of SAMPLES) {
+    const b = el("button", "sample-card");
+    b.innerHTML = `<span class="sc-tag">${esc(s.tag)}</span>
+      <span class="sc-t">${esc(s.t)}</span>
+      <span class="sc-d">${esc(s.d)}</span>`;
+    b.onclick = () => {
+      $("topic").value = s.t;
+      refreshGate();
+      autoGrowTopic();
+      $("topic").focus();
+    };
+    box.appendChild(b);
+  }
+}
+
+function autoGrowTopic() {
+  const t = $("topic");
+  if (!t) return;
+  t.style.height = "auto";
+  t.style.height = Math.min(t.scrollHeight, 140) + "px";
 }
 
 // ── 启动 ─────────────────────────────────────────────────
@@ -165,11 +211,12 @@ async function boot() {
   sel.onchange = () => { renderPackParams(); updateStale(); updateCfgHint(); };
   renderPackParams();
   updateCfgHint();
+  renderSamples();
   loadSessions();
   bindStatic();
   refreshGate();
-  // 预填设置页的模型接口字段（生成参数区在 renderPackParams 已渲染）
-  openSettings().catch(() => {});
+  // 预填设置抽屉的模型接口字段（生成参数区在 renderPackParams 已渲染）
+  preloadSettings().catch(() => {});
 }
 
 function currentPack() {
@@ -197,13 +244,16 @@ function renderQuickParams() {
   const pack = currentPack();
   const box = $("quick-params");
   if (!pack || !box) return;
+  // 菜单挂在 body 下，重建前先清掉旧的，避免残留浮层
+  box.querySelectorAll(".select-wrap").forEach(w => w._menu?.remove());
   box.innerHTML = "";
   const params = pack.params || {};
   for (const key of FRONT_KEYS) {
     const def = params[key];
     if (!def?.options?.length) continue;
-    const s = el("select", "qp");
+    const s = el("select");
     s.id = `p-${key}`;
+    s.dataset.pill = "1";        // 标记为胶囊形态，beautifySelects 据此套 .pill 变体
     for (const opt of def.options) {
       const o = el("option", "", key === "duration" ? `${opt}s` : String(opt));
       o.value = String(opt);
@@ -215,9 +265,11 @@ function renderQuickParams() {
     box.appendChild(s);
   }
   const more = el("button", "ghost qp-more", "更多设置");
-  more.title = "打开设置页（风格 / 人设 / 进阶 / 模型接口）";
-  more.onclick = () => gotoView("setup", "chat");
+  more.title = "打开设置（风格 / 人设 / 输出内容 / 补充资料）";
+  // 显式传入分区：直接把事件对象当 pane 传会走兜底逻辑，语义不清
+  more.onclick = () => openSettings("gen");
   box.appendChild(more);
+  beautifySelects(box);          // 快捷条同样走自绘下拉，避免原生菜单的系统蓝高亮
 }
 
 function renderPackParams() {
@@ -244,10 +296,6 @@ function renderPackParams() {
 }
 
 function getParam(key) {
-  if (key === "duration") {
-    const h = $("p-duration");
-    return h ? (h.value || null) : null;
-  }
   const s = $("p-" + key);
   return s ? (s.value || null) : null;
 }
@@ -262,27 +310,29 @@ function updateCfgHint() {
   if (getParam("style")) parts.push(getParam("style"));
   const mode = document.querySelector("input[name=mode]:checked");
   if (mode) parts.push(mode.value === "step" ? "分步确认" : "一键直通");
-  // 摘要不再挂在侧栏入口上（保持左栏干净），改为 hover 提示
-  const nav = $("btn-nav-setup");
-  if (nav) nav.title = parts.join(" · ") || "设置";
+  // 摘要挂在主侧栏「设置」入口的 hover 提示上（左栏保持干净，不铺开设置项）
+  const nav = $("btn-open-settings");
+  if (nav) nav.title = `打开设置：${parts.join(" · ") || "生成偏好"}`;
 }
 
 // ── 自绘下拉：隐藏原生 select（仅作值容器），按钮 + 菜单替代其外观 ──
+// 快捷条与设置页统一走这套：原生菜单的系统蓝高亮 + 黑描边跟整体设计语言冲突太大
 function beautifySelects(scope = document) {
-  // 快捷条（.qp）用原生下拉：紧凑胶囊场景下，原生菜单宽度自适应选项，比自绘更贴合
-  scope.querySelectorAll("select:not([data-beauty]):not(.qp)").forEach(sel => {
+  scope.querySelectorAll("select:not([data-beauty])").forEach(sel => {
     sel.dataset.beauty = "1";
     sel.classList.add("native-hidden");
-    const wrap = el("div", "select-wrap");
+    const wrap = el("div", "select-wrap" + (sel.dataset.pill ? " pill" : ""));
     sel.parentNode.insertBefore(wrap, sel);
     wrap.appendChild(sel);
     const btn = el("button", "select-btn");
     btn.type = "button";
     btn.innerHTML = `<span class="sel-text"></span>
       <svg class="chev" viewBox="0 0 12 8" width="11" height="8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M1 1.5L6 6.5L11 1.5"/></svg>`;
-    const menu = el("div", "select-menu hidden");
+    const menu = el("div", "select-menu hidden" + (sel.dataset.pill ? " compact" : ""));
+    // 菜单挂到 body 上：祖先若有 backdrop-filter/filter/transform，
+    // 会成为 fixed 定位的包含块，导致菜单被裁在容器内（#composer 正是如此）
+    document.body.appendChild(menu);
     wrap.appendChild(btn);
-    wrap.appendChild(menu);
 
     const sync = () => {
       const o = sel.options[sel.selectedIndex];
@@ -305,27 +355,37 @@ function beautifySelects(scope = document) {
       });
     };
     const isOpen = () => !menu.classList.contains("hidden");
-    // 左栏滚动容器会裁剪绝对定位菜单：改用 fixed 定位于视口，并按可用空间决定向上/向下展开
+    // 左栏滚动容器会裁剪绝对定位菜单：改用 fixed 定位于视口
     const open = () => {
       build();
       menu.classList.remove("hidden");
       wrap.classList.add("open");
       const r = wrap.getBoundingClientRect();
-      const mh = Math.min(menu.offsetHeight || 264, 264);
-      menu.style.position = "fixed";
-      menu.style.left = r.left + "px";
-      menu.style.width = r.width + "px";
-      menu.style.top =
-        r.bottom + 6 + mh <= innerHeight - 8 || r.top - 6 < mh
-          ? (r.bottom + 6) + "px"
-          : (r.top - 6 - mh) + "px";
+      // 先置于视口外测量自身尺寸：胶囊形态需按内容取宽（可宽于按钮）
+      // 注意必须清空 left/right，否则 .select-menu 的 right:0 会把宽度拉满
+      Object.assign(menu.style, { position: "fixed", left: "-9999px", right: "auto", top: "0px", width: "auto", maxHeight: "" });
+      const mw = Math.max(menu.offsetWidth || 0, r.width);
+      const natural = menu.offsetHeight || 0;
+      // 上下可用空间（各留 8px 安全边）
+      const roomBelow = innerHeight - r.bottom - 6 - 8;
+      const roomAbove = r.top - 6 - 8;
+      // 选择空间更充裕的一侧，并把菜单高度压进该空间内（超出则内部滚动）
+      const flipUp = roomAbove > roomBelow;
+      const room = Math.max(96, flipUp ? roomAbove : roomBelow);
+      const mh = Math.min(natural, room);
+      Object.assign(menu.style, { maxHeight: mh + "px" });
+      // 左沿贴齐按钮，超出视口右侧时再向内收
+      const left = Math.max(8, Math.min(r.left, innerWidth - mw - 8));
+      const top = flipUp ? Math.max(8, r.top - 6 - mh) : r.bottom + 6;
+      Object.assign(menu.style, { width: mw + "px", left: left + "px", top: top + "px" });
     };
     const close = () => {
       menu.classList.add("hidden");
       wrap.classList.remove("open");
-      menu.style.position = ""; menu.style.left = ""; menu.style.top = ""; menu.style.width = "";
+      Object.assign(menu.style, { position: "", left: "", right: "", top: "", width: "", maxHeight: "" });
     };
     sel._syncDropdown = sync;
+    wrap._menu = menu;              // 供外部点击判定与重渲染清理使用
 
     btn.onclick = () => (isOpen() ? close() : open());
     btn.onkeydown = ev => {
@@ -345,13 +405,23 @@ function beautifySelects(scope = document) {
     };
     sync();
   });
+  // 清除脱离 DOM 的孤儿菜单：wrap 被重建（如切换分类 / 重渲染设置抽屉）后，
+  // 挂在 body 上的旧菜单会残留，这里统一回收，避免浮层越积越多
+  {
+    const live = new Set();
+    document.querySelectorAll(".select-wrap").forEach(w => { if (w._menu) live.add(w._menu); });
+    document.body.querySelectorAll(":scope > .select-menu").forEach(m => { if (!live.has(m)) m.remove(); });
+  }
   if (!window.__selOutsideBound) {
     window.__selOutsideBound = true;
     document.addEventListener("click", e => {
       document.querySelectorAll(".select-wrap.open").forEach(w => {
-        if (!w.contains(e.target)) {
+        // 菜单挂在 body 下，判定时要把菜单自身也算作"内部"
+        const menu = w._menu;
+        const inside = w.contains(e.target) || (menu && menu.contains(e.target));
+        if (!inside) {
           w.classList.remove("open");
-          w.querySelector(".select-menu").classList.add("hidden");
+          if (menu) menu.classList.add("hidden");
         }
       });
     });
@@ -375,10 +445,15 @@ function collectParams() {
 }
 
 async function send(overrides = {}) {
+  // 生成中不再受理新提交，且必须在 await 之前上锁。
+  // 若放到 await 之后，一次 HTTP 往返的窗口期内连点会并发出多个 job：
+  // activeMsg 被后建的助手气泡覆盖，先建的那些就永远停在 loading，无法回归。
+  if (busyNow) return;
   const base = collectParams();
   const params = { ...base, ...overrides };
   if (!params.topic) { toast("请输入主题"); return; }
   sentTopic = params.topic;
+  setBusy(true, true);
   try {
     const { job_id } = await api("/api/generate", { method: "POST", body: params });
     genParamsSnapshot = JSON.stringify(collectParams());
@@ -394,7 +469,7 @@ async function send(overrides = {}) {
     activeMsg = body;
     $("topic").value = "";
     $("stale-banner").classList.add("hidden");
-    setBusy(true, true);
+    setHead(params.topic, "生成中", "生成中…", "warn");
     scrollBottom(false);
     poll();
   } catch (e) {
@@ -411,11 +486,12 @@ async function send(overrides = {}) {
 function poll() {
   clearTimeout(pollTimer);
   if (!currentJob) return;
-  api(`/api/jobs/${currentJob.id}`).then(snap => {
+    api(`/api/jobs/${currentJob.id}`).then(snap => {
     currentJob.state = snap.state;
     renderProgress(snap);
     if (snap.state === "paused_awaiting_confirmation") {
       setBusy(false);
+      setHead(sentTopic, "待确认选题", "待确认", "warn");
       openConfirm(snap.result.plan);
     } else if (snap.state === "done") {
       setBusy(false);
@@ -430,6 +506,7 @@ function poll() {
     } else if (snap.state === "failed") {
       setBusy(false);
       currentJob = null;
+      setHead(sentTopic, "生成失败", "失败", "bad");
       const body = activeMsg || addAssistantMsg();
       body.innerHTML = `<div class="banner warn">⛔ 生成失败：${esc(snap.error || "未知错误")}</div>`;
       activeMsg = null;
@@ -441,6 +518,7 @@ function poll() {
       const body = activeMsg;
       if (body) body.innerHTML = `<div class="hint">本次生成已取消</div>`;
       activeMsg = null;
+      setHead("新对话", "本次生成已取消", "");
       toast("本次生成已取消");
     } else {
       pollTimer = setTimeout(poll, 900);
@@ -461,6 +539,7 @@ async function abortGeneration() {
   if (body) body.innerHTML = `<div class="hint">已放弃本次生成</div>`;
   activeMsg = null;
   setBusy(false);
+  setHead("新对话", "已放弃本次生成", "");
   toast("已放弃本次生成");
 }
 
@@ -484,8 +563,11 @@ function setBusy(b, loading = false) {
 
 function lockParams(lock) {
   $("topic").disabled = lock;
-  $("quick-params").classList.toggle("locked", lock);
-  $("quick-params").querySelectorAll("select").forEach(s => { s.disabled = lock; });
+  const bar = $("quick-params");
+  bar.classList.toggle("locked", lock);
+  bar.querySelectorAll("select").forEach(s => { s.disabled = lock; });
+  // 自绘下拉的可见按钮也要跟着禁用（原生 select 已被隐藏）
+  bar.querySelectorAll(".select-btn").forEach(b => { b.disabled = lock; });
 }
 
 // ── 防错与快捷键 ─────────────────────────────────────────
@@ -531,6 +613,17 @@ function countCN(text) {
 function renderResult(r, body) {
   const ch = r.check || {};
   const hasSb = (r.storyboard || []).length > 0;
+
+  // 内容区头部同步：标题 / 副标题 / 状态徽标（跟消息流解耦，抽屉打开也看得见）
+  const dev0 = ch.deviation_pct ?? 0;
+  const hard0 = (ch.hard_hits || []).reduce((a, h) => a + h.count, 0);
+  const passed = ch.passed ?? true;
+  setHead(
+    r.params?.topic || "生成结果",
+    `${r.pack || ""} · ${r.params?.duration ?? "-"}s · ${r.params?.platform || ""}`,
+    passed && hard0 === 0 ? "✓ 合格" : `✗ ${hard0 ? hard0 + " 处硬伤" : "需人工确认"}`,
+    passed && hard0 === 0 ? "ok" : "bad"
+  );
 
   // 1) 消息头：主题 + 指标速览 + 操作
   const head = el("div", "res-head");
@@ -614,10 +707,17 @@ function renderResult(r, body) {
   });
   body.appendChild(segs);
 
-  // 4) 折叠：分镜 / 合规 / JSON / 日志（标题带状态预览）
-  const acc = (title, contentHtml, open, badgeHtml = "") => {
-    const d = el("details", "acc" + (open ? " open" : ""));
-    d.innerHTML = `<summary><span class="acc-t">${esc(title)}</span>${badgeHtml}</summary>`;
+  // 4) 折叠：分镜 / 合规 / JSON / 日志（图标 + 标题 + 状态徽标）
+  const ICONS = {
+    sb: `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="14" rx="2.2"/><path d="M3 9h18M8 18v2.5M16 18v2.5"/></svg>`,
+    shield: `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5.5c0 4.3-2.9 7.7-7 9.5-4.1-1.8-7-5.2-7-9.5V6z"/><path d="M9 12l2 2 4-4"/></svg>`,
+    code: `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 7l-5 5 5 5M15 7l5 5-5 5"/></svg>`,
+    log: `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h9l5 5v11a1 1 0 01-1 1H5a1 1 0 01-1-1V5a1 1 0 011-1z"/><path d="M14 4v5h5M8 13h8M8 17h5"/></svg>`,
+  };
+  const acc = (title, contentHtml, open, badgeHtml = "", icon = "", cls = "") => {
+    const d = el("details", "acc" + (open ? " open" : "") + (cls ? " " + cls : ""));
+    d.innerHTML = `<summary>${icon ? `<span class="acc-ic">${icon}</span>` : ""}
+      <span class="acc-t">${esc(title)}</span>${badgeHtml}</summary>`;
     const inner = el("div", "acc-body");
     inner.innerHTML = contentHtml;
     d.appendChild(inner);
@@ -628,12 +728,13 @@ function renderResult(r, body) {
   const logsN = (r.logs || []).length;
   const wrap = el("div", "acc-list");
   const badge = (text, cls) => `<span class="acc-badge ${cls}">${text}</span>`;
-  if (hasSb) wrap.appendChild(acc("分镜", renderStoryboard(r), true, badge(`${sbN} 镜`, "info")));
   const complyOk = (ch.passed ?? true) && hardN2 === 0;
+  if (hasSb) wrap.appendChild(acc("分镜", renderStoryboard(r), true, badge(`${sbN} 镜`, "info"), ICONS.sb));
   wrap.appendChild(acc("合规检查", renderCompliance(r), !complyOk,
-    badge(complyOk ? "✓ 通过" : `✗ ${hardN2 ? hardN2 + " 处硬伤" : "未通过"}`, complyOk ? "ok" : "bad")));
-  wrap.appendChild(acc("JSON", `<pre class="code">${esc(JSON.stringify(r, null, 2))}</pre>`));
-  wrap.appendChild(acc("日志", renderLogs(r.logs || []), false, badge(`${logsN} 条`, "info")));
+    badge(complyOk ? "✓ 通过" : `✗ ${hardN2 ? hardN2 + " 处硬伤" : "未通过"}`, complyOk ? "ok" : "bad"),
+    ICONS.shield, complyOk ? "ok" : "bad"));
+  wrap.appendChild(acc("JSON", `<pre class="code">${esc(JSON.stringify(r, null, 2))}</pre>`, false, "", ICONS.code));
+  wrap.appendChild(acc("日志", renderLogs(r.logs || []), false, badge(`${logsN} 条`, "info"), ICONS.log));
   body.appendChild(wrap);
 
   // 5) 操作绑定（消息级）
@@ -751,44 +852,82 @@ async function waitDone(timeout = 180) {
 }
 
 // ── 会话记录（左栏）──────────────────────────────────────
+// 按 今天 / 昨天 / 更早 分组，跟 WorkBuddy、Trae Work 的会话列表习惯一致
+function dayKey(d) {
+  const x = new Date(d);
+  if (isNaN(x)) return "更早";
+  const now = new Date();
+  const day = new Date(x.getFullYear(), x.getMonth(), x.getDate());
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const diff = Math.round((today - day) / 86400000);
+  if (diff <= 0) return "今天";
+  if (diff === 1) return "昨天";
+  if (diff < 7) return "本周";
+  return "更早";
+}
+
+function sessTime(d) {
+  const x = new Date(d);
+  if (isNaN(x)) return "";
+  const p = n => String(n).padStart(2, "0");
+  const hm = `${p(x.getHours())}:${p(x.getMinutes())}`;
+  const k = dayKey(d);
+  if (k === "今天") return hm;
+  if (k === "昨天") return "昨天 " + hm;
+  return `${p(x.getMonth() + 1)}-${p(x.getDate())} ${hm}`;
+}
+
 async function loadSessions() {
   let items = [];
   try { items = await api("/api/history"); } catch (_) {}
-  $("sess-count").textContent = items.length ? `${items.length}` : "";
   const list = $("session-list");
   list.innerHTML = "";
   if (!items.length) {
     list.appendChild(el("p", "hint sess-empty", "还没有会话记录，先发一条试试"));
     return;
   }
+  const ORDER = ["今天", "昨天", "本周", "更早"];
+  const groups = new Map();
   for (const it of items) {
-    const isCur = currentResult && it.id === currentResult.id;
-    const row = el("div", "sess-item" + (isCur ? " active" : ""));
-    const time = it.created_at.slice(5, 16).replace("T", " ");
-    row.innerHTML = `
-      <div class="sess-top"><span class="dot ${it.passed ? "" : "no"}"></span>
-        <span class="sess-topic">${esc(it.topic)}</span></div>
-      <div class="sess-sub">${esc(it.pack)} · ${time} · ${it.duration ?? "-"}s</div>`;
-    row.onclick = () => openSession(it.id);
-    const del = el("button", "sess-del", "删除");
-    del.onclick = async ev => {
-      ev.stopPropagation();
-      if (!(await appConfirm("删除记录", `「${it.topic.slice(0, 20)}」删除后不可恢复。`))) return;
-      try {
-        await api(`/api/history/${it.id}`, { method: "DELETE" });
-        toast("已删除");
-        loadSessions();
-      } catch (e) { toast("删除失败：" + e.message, 3500); }
-    };
-    row.appendChild(del);
-    list.appendChild(row);
+    const k = dayKey(it.created_at);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(it);
+  }
+  for (const k of ORDER) {
+    const arr = groups.get(k);
+    if (!arr?.length) continue;
+    const lbl = el("div", "group-lbl", `${k}<span class="count">${arr.length}</span>`);
+    list.appendChild(lbl);
+    for (const it of arr) {
+      const isCur = currentResult && it.id === currentResult.id;
+      const row = el("div", "sess-item" + (isCur ? " active" : ""));
+      row.innerHTML = `
+        <div class="sess-top"><span class="dot ${it.passed ? "" : "no"}"></span>
+          <span class="sess-topic">${esc(it.topic)}</span></div>
+        <div class="sess-sub">${esc(it.pack)} · ${sessTime(it.created_at)} · ${it.duration ?? "-"}s</div>`;
+      row.title = `${it.topic}\n${it.pack} · ${sessTime(it.created_at)}`;
+      row.onclick = () => openSession(it.id);
+      const del = el("button", "sess-del", `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9.5 7V5.2A1.2 1.2 0 0 1 10.7 4h2.6a1.2 1.2 0 0 1 1.2 1.2V7M6.5 7l.8 12.1a1.2 1.2 0 0 0 1.2 1.1h7a1.2 1.2 0 0 0 1.2-1.1L17.5 7"/><path d="M10.5 11v5.5M13.5 11v5.5"/></svg>`);
+      del.title = "删除这条记录";
+      del.onclick = async ev => {
+        ev.stopPropagation();
+        if (!(await appConfirm("删除记录", `「${it.topic.slice(0, 20)}」删除后不可恢复。`))) return;
+        try {
+          await api(`/api/history/${it.id}`, { method: "DELETE" });
+          toast("已删除");
+          loadSessions();
+        } catch (e) { toast("删除失败：" + e.message, 3500); }
+      };
+      row.appendChild(del);
+      list.appendChild(row);
+    }
   }
 }
 
 async function openSession(id) {
   try {
     const r = await api(`/api/history/${id}`);
-    gotoView("chat");
+    closeSettings();
     currentResult = r;
     currentJob = null;          // 历史回看不可再重写/轮询
     $("empty").classList.add("hidden");
@@ -820,14 +959,59 @@ function editedPlan() {
   };
 }
 
-// ── 设置 / 新建包 ────────────────────────────────────────
-async function openSettings() {
+// ── 设置：整窗二级页面（#settings-screen，自带左侧分类导航）────────
+// 参照 Zcode：设置不是主侧栏里铺开的几项，而是覆盖整个窗口的独立页面，
+// 有自己的左导航分组 + 右内容区。主界面保持挂载，关闭即原样回来。
+const SETTINGS_PANES = ["gen", "packinfo", "packgen", "llm", "kb", "skills"];
+let lastPane = "gen";           // 记住上次所在分区，重开设置回到原位
+
+function setSettingsPane(pane) {
+  if (!SETTINGS_PANES.includes(pane)) pane = lastPane;
+  SETTINGS_PANES.forEach(p => {
+    const el = $("pane-" + p);
+    if (el) el.classList.toggle("hidden", p !== pane);
+  });
+  // 设置页自己的左导航高亮
+  document.querySelectorAll(".stg-nav-item").forEach(n => {
+    n.classList.toggle("on", n.dataset.pane === pane);
+  });
+  // 切换分区后内容从头看起，避免停在上一分区的滚动位置
+  const cur = $("pane-" + pane);
+  if (cur) cur.scrollTop = 0;
+  lastPane = pane;
+  // 行业包详情每次进入都重拉：包可能被切换过，文件清单与草稿角标也可能已被改动
+  if (pane === "packinfo") {
+    openPackInfo().catch(e => toast("读取失败：" + e.message, 3500));
+  }
+  return pane;
+}
+
+async function preloadSettings() {
   const c = await api("/api/config");
   $("st-baseurl").value = c.base_url || "";
   $("st-model").value = c.model || "";
   $("st-apikey").value = "";
   $("st-status").textContent = c.mock ? "当前为 mock 模式（未配置 Key）"
     : c.api_key_set ? `已配置 Key（模型 ${c.model}）` : "未配置 API Key";
+}
+
+// 打开设置：不传 pane 就回到上次所在分区（主侧栏入口 / Ctrl+,）
+function openSettings(pane) {
+  const target = SETTINGS_PANES.includes(pane) ? pane : lastPane;
+  $("settings-screen").classList.remove("hidden");
+  setSettingsPane(target);
+  preloadSettings().catch(() => {});
+  beautifySelects($("settings-screen"));
+  return Promise.resolve();
+}
+
+function closeSettings() {
+  if (!settingsOpen()) return;
+  $("settings-screen").classList.add("hidden");
+}
+
+function settingsOpen() {
+  return !$("settings-screen").classList.contains("hidden");
 }
 
 async function saveSettings() {
@@ -966,15 +1150,21 @@ async function openPackInfo() {
   box.appendChild(tb);
 }
 
-// ── 视图切换（Trae Work 式：左导航 → 右内容页）────────────
-let viewBack = "chat";   // 记录进入当前内容页前的视图，供「返回」跳回
+// ── 视图切换（Zcode 式：左栏分组导航 → 右栏整页内容）──
 
-function gotoView(name, back) {
-  if (back !== undefined) viewBack = back;
+// 内容区只剩对话视图：行业包 / 模型接口 / 知识库 / 技能都在设置二级页里
+const VIEW_META = {
+  chat: { title: "新对话" },
+};
+
+// 左栏导航项不声明目标视图，也没有需要跨视图维持的高亮，故这里不再管 active
+function gotoView(name) {
   document.querySelectorAll("#right > .view").forEach(v => v.classList.add("hidden"));
   const v = $("view-" + name);
   if (v) v.classList.remove("hidden");
-  document.querySelectorAll(".nav-item").forEach(n => n.classList.toggle("active", n.dataset.view === name));
+  const m = VIEW_META[name];
+  // 对话视图的标题由 renderResult / clearChat 动态维护，此处不能覆盖
+  if (name !== "chat" && m) setHead(m.title, "", "");
 }
 
 // ── 事件绑定 ─────────────────────────────────────────────
@@ -989,18 +1179,18 @@ function setLeftFolded(folded) {
 function bindStatic() {
   if (localStorage.getItem("ts.left.folded") === "1") setLeftFolded(true);
   $("btn-toggle-left").onclick = () => setLeftFolded(!$("left").classList.contains("folded"));
-  $("btn-new-chat").onclick = () => { gotoView("chat"); clearChat(); loadSessions(); $("topic").focus(); };
-  $("btn-nav-setup").onclick = () => gotoView("setup", "chat");
+  $("btn-new-chat").onclick = () => { closeSettings(); gotoView("chat"); clearChat(); loadSessions(); $("topic").focus(); };
 
-  // 设置页一级分段：生成参数 / 模型接口
-  document.querySelectorAll(".tab").forEach(btn => {
-    btn.onclick = () => {
-      document.querySelectorAll(".tab").forEach(b => b.classList.toggle("active", b === btn));
-      const t = btn.dataset.tab;
-      $("pane-gen").classList.toggle("hidden", t !== "gen");
-      $("pane-llm").classList.toggle("hidden", t !== "llm");
-    };
+  // 主侧栏底部「设置」入口 + 设置页自己的左侧分类导航
+  $("btn-open-settings").onclick = () => openSettings();
+  $("btn-close-settings").onclick = closeSettings;
+  document.querySelectorAll(".stg-nav-item").forEach(n => {
+    n.onclick = () => setSettingsPane(n.dataset.pane);
   });
+  // 行业包的「详情 / 新建」不再是主侧栏导航项，改为设置页内的相邻分类。
+  // 详情数据的拉取统一由 setSettingsPane 负责，这里只切面板，避免请求打两次。
+  $("btn-packinfo").onclick = () => setSettingsPane("packinfo");
+  $("pi-close").onclick = () => setSettingsPane("gen");
 
   // 发送：按钮 / Ctrl+Enter / Enter（非 Shift）
   $("btn-generate").onclick = () => { if (busyNow) abortGeneration(); else send(); };
@@ -1015,17 +1205,13 @@ function bindStatic() {
     autoGrow();
   });
 
-  // 参数变更：检测结果过期 + 刷新左栏设置摘要
+  // 参数变更：检测结果过期 + 刷新侧栏设置摘要
   document.addEventListener("change", e => {
-    if (e.target.closest("#view-setup")) { updateStale(); updateCfgHint(); }
+    if (e.target.closest("#settings-screen")) { updateStale(); updateCfgHint(); }
   });
 
   // Enter 换行自动增高 / 恢复单行
-  function autoGrow() {
-    const t = $("topic");
-    t.style.height = "auto";
-    t.style.height = Math.min(t.scrollHeight, 140) + "px";
-  }
+  function autoGrow() { autoGrowTopic(); }
 
   document.addEventListener("keydown", e => {
     if ((e.ctrlKey || e.metaKey) && e.key === "Enter" && !e.shiftKey) {
@@ -1036,8 +1222,14 @@ function bindStatic() {
       e.preventDefault();
       setLeftFolded(!$("left").classList.contains("folded"));
     }
+    if ((e.ctrlKey || e.metaKey) && e.key === ",") {
+      e.preventDefault();
+      settingsOpen() ? closeSettings() : openSettings();
+    }
     if (e.key === "Escape") {
-      document.querySelectorAll(".overlay:not(.hidden)").forEach(o => o.classList.add("hidden"));
+      const open = document.querySelector(".overlay:not(.hidden)");
+      if (open) { open.classList.add("hidden"); return; }
+      if (settingsOpen()) closeSettings();
     }
   });
 
@@ -1066,9 +1258,6 @@ function bindStatic() {
     }
     btn.disabled = false; btn.textContent = label;
   };
-  $("btn-packinfo").onclick = () =>
-    openPackInfo().then(() => gotoView("packinfo", "setup")).catch(e => toast("读取失败：" + e.message, 3500));
-  $("pi-close").onclick = () => gotoView(viewBack || "setup");
   $("pi-export").onclick = async () => {
     const name = $("pack").value;
     $("pi-export").disabled = true;
@@ -1092,15 +1281,16 @@ function bindStatic() {
   $("btn-newpack").onclick = () => {
     $("pg-form").classList.remove("hidden");
     $("pg-result").classList.add("hidden");
-    gotoView("packgen", "setup");
+    setSettingsPane("packgen");
   };
-  $("pg-close").onclick = () => gotoView(viewBack || "setup");
+  $("pg-close").onclick = () => setSettingsPane("gen");
   $("pg-run").onclick = runPackgen;
   $("pg-done").onclick = async () => {
-    gotoView(viewBack || "chat");
+    setSettingsPane("gen");
     await boot();
     $("pack").value = $("pack").options[$("pack").options.length - 1].value;
     $("pack").dispatchEvent(new Event("change"));
+    toast("已切换到新建的行业包");
   };
   $("cf-continue").onclick = async () => {
     $("confirm-overlay").classList.add("hidden");
