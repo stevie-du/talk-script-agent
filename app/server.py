@@ -51,6 +51,21 @@ def _safe_name(name: str) -> str:
     return name
 
 
+class ConfigIn(BaseModel):
+    """设置页提交的模型配置。
+
+    必须定义在模块级：本模块启用了 `from __future__ import annotations`，
+    若把模型类放在 create_app 内部，注解只会留下一个无法解析的 ForwardRef
+    （局部类不在模块 globals 里），FastAPI 便拿不到请求体 ——
+    字段会永远停在默认空值，表现为「保存」写入空值、「测试连接」恒报未配置。
+    """
+
+    base_url: str = ""
+    api_key: str = ""
+    model: str = ""
+    temperature: float | None = None
+
+
 def create_app(root: Path) -> FastAPI:
     cfg = load_config(root)
     pipeline = Pipeline(root, cfg)
@@ -238,12 +253,6 @@ def create_app(root: Path) -> FastAPI:
         return {"base_url": cfg.llm.base_url, "model": cfg.llm.model,
                 "api_key_set": bool(cfg.llm.api_key), "temperature": cfg.llm.temperature,
                 "mock": cfg.mock}
-
-    class ConfigIn(BaseModel):
-        base_url: str = ""
-        api_key: str = ""
-        model: str = ""
-        temperature: float | None = None
 
     @app.post("/api/config")
     def set_config(body: ConfigIn):
