@@ -278,8 +278,6 @@ class Pipeline:
         feedback = ""
         for rnd in range(1, rounds + 1):
             job.update(state="writing" if rnd == 1 else "rewriting")
-            self._step(job, f"write_r{rnd}", "文案撰写" if rnd == 1 else f"回炉改写·第 {rnd - 1} 轮",
-                       {"feedback": feedback} if feedback else {})
 
             ctx = self._base_ctx(pack, p)
             self._stage_files(pack, skill, "write", ctx)
@@ -307,8 +305,13 @@ class Pipeline:
             draft = self.llm.chat_json("write", system, user, ScriptDraft,
                                        on_retry=self._retry_logger(job),
                                        temperature=temp,
-                                       on_delta=self._delta_handler(
-                                           job, "回炉改写" if rnd > 1 else "文案撰写")).model_dump()
+                                           on_delta=self._delta_handler(
+                                               job, "回炉改写" if rnd > 1 else "文案撰写")).model_dump()
+            # 步骤必须在阶段「完成后」再记：界面把 steps 一律渲染为已完成，
+            # 若在开始前就记录，会出现「已完成的文案撰写」与「文案撰写中」并存的矛盾。
+            # 其余步骤（select / check_r）也都是完成后才记，此前只有这里不一致。
+            self._step(job, f"write_r{rnd}", "文案撰写" if rnd == 1 else f"回炉改写·第 {rnd - 1} 轮",
+                       {"feedback": feedback} if feedback else {})
 
             job.update(state="checking")
             report = check_script(draft["sections"], p["duration"], p["rate"], ban, p["platform"], quota)

@@ -546,12 +546,22 @@ function poll() {
       scrollBottom();
     } else if (snap.state === "failed") {
       setBusy(false);
+      const failParams = snap.params || {};   // 失败作业的参数，「重试」直接复用
       currentJob = null;
+      const err = snap.error || "未知错误";
       setHead(sentTopic, "生成失败", "失败", "bad");
       const body = activeMsg || addAssistantMsg();
-      body.innerHTML = `<div class="banner warn">⛔ 生成失败：${esc(snap.error || "未知错误")}</div>`;
+      body.innerHTML = `
+        <div class="banner warn">⛔ 生成失败：${esc(err)}</div>
+        <div class="fail-actions">
+          <button class="ghost" id="retry-gen" title="用本次相同的参数再生成一次">重试</button>
+        </div>`;
+      const rb = body.querySelector("#retry-gen");
+      // 失败多半是连接失败/限流这类瞬时问题，重试应当原样再来一次，
+      // 所以用失败作业里的参数，而不是可能被改动的当前界面参数
+      if (rb) rb.onclick = () => send({ ...failParams });
       activeMsg = null;
-      toast("生成失败：" + (snap.error || "未知错误"), 5000);
+      toast("生成失败：" + err, 5000);
       scrollBottom();
     } else if (snap.state === "cancelled") {
       setBusy(false);
@@ -973,22 +983,30 @@ async function loadSessions() {
       row.title = `${it.topic}\n${it.pack} · ${sessTime(it.created_at)}${settled ? "" : " · 生成中"}`;
       // 有结果的按结果渲染；还在跑（或已失败）的点回去接着看它的状态
       row.onclick = () => st === "done" ? openSession(it.id) : attachJob(it.id);
-      // 未结束的不给删除：磁盘上还没有产物，删掉的其实是内存里的作业，语义容易误解
-      let del = null;
-      if (settled) {
-        del = el("button", "sess-del", `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9.5 7V5.2A1.2 1.2 0 0 1 10.7 4h2.6a1.2 1.2 0 0 1 1.2 1.2V7M6.5 7l.8 12.1a1.2 1.2 0 0 0 1.2 1.1h7a1.2 1.2 0 0 0 1.2-1.1L17.5 7"/><path d="M10.5 11v5.5M13.5 11v5.5"/></svg>`);
-        del.title = "删除这条记录";
-        del.onclick = async ev => {
-          ev.stopPropagation();
-          if (!(await appConfirm("删除记录", `「${it.topic.slice(0, 20)}」删除后不可恢复。`))) return;
-          try {
-            await api(`/api/history/${it.id}`, { method: "DELETE" });
-            toast("已删除");
-            loadSessions();
-          } catch (e) { toast("删除失败：" + e.message, 3500); }
-        };
-        row.appendChild(del);
-      }
+      // 删除按钮两种状态都给，但语义与调用不同：
+      // - 已结束（done / failed）：产物已落盘，DELETE /api/history/{id}
+      // - 进行中：产物还没落盘，DELETE 会 404，改为取消作业；
+      //   取消后状态变 cancelled，列表不再列出它，效果一致
+      const del = el("button", "sess-del", `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9.5 7V5.2A1.2 1.2 0 0 1 10.7 4h2.6a1.2 1.2 0 0 1 1.2 1.2V7M6.5 7l.8 12.1a1.2 1.2 0 0 0 1.2 1.1h7a1.2 1.2 0 0 0 1.2-1.1L17.5 7"/><path d="M10.5 11v5.5M13.5 11v5.5"/></svg>`);
+      del.title = settled ? "删除这条记录" : "放弃这次生成并移除记录";
+      del.onclick = async ev => {
+        ev.stopPropagation();
+        const name = String(it.topic || "").slice(0, 20);
+        const ok = settled
+          ? await appConfirm("删除记录", `「${name}」删除后不可恢复。`)
+          : await appConfirm("放弃这次生成", `「${name}」正在生成，将停止并移除该记录。`);
+        if (!ok) return;
+        try {
+          if (settled) await api(`/api/history/${it.id}`, { method: "DELETE" });
+          else await api(`/api/jobs/${it.id}/cancel`, { method: "POST", body: {} });
+          // 删掉的正是当前挂着的作业时必须顺手解锁，否则会留下锁死态
+          if (currentJob && currentJob.id === it.id) { currentJob = null; setBusy(false); }
+          if (currentResult && currentResult.id === it.id) currentResult = null;
+          toast(settled ? "已删除" : "已放弃");
+          loadSessions();
+        } catch (e) { toast("删除失败：" + e.message, 3500); }
+      };
+      row.appendChild(del);
       list.appendChild(row);
     }
   }
@@ -999,7 +1017,14 @@ async function loadSessions() {
     const s = it.state || "done";
     return s !== "done" && s !== "failed" && s !== "cancelled";
   })) {
-    activeRefresh = setTimeout(loadSessions, 3000);
+    // 指针停在列表上时先别重建 DOM：每 3s 换一次会把用户正要点的那一行
+    // （连同行内的删除按钮）换掉，点击落空，表现为「点了没反应」。
+    const tick = () => {
+      const l = $("session-list");
+      if (l && l.matches(":hover")) { activeRefresh = setTimeout(tick, 1200); return; }
+      loadSessions();
+    };
+    activeRefresh = setTimeout(tick, 3000);
   }
 }
 

@@ -633,6 +633,9 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
   background: var(--fill); color: var(--text-2);
   animation: fadeUp .22s var(--ease);
 }
+.fail-actions { display: flex; gap: 8px; margin-top: 9px; }
+.fail-actions button { height: 28px; font-size: var(--f-xs); padding: 0 12px; }
+
 .banner.warn { background: var(--warn-soft); color: var(--warn); }
 .banner.info { background: var(--sel-bg); color: var(--ink); }
 .banner::before { content: "⚠"; font-weight: 600; }

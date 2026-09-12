@@ -66,9 +66,14 @@ addEventListener('unhandledrejection', e => window.__errs.push('rej: ' + String(
       placeholders:[], revisions:[], timings:[], logs:[] });
     // 在跑会话的详情（attachJob 用它重建消息流）；带 stream 以覆盖思考流渲染
     if (s.indexOf('/api/jobs/s2') >= 0) return mk({ id:'s2', state:'writing',
-      params:{ topic:'扶梯突然停了怎么办', pack:'elevator', duration:60 }, steps:[],
+      params:{ topic:'扶梯突然停了怎么办', pack:'elevator', duration:60 },
+      steps:[{ key:'select', title:'选题策划' }],
       stream:{ phase:'文案撰写', reasoning_tail:'正在斟酌开场钩子的表达方式，避免直接报价格……',
                reasoning_len:136, content_len:12 } });
+    // 失败作业（覆盖失败态的「重试」按钮）
+    if (s.indexOf('/api/jobs/s3') >= 0) return mk({ id:'s3', state:'failed',
+      error:'模型接口连接失败（已重试 3 次）：Server disconnected',
+      params:{ topic:'扶梯突然停了怎么办', pack:'elevator', duration:60 }, steps:[] });
     if (s.indexOf('/api/config/test') >= 0) return mk({ ok:true, model:'glm-4.7', detail:'延迟 320ms' });
     if (s.indexOf('/api/config') >= 0) return mk(CONFIG);
     if (s.indexOf('/api/packs/') >= 0) return mk({ display_name:'电梯行业包', description:'电梯行业口播脚本包',
@@ -561,6 +566,17 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   results.push(["思考流标题带阶段名", /文案撰写/.test(thinkShown.title || ""), String(thinkShown.title)]);
   results.push(["思考流有正文内容", (thinkShown.body || "").length > 5, String(thinkShown.body).slice(0, 40)]);
   results.push(["思考流显示进度字数", /字/.test(thinkShown.meta || ""), String(thinkShown.meta)]);
+
+  // 15c) 步骤条不得出现两个「文案撰写」。
+  //     曾经把「文案撰写」这一步记在撰写开始之前，而步骤一律按已完成渲染，
+  //     于是同时出现「已完成的文案撰写」和进行中的「文案撰写中」。
+  const track = await evalIn(`(() => {
+    const t = document.querySelector('#step-track');
+    return t ? [...t.querySelectorAll('.pstep')].map(e => e.textContent.trim()) : null;
+  })()`);
+  results.push(["步骤条不重复出现「文案撰写」",
+    Array.isArray(track) && track.filter(x => /文案撰写/.test(x)).length === 1,
+    JSON.stringify(track)]);
   // 收拾干净：停掉轮询与定时刷新，复位全局态，避免影响后面的截图
   await evalIn(`clearTimeout(pollTimer); clearTimeout(activeRefresh);
     currentJob = null; currentResult = null; setBusy(false); true`);
@@ -608,6 +624,84 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await evalIn(`clearTimeout(pollTimer); clearTimeout(activeRefresh);
     currentJob = null; currentResult = null; setBusy(false);
     clearStreamMsgs(); document.getElementById('empty').classList.remove('hidden'); true`);
+
+  // 18) 失败态要能重试：给一个「重试」按钮，且带的是失败作业自己的参数
+  await evalIn(`currentJob = null; currentResult = null; attachJob('s3'); true`);
+  await sleep(700);
+  const fail = await evalIn(`(() => {
+    const b = document.getElementById('retry-gen');
+    return { hasRetry: !!b, label: b ? b.textContent : null,
+             err: /生成失败/.test(document.body.innerText || '') };
+  })()`);
+  results.push(["生成失败时提供「重试」按钮", fail.hasRetry === true, JSON.stringify(fail)]);
+  results.push(["失败态显示错误信息", fail.err === true, "含'生成失败'=" + fail.err]);
+  // 点重试 → 应带着失败作业的参数重新发起（用 topic 是否在输入框出现来判断不靠谱，
+  // 改为拦截 /api/generate 的请求体）
+  await evalIn(`window.__GEN__ = []; if (!window.__genW) { window.__genW = true;
+    const of = window.fetch.bind(window);
+    window.fetch = function (u, o) {
+      if (String(u).indexOf('/api/generate') >= 0 && o && o.body) window.__GEN__.push(o.body);
+      return of(u, o); }; } true`);
+  await evalIn(`(() => { const b = document.getElementById('retry-gen'); if (b) b.click(); })()`);
+  await sleep(600);
+  const retried = await evalIn(`window.__GEN__`);
+  results.push(["点重试 → 用原参数重新发起",
+    (retried || []).some(b => b.indexOf('扶梯突然停了怎么办') >= 0), JSON.stringify(retried).slice(0, 120)]);
+
+  // 19) 已完结记录的删除按钮：应弹出确认框，确认后发出 DELETE 并关闭
+  await evalIn(`clearTimeout(pollTimer); clearTimeout(activeRefresh);
+    currentJob = null; currentResult = null; setBusy(false); loadSessions(); true`);
+  await sleep(500);
+  await evalIn(`window.__DEL__ = []; if (!window.__delW) { window.__delW = true;
+    const of = window.fetch.bind(window);
+    window.fetch = function (u, o) { if (o && o.method === 'DELETE') window.__DEL__.push(String(u));
+      return of(u, o); }; } true`);
+  // 明确挑「已结束」那条（生成中的排在前面，走的是取消而不是 DELETE）
+  const clickDel = await evalIn(`(() => {
+    const rows = [...document.querySelectorAll('#session-list .sess-item')];
+    const t = rows.find(r => {
+      const d = r.querySelector('.sess-del');
+      return d && d.title.indexOf('删除这条记录') >= 0;
+    });
+    if (!t) return { found: false, rows: rows.length };
+    t.querySelector('.sess-del').click();
+    return { found: true, rows: rows.length };
+  })()`);
+  await sleep(400);
+  const dlg = await evalIn(`(() => {
+    const d = document.getElementById('confirm-dialog');
+    const r = d.getBoundingClientRect();
+    const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    return { hidden: d.classList.contains('hidden'), w: Math.round(r.width), h: Math.round(r.height),
+             title: document.getElementById('cd-title').textContent,
+             onTop: !!(top && d.contains(top)) };
+  })()`);
+  results.push(["点删除 → 弹出确认框", clickDel.found === true && dlg.hidden === false && dlg.w > 0,
+    JSON.stringify(clickDel) + " " + JSON.stringify(dlg).slice(0, 130)]);
+  results.push(["确认框浮在最上层可点击", dlg.onTop === true, "命中=" + dlg.onTop]);
+  await evalIn(`document.getElementById('cd-yes').click(); true`);
+  await sleep(500);
+  const delRes = await evalIn(`({ dels: window.__DEL__,
+    closed: document.getElementById('confirm-dialog').classList.contains('hidden') })`);
+  results.push(["确认后发出删除请求并关闭弹层",
+    (delRes.dels || []).some(u => u.indexOf('/api/history/') >= 0) && delRes.closed === true,
+    JSON.stringify(delRes)]);
+
+  // 19b) 生成中的记录同样要有删除入口（此前只在已结束时渲染，导致点了没反应）
+  await evalIn(`currentJob = null; currentResult = null; loadSessions(); true`);
+  await sleep(500);
+  const delBtns = await evalIn(`(() => {
+    const rows = [...document.querySelectorAll('#session-list .sess-item')];
+    return rows.map(r => {
+      const d = r.querySelector('.sess-del');
+      return { has: !!d, title: d ? d.title : null };
+    });
+  })()`);
+  results.push(["每条记录都有删除入口（含生成中）",
+    delBtns.length === 2 && delBtns.every(b => b.has === true),
+    JSON.stringify(delBtns)]);
+  results.push(["生成中的删除入口语义不同",
+    delBtns.some(b => b.title && b.title.indexOf('放弃') >= 0), JSON.stringify(delBtns.map(b => b.title))]);
 
   // 收尾：清掉测试用的主题，避免污染后面的截图
   await evalIn(`(() => { const t = document.getElementById('topic');
