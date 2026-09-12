@@ -38,9 +38,14 @@ addEventListener('unhandledrejection', e => window.__errs.push('rej: ' + String(
   window.fetch = function(u, o){
     var s = String(u);
     if (s.indexOf('/api/meta') >= 0) return mk(META);
-    if (s.indexOf('/api/history/list') >= 0) return mk({ items: [
-      { id:'s1', topic:'家用电梯怎么挑？', state:'done', mtime:1757000000 },
-      { id:'s2', topic:'电梯维保到底保什么', state:'done', mtime:1756900000 } ] });
+    // 注意：这段代码位于模板字面量内，反斜杠会被提前消掉（斜杠转义会让整行
+    // 变成注释、桩脚本全部失效），所以这里只用 indexOf 判断，不用正则。
+    // 真实接口是 GET /api/history，直接返回数组（不是 {items:[]}）。
+    if (s.indexOf('/api/history') >= 0 && s.indexOf('/api/history/') < 0) return mk([
+      { id:'s1', created_at:'2026-09-10 10:00', pack:'elevator',
+        topic:'家用电梯怎么挑？', duration:60, chars:261 },
+      { id:'s2', created_at:'2026-09-09 09:00', pack:'elevator',
+        topic:'电梯维保到底保什么', duration:60, chars:255 } ]);
     if (s.indexOf('/api/config/test') >= 0) return mk({ ok:true, model:'glm-4.7', detail:'延迟 320ms' });
     if (s.indexOf('/api/config') >= 0) return mk(CONFIG);
     if (s.indexOf('/api/packs/') >= 0) return mk({ display_name:'电梯行业包', description:'电梯行业口播脚本包',
@@ -235,12 +240,15 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       navItems: document.querySelectorAll('.stg-nav-item').length,
       inRight: !!document.querySelector('#right #settings-screen'),
       visibleView: (document.querySelector('#right > .view:not(.hidden)')||{}).id,
+      sessions: document.querySelectorAll('#session-list .sess-item').length,
     };
   })()`);
   results.push(["设置页存在且初始隐藏", init.exists && init.hidden === true, "hidden=" + init.hidden]);
   results.push(["设置页挂在 #right 之外（真·二级页）", init.inRight === false, ""]);
   results.push(["设置页 6 分区 + 6 个分类项", init.panes === 6 && init.navItems === 6, "panes=" + init.panes + " nav=" + init.navItems]);
   results.push(["初始视图 = chat", init.visibleView === "view-chat", init.visibleView]);
+  // 这条同时校验 stub 的 /api/history 路径与返回结构是否和真实接口一致
+  results.push(["会话列表渲染出 2 条（stub）", init.sessions === 2, "sessions=" + init.sessions]);
 
   // 4) 点主侧栏「设置」→ 整窗页面出现，默认落在生成偏好
   await evalIn(`document.getElementById('btn-open-settings').click(); true`);
