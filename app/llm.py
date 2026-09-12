@@ -31,6 +31,19 @@ class LLMError(RuntimeError):
     pass
 
 
+class RetryableStatus(RuntimeError):
+    """流式分支里遇到的 429/5xx。
+
+    非流式分支能直接看到 status_code 就地重试，流式分支在 with 块里不方便
+    连续 continue，于是抛出来交给 _complete 的重试循环统一退避。
+    """
+
+    def __init__(self, code: int, text: str):
+        super().__init__(str(code))
+        self.code = code
+        self.text = text
+
+
 class LLMClient:
     def __init__(self, cfg: LLMConfig, mock: bool = False, on_retry=None):
         self.cfg = cfg
@@ -39,10 +52,13 @@ class LLMClient:
 
     # ── 公开入口 ────────────────────────────────────────────
     def chat_json(self, task: str, system: str, user: str, model_cls: type[BaseModel],
-                  max_retries: int = 1, on_retry=None, temperature: float | None = None) -> BaseModel:
+                  max_retries: int = 1, on_retry=None, temperature: float | None = None,
+                  on_delta=None) -> BaseModel:
         """请求 JSON 输出并校验为 model_cls；校验失败带错误信息重试一次。
 
         temperature 传入时覆盖本次调用的默认温度（「换一版」用它换取不同表达）。
+        on_delta(kind, text) 传入时改用流式请求，供界面实时显示思考过程；
+        返回值仍是拼接好的完整正文，校验与重试逻辑完全不受影响。
         """
         if self.mock:
             data = mock_fixtures.response_for(task, user)
@@ -52,7 +68,8 @@ class LLMClient:
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
         last_err: Exception | None = None
         for attempt in range(max_retries + 1):
-            content = self._complete(messages, on_retry=on_retry, temperature=temperature)
+            content = self._complete(messages, on_retry=on_retry,
+                                     temperature=temperature, on_delta=on_delta)
             try:
                 return model_cls.model_validate(_extract_json(content))
             except (ValueError, ValidationError) as e:
@@ -83,7 +100,7 @@ class LLMClient:
     # ── 底层调用（带网络重试）────────────────────────────────
     def _complete(self, messages: list[dict], on_retry=None,
                   json_mode: bool = True, max_tokens: int | None = None,
-                  temperature: float | None = None) -> str:
+                  temperature: float | None = None, on_delta=None) -> str:
         url = f"{self.cfg.base_url}/chat/completions"
         payload = {
             "model": self.cfg.model,
@@ -102,7 +119,17 @@ class LLMClient:
 
         for attempt in range(attempts):
             try:
+                if on_delta:
+                    # 流式：边收边把增量交出去；返回值仍是完整正文，调用方无感
+                    return self._stream_once(url, payload, headers, on_delta)
                 resp = httpx.post(url, json=payload, headers=headers, timeout=self.cfg.timeout)
+            except RetryableStatus as e:             # 流式分支里的 429/5xx
+                last_err = e
+                if attempt + 1 < attempts:
+                    self._notify(on_retry, f"接口返回 {e.code}", attempt + 1, attempts)
+                    time.sleep(self._backoff(attempt))
+                    continue
+                raise LLMError(f"模型接口返回 {e.code}: {e.text}") from e
             except httpx.RequestError as e:          # 超时 / 连接失败 / 网络中断
                 last_err = e
                 if attempt + 1 < attempts:
@@ -133,6 +160,46 @@ class LLMClient:
             return content
 
         raise LLMError(f"模型接口连续失败（已重试 {attempts} 次）：{last_err}")
+
+    def _stream_once(self, url: str, payload: dict, headers: dict, on_delta) -> str:
+        """流式请求一次：逐块解析 SSE，把增量交给 on_delta，返回拼接好的正文。
+
+        推理型模型在 delta 里分两条通道推送：reasoning_content（思考过程）与
+        content（最终正文）。两者必须分开累计 —— 思考只是给人看的过程，
+        混进正文会让 json.loads 直接失败。
+        """
+        body = {**payload, "stream": True}
+        parts: list[str] = []
+        with httpx.stream("POST", url, json=body, headers=headers,
+                          timeout=self.cfg.timeout) as resp:
+            if resp.status_code in RETRYABLE_STATUS:
+                resp.read()
+                raise RetryableStatus(resp.status_code, resp.text[:300])
+            if resp.status_code >= 400:
+                resp.read()
+                raise LLMError(f"模型接口返回 {resp.status_code}: {resp.text[:300]}")
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+                chunk = line[5:].strip() if line.startswith("data:") else line.strip()
+                if chunk == "[DONE]":
+                    break
+                try:
+                    obj = json.loads(chunk)
+                except ValueError:
+                    continue                      # 心跳等非 JSON 行，跳过
+                choices = obj.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                think = delta.get("reasoning_content")
+                if think:
+                    on_delta("reasoning", think)
+                text = delta.get("content")
+                if text:
+                    parts.append(text)
+                    on_delta("content", text)
+        return "".join(parts)
 
     @staticmethod
     def _backoff(attempt: int) -> float:

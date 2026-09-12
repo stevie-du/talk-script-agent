@@ -579,6 +579,31 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 .thinking .t-text { font-size: var(--f-md); font-weight: 500; color: var(--text-1); }
 .t-steps { display: inline-flex; gap: 5px; flex-wrap: wrap; margin-left: auto; }
 
+/* 流式思考过程：生成中展开、完成折叠。推理型模型「想」远久于「写」，
+   把这部分露出来，用户就不必盯着「正在生成…」干等几十秒 */
+.think-stream {
+  margin: 10px 0 4px; border: 1px solid var(--line);
+  border-radius: var(--r-md); background: var(--fill); overflow: hidden;
+}
+.think-stream > summary {
+  cursor: pointer; padding: 6px 10px; font-size: var(--f-xs); color: var(--text-3);
+  display: flex; align-items: center; gap: 6px; list-style: none; user-select: none;
+}
+.think-stream > summary::-webkit-details-marker { display: none; }
+.think-stream > summary::before {
+  content: "▸"; font-size: var(--f-min); color: var(--text-3);
+  transition: transform .16s var(--ease);
+}
+.think-stream[open] > summary::before { transform: rotate(90deg); }
+.think-stream .ts-title { color: var(--text-2); font-weight: 600; }
+.think-stream .ts-meta { margin-left: auto; color: var(--text-3); }
+.think-stream .ts-body {
+  margin: 0; padding: 0 12px 9px; max-height: 190px; overflow: auto;
+  font-family: inherit; font-size: var(--f-xs); line-height: 1.7;
+  color: var(--text-2); white-space: pre-wrap; word-break: break-word;
+  background: transparent; scrollbar-width: thin;
+}
+
 /* 小标签/胶囊（进度、指标、状态徽标共用同一套基础样式） */
 .pstep, .m-chip, .acc-badge {
   font-size: var(--f-xs); padding: 2px 9px; border-radius: var(--r-pill);

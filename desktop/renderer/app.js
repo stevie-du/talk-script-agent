@@ -123,6 +123,10 @@ function placeholderBody() {
       <span class="t-text">正在生成…</span>
       <span class="t-steps" id="step-track"></span>
     </div>
+    <details class="think-stream hidden" id="think-stream" open>
+      <summary><span class="ts-title">思考过程</span><span class="ts-meta"></span></summary>
+      <pre class="ts-body"></pre>
+    </details>
     <div class="hint" id="gen-hint"></div>`;
 }
 
@@ -142,17 +146,46 @@ function setThinking(snap) {
     track.innerHTML = parts.join("");
   }
   body.querySelector("#gen-hint").textContent = snap.state === "failed" ? "" : "";
+  renderThinkStream(body, snap);
+}
+
+// 流式思考过程：只显示尾部（后端已截取），并自动滚到底。
+// 推理型模型「想」的时间远长于「写」的时间，把这部分露出来，
+// 用户就不会盯着「正在生成…」干等几十秒。
+function renderThinkStream(body, snap) {
+  const box = body.querySelector("#think-stream");
+  if (!box) return;
+  const st = snap.stream;
+  if (!st || (!st.reasoning_tail && !st.content_len)) {
+    if (box.classList.contains("hidden")) return;
+    box.classList.add("hidden");
+    return;
+  }
+  box.classList.remove("hidden");
+  box.querySelector(".ts-title").textContent = `${st.phase || "模型"} · 思考过程`;
+  box.querySelector(".ts-meta").textContent =
+    `${st.reasoning_len ?? 0} 字` + (st.content_len ? ` · 正文 ${st.content_len} 字` : "");
+  const pre = box.querySelector(".ts-body");
+  pre.textContent = st.reasoning_tail || "（本阶段没有可展示的思考内容）";
+  pre.scrollTop = pre.scrollHeight;
+}
+
+// 清掉消息流里的气泡。切换会话 / 新建对话都必须先走这一步：
+// 先前 openSession 只 append 不清空，结果上一个会话的气泡（含「正在生成…」）
+// 留在上方，切到别的记录时顶部看起来还在显示上一次生成的内容。
+function clearStreamMsgs() {
+  stream().querySelectorAll(".msg").forEach(m => m.remove());
+  activeMsg = null;
 }
 
 // 清空消息流（新建对话）
 function clearChat() {
   abandonRunningJob();        // 生成中点「新建对话」也要解锁，否则发送键永久变灰
-  stream().querySelectorAll(".msg").forEach(m => m.remove());
+  clearStreamMsgs();
   $("empty").classList.remove("hidden");
   $("stale-banner").classList.add("hidden");
   currentResult = null;
   genParamsSnapshot = null;
-  activeMsg = null;
   setHead("新对话", "", "");
 }
 
@@ -500,9 +533,15 @@ function poll() {
       currentResult = snap.result;
       $("stale-banner").classList.add("hidden");
       const body = activeMsg || addAssistantMsg();
+      const think = body.querySelector("#think-stream");   // 先把思考过程摘出来再清空
       body.innerHTML = "";
       activeMsg = body;
       renderResult(snap.result, body);
+      if (think && !think.classList.contains("hidden")) {
+        think.open = false;                 // 完成后默认折叠，想看再点开
+        think.querySelector(".ts-title").textContent = "生成过程";
+        body.appendChild(think);
+      }
       loadSessions();
       scrollBottom();
     } else if (snap.state === "failed") {
@@ -975,7 +1014,7 @@ async function attachJob(id) {
   currentResult = null;
   currentJob = { id, state: snap.state };
   genParamsSnapshot = null;
-  stream().querySelectorAll(".msg").forEach(m => m.remove());
+  clearStreamMsgs();
   $("empty").classList.add("hidden");
   $("stale-banner").classList.add("hidden");
   const topic = snap.params?.topic || "";
@@ -1003,6 +1042,7 @@ async function openSession(id) {
     const r = await api(`/api/history/${id}`);
     closeSettings();
     abandonRunningJob();        // 离开当前生成：停轮询 + 解锁；后端作业继续跑，左栏随时能点回去
+    clearStreamMsgs();          // 必须先清空：否则上一个会话（含「正在生成…」）会留在上方
     currentResult = r;          // 历史回看不可再重写/轮询
     $("empty").classList.add("hidden");
     addUserMsg(r.params?.topic || "");

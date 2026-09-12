@@ -40,6 +40,10 @@ class SegmentRewrite(BaseModel):
     subtitle: str = ""
 
 
+# 流式思考内容随轮询外传时的截取长度：思考动辄上万字，每次全量传输没必要
+STREAM_TAIL = 1500
+
+
 class Job:
     def __init__(self, jid: str, kind: str, params: dict):
         self.id = jid
@@ -51,15 +55,41 @@ class Job:
         self.result: dict | None = None
         self.created_at = datetime.now().isoformat(timespec="seconds")
         self._lock = threading.Lock()
+        # 流式过程内容：只驻内存、不落盘（重启即弃，属过程态而非产物）
+        self.stream_phase = ""            # 当前阶段名，如「文案撰写」
+        self.stream_reasoning = ""        # 模型思考（展示用）
+        self.stream_content = ""          # 正文（JSON），仅用于展示进度
+
+    def begin_stream(self, phase: str):
+        """进入某个阶段时重置缓冲，避免上一阶段的思考串到下一阶段。"""
+        with self._lock:
+            self.stream_phase = phase
+            self.stream_reasoning = ""
+            self.stream_content = ""
+
+    def push_delta(self, kind: str, text: str):
+        with self._lock:
+            if kind == "reasoning":
+                self.stream_reasoning += text
+            else:
+                self.stream_content += text
 
     def snapshot(self) -> dict:
         with self._lock:
-            return {
+            snap = {
                 "id": self.id, "kind": self.kind, "state": self.state,
                 "params": self.params, "steps": self.steps,
                 "error": self.error, "result": self.result,
                 "created_at": self.created_at,
             }
+            if self.stream_reasoning or self.stream_content:
+                snap["stream"] = {
+                    "phase": self.stream_phase,
+                    "reasoning_tail": self.stream_reasoning[-STREAM_TAIL:],
+                    "reasoning_len": len(self.stream_reasoning),
+                    "content_len": len(self.stream_content),
+                }
+            return snap
 
     def update(self, **kw):
         with self._lock:
@@ -236,7 +266,8 @@ class Pipeline:
         ctx["audience_slice"] = pack.audience_slice(p["audience"])
         system, user = self._render(skill, "select", ctx)
         return self.llm.chat_json("select", system, user, TopicPlan,
-                                  on_retry=self._retry_logger(job))
+                                  on_retry=self._retry_logger(job),
+                                  on_delta=self._delta_handler(job, "选题策划"))
 
     def _write_with_recheck(self, job: Job, pack: Pack, skill: dict,
                             p: dict, plan: TopicPlan) -> tuple[dict, list[dict]]:
@@ -275,7 +306,9 @@ class Pipeline:
                 temp = min(1.0, float(self.llm.cfg.temperature) + 0.25)
             draft = self.llm.chat_json("write", system, user, ScriptDraft,
                                        on_retry=self._retry_logger(job),
-                                       temperature=temp).model_dump()
+                                       temperature=temp,
+                                       on_delta=self._delta_handler(
+                                           job, "回炉改写" if rnd > 1 else "文案撰写")).model_dump()
 
             job.update(state="checking")
             report = check_script(draft["sections"], p["duration"], p["rate"], ban, p["platform"], quota)
@@ -436,7 +469,8 @@ class Pipeline:
             }
             system, user = self._render(skill, "rewrite_segment", ctx)
             new = self.llm.chat_json("rewrite_segment", system, user, SegmentRewrite,
-                                     on_retry=self._retry_logger(job))
+                                     on_retry=self._retry_logger(job),
+                                     on_delta=self._delta_handler(job, "单段重写"))
             old = seg["text"]
             sections[index]["text"] = new.text
             if new.subtitle:
@@ -462,6 +496,23 @@ class Pipeline:
         """接口自动重试时记录到作业日志（界面「日志」页签可见）"""
         def cb(note: str, attempt: int, total: int):
             self._step(job, "retry", f"接口自动重试·第 {attempt}/{total} 次", {"note": note})
+        return cb
+
+    @staticmethod
+    def _delta_handler(job: Job, phase: str):
+        """返回流式回调：把模型增量写进 job，界面据此实时显示思考过程。
+
+        每次调用都新建一个，首次收到增量时才 begin_stream —— 这样每进入一个
+        阶段（含每次重试）都会清空缓冲，上一阶段/上一轮的思考不会串过来。
+        """
+        state = {"started": False}
+
+        def cb(kind: str, text: str):
+            if not state["started"]:
+                job.begin_stream(phase)
+                state["started"] = True
+            job.push_delta(kind, text)
+
         return cb
 
     def _step(self, job: Job, key: str, title: str, data: dict):

@@ -53,9 +53,22 @@ addEventListener('unhandledrejection', e => window.__errs.push('rej: ' + String(
         topic:'家用电梯怎么挑？', duration:60, chars:261, passed:true, state:'done' },
       { id:'s2', created_at:'2026-09-12 15:30', pack:'elevator',
         topic:'扶梯突然停了怎么办', duration:null, chars:null, passed:null, state:'writing' } ]);
-    // 在跑会话的详情（attachJob 用它重建消息流）
+    // 已完成记录的详情（openSession 用它渲染结果）
+    if (s.indexOf('/api/history/s1') >= 0) return mk({
+      id:'s1', created_at:'2026-09-10T10:00', pack:'elevator',
+      params:{ topic:'家用电梯怎么挑？', pack:'elevator', duration:60,
+               platform:'抖音', style:'口播科普', persona:'维保老师傅' },
+      quota:{ total:290, hook:45, body:190, cta:55 },
+      plan:{ angle:'看维保', hook_type:'反常识', hook_line:'钩子', points:['要点一'], cta:'关注' },
+      sections:[{ type:'hook', text:'开场文案示例', subtitle:'字幕' }],
+      storyboard:[], scenes:[],
+      check:{ passed:true, chars_total:10, target_total:290, deviation_pct:0, hard_hits:[] },
+      placeholders:[], revisions:[], timings:[], logs:[] });
+    // 在跑会话的详情（attachJob 用它重建消息流）；带 stream 以覆盖思考流渲染
     if (s.indexOf('/api/jobs/s2') >= 0) return mk({ id:'s2', state:'writing',
-      params:{ topic:'扶梯突然停了怎么办', pack:'elevator', duration:60 }, steps:[] });
+      params:{ topic:'扶梯突然停了怎么办', pack:'elevator', duration:60 }, steps:[],
+      stream:{ phase:'文案撰写', reasoning_tail:'正在斟酌开场钩子的表达方式，避免直接报价格……',
+               reasoning_len:136, content_len:12 } });
     if (s.indexOf('/api/config/test') >= 0) return mk({ ok:true, model:'glm-4.7', detail:'延迟 320ms' });
     if (s.indexOf('/api/config') >= 0) return mk(CONFIG);
     if (s.indexOf('/api/packs/') >= 0) return mk({ display_name:'电梯行业包', description:'电梯行业口播脚本包',
@@ -528,6 +541,26 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   results.push(["点回在跑会话 → 重新挂上并恢复生成态",
     reattached.job === 's2' && reattached.busy === true && reattached.hasUserMsg === true,
     JSON.stringify(reattached)]);
+
+  // 15b) 生成中要能看到模型的思考过程（流式）
+  const thinkShown = await evalIn(`(() => {
+    const b = document.getElementById('think-stream');
+    if (!b) return { found: false };
+    return {
+      found: true,
+      hidden: b.classList.contains('hidden'),
+      open: b.open,
+      title: (b.querySelector('.ts-title') || {}).textContent,
+      meta: (b.querySelector('.ts-meta') || {}).textContent,
+      body: (b.querySelector('.ts-body') || {}).textContent,
+    };
+  })()`);
+  results.push(["生成中显示思考流（展开）",
+    thinkShown.found === true && thinkShown.hidden === false && thinkShown.open === true,
+    JSON.stringify(thinkShown).slice(0, 120)]);
+  results.push(["思考流标题带阶段名", /文案撰写/.test(thinkShown.title || ""), String(thinkShown.title)]);
+  results.push(["思考流有正文内容", (thinkShown.body || "").length > 5, String(thinkShown.body).slice(0, 40)]);
+  results.push(["思考流显示进度字数", /字/.test(thinkShown.meta || ""), String(thinkShown.meta)]);
   // 收拾干净：停掉轮询与定时刷新，复位全局态，避免影响后面的截图
   await evalIn(`clearTimeout(pollTimer); clearTimeout(activeRefresh);
     currentJob = null; currentResult = null; setBusy(false); true`);
@@ -551,6 +584,30 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     new Set([...paramPlacement.barIds, ...paramPlacement.frontIds]).size ===
     paramPlacement.barIds.length + paramPlacement.frontIds.length,
     "条=" + paramPlacement.barIds.length + " 设置=" + paramPlacement.frontIds.length]);
+
+  // 17) 回归：切到别的记录后，消息流与顶端都不能残留上一个会话。
+  //     原先 openSession 只 append 不清空，切记录后顶部还挂着上一次生成的内容，
+  //     连「正在生成…」气泡都还在。
+  await evalIn(`currentJob = null; currentResult = null; attachJob('s2'); true`);
+  await sleep(500);
+  const nBefore = await evalIn(`document.querySelectorAll('.msg').length`);
+  await evalIn(`openSession('s1'); true`);
+  await sleep(600);
+  const swapped = await evalIn(`(() => ({
+    msgs: document.querySelectorAll('.msg').length,
+    stale: /正在生成/.test(document.body.innerText || ''),
+    head: document.getElementById('rh-title').textContent || '',
+  }))()`);
+  results.push(["切到别的记录 → 不残留上一会话的气泡",
+    nBefore === 2 && swapped.msgs === 2, "切换前 " + nBefore + " 条 → 切换后 " + swapped.msgs + " 条"]);
+  results.push(["切到别的记录 → 不再出现「正在生成」", swapped.stale === false, "含'正在生成'=" + swapped.stale]);
+  results.push(["顶端标题跟随打开的记录",
+    /家用电梯怎么挑/.test(swapped.head) && !/扶梯突然停了/.test(swapped.head),
+    "顶端=" + JSON.stringify(swapped.head)]);
+  // 收拾干净，避免影响后面的截图
+  await evalIn(`clearTimeout(pollTimer); clearTimeout(activeRefresh);
+    currentJob = null; currentResult = null; setBusy(false);
+    clearStreamMsgs(); document.getElementById('empty').classList.remove('hidden'); true`);
 
   // 收尾：清掉测试用的主题，避免污染后面的截图
   await evalIn(`(() => { const t = document.getElementById('topic');
