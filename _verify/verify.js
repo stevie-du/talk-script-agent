@@ -449,6 +449,38 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     cfState.busy === false && cfState.job === null && cfState.btnDisabled === false && cfState.topicDisabled === false,
     JSON.stringify(cfState)]);
 
+  // 13) 回归：设置页里的自绘下拉必须浮在设置页之上
+  //     曾经的 bug：.select-menu 的 z-index(40) 低于 .screen(60)，
+  //     菜单虽然弹出了却被整窗设置页盖住 → 「风格 / 人设 / 结尾引导」点了没反应。
+  //     判定不能只看菜单宽高（被盖住时依然有尺寸），要看 elementFromPoint 命中的是谁。
+  await evalIn(`document.getElementById('btn-open-settings').click(); setSettingsPane('gen'); true`);
+  await sleep(320);
+  await evalIn(`(() => { const w = document.querySelector('#param-front select').closest('.select-wrap');
+    w.querySelector('.select-btn').click(); })()`);
+  await sleep(260);
+  const dd = await evalIn(`(() => {
+    const sel = document.querySelector('#param-front select');
+    const menu = [...document.querySelectorAll('body > .select-menu')].find(m => !m.classList.contains('hidden'));
+    if (!menu) return { found: false };
+    const r = menu.getBoundingClientRect();
+    const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    return {
+      found: true,
+      label: sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].textContent : '',
+      options: menu.querySelectorAll('.select-opt').length,
+      z: getComputedStyle(menu).zIndex,
+      onTop: menu.contains(top),
+      hit: top ? (top.id || top.className || top.tagName) : null,
+    };
+  })()`);
+  // 桩里 style 只有 2 个选项，故断言按 >=2；关键是「菜单能不能浮在上面」
+  results.push(["设置页下拉能展开出选项", dd.found === true && dd.options >= 2,
+    "选项数=" + dd.options + " 当前=" + dd.label]);
+  results.push(["下拉浮在设置页之上（可点选）", dd.onTop === true,
+    "z=" + dd.z + " 命中=" + dd.hit]);
+  // 收尾：关掉菜单，避免影响后面的截图
+  await evalIn(`document.querySelectorAll('body > .select-menu').forEach(m => m.classList.add('hidden')); true`);
+
   // 收尾：清掉测试用的主题，避免污染后面的截图
   await evalIn(`(() => { const t = document.getElementById('topic');
     t.value = ''; t.dispatchEvent(new Event('input', { bubbles: true })); })()`);
@@ -464,6 +496,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await shot("main-sidebar.png", "document.getElementById('settings-screen').classList.add('hidden'); gotoView('chat'); true");
   // 设置整窗页面：生成偏好 / 行业包 / 模型接口 / 知识库
   await shot("settings-gen.png", "document.getElementById('btn-open-settings').click(); setSettingsPane('gen'); true");
+  // 展开「风格」下拉：确认菜单浮在设置页之上（曾因 z-index 过低而点不到）
+  await shot("settings-style-menu.png",
+    "(() => { setSettingsPane('gen'); const w = document.querySelector('#param-front select').closest('.select-wrap'); w.querySelector('.select-btn').click(); })()");
   await shot("settings-packinfo.png", "setSettingsPane('packinfo'); true");
   await shot("settings-llm.png", "setSettingsPane('llm'); true");
   await shot("settings-kb.png", "setSettingsPane('kb'); true");

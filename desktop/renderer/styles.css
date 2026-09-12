@@ -301,9 +301,12 @@ select {
   border-radius: var(--r-pill);
 }
 .select-wrap.pill .chev { margin-left: 2px; }
-/* 菜单宽度与位置由 JS 量取后写入（贴按钮左沿、可按内容取宽） */
+/* 菜单宽度与位置由 JS 量取后写入（贴按钮左沿、可按内容取宽）。
+   z-index 必须高于整窗二级页 .screen(60)：菜单挂在 body 下，与 .screen 同处根层叠
+   上下文，低于它就会被整窗设置页盖住 —— 菜单其实弹出来了，但点不到，
+   表现为「设置 → 生成偏好」里的风格 / 人设 / 结尾引导选不动。toast 是 99，仍在其上。 */
 .select-menu {
-  position: absolute; top: calc(100% + 5px); left: 0; z-index: 40;
+  position: absolute; top: calc(100% + 5px); left: 0; z-index: 80;
   background: var(--glass-strong); border-radius: var(--r-md);
   backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);
   box-shadow: var(--shadow-pop); padding: 4px; max-height: 264px; overflow: auto;
