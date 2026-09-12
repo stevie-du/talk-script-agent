@@ -57,6 +57,7 @@
 
   /* ── 功能状态（低饱和，仅小面积文字）── */
   --ok: #248a3d;
+  --ok-soft: rgba(36, 138, 61, .08);   /* .rh-state.ok 用得到，漏定义会让底色整块失效 */
   --warn: #b25e00;
   --warn-soft: rgba(178, 94, 0, .09);
   --bad: #d70015;
@@ -386,12 +387,30 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 .sess-item.active { background: var(--sel-bg); }
 .sess-item.active .sess-topic { color: var(--ink); font-weight: 600; }
 .sess-item.active .sess-sub { color: var(--ink); opacity: .7; }
+/* 行首状态点。此前整段规则缺失，<span class="dot"> 是个空的 inline 元素 ——
+   既没有宽高也没有底色，等于列表压根没有状态标识。
+   三态：ok=已完成且校验通过 / no=已完成但校验未通过或失败 / run=还在跑（呼吸）。 */
+.dot {
+  width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%;
+  background: var(--text-3); opacity: .5;
+}
+.dot.ok { background: var(--ok); opacity: .85; }
+.dot.no { background: var(--bad); opacity: .85; }
+.dot.run { animation: dotPulse 1.4s var(--ease) infinite; }
+@keyframes dotPulse { 50% { opacity: .2; } }
+
 .sess-top { display: flex; align-items: center; gap: 8px; padding-right: 32px; }
 .sess-topic {
   font-size: var(--f-sm); font-weight: 500; color: var(--text-1);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.sess-sub { font-size: var(--f-xs); color: var(--text-3); margin-top: 1px; }
+.sess-sub {
+  font-size: var(--f-xs); color: var(--text-3); margin-top: 1px;
+  /* 右上角常驻着删除按钮（宽 28 + 右距 3），副标题没有这条留白时，
+     长文案会一直排到按钮底下被压住；一并加省略号而不是换行顶开行高。 */
+  padding-right: 32px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 /* 删除：常驻图标按钮（悬停才提亮）
    以前默认 opacity:0 —— 按钮不现身时用户第一下往往点在行上（触发打开记录），
    看上去就像「删除要点好几次」。现在常驻淡显，随时可瞄准；命中区也放大到 28px。 */
@@ -679,7 +698,9 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 .card-foot .rw {
   height: 24px; font-size: var(--f-xs); padding: 0 9px; flex: 0 0 auto;
   background: transparent; color: var(--text-3); border-radius: var(--r-xs);
-  opacity: 0; transition: opacity .15s var(--ease), background .15s, color .15s;
+  /* 默认淡显而非全隐：完全看不见就等于没有这个入口，用户不知道卡片能单段重写。
+     悬停/聚焦才提到全亮，平时不抢正文的注意力（与 .sess-del 同一套路）。 */
+  opacity: .45; transition: opacity .15s var(--ease), background .15s, color .15s;
 }
 .script-card:hover .card-foot .rw, .card-foot:focus-within .rw { opacity: 1; }
 .card-foot button:hover { background: var(--fill); color: var(--ink); }
@@ -839,7 +860,10 @@ td.bad { color: var(--bad); font-weight: 500; }
   position: fixed; inset: 0;
   background: var(--scrim);
   backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
-  display: flex; align-items: center; justify-content: center; z-index: 50;
+  display: flex; align-items: center; justify-content: center;
+  /* 必须高于 .screen（设置整窗页，60）：否则设置页开着时弹出的确认框会被它压在下面，
+     看得见背景模糊却点不到按钮，像卡住一样。低于 .select-menu（80）不影响下拉。 */
+  z-index: 70;
   animation: fadeIn .18s var(--ease);
 }
 .dialog {

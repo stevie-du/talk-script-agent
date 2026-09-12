@@ -1090,7 +1090,10 @@ function updateSessionRow(row, it) {
   const sig = [isCur, st, it.topic, sub].join("\u0001");
   if (row._sig === sig) return;          // 内容没变就彻底不动 DOM
   row._sig = sig;
-  row.querySelector(".dot").className = "dot " + (st === "done" && !it.passed ? "no" : "");
+  // 状态点三态：已完成看是否通过校验，失败也归未通过，其余（在跑/已取消）用中性的呼吸点
+  row.querySelector(".dot").className = "dot " + (
+    st === "done" ? (it.passed ? "ok" : "no")
+      : st === "failed" ? "no" : "run");
   row.querySelector(".sess-topic").textContent = it.topic || "";
   row.querySelector(".sess-sub").textContent = sub;
   row.title = `${it.topic || ""}\n${it.pack || ""} · ${sessTime(it.created_at)}${settled ? "" : " · 生成中"}`;

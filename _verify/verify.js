@@ -933,6 +933,49 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     currentJob = null; currentResult = null; activeMsg = null; pollMisses = 0;
     setBusy(false); if (window.__OF__) window.fetch = window.__OF__; true`);
 
+  // 21) 样式层回归：状态点 / CSS 变量 / 层级顺序 / 常驻入口 / 副标题避让删除按钮
+  await evalIn(`openSession('s1'); true`);
+  await sleep(600);
+  const cssChk = await evalIn(`(() => {
+    const rows = [...document.querySelectorAll('#session-list .sess-item')];
+    const dots = rows.map(r => (r.querySelector('.dot') || {}).className || '').map(c => c.replace('dot', '').trim());
+    const d = rows.length ? rows[0].querySelector('.dot') : null;
+    const dr = d ? d.getBoundingClientRect() : { width: 0, height: 0 };
+    const rw = document.querySelector('.card-foot .rw');
+    const sub = document.querySelector('#session-list .sess-sub');
+    const del = document.querySelector('#session-list .sess-del');
+    const sr = sub && sub.getBoundingClientRect();
+    const dlr = del && del.getBoundingClientRect();
+    return {
+      kinds: dots,
+      dotW: d ? Math.round(dr.width) : 0, dotH: d ? Math.round(dr.height) : 0,
+      dotBg: d ? getComputedStyle(d).backgroundColor : '',
+      okSoft: getComputedStyle(document.documentElement).getPropertyValue('--ok-soft').trim(),
+      zScreen: parseInt(getComputedStyle(document.getElementById('settings-screen')).zIndex, 10),
+      zOverlay: parseInt(getComputedStyle(document.getElementById('confirm-overlay')).zIndex, 10),
+      rwOpacity: rw ? parseFloat(getComputedStyle(rw).opacity) : -1,
+      // 要比的是「文字实际排到的位置」= 内容盒右边缘，rect 含 padding 会虚报
+      subPadRight: sub ? parseFloat(getComputedStyle(sub).paddingRight) : -1,
+      overlap: !!(sr && dlr) &&
+        Math.round(sr.right - parseFloat(getComputedStyle(sub).paddingRight)) > Math.round(dlr.left) + 1,
+    };
+  })()`);
+  results.push(["会话状态点有实际尺寸（不再隐形）",
+    cssChk.dotW >= 4 && cssChk.dotH >= 4 && cssChk.dotBg !== 'rgba(0, 0, 0, 0)',
+    cssChk.dotW + 'x' + cssChk.dotH + ' ' + cssChk.dotBg]);
+  results.push(["状态点按状态区分（ok / no / run）",
+    cssChk.kinds.length > 0 && cssChk.kinds.every(k => ['ok', 'no', 'run'].includes(k)),
+    JSON.stringify(cssChk.kinds)]);
+  results.push(["--ok-soft 已定义（合格标签底色不丢）",
+    cssChk.okSoft.length > 0, JSON.stringify(cssChk.okSoft)]);
+  results.push(["确认浮层层级高于设置整窗页",
+    cssChk.zOverlay > cssChk.zScreen, "overlay=" + cssChk.zOverlay + " screen=" + cssChk.zScreen]);
+  results.push(["单段重写入口平时也看得见（不是 opacity:0）",
+    cssChk.rwOpacity > 0 && cssChk.rwOpacity < 1, "opacity=" + cssChk.rwOpacity]);
+  results.push(["副标题留出删除按钮的位置且不被压住",
+    cssChk.subPadRight >= 28 && cssChk.overlap === false,
+    "padding-right=" + cssChk.subPadRight + " 重叠=" + cssChk.overlap]);
+
   // 收尾：清掉测试用的主题，避免污染后面的截图
   await evalIn(`(() => { const t = document.getElementById('topic');
     t.value = ''; t.dispatchEvent(new Event('input', { bubbles: true })); })()`);
