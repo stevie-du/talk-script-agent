@@ -16,6 +16,7 @@ import yaml
 from pydantic import BaseModel, Field
 
 from .knowledge import Pack
+from .fileio import write_atomic
 from .llm import LLMClient
 
 GENERIC_FILES = [
@@ -200,8 +201,10 @@ def create_pack(root: Path, llm: LLMClient, industry: str, description: str) -> 
         },
         "banwords": "banwords.yaml",
     }
-    (d / "pack.yaml").write_text(
-        yaml.safe_dump(pack_yaml, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    # pack.yaml 是这个包在列表里的身份证：写坏了不是这一个包不可用，
+    # list_packs 会连带把整个首页的行业包列表一起带崩，所以必须原子替换。
+    write_atomic(d / "pack.yaml",
+                 yaml.safe_dump(pack_yaml, allow_unicode=True, sort_keys=False))
 
     # 6. 校对清单
     checklist = ["# 新行业包校对清单", "",

@@ -14,17 +14,18 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 import yaml
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
 
 from .config import load_config, save_config
 from .knowledge import Pack, list_packs
 from .llm import LLMClient
 from .packgen import create_pack
+from .fileio import write_atomic
 from .pipeline import Pipeline
 from .schemas import (ConfirmRequest, GenerateRequest, PackCreateRequest,
                       RewriteSegmentRequest)
@@ -66,13 +67,74 @@ class ConfigIn(BaseModel):
     temperature: float | None = None
 
 
+def _local_host(host: str) -> bool:
+    """只认本机回环：引擎绑 127.0.0.1，合法来源不该有别的域名。"""
+    host = host.strip("[]").lower()
+    return host in ("127.0.0.1", "localhost", "::1", "0.0.0.0")
+
+
+def _origin_allowed(origin: str | None) -> bool:
+    """同源判定：本机/Electron 放行，其它站点一律拒绝。
+
+    原来是 allow_origins=["*"]，等于任何一个你在浏览器里打开的网页都能悄悄
+    GET /api/history 把你写过的脚本读走、POST /api/jobs 拿你的 Key 去烧额度、
+    DELETE /api/history/{id} 删记录。引擎常年在本机后台跑着（Electron 拉起、
+    用完也不一定退），这不是理论风险。
+
+    放行集合刻意包含了 file:// 页面发起请求时的几种形态：没有 Origin（非浏览器
+    客户端、同文档请求）、"null"（Chromium 对 file:// 文档统一上报的 Origin）、
+    file:// / app://（Electron 打包后的自定义协议）。
+    """
+    if not origin:
+        return True
+    o = origin.strip().rstrip("/")
+    if o.lower() in ("null", "file:", "file://"):
+        return True
+    if o.lower().startswith("app://") or o.lower().startswith("chrome-extension://"):
+        return True
+    return bool(urlparse(o).hostname) and _local_host(urlparse(o).hostname or "")
+
+
+_CORS_METHODS = "DELETE, GET, OPTIONS, POST"
+_CORS_HEADERS = "Content-Type"
+
+
 def create_app(root: Path) -> FastAPI:
-    cfg = load_config(root)
-    pipeline = Pipeline(root, cfg)
+    def _cfg():
+        """每次现读配置文件。
+
+        以前只在 create_app 里读一次然后关进闭包，用户在设置里保存 Key 之后，
+        /api/meta 仍返回旧模型名、has_api_key 仍是 false，建包接口也照旧拿旧的
+        api_key 去拦 —— 表现为「明明刚填好 Key 还提示未配置」，必须重启才生效。
+        """
+        return load_config(root)
+
+    pipeline = Pipeline(root, _cfg())
 
     app = FastAPI(title="TalkScript Engine", version=VERSION)
-    app.add_middleware(
-        CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+    def _cors_headers(origin: str) -> dict[str, str]:
+        return {
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Methods": _CORS_METHODS,
+            "Access-Control-Allow-Headers": _CORS_HEADERS,
+            "Access-Control-Max-Age": "600",
+            "Vary": "Origin",
+        }
+
+    @app.middleware("http")
+    async def local_origin_only(request, call_next):
+        origin = request.headers.get("origin")
+        if not _origin_allowed(origin):
+            # 明确拒绝而非静默丢弃：出了问题时前端能看到 403，而不是一个空响应。
+            return PlainTextResponse("跨站请求已被拒绝", status_code=403)
+        if request.method == "OPTIONS" and origin:
+            return PlainTextResponse("", status_code=204, headers=_cors_headers(origin))
+        resp = await call_next(request)
+        if origin:
+            for k, v in _cors_headers(origin).items():
+                resp.headers[k] = v
+        return resp
 
     @app.get("/")
     def index():
@@ -92,10 +154,11 @@ def create_app(root: Path) -> FastAPI:
 
     @app.get("/api/health")
     def health():
-        return {"ok": True, "version": VERSION, "mock": cfg.mock}
+        return {"ok": True, "version": VERSION, "mock": _cfg().mock}
 
     @app.get("/api/meta")
     def meta():
+        cfg = _cfg()          # 现读：设置里改完模型，这里要立刻反映出来
         packs = list_packs(root)
         return {
             "packs": [p.model_dump() for p in packs],
@@ -170,9 +233,9 @@ def create_app(root: Path) -> FastAPI:
     # ── 行业包 ──────────────────────────────────────────────
     @app.post("/api/packs/create")
     def packs_create(req: PackCreateRequest):
-        if cfg.mock:
-            # mock 模式同样走生成流程（返回夹具数据），验证流程用
-            pass
+        # 同样现读：有不少用户是「先建自己的行业包 → 再写脚本」，而填 Key 和建包
+        # 之间往往不重启。用启动时那份旧配置拦，就会误报「未配置 API Key」。
+        cfg = _cfg()
         if not (cfg.llm.api_key or cfg.mock):
             raise HTTPException(400, "未配置模型 API Key，请先在设置中填写")
         try:
@@ -197,7 +260,7 @@ def create_app(root: Path) -> FastAPI:
             raise HTTPException(404, "行业包不存在")
         data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
         data["draft"] = False
-        p.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        write_atomic(p, yaml.safe_dump(data, allow_unicode=True, sort_keys=False))
         return {"ok": True, "name": name, "draft": False}
 
     # ── 历史 ────────────────────────────────────────────────

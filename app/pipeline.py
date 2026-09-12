@@ -24,6 +24,7 @@ from pydantic import BaseModel
 
 from .checker import Banwords, Quota, check_script, count_chars
 from .config import AppConfig, load_config
+from .fileio import write_atomic
 from .knowledge import Pack
 from .llm import LLMClient
 from .schemas import (ConfirmRequest, GenerateRequest, RewriteSegmentRequest,
@@ -478,8 +479,8 @@ class Pipeline:
 
     def _write_output_files(self, result: dict, full_text: str) -> None:
         out_dir = self._out_dir(result["created_at"], result["id"])
-        (out_dir / "result.json").write_text(
-            json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
+        write_atomic(out_dir / "result.json",
+                     json.dumps(result, ensure_ascii=False, indent=1))
 
         p = result["params"]
         lines = [f"# 口播脚本：{p['topic']}",
@@ -515,7 +516,9 @@ class Pipeline:
         lines += ["", "## 合规检查", "",
                   f"- 硬禁用词：{ch['hard_hits'] or '无'}",
                   f"- 待确认：{ch['soft_hits'] or '无'}（语境正常即可放行）"]
-        (out_dir / "脚本.md").write_text("\n".join(lines), encoding="utf-8")
+        # 单段重写会重复调用本方法：结果文件或脚本写一半被打断时会留半截内容，
+        # write_atomic 保证用户在任何时刻看到的都是前一版或完整的新一版。
+        write_atomic(out_dir / "脚本.md", "\n".join(lines))
 
     def _run_rewrite_segment(self, job: Job, pack: Pack, index: int, feedback: str) -> None:
         try:
@@ -617,16 +620,16 @@ class Pipeline:
         snap = job.snapshot()
         try:
             out_dir = self._out_dir(datetime.now().isoformat(timespec="seconds"), job.id)
-            (out_dir / "job.json").write_text(
-                json.dumps(snap, ensure_ascii=False, indent=1), encoding="utf-8")
+            write_atomic(out_dir / "job.json",
+                         json.dumps(snap, ensure_ascii=False, indent=1))
         except Exception:
             pass
 
     def _persist_result(self, result: dict):
         try:
             out_dir = self._out_dir(result["created_at"], result["id"])
-            (out_dir / "result.json").write_text(
-                json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
+            write_atomic(out_dir / "result.json",
+                         json.dumps(result, ensure_ascii=False, indent=1))
         except Exception:
             pass
 

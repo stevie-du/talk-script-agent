@@ -8,6 +8,8 @@ from pathlib import Path
 
 import yaml
 
+from .fileio import write_atomic
+
 DEFAULT_CONFIG = {
     "llm": {
         "base_url": "https://open.bigmodel.cn/api/paas/v4",
@@ -94,5 +96,6 @@ def save_config(root: Path, llm: dict, default_pack: str | None = None) -> None:
     data["llm"] = existing
     if default_pack:
         data["default_pack"] = default_pack
-    with open(p, "w", encoding="utf-8") as f:
-        yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
+    # 原子写：这里尤其要紧 —— config.yaml 被写坏就是半截 YAML，后果不是丢一条
+    # 记录，而是每次 load_config 都炸、连界面都出不来。
+    write_atomic(p, yaml.safe_dump(data, allow_unicode=True, sort_keys=False))
