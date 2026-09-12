@@ -247,6 +247,7 @@ async function boot() {
   renderPackParams();
   updateCfgHint();
   renderSamples();
+  bindSessionList();
   loadSessions();
   bindStatic();
   refreshGate();
@@ -943,73 +944,14 @@ function sessTime(d) {
 }
 
 let activeRefresh = null;      // 有会话在跑时的列表自动刷新
+const SESS_ORDER = ["今天", "昨天", "本周", "更早"];
+const sessIndex = new Map();   // id -> 这条记录最近一次的数据（委托 handler 从这里取数，闭包不会过期）
+const DEL_SVG = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9.5 7V5.2A1.2 1.2 0 0 1 10.7 4h2.6a1.2 1.2 0 0 1 1.2 1.2V7M6.5 7l.8 12.1a1.2 1.2 0 0 0 1.2 1.1h7a1.2 1.2 0 0 0 1.2-1.1L17.5 7"/><path d="M10.5 11v5.5M13.5 11v5.5"/></svg>`;
+
 async function loadSessions() {
   let items = [];
   try { items = await api("/api/history"); } catch (_) {}
-  const list = $("session-list");
-  list.innerHTML = "";
-  if (!items.length) {
-    list.appendChild(el("p", "hint sess-empty", "还没有会话记录，先发一条试试"));
-    return;
-  }
-  const ORDER = ["今天", "昨天", "本周", "更早"];
-  const groups = new Map();
-  for (const it of items) {
-    const k = dayKey(it.created_at);
-    if (!groups.has(k)) groups.set(k, []);
-    groups.get(k).push(it);
-  }
-  for (const k of ORDER) {
-    const arr = groups.get(k);
-    if (!arr?.length) continue;
-    const lbl = el("div", "group-lbl", `${k}<span class="count">${arr.length}</span>`);
-    list.appendChild(lbl);
-    for (const it of arr) {
-      // 状态：done 已有落盘结果；failed 也是「结束」，但没有结果可渲染；
-      // 其余（排队 / 选题 / 撰写 / 回炉 / 校验 / 待确认）都算进行中。
-      const st = it.state || "done";
-      const settled = st === "done" || st === "failed" || st === "cancelled";
-      const isCur = settled
-        ? (!!currentResult && it.id === currentResult.id)
-        : (!!currentJob && it.id === currentJob.id);
-      const row = el("div", "sess-item" + (isCur ? " active" : ""));
-      const sub = st === "done"
-        ? `${esc(it.pack)} · ${sessTime(it.created_at)} · ${it.duration ?? "-"}s`
-        : `${esc(it.pack)} · ${esc(STATE_LABEL[st] || st)} · ${sessTime(it.created_at)}`;
-      row.innerHTML = `
-        <div class="sess-top"><span class="dot ${st === "done" ? (it.passed ? "" : "no") : ""}"></span>
-          <span class="sess-topic">${esc(it.topic)}</span></div>
-        <div class="sess-sub">${sub}</div>`;
-      row.title = `${it.topic}\n${it.pack} · ${sessTime(it.created_at)}${settled ? "" : " · 生成中"}`;
-      // 有结果的按结果渲染；还在跑（或已失败）的点回去接着看它的状态
-      row.onclick = () => st === "done" ? openSession(it.id) : attachJob(it.id);
-      // 删除按钮两种状态都给，但语义与调用不同：
-      // - 已结束（done / failed）：产物已落盘，DELETE /api/history/{id}
-      // - 进行中：产物还没落盘，DELETE 会 404，改为取消作业；
-      //   取消后状态变 cancelled，列表不再列出它，效果一致
-      const del = el("button", "sess-del", `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9.5 7V5.2A1.2 1.2 0 0 1 10.7 4h2.6a1.2 1.2 0 0 1 1.2 1.2V7M6.5 7l.8 12.1a1.2 1.2 0 0 0 1.2 1.1h7a1.2 1.2 0 0 0 1.2-1.1L17.5 7"/><path d="M10.5 11v5.5M13.5 11v5.5"/></svg>`);
-      del.title = settled ? "删除这条记录" : "放弃这次生成并移除记录";
-      del.onclick = async ev => {
-        ev.stopPropagation();
-        const name = String(it.topic || "").slice(0, 20);
-        const ok = settled
-          ? await appConfirm("删除记录", `「${name}」删除后不可恢复。`)
-          : await appConfirm("放弃这次生成", `「${name}」正在生成，将停止并移除该记录。`);
-        if (!ok) return;
-        try {
-          if (settled) await api(`/api/history/${it.id}`, { method: "DELETE" });
-          else await api(`/api/jobs/${it.id}/cancel`, { method: "POST", body: {} });
-          // 删掉的正是当前挂着的作业时必须顺手解锁，否则会留下锁死态
-          if (currentJob && currentJob.id === it.id) { currentJob = null; setBusy(false); }
-          if (currentResult && currentResult.id === it.id) currentResult = null;
-          toast(settled ? "已删除" : "已放弃");
-          loadSessions();
-        } catch (e) { toast("删除失败：" + e.message, 3500); }
-      };
-      row.appendChild(del);
-      list.appendChild(row);
-    }
-  }
+  paintSessions(items);
   // 还有会话没结束就定期刷新；结束后会自动变成正常记录。
   // failed / cancelled 不算「没结束」，否则失败后这条会一直触发空转刷新。
   clearTimeout(activeRefresh);
@@ -1017,15 +959,141 @@ async function loadSessions() {
     const s = it.state || "done";
     return s !== "done" && s !== "failed" && s !== "cancelled";
   })) {
-    // 指针停在列表上时先别重建 DOM：每 3s 换一次会把用户正要点的那一行
-    // （连同行内的删除按钮）换掉，点击落空，表现为「点了没反应」。
-    const tick = () => {
-      const l = $("session-list");
-      if (l && l.matches(":hover")) { activeRefresh = setTimeout(tick, 1200); return; }
-      loadSessions();
-    };
-    activeRefresh = setTimeout(tick, 3000);
+    activeRefresh = setTimeout(() => loadSessions(), 3000);
   }
+}
+
+// ── 列表绘制：按 key 增量更新，绝不重建已经存在的行 ──────────
+// 以前每次刷新都把 #session-list 整个 innerHTML 清空重画：鼠标按下（mousedown）
+// 与松开（mouseup）之间只要发生一次重画，那一行连同里面的删除按钮就被换成了
+// 新的 DOM 对象，click 事件合成不出来 —— 表现就是「删除按钮要点好几次」。
+// 现在同一条记录永远复用同一个节点，内容没变时连一个字节都不写。
+function paintSessions(items) {
+  const list = $("session-list");
+  // 清掉没有 key 的残留节点（比如空态提示）
+  Array.from(list.children).forEach(n => { if (!n.dataset.key) n.remove(); });
+  if (!items.length) {
+    if (list.children.length) list.innerHTML = "";
+    list.appendChild(el("p", "hint sess-empty", "还没有会话记录，先发一条试试"));
+    return;
+  }
+  const specs = [];
+  const groups = new Map();
+  for (const it of items) {
+    const k = dayKey(it.created_at);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(it);
+  }
+  for (const k of SESS_ORDER) {
+    const arr = groups.get(k);
+    if (!arr || !arr.length) continue;
+    specs.push({ kind: "grp", key: "g:" + k, label: k, count: arr.length });
+    for (const it of arr) specs.push({ kind: "row", key: "s:" + it.id, it });
+  }
+  sessIndex.clear();
+  for (const sp of specs) if (sp.kind === "row") sessIndex.set(sp.it.id, sp.it);
+
+  const old = new Map();
+  Array.from(list.children).forEach(n => { if (n.dataset.key) old.set(n.dataset.key, n); });
+  let cursor = list.firstChild;
+  for (const sp of specs) {
+    let node = old.get(sp.key);
+    if (!node) {
+      node = sp.kind === "grp" ? buildGroupLabel() : buildSessionRow();
+      node.dataset.key = sp.key;
+    } else old.delete(sp.key);
+    if (sp.kind === "grp") updateGroupLabel(node, sp);
+    else updateSessionRow(node, sp.it);
+    if (node === cursor) cursor = cursor.nextSibling;
+    else list.insertBefore(node, cursor);   // 只在顺序不对时挪位置，正常刷新走不到这里
+  }
+  old.forEach(n => n.remove());
+}
+
+function buildGroupLabel() { return el("div", "group-lbl"); }
+
+function updateGroupLabel(n, sp) {
+  const sig = sp.label + "|" + sp.count;
+  if (n._sig === sig) return;
+  n._sig = sig;
+  n.innerHTML = `${esc(sp.label)}<span class="count">${sp.count}</span>`;
+}
+
+// 行的结构只造一次；删除按钮始终在场（可见度交给 CSS），不存在「这一行没有按钮」
+function buildSessionRow() {
+  const row = el("div", "sess-item");
+  row.innerHTML = `<div class="sess-top"><span class="dot"></span><span class="sess-topic"></span></div>
+    <div class="sess-sub"></div>`;
+  row.appendChild(el("button", "sess-del", DEL_SVG));
+  return row;
+}
+
+function updateSessionRow(row, it) {
+  const st = it.state || "done";
+  const settled = st === "done" || st === "failed" || st === "cancelled";
+  const isCur = settled
+    ? (!!currentResult && it.id === currentResult.id)
+    : (!!currentJob && it.id === currentJob.id);
+  row.dataset.id = it.id;
+  row.classList.toggle("active", isCur);
+  const sub = st === "done"
+    ? `${it.pack || ""} · ${sessTime(it.created_at)} · ${it.duration ?? "-"}s`
+    : `${it.pack || ""} · ${STATE_LABEL[st] || st} · ${sessTime(it.created_at)}`;
+  const sig = [isCur, st, it.topic, sub].join("\u0001");
+  if (row._sig === sig) return;          // 内容没变就彻底不动 DOM
+  row._sig = sig;
+  row.querySelector(".dot").className = "dot " + (st === "done" && !it.passed ? "no" : "");
+  row.querySelector(".sess-topic").textContent = it.topic || "";
+  row.querySelector(".sess-sub").textContent = sub;
+  row.title = `${it.topic || ""}\n${it.pack || ""} · ${sessTime(it.created_at)}${settled ? "" : " · 生成中"}`;
+  const del = row.querySelector(".sess-del");
+  del.title = settled ? "删除这条记录" : "放弃这次生成并移除记录";
+  del.dataset.act = settled ? "del" : "cancel";
+}
+
+// 整个列表只在容器上挂一个监听器：以前逐行绑 onclick，行被刷新换掉后绑定跟着错位，
+// 委托则与重绘无关，任何一行任何时候点击都走同一条路径。
+function bindSessionList() {
+  const list = $("session-list");
+  if (list._bound) return;
+  list._bound = true;
+  list.addEventListener("click", ev => {
+    const row = ev.target.closest(".sess-item");
+    if (!row) return;
+    const it = sessIndex.get(row.dataset.id);
+    if (!it) return;
+    if (ev.target.closest(".sess-del")) {
+      ev.stopPropagation();
+      ev.preventDefault();
+      deleteSession(it);
+      return;
+    }
+    // 有结果的按结果渲染；还在跑（或已失败）的点回去接着看它的状态
+    const st = it.state || "done";
+    st === "done" ? openSession(it.id) : attachJob(it.id);
+  });
+}
+
+// 删除：两种语义
+// - 已结束（done / failed）：产物已落盘，DELETE /api/history/{id}
+// - 进行中：产物还没落盘，DELETE 会 404，改为取消作业；取消后列表不再列出它
+async function deleteSession(it) {
+  const st = it.state || "done";
+  const settled = st === "done" || st === "failed" || st === "cancelled";
+  const name = String(it.topic || "").slice(0, 20);
+  const ok = settled
+    ? await appConfirm("删除记录", `「${name}」删除后不可恢复。`)
+    : await appConfirm("放弃这次生成", `「${name}」正在生成，将停止并移除该记录。`);
+  if (!ok) return;
+  try {
+    if (settled) await api(`/api/history/${it.id}`, { method: "DELETE" });
+    else await api(`/api/jobs/${it.id}/cancel`, { method: "POST", body: {} });
+    // 删掉的正是当前挂着的作业时必须顺手解锁，否则会留下锁死态
+    if (currentJob && currentJob.id === it.id) abandonRunningJob();
+    if (currentResult && currentResult.id === it.id) currentResult = null;
+    toast(settled ? "已删除" : "已放弃");
+    loadSessions();
+  } catch (e) { toast("删除失败：" + e.message, 3500); }
 }
 
 // 回到一个正在跑的会话：重建消息流 + 把轮询接回去。

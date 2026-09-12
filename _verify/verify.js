@@ -747,6 +747,58 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   results.push(["生成中的删除入口语义不同",
     delBtns.some(b => b.title && b.title.indexOf('放弃') >= 0), JSON.stringify(delBtns.map(b => b.title))]);
 
+  // 19c) 删除按钮要「一次点中」：常驻可见 + 鼠标可直达 + 真实单击即弹确认
+  //      此前按钮 opacity:0（不悬停看不见，第一下常落在行上），命中区也只有 26px
+  await evalIn(`currentJob = null; currentResult = null; loadSessions(); true`);
+  await sleep(500);
+  const delHit = await evalIn(`(() => {
+    const rows = [...document.querySelectorAll('#session-list .sess-item')];
+    const t = rows.find(r => { const d = r.querySelector('.sess-del'); return d && d.title.indexOf('删除这条记录') >= 0; });
+    if (!t) return { found: false, rows: rows.length };
+    const d = t.querySelector('.sess-del');
+    const r = d.getBoundingClientRect();
+    const cx = Math.round(r.left + r.width / 2), cy = Math.round(r.top + r.height / 2);
+    const top = document.elementFromPoint(cx, cy);
+    const cs = getComputedStyle(d);
+    return { found: true, cx: cx, cy: cy, w: Math.round(r.width), h: Math.round(r.height),
+             opacity: parseFloat(cs.opacity), pointer: cs.pointerEvents,
+             reachable: !!top && (top === d || d.contains(top)) };
+  })()`);
+  results.push(["删除按钮不悬停也看得见（opacity>0）",
+    delHit.found === true && delHit.opacity > 0, JSON.stringify(delHit).slice(0, 150)]);
+  results.push(["删除按钮命中区够大且鼠标可直达",
+    delHit.w >= 28 && delHit.h >= 28 && delHit.reachable === true,
+    delHit.w + 'x' + delHit.h + ' 可达=' + delHit.reachable]);
+
+  // 真实鼠标单击一次 —— 以前列表每 3s 整段重建，按下与松开落在不同节点上，click 合成不出来
+  await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", x: delHit.cx, y: delHit.cy, button: "left", clickCount: 1 });
+  await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: delHit.cx, y: delHit.cy, button: "left", clickCount: 1 });
+  await sleep(400);
+  const firstClickOpened = await evalIn(`document.getElementById('confirm-dialog').classList.contains('hidden') === false`);
+  results.push(["真实鼠标单击一次即弹出确认", firstClickOpened === true, "已弹出=" + firstClickOpened]);
+  await evalIn(`document.getElementById('cd-no').click(); true`);
+  await sleep(250);
+
+  // 19d) 刷新不再整段重建列表：给行打标记，连续刷新三次后标记还在、且没有任何行被移除。
+  //      这是上面那个问题的根因——行节点被换掉就等于把用户正要点的按钮抽走了。
+  const keepNodes = await evalIn(`(async () => {
+    const rows = () => [...document.querySelectorAll('#session-list .sess-item')];
+    rows().forEach((r, i) => { r.__probe = 'p' + i; });
+    let removed = 0;
+    const ob = new MutationObserver(ms => ms.forEach(m => {
+      m.removedNodes.forEach(n => { if (n.classList && n.classList.contains('sess-item')) removed++; });
+    }));
+    ob.observe(document.getElementById('session-list'), { childList: true });
+    await loadSessions(); await loadSessions(); await loadSessions();
+    await new Promise(r => setTimeout(r, 80));
+    ob.disconnect();
+    const now = rows();
+    return { removed: removed, total: now.length, kept: now.filter(r => r.__probe).length };
+  })()`);
+  results.push(["刷新列表不重建行节点（按钮不会被抽走）",
+    keepNodes.removed === 0 && keepNodes.total > 0 && keepNodes.kept === keepNodes.total,
+    JSON.stringify(keepNodes)]);
+
   // 收尾：清掉测试用的主题，避免污染后面的截图
   await evalIn(`(() => { const t = document.getElementById('topic');
     t.value = ''; t.dispatchEvent(new Event('input', { bubbles: true })); })()`);

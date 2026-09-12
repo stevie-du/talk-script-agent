@@ -392,16 +392,20 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .sess-sub { font-size: var(--f-xs); color: var(--text-3); margin-top: 1px; }
-/* 删除：图标按钮，hover 会话项时才现身（内容让位靠 .sess-top 的 padding-right） */
+/* 删除：常驻图标按钮（悬停才提亮）
+   以前默认 opacity:0 —— 按钮不现身时用户第一下往往点在行上（触发打开记录），
+   看上去就像「删除要点好几次」。现在常驻淡显，随时可瞄准；命中区也放大到 28px。 */
 .sess-del {
-  position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
-  width: 26px; height: 26px; padding: 0; min-height: 0;
-  display: grid; place-items: center;
-  background: transparent; color: var(--text-3); opacity: 0;
-  transition: opacity .14s var(--ease), background .14s, color .14s;
+  position: absolute; right: 3px; top: 50%; transform: translateY(-50%);
+  width: 28px; height: 28px; padding: 0; min-height: 0;
+  display: grid; place-items: center; border-radius: var(--r-sm);
+  background: transparent; color: var(--text-3);
+  opacity: .5;
+  transition: opacity .12s var(--ease), background .12s, color .12s;
 }
 .sess-item:hover .sess-del, .sess-del:focus-visible { opacity: 1; }
-.sess-del:hover { background: var(--fill-strong); color: var(--bad); }
+.sess-del:hover { background: var(--fill-strong); color: var(--bad); opacity: 1; }
+.sess-del:active { background: var(--fill-strong); color: var(--bad); }
 .sess-del svg { pointer-events: none; }
 .sess-empty { padding: 6px 12px; }
 
