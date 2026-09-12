@@ -144,13 +144,13 @@ function setThinking(snap) {
 
 // 清空消息流（新建对话）
 function clearChat() {
+  abandonRunningJob();        // 生成中点「新建对话」也要解锁，否则发送键永久变灰
   stream().querySelectorAll(".msg").forEach(m => m.remove());
   $("empty").classList.remove("hidden");
   $("stale-banner").classList.add("hidden");
-  currentResult = null; currentJob = null;
+  currentResult = null;
   genParamsSnapshot = null;
   activeMsg = null;
-  clearTimeout(pollTimer);
   setHead("新对话", "", "");
 }
 
@@ -549,6 +549,22 @@ function renderProgress(snap) {
   setThinking(snap);
 }
 
+// 离开当前生成上下文（新建对话 / 回看历史 / 取消分步确认）时统一走这里：
+// 停轮询 + 复位 busy + 通知后端作废在跑的作业。
+// 关键：busyNow 必须和 currentJob 一起复位。只把 currentJob 置空而不解锁，
+// 会留下「busy=true 且 currentJob=null」的死锁态 —— 此时 refreshGate 里
+// canStop 为假，发送键直接 disabled、输入框永久锁定，且轮询已停无法自愈，
+// 用户只能重启应用。三个调用点（clearChat / openSession / cf-cancel）都踩过。
+function abandonRunningJob() {
+  clearTimeout(pollTimer);
+  const job = currentJob;
+  currentJob = null;
+  setBusy(false);
+  if (job && job.id) {
+    api(`/api/jobs/${job.id}/cancel`, { method: "POST", body: {} }).catch(() => {});
+  }
+}
+
 // 生成中：发送键变「停止」，同时锁住输入框与快捷参数
 // 参数在发送瞬间已快照进 job，生成中改动不会生效——锁住比让用户白改更诚实
 function setBusy(b, loading = false) {
@@ -928,8 +944,8 @@ async function openSession(id) {
   try {
     const r = await api(`/api/history/${id}`);
     closeSettings();
-    currentResult = r;
-    currentJob = null;          // 历史回看不可再重写/轮询
+    abandonRunningJob();        // 回看历史即离开当前生成：停轮询 + 解锁 + 作废在跑的作业
+    currentResult = r;          // 历史回看不可再重写/轮询
     $("empty").classList.add("hidden");
     addUserMsg(r.params?.topic || "");
     const body = addAssistantMsg();
@@ -1305,10 +1321,9 @@ function bindStatic() {
     send({ topic: sentTopic, mode: "step" });
     toast("正在换个角度重选…");
   };
-  $("cf-cancel").onclick = async () => {
+  $("cf-cancel").onclick = () => {
     $("confirm-overlay").classList.add("hidden");
-    try { await api(`/api/jobs/${currentJob.id}/cancel`, { method: "POST", body: {} }); } catch (_) {}
-    currentJob = null;
+    abandonRunningJob();        // 停轮询 + 解锁 + 作废作业（原先只置空 currentJob，会锁死界面）
     if (activeMsg) activeMsg.innerHTML = `<div class="hint">本次生成已取消</div>`;
     activeMsg = null;
   };

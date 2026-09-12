@@ -403,6 +403,56 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   results.push(["可见分区有合理尺寸", layout.paneW > 400 && layout.paneH > 300, JSON.stringify(layout)]);
   results.push(["无横向溢出", layout.overflowX === false, ""]);
 
+  // 11) 回归：生成中点「新建对话」不得把界面锁死
+  //     曾经的 bug：clearChat 把 currentJob 置空却没复位 busy，
+  //     轮询也停了 → btn-generate 永久 disabled、输入框永久锁定，只能重启应用。
+  //     注意断言前要先填主题：发送键的可用性 = 「有主题 && 不在生成中」，
+  //     空主题时它本来就该是灰的，否则这条断言会误报。
+  const FILL_TOPIC = `(() => { const t = document.getElementById('topic');
+    t.value = '锁死回归测试'; t.dispatchEvent(new Event('input', { bubbles: true })); })()`;
+  const lockup = await evalIn(`(() => {
+    gotoView('chat');
+    setBusy(true, true);
+    currentJob = { id: 'fake-job', state: 'writing' };
+    clearChat();
+    ${FILL_TOPIC}
+    const t = document.getElementById('topic');
+    return {
+      busy: busyNow, job: currentJob,
+      btnDisabled: document.getElementById('btn-generate').disabled,
+      topicDisabled: t.disabled,
+      hint: document.getElementById('composer-gen-hint').textContent,
+    };
+  })()`);
+  results.push(["生成中点「新建对话」→ busy 复位", lockup.busy === false && lockup.job === null,
+    "busy=" + lockup.busy + " job=" + JSON.stringify(lockup.job)]);
+  results.push(["→ 发送键恢复可用", lockup.btnDisabled === false, "disabled=" + lockup.btnDisabled]);
+  results.push(["→ 输入框恢复可编辑", lockup.topicDisabled === false, "disabled=" + lockup.topicDisabled]);
+  results.push(["→ 「生成中」提示已清空", lockup.hint === "", JSON.stringify(lockup.hint)]);
+
+  // 12) 回归：分步确认卡点「取消」同样不得锁死
+  await evalIn(`(() => {
+    setBusy(true, true);
+    currentJob = { id: 'fake-job2', state: 'paused_awaiting_confirmation' };
+    document.getElementById('confirm-overlay').classList.remove('hidden');
+  })()`);
+  await evalIn(`document.getElementById('cf-cancel').click(); true`);
+  await sleep(320);
+  const cfState = await evalIn(`(() => {
+    ${FILL_TOPIC}
+    const t = document.getElementById('topic');
+    return { busy: busyNow, job: currentJob,
+             btnDisabled: document.getElementById('btn-generate').disabled,
+             topicDisabled: t.disabled };
+  })()`);
+  results.push(["分步确认「取消」→ 界面解锁",
+    cfState.busy === false && cfState.job === null && cfState.btnDisabled === false && cfState.topicDisabled === false,
+    JSON.stringify(cfState)]);
+
+  // 收尾：清掉测试用的主题，避免污染后面的截图
+  await evalIn(`(() => { const t = document.getElementById('topic');
+    t.value = ''; t.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+
   // 截图（2x 便于目检细节）
   await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 2, mobile: false });
   const shot = async (name, setup) => {
