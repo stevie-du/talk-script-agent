@@ -181,6 +181,9 @@ class Pipeline:
         skill = pack.skill()
         if not skill:
             raise ValueError(f"行业包缺少 skill.yaml：{pack.name}")
+        # 确认后先落到 writing 再起线程：否则从点击到首行增量回来这段时间里，
+        # 前端看到的仍是「待确认选题」，像没生效。
+        job.update(state="writing", error=None)
         self._spawn(job, lambda: self._continue_write(job, pack, skill, plan))
         return job.snapshot()
 

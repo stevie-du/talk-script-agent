@@ -183,6 +183,7 @@ function clearStreamMsgs() {
 function clearChat() {
   abandonRunningJob();        // 生成中点「新建对话」也要解锁，否则发送键永久变灰
   clearStreamMsgs();
+  closeOverlays();            // 分步选题的确认卡不能再挂在新对话上
   $("empty").classList.remove("hidden");
   $("stale-banner").classList.add("hidden");
   currentResult = null;
@@ -236,15 +237,8 @@ async function boot() {
     return;
   }
   const sel = $("pack");
-  sel.innerHTML = "";
-  for (const p of META.packs) {
-    const o = el("option", "", esc(p.display_name) + (p.draft ? "（草稿）" : ""));
-    o.value = p.name;
-    sel.appendChild(o);
-  }
-  sel.value = META.default_pack;
-  if (!sel.value) sel.selectedIndex = 0;
   sel.onchange = () => { renderPackParams(); updateStale(); updateCfgHint(); };
+  fillPackSelect(sel);
   renderPackParams();
   updateCfgHint();
   renderSamples();
@@ -258,6 +252,21 @@ async function boot() {
 
 function currentPack() {
   return META?.packs.find(p => p.name === $("pack").value);
+}
+
+// 把 META.packs 灌进下拉：boot() 与「新建行业包完成」共用。
+// selectLast=true 时选中最后一个（新建的包总是追加在末尾）。
+function fillPackSelect(sel, selectLast = false) {
+  sel.innerHTML = "";
+  for (const p of META.packs) {
+    const o = el("option", "", esc(p.display_name) + (p.draft ? "（草稿）" : ""));
+    o.value = p.name;
+    sel.appendChild(o);
+  }
+  sel.value = selectLast
+    ? (META.packs[META.packs.length - 1]?.name || "")
+    : (META.default_pack || "");
+  if (!sel.value && sel.options.length) sel.selectedIndex = 0;
 }
 
 function paramSelect(key, def) {
@@ -790,6 +799,9 @@ function renderResult(r, body) {
   const segs = el("div", "script-list");
   let pi = 0;
   const bodyQuota = Math.floor((r.quota?.body || 0) / nPoints(r));
+  // 历史回看时后台作业对象早已释放，局部重写必然失败：与其给一个点了没反应的按钮
+  // （这类「假按钮」已被反复反馈过），不如落成禁用态并在悬停时说明原因。
+  const rwOk = !!(currentJob && currentResult);
   r.sections.forEach((s, i) => {
     const label = s.type === "point" ? `要点${++pi}` : TYPE_LABEL[s.type];
     const tm = (r.timings || [])[i];
@@ -808,11 +820,14 @@ function renderResult(r, body) {
       </div>
       <div class="card-text">${fmtText(s.text)}</div>
       <div class="card-foot">
-        <button class="ghost rw">✎ 重写</button>
+        <button class="ghost rw"${rwOk ? "" : " disabled"} title="${rwOk
+          ? "单段重写：改完不再整篇回炉" : "历史记录不可局部重写（后台作业已释放），可用『换一版』整体重生成"}">✎ 重写</button>
         <input placeholder="给重写的反馈（可选），回车提交">
       </div>`;
     const input = card.querySelector("input");
-    card.querySelector(".rw").onclick = () => {
+    const rwBtn = card.querySelector(".rw");
+    rwBtn.onclick = () => {
+      if (!rwOk) return;              // 禁用态不必解释两次，悬停提示与后续 toast 已覆盖
       card.querySelector(".card-foot").classList.toggle("editing");
       input.focus();
     };
@@ -934,7 +949,11 @@ function renderLogs(logs) {
 }
 
 async function rewriteSegment(index, feedback) {
-  if (!currentJob || !currentResult || busyNow) return;
+  // 以前这里是裸 return：历史回看时 currentJob 为空，点了「重写」毫无反应，
+  // 用户会以为按钮坏了。现在把不成立的原因说出来。
+  if (busyNow) { toast("正在生成中，请稍候再重写", 2500); return; }
+  if (!currentJob) { toast("这是历史记录：局部重写需要后台作业仍在内存中，重启应用后不可再用。可点卡片右上角的『换一版』整篇重生成", 4500); return; }
+  if (!currentResult) { toast("还没有可重写的结果", 2500); return; }
   setBusy(true, true);
   toast("重写中…");
   try {
@@ -1188,6 +1207,7 @@ async function openSession(id) {
     closeSettings();
     abandonRunningJob();        // 离开当前生成：停轮询 + 解锁；后端作业继续跑，左栏随时能点回去
     clearStreamMsgs();          // 必须先清空：否则上一个会话（含「正在生成…」）会留在上方
+    closeOverlays();            // 场景已切到历史回看，上个场景没关的确认浮层一并收掉
     currentResult = r;          // 历史回看不可再重写/轮询
     $("empty").classList.add("hidden");
     addUserMsg(r.params?.topic || "");
@@ -1257,6 +1277,7 @@ async function preloadSettings() {
 // 打开设置：不传 pane 就回到上次所在分区（主侧栏入口 / Ctrl+,）
 function openSettings(pane) {
   const target = SETTINGS_PANES.includes(pane) ? pane : lastPane;
+  closeOverlays();            // 确认浮层在设置页之上（z 70 > 60），不关会一直糊在整窗上
   $("settings-screen").classList.remove("hidden");
   setSettingsPane(target);
   preloadSettings().catch(() => {});
@@ -1271,6 +1292,12 @@ function closeSettings() {
 
 function settingsOpen() {
   return !$("settings-screen").classList.contains("hidden");
+}
+
+// 场景已经换了（新建对话 / 回看历史 / 打开设置 / 换记录），还留在屏幕上的确认浮层
+// 就成了孤儿：它盖在新内容之上，点哪儿都先命中它。统一在这里收掉。
+function closeOverlays() {
+  document.querySelectorAll(".overlay:not(.hidden)").forEach(o => o.classList.add("hidden"));
 }
 
 async function saveSettings() {
@@ -1436,6 +1463,10 @@ function setLeftFolded(folded) {
 }
 
 function bindStatic() {
+  // boot() 可能被重复调用（早先「新建行业包完成」直接整段 boot()），里面的全局
+  // change / keydown 监听会注册两遍：Ctrl+\ 连翻两次等于没翻。加一次守卫兜底。
+  if (bindStatic._bound) return;
+  bindStatic._bound = true;
   if (localStorage.getItem("ts.left.folded") === "1") setLeftFolded(true);
   $("btn-toggle-left").onclick = () => setLeftFolded(!$("left").classList.contains("folded"));
   $("btn-new-chat").onclick = () => { closeSettings(); gotoView("chat"); clearChat(); loadSessions(); $("topic").focus(); };
@@ -1464,10 +1495,10 @@ function bindStatic() {
     autoGrow();
   });
 
-  // 参数变更：检测结果过期 + 刷新侧栏设置摘要
-  document.addEventListener("change", e => {
-    if (e.target.closest("#settings-screen")) { updateStale(); updateCfgHint(); }
-  });
+  // 参数变更：检测结果过期 + 刷新侧栏设置摘要。
+  // 不能只认 #settings-screen —— 快捷条上的时长/平台/人设才是最常被改的几个，
+  // 而它们在设置页之外，此前被这层过滤挡掉，改了参数却永远不提示「结果已过期」。
+  document.addEventListener("change", () => { updateStale(); updateCfgHint(); });
 
   // Enter 换行自动增高 / 恢复单行
   function autoGrow() { autoGrowTopic(); }
@@ -1545,11 +1576,15 @@ function bindStatic() {
   $("pg-close").onclick = () => setSettingsPane("gen");
   $("pg-run").onclick = runPackgen;
   $("pg-done").onclick = async () => {
+    // 早先这里是整段 await boot()：包列表确实刷新了，但 bindStatic 里的全局监听
+    // 被注册第二遍（Ctrl+\ 连翻两次等于没翻）。新建一个包只需重新灌下拉即可。
     setSettingsPane("gen");
-    await boot();
-    $("pack").value = $("pack").options[$("pack").options.length - 1].value;
-    $("pack").dispatchEvent(new Event("change"));
-    toast("已切换到新建的行业包");
+    try {
+      META = await api("/api/meta");
+      fillPackSelect($("pack"), true);
+      renderPackParams(); updateCfgHint();
+      toast("已切换到新建的行业包");
+    } catch (e) { toast("刷新行业包列表失败：" + e.message, 3500); }
   };
   $("cf-continue").onclick = async () => {
     $("confirm-overlay").classList.add("hidden");

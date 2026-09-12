@@ -709,6 +709,8 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 }
 .card-foot.editing input { display: block; }
 .card-foot.editing .rw { opacity: 1; }
+/* 历史回看时的禁用态要一眼看出「点不动」，而不是和可用状态一样淡显 */
+.card-foot .rw:disabled { opacity: .16; cursor: not-allowed; }
 .card-foot input:focus { box-shadow: var(--shadow-focus); }
 
 /* 折叠块：分镜 / 合规 / JSON / 日志 */

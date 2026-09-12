@@ -976,6 +976,78 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     cssChk.subPadRight >= 28 && cssChk.overlap === false,
     "padding-right=" + cssChk.subPadRight + " 重叠=" + cssChk.overlap]);
 
+  // 22) 历史回看时的「单段重写」不能再是点了没反应的死按钮
+  await evalIn(`clearTimeout(pollTimer); currentJob = null; currentResult = null; setBusy(false);
+    openSession('s1'); true`);
+  await sleep(600);
+  const rwHist = await evalIn(`(() => {
+    const b = document.querySelector('.card-foot .rw');
+    if (!b) return { found: false };
+    return { found: true, disabled: b.disabled,
+             opacity: parseFloat(getComputedStyle(b).opacity),
+             title: b.title || '' };
+  })()`);
+  results.push(["历史回看时重写按钮是禁用态且有原因说明",
+    rwHist.found && rwHist.disabled === true && /历史记录/.test(rwHist.title),
+    JSON.stringify(rwHist).slice(0, 170)]);
+  results.push(["禁用态一眼能看出点不动（不是与可用同款的淡显）",
+    rwHist.opacity <= 0.2, "opacity=" + rwHist.opacity]);
+  // 有后台作业时应当可用（不能一刀切关掉）。先清掉上面的旧卡片，否则会查到它。
+  await evalIn(`clearStreamMsgs(); currentJob = { id: 's1', state: 'done' };
+    renderResult(currentResult, addAssistantMsg()); true`);
+  await sleep(300);
+  const rwLive = await evalIn(`(() => { const b = document.querySelector('.card-foot .rw');
+    return b ? { disabled: b.disabled, opacity: parseFloat(getComputedStyle(b).opacity) } : null; })()`);
+  results.push(["有后台作业时重写按钮照常可用", rwLive && rwLive.disabled === false, JSON.stringify(rwLive)]);
+  results.push(["可用的重写按钮是淡显而非全亮（不抢正文注意力）",
+    !!rwLive && rwLive.opacity > 0.2 && rwLive.opacity < 1, "opacity=" + (rwLive && rwLive.opacity)]);
+  // 直接调用也要把原因说出来，不能裸 return
+  await evalIn(`currentJob = null; currentResult = document.querySelector('.card-foot') ? currentResult : null; rewriteSegment(0, ''); true`);
+  await sleep(250);
+  const rwToast = await evalIn(`({ text: document.getElementById('toast').textContent || '',
+    shown: !document.getElementById('toast').classList.contains('hidden') })`);
+  results.push(["重写不可用时给出原因，不再静默失效",
+    /历史记录/.test(rwToast.text) && rwToast.shown === true, JSON.stringify(rwToast).slice(0, 140)]);
+
+  // 23) 快捷条改参数要触发「结果已过期」提示（此前被 #settings-screen 过滤挡掉）
+  await evalIn(`genParamsSnapshot = JSON.stringify(collectParams()); updateStale(); true`);
+  const staleBefore = await evalIn(`document.getElementById('stale-banner').classList.contains('hidden')`);
+  await evalIn(`(() => { const s = document.getElementById('p-duration');
+    if (!s) return false; s.value = s.options[s.options.length - 1].value;
+    s.dispatchEvent(new Event('change', { bubbles: true })); return true; })()`);
+  await sleep(250);
+  const staleAfter = await evalIn(`(() => { const b = document.getElementById('stale-banner');
+    return { hidden: b.classList.contains('hidden'), text: b.textContent || '' }; })()`);
+  results.push(["改快捷条参数 → 提示结果已过期",
+    staleBefore === true && staleAfter.hidden === false && /参数已修改/.test(staleAfter.text),
+    "改前隐藏=" + staleBefore + " → " + JSON.stringify(staleAfter).slice(0, 110)]);
+  await evalIn(`document.getElementById('stale-banner').classList.add('hidden'); genParamsSnapshot = null; true`);
+
+  // 24) 重复 bindStatic 不得让 Ctrl+\ 连翻两次（等于键失灵）
+  await evalIn(`bindStatic(); bindStatic(); bindStatic(); true`);
+  const foldBefore = await evalIn(`document.getElementById('left').classList.contains('folded')`);
+  await evalIn(`document.dispatchEvent(new KeyboardEvent('keydown', { ctrlKey: true, key: '\\\\', bubbles: true })); true`);
+  await sleep(200);
+  const foldAfter = await evalIn(`document.getElementById('left').classList.contains('folded')`);
+  results.push(["重复绑定后 Ctrl+\\ 仍是一键一翻",
+    foldBefore !== foldAfter, "折叠态 " + foldBefore + " → " + foldAfter]);
+
+  // 25) 确认浮层要随场景关闭，不能变成盖在新内容上的孤儿
+  const orphan = await evalIn(`(async () => {
+    const ov = document.getElementById('confirm-overlay');
+    const out = {};
+    ov.classList.remove('hidden'); document.getElementById('btn-open-settings').click();
+    await new Promise(r => setTimeout(r, 60));
+    out.afterSettings = ov.classList.contains('hidden');
+    document.getElementById('settings-screen').classList.add('hidden');
+    ov.classList.remove('hidden'); document.getElementById('btn-new-chat').click();
+    await new Promise(r => setTimeout(r, 60));
+    out.afterNewChat = ov.classList.contains('hidden');
+    return out;
+  })()`);
+  results.push(["打开设置时自动收起确认浮层", orphan.afterSettings === true, JSON.stringify(orphan)]);
+  results.push(["新建对话时自动收起确认浮层", orphan.afterNewChat === true, JSON.stringify(orphan)]);
+
   // 收尾：清掉测试用的主题，避免污染后面的截图
   await evalIn(`(() => { const t = document.getElementById('topic');
     t.value = ''; t.dispatchEvent(new Event('input', { bubbles: true })); })()`);
