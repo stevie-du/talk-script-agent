@@ -45,3 +45,6 @@ _verify/*.png
 _verify/_*.txt
 _verify/_app.log
 _verify/_start.bat
+
+# 本地配置：含明文 API Key，绝不入库（模板见 config.example.yaml）
+config.yaml
