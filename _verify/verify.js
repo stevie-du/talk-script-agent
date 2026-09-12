@@ -770,8 +770,25 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     delHit.w >= 28 && delHit.h >= 28 && delHit.reachable === true,
     delHit.w + 'x' + delHit.h + ' 可达=' + delHit.reachable]);
 
-  // 真实鼠标单击一次 —— 以前列表每 3s 整段重建，按下与松开落在不同节点上，click 合成不出来
+  // 先「按下不松」，看按钮会不会跑位。曾经的坑：全局 button:active{transform:scale(.96)}
+  // 覆盖了按钮用于垂直居中的 translateY(-50%)，按下瞬间按钮下移 14px 脱离指针，
+  // mouseup 落到行上 → click 归属变成「打开记录」，删除确认怎么点都弹不出来。
   await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", x: delHit.cx, y: delHit.cy, button: "left", clickCount: 1 });
+  await sleep(140);
+  const held = await evalIn(`(() => {
+    const rows = [...document.querySelectorAll('#session-list .sess-item')];
+    const t = rows.find(r => { const d = r.querySelector('.sess-del'); return d && d.title.indexOf('删除这条记录') >= 0; });
+    const d = t.querySelector('.sess-del');
+    const b = d.getBoundingClientRect();
+    const e = document.elementFromPoint(${delHit.cx}, ${delHit.cy});
+    return { top: Math.round(b.top), stillUnder: !!e && (e === d || d.contains(e)) };
+  })()`);
+  const expectTop = delHit.cy - Math.round(delHit.h / 2);
+  results.push(["按下时删除按钮不位移、仍在指针下",
+    Math.abs(held.top - expectTop) <= 3 && held.stillUnder === true,
+    "实测top=" + held.top + " 期望≈" + expectTop + " 仍在指针下=" + held.stillUnder]);
+
+  // 真实鼠标单击一次 —— 松开必须仍落在按钮上（成败全看上面那条）
   await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: delHit.cx, y: delHit.cy, button: "left", clickCount: 1 });
   await sleep(400);
   const firstClickOpened = await evalIn(`document.getElementById('confirm-dialog').classList.contains('hidden') === false`);

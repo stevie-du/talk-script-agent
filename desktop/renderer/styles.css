@@ -396,7 +396,11 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
    以前默认 opacity:0 —— 按钮不现身时用户第一下往往点在行上（触发打开记录），
    看上去就像「删除要点好几次」。现在常驻淡显，随时可瞄准；命中区也放大到 28px。 */
 .sess-del {
-  position: absolute; right: 3px; top: 50%; transform: translateY(-50%);
+  /* 垂直居中不能用 top:50% + translateY(-50%)：全局的 button:active{transform:scale(.96)}
+     会在按下瞬间覆盖掉 translateY，按钮直接下移 14px 脱离指针，
+     mouseup 于是落在行里 → click 归属变成「打开记录」，删除确认永远弹不出来。
+     改用 top/bottom:0 + margin-block:auto，位置由布局决定，transform 再怎么变都不影响。 */
+  position: absolute; right: 3px; top: 0; bottom: 0; margin-block: auto;
   width: 28px; height: 28px; padding: 0; min-height: 0;
   display: grid; place-items: center; border-radius: var(--r-sm);
   background: transparent; color: var(--text-3);
@@ -405,7 +409,7 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 }
 .sess-item:hover .sess-del, .sess-del:focus-visible { opacity: 1; }
 .sess-del:hover { background: var(--fill-strong); color: var(--bad); opacity: 1; }
-.sess-del:active { background: var(--fill-strong); color: var(--bad); }
+.sess-del:active { background: var(--fill-strong); color: var(--bad); transform: scale(.9); }
 .sess-del svg { pointer-events: none; }
 .sess-empty { padding: 6px 12px; }
 
