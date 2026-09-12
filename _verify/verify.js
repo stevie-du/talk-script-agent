@@ -10,8 +10,48 @@ const net = require("net");
 const ROOT = path.resolve(__dirname, "..", "desktop", "renderer");
 const CHROME = process.env.CHROME ||
   "C:/Program Files/Google/Chrome/Application/chrome.exe";
-const PORT = 8931;
-const CDP_PORT = 9333;
+let PORT = 8931;          // 运行时换成实际拿到的空闲端口
+let CDP_PORT = 9333;
+// 端口不能写死：上一轮若没退干净，新实例会连到旧实例上然后卡到超时
+// （表现为「输出为空 + SIGTERM」）。改为每次先探一个空闲端口。
+
+/** 取空闲端口：首选端口被占则交给系统分配 */
+function freePort(preferred) {
+  return new Promise(resolve => {
+    const probe = net.createServer();
+    probe.once("error", () => {                 // 首选端口被占用
+      const s = net.createServer();
+      s.once("error", () => resolve(0));
+      s.listen(0, "127.0.0.1", () => { const p = s.address().port; s.close(() => resolve(p)); });
+    });
+    probe.listen(preferred, "127.0.0.1", () => {
+      const p = probe.address().port;
+      probe.close(() => resolve(p));
+    });
+  });
+}
+
+/** 按进程树强杀：child.kill() 只杀父进程，浏览器会留一堆子进程继续占着端口 */
+function killTree(pid) {
+  if (!pid) return;
+  try { execSync(`taskkill /PID ${pid} /T /F`, { stdio: "ignore" }); } catch (_) {}
+}
+
+// 退出时必须收干净。此前只在成功分支收尾，抛错或超时时浏览器会一直留着占端口。
+// execSync 是同步的，所以放在 exit 钩子里也安全。
+let _chromeRef = null, _cdpRef = null;
+function cleanupAll() {
+  try { if (_cdpRef) _cdpRef.close(); } catch (_) {}
+  killTree(_chromeRef && _chromeRef.pid);   // 只要起过就杀，与 cdp 是否连上无关
+  _chromeRef = null; _cdpRef = null;
+}
+process.on("exit", cleanupAll);
+for (const sig of ["SIGINT", "SIGTERM"]) {
+  process.on(sig, () => { cleanupAll(); process.exit(130); });
+}
+process.on("uncaughtException", e => {
+  console.error("UNCAUGHT:", e.message); cleanupAll(); process.exit(3);
+});
 
 // ── 静态服务 ─────────────────────────────────────────────
 const MIME = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css" };
@@ -167,9 +207,11 @@ function connect(wsUrl) {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 (async () => {
-  // 清掉可能残留的 Chrome（端口占用会导致连不上旧实例）
-  try { execSync("taskkill /F /IM chrome.exe /T >NUL 2>NUL"); } catch (_) {}
-  await sleep(600);
+  // 不再无差别执行 taskkill /IM chrome.exe（那会连用户自己开的浏览器一起干掉）。
+  // 改为：端口用随机空闲端口避开冲突，退出时按进程树只回收本脚本起的实例。
+  PORT = await freePort(PORT);
+  CDP_PORT = await freePort(CDP_PORT);
+  console.log("[port] 静态服务=" + PORT + "  CDP=" + CDP_PORT);
 
   const srv = await serve();
   // 每次用全新 profile：复用旧 profile 会命中 HTTP 缓存，
@@ -182,6 +224,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     `--user-data-dir=${userDir}`, `--no-first-run`, `--no-default-browser-check`,
     `--disable-gpu`, `--window-size=1440,900`, "about:blank",
   ], { stdio: "ignore" });
+  _chromeRef = chrome;                     // 退出时按进程树回收
 
   // 等 CDP 就绪
   let target = null;
@@ -194,6 +237,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   if (!target) throw new Error("CDP 未就绪");
 
   const cdp = await connect(target.webSocketDebuggerUrl);
+  _cdpRef = cdp;
   await cdp.send("Page.enable");
   await cdp.send("Runtime.enable");
   await cdp.send("Network.enable");
@@ -734,7 +778,6 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   }
   console.log(`\n${pass}/${results.length} 通过`);
 
-  cdp.close(); chrome.kill();
-  srv.close();
+  cleanupAll();
   process.exit(pass === results.length ? 0 : 1);
-})().catch(e => { console.error("FAIL:", e.message); process.exit(2); });
+})().catch(e => { console.error("FAIL:", e.message); cleanupAll(); process.exit(2); });
