@@ -16,6 +16,7 @@ DEFAULT_CONFIG = {
         "temperature": 0.7,
         "retries": 2,
         "timeout": 180,
+        "max_tokens": 16000,
     },
     "default_pack": "elevator",
 }
@@ -29,6 +30,10 @@ class LLMConfig:
     temperature: float = 0.7
     retries: int = 2          # 请求失败（网络/超时/429/5xx）自动重试次数
     timeout: float = 180      # 单次请求超时（秒）
+    # 单次请求的输出预算。必须显式给足：推理型模型（deepseek 系等）的「思考」
+    # token 也计入这个预算，服务端默认值容易被思考吃光，导致 content 返回空串
+    # （HTTP 仍是 200），表现为「模型输出无法解析为 ScriptDraft」。
+    max_tokens: int = DEFAULT_CONFIG["llm"]["max_tokens"]
 
 
 @dataclass
@@ -58,6 +63,7 @@ def load_config(root: Path) -> AppConfig:
         temperature=float(llm.get("temperature", 0.7)),
         retries=int(llm.get("retries", 2)),
         timeout=float(llm.get("timeout", 180)),
+        max_tokens=int(llm.get("max_tokens") or DEFAULT_CONFIG["llm"]["max_tokens"]),
     )
     # 环境变量覆盖（避免密钥落盘）
     cfg.api_key = os.environ.get("TALKSCRIPT_API_KEY", cfg.api_key)

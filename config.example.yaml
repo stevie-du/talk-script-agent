@@ -12,5 +12,8 @@ llm:
   temperature: 0.7
   retries: 2        # 请求失败（网络/超时/429/5xx）自动重试次数；0 = 不重试
   timeout: 180      # 单次请求超时（秒）；长输出模型可调大
+  max_tokens: 16000 # 单次输出预算。推理型模型（deepseek 系等）的「思考」token
+                    # 也计入这里，给太小会导致 content 返回空串。遇到
+                    # 「模型返回了空内容」或 JSON 解析失败，优先调大这一项。
 
 default_pack: elevator

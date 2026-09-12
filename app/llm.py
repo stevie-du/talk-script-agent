@@ -92,8 +92,10 @@ class LLMClient:
         }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
-        if max_tokens:
-            payload["max_tokens"] = max_tokens
+        # 输出预算必须显式给足：推理型模型（deepseek 系等）的「思考」token 也计入
+        # 该预算，服务端默认值容易被思考吃光 → content 返回空串（HTTP 仍是 200），
+        # 上层只会看到「模型输出无法解析为 JSON」这种误导性报错。
+        payload["max_tokens"] = max_tokens or self.cfg.max_tokens
         headers = {"Authorization": f"Bearer {self.cfg.api_key}"}
         attempts = max(1, int(self.cfg.retries) + 1)
         last_err: Exception | None = None
@@ -118,9 +120,17 @@ class LLMClient:
 
             try:
                 data = resp.json()
-                return data["choices"][0]["message"]["content"]
+                content = data["choices"][0]["message"]["content"]
             except (KeyError, IndexError, ValueError) as e:
                 raise LLMError(f"模型接口返回结构异常: {str(resp.text)[:300]}") from e
+            if not (content or "").strip():
+                finish = (data.get("choices") or [{}])[0].get("finish_reason")
+                raise LLMError(
+                    f"模型返回了空内容（HTTP 200，但 content 为空，finish_reason={finish}）。"
+                    "通常原因：输出预算被推理模型的思考 token 用尽。"
+                    f"请调大 config.yaml 里的 llm.max_tokens（当前 {self.cfg.max_tokens}），"
+                    "或改用非推理模型。")
+            return content
 
         raise LLMError(f"模型接口连续失败（已重试 {attempts} 次）：{last_err}")
 
