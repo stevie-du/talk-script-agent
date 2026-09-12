@@ -28,8 +28,15 @@ addEventListener('unhandledrejection', e => window.__errs.push('rej: ' + String(
     default_pack: "elevator",
     packs: [
       { name: "elevator", display_name: "电梯行业包", draft: false,
+        // 与真实 packs/elevator/pack.yaml 的参数集合保持一致，
+        // 否则快捷条只渲染 2 个胶囊，「无横向溢出」就测不到真实布局
         params: { segment: { label: "细分领域", default: "家用电梯", options: ["家用电梯","维保","加装"] },
-                  style: { label: "风格", default: "口播科普", options: ["口播科普","带货"] } } },
+                  audience: { label: "受众", default: "业主乘客", options: ["业主乘客","物业业委会"] },
+                  duration: { label: "时长（秒）", default: 60, options: [15, 30, 60, 90] },
+                  platform: { label: "平台", default: "抖音", options: ["抖音","视频号","小红书"] },
+                  style: { label: "风格", default: "口播科普", options: ["口播科普","带货"] },
+                  persona: { label: "人设", default: "维保老师傅", options: ["维保老师傅","产品经理"] },
+                  cta: { label: "结尾引导", default: "关注", options: ["关注","私信","留资"] } } },
       { name: "fitment", display_name: "全屋定制包", draft: true,
         params: { segment: { label: "细分领域", default: "全屋定制", options: ["全屋定制"] } } },
     ] })};
@@ -43,9 +50,12 @@ addEventListener('unhandledrejection', e => window.__errs.push('rej: ' + String(
     // 真实接口是 GET /api/history，直接返回数组（不是 {items:[]}）。
     if (s.indexOf('/api/history') >= 0 && s.indexOf('/api/history/') < 0) return mk([
       { id:'s1', created_at:'2026-09-10 10:00', pack:'elevator',
-        topic:'家用电梯怎么挑？', duration:60, chars:261 },
-      { id:'s2', created_at:'2026-09-09 09:00', pack:'elevator',
-        topic:'电梯维保到底保什么', duration:60, chars:255 } ]);
+        topic:'家用电梯怎么挑？', duration:60, chars:261, passed:true, state:'done' },
+      { id:'s2', created_at:'2026-09-12 15:30', pack:'elevator',
+        topic:'扶梯突然停了怎么办', duration:null, chars:null, passed:null, state:'writing' } ]);
+    // 在跑会话的详情（attachJob 用它重建消息流）
+    if (s.indexOf('/api/jobs/s2') >= 0) return mk({ id:'s2', state:'writing',
+      params:{ topic:'扶梯突然停了怎么办', pack:'elevator', duration:60 }, steps:[] });
     if (s.indexOf('/api/config/test') >= 0) return mk({ ok:true, model:'glm-4.7', detail:'延迟 320ms' });
     if (s.indexOf('/api/config') >= 0) return mk(CONFIG);
     if (s.indexOf('/api/packs/') >= 0) return mk({ display_name:'电梯行业包', description:'电梯行业口播脚本包',
@@ -480,6 +490,67 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     "z=" + dd.z + " 命中=" + dd.hit]);
   // 收尾：关掉菜单，避免影响后面的截图
   await evalIn(`document.querySelectorAll('body > .select-menu').forEach(m => m.classList.add('hidden')); true`);
+
+  // 14) 会话列表：「在跑」的会话就是一条普通记录（发起即有记录），不另起分组。
+  //     曾经的做法是单独搞一个「生成中」分组，与其他智能体的习惯不一致。
+  await evalIn(`currentResult = null; currentJob = { id: 's2', state: 'writing' };
+    loadSessions(); true`);
+  await sleep(500);
+  const sess = await evalIn(`(() => {
+    const list = document.getElementById('session-list');
+    const labels = [...list.querySelectorAll('.group-lbl')]
+      .map(e => (e.firstChild ? e.firstChild.textContent : '').trim());
+    const rows = [...list.querySelectorAll('.sess-item')];
+    const run = rows.find(r => r.classList.contains('active'));
+    return {
+      labels, rows: rows.length,
+      hasRunningGroup: labels.some(t => t.indexOf('生成中') >= 0),
+      sub: run ? run.querySelector('.sess-sub').textContent.trim() : null,
+      topic: run ? run.querySelector('.sess-topic').textContent.trim() : null,
+    };
+  })()`);
+  results.push(["不发散出「生成中」分组", sess.hasRunningGroup === false, "分组=" + JSON.stringify(sess.labels)]);
+  results.push(["在跑会话与历史同列（共 2 条）", sess.rows === 2, "行数=" + sess.rows]);
+  results.push(["在跑会话副标题显示实时状态", /撰写/.test(sess.sub || ""),
+    sess.topic + " · " + sess.sub]);
+  results.push(["在跑会话高亮为当前", sess.topic === "扶梯突然停了怎么办", String(sess.topic)]);
+
+  // 15) 点回去能重新挂上（attachJob 重建消息流并接回轮询）
+  await evalIn(`document.querySelectorAll('#session-list .sess-item.active')[0].click(); true`);
+  await sleep(600);
+  const reattached = await evalIn(`(() => ({
+    hasUserMsg: !!document.querySelector('.msg .bubble.user') ||
+                document.querySelectorAll('.msg').length > 0,
+    busy: busyNow,
+    job: currentJob ? currentJob.id : null,
+    topic: document.getElementById('topic').value,
+  }))()`);
+  results.push(["点回在跑会话 → 重新挂上并恢复生成态",
+    reattached.job === 's2' && reattached.busy === true && reattached.hasUserMsg === true,
+    JSON.stringify(reattached)]);
+  // 收拾干净：停掉轮询与定时刷新，复位全局态，避免影响后面的截图
+  await evalIn(`clearTimeout(pollTimer); clearTimeout(activeRefresh);
+    currentJob = null; currentResult = null; setBusy(false); true`);
+
+  // 16) 参数落位：风格 / 人设要在快捷条上直接可选，不该只藏在设置里。
+  //     同一个参数不能同时出现在两处 —— 两边的 select 都用 p-<key> 作 id，
+  //     重复会让 getParam 只认先出现的那个，另一处改了不生效。
+  const paramPlacement = await evalIn(`(() => {
+    const bar = document.getElementById('quick-params');
+    const barIds = [...bar.querySelectorAll('select')].map(s => s.id);
+    const pillCount = bar.querySelectorAll('.select-wrap.pill').length;
+    const frontIds = [...document.querySelectorAll('#param-front select')].map(s => s.id);
+    return { barIds, pillCount, frontIds };
+  })()`);
+  results.push(["风格已放到快捷条上", paramPlacement.barIds.includes('p-style'), JSON.stringify(paramPlacement.barIds)]);
+  results.push(["设置页不再重复放风格（避免 id 冲突）",
+    !paramPlacement.frontIds.includes('p-style'), JSON.stringify(paramPlacement.frontIds)]);
+  results.push(["快捷条参数以胶囊形态渲染", paramPlacement.pillCount === paramPlacement.barIds.length,
+    "胶囊=" + paramPlacement.pillCount + " select=" + paramPlacement.barIds.length]);
+  results.push(["全部参数合计不重不漏",
+    new Set([...paramPlacement.barIds, ...paramPlacement.frontIds]).size ===
+    paramPlacement.barIds.length + paramPlacement.frontIds.length,
+    "条=" + paramPlacement.barIds.length + " 设置=" + paramPlacement.frontIds.length]);
 
   // 收尾：清掉测试用的主题，避免污染后面的截图
   await evalIn(`(() => { const t = document.getElementById('topic');

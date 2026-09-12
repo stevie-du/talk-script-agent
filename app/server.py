@@ -202,6 +202,12 @@ def create_app(root: Path) -> FastAPI:
     # ── 历史 ────────────────────────────────────────────────
     @app.get("/api/history")
     def history():
+        """全部会话：已落盘的结果 + 内存中正在跑的作业。
+
+        会话应当是「一发起就有记录」。只扫 result.json 的话，生成中的会话在左栏
+        完全不可见，用户切走就找不回正在生成的那一次；把在跑作业并进同一张列表，
+        前端就能用同一个模子渲染，不必另造一个「生成中」分组。
+        """
         out = []
         gen = root / "generated"
         if gen.exists():
@@ -214,10 +220,31 @@ def create_app(root: Path) -> FastAPI:
                         "duration": r["params"].get("duration"),
                         "chars": r["check"].get("chars_total"),
                         "passed": r["check"].get("passed"),
+                        "state": "done",
                     })
                 except Exception:
                     continue
-        return out[:100]
+        # 未落盘的作业插到最前：它们必然比已落盘的新，这样也无需对两种时间格式排序。
+        # failed 必须算进来 —— 失败的作业没有 result.json，若当成终态一起排除，
+        # 它会从列表里彻底消失，用户既看不到这条记录也不知道它失败了。
+        # 只有 cancelled 排除：那是用户自己按的停止，不必再占一条。
+        done_ids = {x["id"] for x in out}
+        skip = {"done", "cancelled"}
+        running = []
+        for job in pipeline.jobs.values():
+            snap = job.snapshot()
+            if snap["state"] in skip or snap["id"] in done_ids:
+                continue
+            p = snap.get("params") or {}
+            running.append({
+                "id": snap["id"], "created_at": snap["created_at"],
+                "pack": p.get("pack", ""), "topic": p.get("topic", ""),
+                "duration": p.get("duration"),
+                "chars": None, "passed": None,
+                "state": snap["state"],
+            })
+        running.sort(key=lambda x: x["created_at"], reverse=True)
+        return (running + out)[:100]
 
     @app.get("/api/history/{jid}")
     def history_item(jid: str):

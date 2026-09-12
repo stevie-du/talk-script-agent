@@ -20,8 +20,10 @@ const STATE_LABEL = {
   done: "完成", failed: "失败", cancelled: "已取消",
 };
 const TYPE_LABEL = { hook: "开场钩子", point: "要点", cta: "结尾引导" };
-const FRONT_KEYS = ["segment", "audience", "duration", "platform"];
-const MORE_KEYS = ["style", "persona", "cta"];
+// 快捷条常显的参数（豆包 / 千问式，不进设置页）
+const FRONT_KEYS = ["segment", "audience", "duration", "platform", "style", "persona"];
+// 仍留在设置页「更多设置」里的项：结尾引导 + 补充资料（补充资料不是 select，单独渲染）
+const MORE_KEYS = ["cta"];
 const KEY_FALLBACK_LABEL = { segment: "细分领域", audience: "受众", duration: "时长（秒）",
   style: "风格", platform: "平台", persona: "人设", cta: "结尾引导" };
 
@@ -265,7 +267,7 @@ function renderQuickParams() {
     box.appendChild(s);
   }
   const more = el("button", "ghost qp-more", "更多设置");
-  more.title = "打开设置（风格 / 人设 / 输出内容 / 补充资料）";
+  more.title = "打开设置（结尾引导 / 输出内容 / 补充资料）";
   // 显式传入分区：直接把事件对象当 pane 传会走兜底逻辑，语义不清
   more.onclick = () => openSettings("gen");
   box.appendChild(more);
@@ -550,19 +552,17 @@ function renderProgress(snap) {
 }
 
 // 离开当前生成上下文（新建对话 / 回看历史 / 取消分步确认）时统一走这里：
-// 停轮询 + 复位 busy + 通知后端作废在跑的作业。
-// 关键：busyNow 必须和 currentJob 一起复位。只把 currentJob 置空而不解锁，
-// 会留下「busy=true 且 currentJob=null」的死锁态 —— 此时 refreshGate 里
-// canStop 为假，发送键直接 disabled、输入框永久锁定，且轮询已停无法自愈，
-// 用户只能重启应用。三个调用点（clearChat / openSession / cf-cancel）都踩过。
+// 停轮询 + 复位 busy，但**不取消后端的作业** —— 它照常往下跑，左栏「生成中」
+// 分组里始终留着入口，点回去即可接着看（见 attachJob）。
+// 要真正终止请点发送键上的「停止」（abortGeneration）。
+// 关键：busyNow 必须和 currentJob 一起复位，否则会留下
+// 「busy=true 且 currentJob=null」的死锁态 —— 发送键 disabled、输入框永久锁定，
+// 且轮询已停无法自愈，用户只能重启应用。三个调用点都踩过这个坑。
 function abandonRunningJob() {
   clearTimeout(pollTimer);
-  const job = currentJob;
   currentJob = null;
   setBusy(false);
-  if (job && job.id) {
-    api(`/api/jobs/${job.id}/cancel`, { method: "POST", body: {} }).catch(() => {});
-  }
+  loadSessions();        // 让这次生成立刻出现在左栏「生成中」
 }
 
 // 生成中：发送键变「停止」，同时锁住输入框与快捷参数
@@ -893,6 +893,7 @@ function sessTime(d) {
   return `${p(x.getMonth() + 1)}-${p(x.getDate())} ${hm}`;
 }
 
+let activeRefresh = null;      // 有会话在跑时的列表自动刷新
 async function loadSessions() {
   let items = [];
   try { items = await api("/api/history"); } catch (_) {}
@@ -915,36 +916,93 @@ async function loadSessions() {
     const lbl = el("div", "group-lbl", `${k}<span class="count">${arr.length}</span>`);
     list.appendChild(lbl);
     for (const it of arr) {
-      const isCur = currentResult && it.id === currentResult.id;
+      // 状态：done 已有落盘结果；failed 也是「结束」，但没有结果可渲染；
+      // 其余（排队 / 选题 / 撰写 / 回炉 / 校验 / 待确认）都算进行中。
+      const st = it.state || "done";
+      const settled = st === "done" || st === "failed" || st === "cancelled";
+      const isCur = settled
+        ? (!!currentResult && it.id === currentResult.id)
+        : (!!currentJob && it.id === currentJob.id);
       const row = el("div", "sess-item" + (isCur ? " active" : ""));
+      const sub = st === "done"
+        ? `${esc(it.pack)} · ${sessTime(it.created_at)} · ${it.duration ?? "-"}s`
+        : `${esc(it.pack)} · ${esc(STATE_LABEL[st] || st)} · ${sessTime(it.created_at)}`;
       row.innerHTML = `
-        <div class="sess-top"><span class="dot ${it.passed ? "" : "no"}"></span>
+        <div class="sess-top"><span class="dot ${st === "done" ? (it.passed ? "" : "no") : ""}"></span>
           <span class="sess-topic">${esc(it.topic)}</span></div>
-        <div class="sess-sub">${esc(it.pack)} · ${sessTime(it.created_at)} · ${it.duration ?? "-"}s</div>`;
-      row.title = `${it.topic}\n${it.pack} · ${sessTime(it.created_at)}`;
-      row.onclick = () => openSession(it.id);
-      const del = el("button", "sess-del", `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9.5 7V5.2A1.2 1.2 0 0 1 10.7 4h2.6a1.2 1.2 0 0 1 1.2 1.2V7M6.5 7l.8 12.1a1.2 1.2 0 0 0 1.2 1.1h7a1.2 1.2 0 0 0 1.2-1.1L17.5 7"/><path d="M10.5 11v5.5M13.5 11v5.5"/></svg>`);
-      del.title = "删除这条记录";
-      del.onclick = async ev => {
-        ev.stopPropagation();
-        if (!(await appConfirm("删除记录", `「${it.topic.slice(0, 20)}」删除后不可恢复。`))) return;
-        try {
-          await api(`/api/history/${it.id}`, { method: "DELETE" });
-          toast("已删除");
-          loadSessions();
-        } catch (e) { toast("删除失败：" + e.message, 3500); }
-      };
-      row.appendChild(del);
+        <div class="sess-sub">${sub}</div>`;
+      row.title = `${it.topic}\n${it.pack} · ${sessTime(it.created_at)}${settled ? "" : " · 生成中"}`;
+      // 有结果的按结果渲染；还在跑（或已失败）的点回去接着看它的状态
+      row.onclick = () => st === "done" ? openSession(it.id) : attachJob(it.id);
+      // 未结束的不给删除：磁盘上还没有产物，删掉的其实是内存里的作业，语义容易误解
+      let del = null;
+      if (settled) {
+        del = el("button", "sess-del", `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9.5 7V5.2A1.2 1.2 0 0 1 10.7 4h2.6a1.2 1.2 0 0 1 1.2 1.2V7M6.5 7l.8 12.1a1.2 1.2 0 0 0 1.2 1.1h7a1.2 1.2 0 0 0 1.2-1.1L17.5 7"/><path d="M10.5 11v5.5M13.5 11v5.5"/></svg>`);
+        del.title = "删除这条记录";
+        del.onclick = async ev => {
+          ev.stopPropagation();
+          if (!(await appConfirm("删除记录", `「${it.topic.slice(0, 20)}」删除后不可恢复。`))) return;
+          try {
+            await api(`/api/history/${it.id}`, { method: "DELETE" });
+            toast("已删除");
+            loadSessions();
+          } catch (e) { toast("删除失败：" + e.message, 3500); }
+        };
+        row.appendChild(del);
+      }
       list.appendChild(row);
     }
   }
+  // 还有会话没结束就定期刷新；结束后会自动变成正常记录。
+  // failed / cancelled 不算「没结束」，否则失败后这条会一直触发空转刷新。
+  clearTimeout(activeRefresh);
+  if (items.some(it => {
+    const s = it.state || "done";
+    return s !== "done" && s !== "failed" && s !== "cancelled";
+  })) {
+    activeRefresh = setTimeout(loadSessions, 3000);
+  }
+}
+
+// 回到一个正在跑的会话：重建消息流 + 把轮询接回去。
+// 后端作业一直在跑（切走只脱离、不取消），所以这里只是重新把界面挂上去。
+async function attachJob(id) {
+  let snap;
+  try { snap = await api(`/api/jobs/${id}`); }
+  catch (e) { toast("无法回到这次生成：" + e.message, 3500); loadSessions(); return; }
+  closeSettings();
+  clearTimeout(pollTimer);
+  currentResult = null;
+  currentJob = { id, state: snap.state };
+  genParamsSnapshot = null;
+  stream().querySelectorAll(".msg").forEach(m => m.remove());
+  $("empty").classList.add("hidden");
+  $("stale-banner").classList.add("hidden");
+  const topic = snap.params?.topic || "";
+  sentTopic = topic;
+  addUserMsg(topic);
+  const body = addAssistantMsg();
+  body.innerHTML = placeholderBody();
+  activeMsg = body;
+  renderProgress(snap);
+  scrollBottom();
+  if (snap.state === "paused_awaiting_confirmation") {
+    setBusy(false);
+    setHead(topic, "待确认选题", "待确认", "warn");
+    openConfirm((snap.result || {}).plan || {});
+  } else {
+    setBusy(true, true);
+    setHead(topic, "生成中", STATE_LABEL[snap.state] || "生成中", "warn");
+    poll();
+  }
+  loadSessions();
 }
 
 async function openSession(id) {
   try {
     const r = await api(`/api/history/${id}`);
     closeSettings();
-    abandonRunningJob();        // 回看历史即离开当前生成：停轮询 + 解锁 + 作废在跑的作业
+    abandonRunningJob();        // 离开当前生成：停轮询 + 解锁；后端作业继续跑，左栏随时能点回去
     currentResult = r;          // 历史回看不可再重写/轮询
     $("empty").classList.add("hidden");
     addUserMsg(r.params?.topic || "");
