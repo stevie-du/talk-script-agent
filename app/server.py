@@ -134,8 +134,9 @@ def create_app(root: Path) -> FastAPI:
 
     @app.get("/api/jobs/{jid}")
     def job_snapshot(jid: str):
-        job = pipeline.jobs.get(jid)
-        if not job:
+        try:
+            job = pipeline.get_job(jid)      # 走锁，避免与生成线程同时碰字典
+        except KeyError:
             raise HTTPException(404, "作业不存在")
         return job.snapshot()
 
@@ -231,8 +232,10 @@ def create_app(root: Path) -> FastAPI:
         done_ids = {x["id"] for x in out}
         skip = {"done", "cancelled"}
         running = []
-        for job in pipeline.jobs.values():
-            snap = job.snapshot()
+        # 必须走 snapshot_jobs() 取快照拷贝：直接迭代 pipeline.jobs.values() 时，
+        # 后台线程可能正好在 start_generate 里插入新作业 —— 一边遍历一边增，
+        # 偶发 RuntimeError: dictionary changed size during iteration，整个列表 500。
+        for snap in pipeline.snapshot_jobs():
             if snap["state"] in skip or snap["id"] in done_ids:
                 continue
             p = snap.get("params") or {}

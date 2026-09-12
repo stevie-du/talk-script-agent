@@ -43,6 +43,18 @@ class SegmentRewrite(BaseModel):
 # 流式思考内容随轮询外传时的截取长度：思考动辄上万字，每次全量传输没必要
 STREAM_TAIL = 1500
 
+# 终态：进入后不再流转。「停止」之所以此前对运行中的作业无效，根因就是没有
+# 一个「用户已要求终止」的标志，后台线程照跑并最后把 state 写回 done/writing。
+TERMINAL_STATES = {"done", "failed", "cancelled"}
+
+
+class JobCancelled(Exception):
+    """用户按了停止。
+
+    这是控制流而非错误：走了它就不能落到 failed，否则界面显示「生成失败」
+    让用户以为是自己配置错了，实则只是他主动停的。
+    """
+
 
 class Job:
     def __init__(self, jid: str, kind: str, params: dict):
@@ -55,6 +67,7 @@ class Job:
         self.result: dict | None = None
         self.created_at = datetime.now().isoformat(timespec="seconds")
         self._lock = threading.Lock()
+        self.cancel_event = threading.Event()   # 用户点了「停止」→ 后台线程据此尽早收工
         # 流式过程内容：只驻内存、不落盘（重启即弃，属过程态而非产物）
         self.stream_phase = ""            # 当前阶段名，如「文案撰写」
         self.stream_reasoning = ""        # 模型思考（展示用）
@@ -93,8 +106,25 @@ class Job:
 
     def update(self, **kw):
         with self._lock:
+            # 已经点了停止之后，后台线程的收尾写入不能再把 state 改回来 ——
+            # 否则会出现「停了半秒又被改成 writing / done」的假停止。
+            if "state" in kw and self.cancel_event.is_set():
+                kw = {k: v for k, v in kw.items() if k != "state"}
             for k, v in kw.items():
                 setattr(self, k, v)
+
+    def is_cancelled(self) -> bool:
+        return self.cancel_event.is_set()
+
+    def request_cancel(self) -> None:
+        """置取消标志并立即落到 cancelled 终态。
+
+        先落状态是刻意的：后台线程可能正卡在一段 CPU 密集的校验里，等它自己
+        走到检查点要一会儿；界面必须立刻响应按钮，不能让用户以为没点上。
+        """
+        with self._lock:
+            self.cancel_event.set()
+            self.state = "cancelled"
 
 
 class Pipeline:
@@ -104,6 +134,28 @@ class Pipeline:
         self.mock = getattr(cfg, "mock", False)
         self.llm = self.build_llm()
         self.jobs: dict[str, Job] = {}
+        # HTTP 层（FastAPI 线程池）会遍历 self.jobs，后台生成线程会往里增删改 ——
+        # 两边都不加锁时，一边建作业一边拉历史就会「RuntimeError: dictionary changed
+        # size during iteration」。这把锁只保护字典本身，作业内部状态各自有 _lock。
+        self._jobs_lock = threading.Lock()
+
+    # ── 作业字典的并发访问（配 _jobs_lock 使用）────────────────────
+    def add_job(self, job: Job) -> None:
+        with self._jobs_lock:
+            self.jobs[job.id] = job
+
+    def get_job(self, jid: str) -> Job:
+        with self._jobs_lock:
+            job = self.jobs.get(jid)
+        if not job:
+            raise KeyError(jid)
+        return job
+
+    def snapshot_jobs(self) -> list[dict]:
+        """HTTP 层专用：先锁着拷出列表，再逐个取快照（不在持锁期间做 IO/序列化）。"""
+        with self._jobs_lock:
+            jobs = list(self.jobs.values())
+        return [j.snapshot() for j in jobs]
 
     def build_llm(self) -> LLMClient:
         """每次生成前重建客户端：设置里改了 Key/模型立即生效，无需重启。"""
@@ -116,14 +168,12 @@ class Pipeline:
         self.llm = self.build_llm()
         jid = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
         job = Job(jid, "generate", req.model_dump())
-        self.jobs[jid] = job
+        self.add_job(job)
         self._spawn(job, lambda: self._run_generate(job, pack))
         return jid
 
     def confirm(self, jid: str, req: ConfirmRequest) -> dict:
-        job = self.jobs.get(jid)
-        if not job:
-            raise KeyError(jid)
+        job = self.get_job(jid)
         if job.state != "paused_awaiting_confirmation":
             raise ValueError(f"作业状态为 {job.state}，不可确认")
         plan = TopicPlan.model_validate(req.plan)
@@ -135,9 +185,7 @@ class Pipeline:
         return job.snapshot()
 
     def rewrite_segment(self, jid: str, req: RewriteSegmentRequest) -> dict:
-        job = self.jobs.get(jid)
-        if not job:
-            raise KeyError(jid)
+        job = self.get_job(jid)
         if job.state != "done":
             raise ValueError(f"作业状态为 {job.state}，仅完成后可单段重写")
         result = job.result
@@ -145,23 +193,29 @@ class Pipeline:
             raise ValueError("段落序号无效")
         pack = Pack(self.root, result["pack"])
         self.llm = self.build_llm()
+        # 先把状态挪出 done 再起线程：否则整段重写期间前端看到的仍是「已完成」，
+        # 用户以为没生效而反复点；也顺便让停止按钮在这段时间内有状态可依据。
+        job.update(state="rewriting", error=None)
         self._spawn(job, lambda: self._run_rewrite_segment(job, pack, req.index, req.feedback or ""))
         return job.snapshot()
 
     def cancel(self, jid: str) -> dict:
-        """取消排队/待确认中的作业（进行中的写入线程不可中断，仅这两种状态可取消）。"""
-        job = self.jobs.get(jid)
-        if not job:
-            raise KeyError(jid)
-        if job.state not in ("queued", "paused_awaiting_confirmation"):
-            raise ValueError(f"作业状态为 {job.state}，不可取消")
-        job.update(state="cancelled")
+        """取消作业：排队/待确认立即落终态，运行中则置标志让线程尽早自行收工。
+
+        以前只允许 queued / paused 两种状态，等于「停止」按钮对正在写的作业是空操作
+        ——按下去没任何反馈，线程照样把 token 烧完再写回结果。
+        """
+        job = self.get_job(jid)
+        if job.state in TERMINAL_STATES:
+            return job.snapshot()          # 已结束：幂等返回，不再报错
+        job.request_cancel()
         self._persist(job)
         return job.snapshot()
 
     # ── 生成主流程 ──────────────────────────────────────────
     def _run_generate(self, job: Job, pack: Pack):
         try:
+            self._abort_if_cancelled(job)
             skill = pack.skill()
             if not skill:
                 raise ValueError(f"行业包缺少 skill.yaml（生成技能定义）：{pack.name}")
@@ -169,23 +223,29 @@ class Pipeline:
             job.update(params=p, state="selecting")
             plan = self._select(job, pack, skill, p)
             self._step(job, "select", "选题策划", {"plan": plan.model_dump()})
+            self._abort_if_cancelled(job)
             if p.get("mode") == "step":
                 job.update(state="paused_awaiting_confirmation",
                            result={"plan": plan.model_dump()})
                 self._persist(job)
                 return
             self._continue_write(job, pack, skill, plan)
+        except JobCancelled:
+            pass                              # 已由 request_cancel 置 cancelled，别再写回
         except Exception as e:  # noqa: BLE001
             job.update(state="failed", error=str(e))
             self._persist(job)
 
     def _continue_write(self, job: Job, pack: Pack, skill: dict, plan: TopicPlan):
         try:
+            self._abort_if_cancelled(job)
             p = job.params
             draft, revisions = self._write_with_recheck(job, pack, skill, p, plan)
             result = self._finalize(job, pack, p, plan, draft, revisions)
             job.update(state="done", result=result)
             self._persist(job)
+        except JobCancelled:
+            pass                              # 已由 request_cancel 置 cancelled，别再写回
         except Exception as e:  # noqa: BLE001
             job.update(state="failed", error=str(e))
             self._persist(job)
@@ -277,6 +337,7 @@ class Pipeline:
         revisions: list[dict] = []
         feedback = ""
         for rnd in range(1, rounds + 1):
+            self._abort_if_cancelled(job)     # 回炉每一轮前先看有没有让停
             job.update(state="writing" if rnd == 1 else "rewriting")
 
             ctx = self._base_ctx(pack, p)
@@ -455,6 +516,7 @@ class Pipeline:
 
     def _run_rewrite_segment(self, job: Job, pack: Pack, index: int, feedback: str) -> None:
         try:
+            self._abort_if_cancelled(job)
             skill = pack.skill() or {}
             result = job.result
             p = result["params"]
@@ -491,6 +553,10 @@ class Pipeline:
             self._step(job, "rewrite_segment", f"重写第 {index + 1} 段", {"report": report})
             job.update(state="done", result=result)
             self._write_output_files(result, "\n".join(s["text"] for s in sections))
+        except JobCancelled:
+            # 重写被中止：内存里的 result 已被改了一半，但产物文件的旧版本没动过，
+            # 直接把服务端状态留在 cancelled，用户下次打开仍是重写前的内容。
+            job.update(error=None)
         except Exception as e:  # noqa: BLE001
             job.update(state="failed", error=str(e))
 
@@ -511,6 +577,10 @@ class Pipeline:
         state = {"started": False}
 
         def cb(kind: str, text: str):
+            # 停止要在「收包过程中」就生效：等整段创建完再取消，钱已经花完了。
+            # 抛出去会顺着 httpx 的流式迭代一路冒到工作线程的 except JobCancelled。
+            if job.is_cancelled():
+                raise JobCancelled()
             if not state["started"]:
                 job.begin_stream(phase)
                 state["started"] = True
@@ -521,6 +591,16 @@ class Pipeline:
     def _step(self, job: Job, key: str, title: str, data: dict):
         job.steps.append({"key": key, "title": title, "data": data,
                           "ts": datetime.now().isoformat(timespec="seconds")})
+
+    @staticmethod
+    def _abort_if_cancelled(job: Job) -> None:
+        """阶段之间的取消检查点：已停止就抛 JobCancelled 让线程收工。
+
+        Python 没法强杀线程，所以取消只能「协作式」——把检查点放在每个耗钱耗时的
+        动作之前（LLM 调用、回炉下一轮），线程自己走出来而不是被掐断。
+        """
+        if job.is_cancelled():
+            raise JobCancelled()
 
     def _spawn(self, job: Job, fn):
         threading.Thread(target=fn, daemon=True).start()
@@ -552,7 +632,7 @@ def wait_job(pipeline: Pipeline, jid: str, timeout: float = 120.0) -> dict:
     """测试辅助：等待作业结束"""
     deadline = time.time() + timeout
     while time.time() < deadline:
-        snap = pipeline.jobs[jid].snapshot()
+        snap = pipeline.get_job(jid).snapshot()
         if snap["state"] in ("done", "failed"):
             return snap
         time.sleep(0.2)

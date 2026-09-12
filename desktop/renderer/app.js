@@ -31,6 +31,7 @@ let META = null;
 let currentJob = null;
 let currentResult = null;
 let pollTimer = null;
+let pollMisses = 0;        // 连续拉取失败次数：超过上限就停，决不无限重试
 let busyNow = false;
 let genParamsSnapshot = null;   // 上次生成时的参数快照（检测"参数已改、结果未更新"）
 let activeMsg = null;           // 当前正在生成/回写的消息节点（用于原地刷新状态与结果）
@@ -494,7 +495,10 @@ async function send(overrides = {}) {
     const { job_id } = await api("/api/generate", { method: "POST", body: params });
     genParamsSnapshot = JSON.stringify(collectParams());
     updateStale();
-    currentJob = { id: job_id, state: "queued" };
+    // params 随 job 带走：连接中断/失败后的「重试」要复用当时真正发出的参数，
+    // 不能拿被用户改过的当前界面值充数。
+    currentJob = { id: job_id, state: "queued", params };
+    pollMisses = 0;
     currentResult = null;
     activeMsg = null;
     // 消息流：用户气泡 + 助手占位
@@ -522,7 +526,14 @@ async function send(overrides = {}) {
 function poll() {
   clearTimeout(pollTimer);
   if (!currentJob) return;
-    api(`/api/jobs/${currentJob.id}`).then(snap => {
+  // 作业令牌：请求发出到回来这段时间里，用户可能点了「新对话」、切了历史记录、
+  // 或者干脆发起了新一次生成 —— currentJob 已经换成别人（甚至被清成 null）。
+  // 没有令牌的话，旧作业的响应照样往下走：把别的作业的进度画到当前会话上，
+  // 更糟的是它会分支到 else 重新 setTimeout(poll)，凭空复活一条本该停掉的轮询链。
+  const jobId = currentJob.id;
+  api(`/api/jobs/${jobId}`).then(snap => {
+    if (!currentJob || currentJob.id !== jobId) return;   // 过期响应，直接丢弃
+    pollMisses = 0;
     currentJob.state = snap.state;
     renderProgress(snap);
     if (snap.state === "paused_awaiting_confirmation") {
@@ -575,24 +586,61 @@ function poll() {
     } else {
       pollTimer = setTimeout(poll, 900);
     }
-  }).catch(() => { pollTimer = setTimeout(poll, 1500); });
+  }).catch(e => {
+    if (!currentJob || currentJob.id !== jobId) return;   // 同上：旧作业的错误也别管
+    pollMisses += 1;
+    if (pollMisses <= 3) {
+      pollTimer = setTimeout(poll, Math.min(1200 * pollMisses, 3000));   // 退避重试，封顶 3s
+      return;
+    }
+    // 服务连续不可达就别再骗用户「正在生成」了：停在 busy 态既看不到进度
+    // 也发不出下一句，只能重启。这里明确落到失败态，界面立刻可用。
+    // 连接中断（不是作业失败）：没有 snap 可拿 params，用发起这次生成时的参数重试，
+    // 否则用户改了界面参数后一按「重试」生成的就不是刚才那一版了。
+    const failParams = currentJob.params || collectParams();
+    currentJob = null;
+    pollMisses = 0;
+    setBusy(false);
+    setHead(sentTopic, "连接中断", "失败", "bad");
+    const body = activeMsg || addAssistantMsg();
+    body.innerHTML = `
+      <div class="banner warn">⚠️ 与生成服务的连接中断：${esc(e.message || "未知原因")}</div>
+      <div class="fail-actions">
+        <button class="ghost" id="retry-gen" title="用本次相同的参数重新生成">重试</button>
+      </div>`;
+    const rb = body.querySelector("#retry-gen");
+    if (rb) rb.onclick = () => send(failParams);
+    activeMsg = null;
+    toast("连接中断：" + (e.message || "未知原因"), 5000);
+    scrollBottom();
+  });
 }
 
-// 「放弃本次」：生成中的 LLM 请求无法真正掐断（阻塞在网络 IO），
-// 所以这里的语义是——停掉轮询、解锁界面、丢弃这个 job 的结果，
-// 后台线程自己跑完即作废。对用户而言等价于「停止」。
+// 「停止」：后端已支持协作式取消（Job.cancel_event），写了技能的手见证了 ——
+// 流式收包过程中检测到取消标志就中断请求，不再是无言地烧完剩下的 token。
+// 前端仍要立刻解锁界面，不能等网络往返。
 async function abortGeneration() {
   const job = currentJob;
   if (!job) return;
   clearTimeout(pollTimer);
-  try { await api(`/api/jobs/${job.id}/cancel`, { method: "POST", body: {} }); } catch (_) {}
+  // 后端不同意（作业其实已结束、或记录不存在）时要说出来。
+  // 以前这里是 try/catch(_){} 全吞：用户看到「已放弃本次生成」以为停了，
+  // 实际后台还在跑并把结果写回来，于是出现「停止后又多出一条记录」的怪事。
+  let err = null;
+  try {
+    await api(`/api/jobs/${job.id}/cancel`, { method: "POST", body: {} });
+  } catch (e) {
+    err = e.message || "未知原因";
+  }
   currentJob = null;
+  pollMisses = 0;
   const body = activeMsg;
-  if (body) body.innerHTML = `<div class="hint">已放弃本次生成</div>`;
+  if (body) body.innerHTML = `<div class="hint">${err ? "停止失败，后台可能仍在运行" : "已停止本次生成"}</div>`;
   activeMsg = null;
   setBusy(false);
-  setHead("新对话", "已放弃本次生成", "");
-  toast("已放弃本次生成");
+  setHead("新对话", err ? "停止失败" : "已停止本次生成", "");
+  toast(err ? `停止失败：${err}` : "已停止本次生成", err ? 4500 : 2200);
+  loadSessions();
 }
 
 function renderProgress(snap) {
@@ -1105,7 +1153,8 @@ async function attachJob(id) {
   closeSettings();
   clearTimeout(pollTimer);
   currentResult = null;
-  currentJob = { id, state: snap.state };
+  pollMisses = 0;
+  currentJob = { id, state: snap.state, params: snap.params || null };
   genParamsSnapshot = null;
   clearStreamMsgs();
   $("empty").classList.add("hidden");

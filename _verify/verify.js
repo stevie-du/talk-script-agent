@@ -816,6 +816,123 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     keepNodes.removed === 0 && keepNodes.total > 0 && keepNodes.kept === keepNodes.total,
     JSON.stringify(keepNodes)]);
 
+  // 20) 轮询作业令牌：请求回来时 currentJob 可能已经换成别的作业（或已清空），
+  //     旧响应必须丢弃。否则它会把别的作业的进度画到当前会话上，还会用
+  //     setTimeout(poll) 凭空复活一条本该停掉的轮询链。
+  //     这里刻意让 sGhost 延迟 700ms 再返回：请求正在飞行时用户切到另一个作业，
+  //     旧响应回来时 currentJob 已经是别人了。它若照常往下走，会把旧作业的状态
+  //     写到新作业头上，还会替新作业渲染出一个「幽灵」结果气泡。
+  await evalIn(`clearTimeout(pollTimer); currentJob = null; currentResult = null; activeMsg = null;
+    setBusy(false); document.getElementById('empty').classList.add('hidden');
+    window.__OF__ = window.__OF__ || window.fetch.bind(window);
+    window.__REQ__ = [];
+    if (!window.__ghostW) { window.__ghostW = true;
+      const og = window.fetch.bind(window);
+      window.fetch = function (u, o) {
+        const s = String(u);
+        if (s.indexOf('/api/jobs/') >= 0) window.__REQ__.push({ u: s, t: Date.now() });
+        if (s.indexOf('/api/jobs/sGhost') >= 0) {
+          const body = JSON.stringify({
+            id: 'sGhost', state: 'done', error: null, params: { topic: '幽灵会话' },
+            result: { id: 'sGhost', created_at: '2026-09-12T10:00', pack: 'elevator', pack_draft: false,
+              params: { topic: '幽灵会话', pack: 'elevator', duration: 60 },
+              quota: { total: 290, hook: 45, body: 190, cta: 55 },
+              plan: { angle: '幽灵', hook_type: '反常识', hook_line: '幽灵开场', points: ['幽灵要点'], cta: '关注' },
+              sections: [{ type: 'hook', text: '幽灵结果不该出现在这里', subtitle: '' }],
+              storyboard: [], scenes: [],
+              check: { passed: true, chars_total: 10, target_total: 290, deviation_pct: 0, hard_hits: [] },
+              placeholders: [], revisions: [], timings: [], logs: [] } });
+          return new Promise(res => setTimeout(() => res(new Response(body,
+            { status: 200, headers: { 'Content-Type': 'application/json' } })), 700));
+        }
+        return og(u, o);
+      }; }
+    true`);
+  await evalIn(`currentJob = { id: 'sGhost', state: 'writing', params: { topic: '幽灵会话' } };
+    poll();                                              // 请求此刻在飞行途中
+    currentJob = { id: 's2', state: 'queued', params: { topic: '扶梯突然停了怎么办' } };
+    true`);                                              // 用户切走了，且没替新作业起轮询
+  await sleep(1800);
+  const tokenChk = await evalIn(`(() => ({
+    state: currentJob && currentJob.state,
+    id: currentJob && currentJob.id,
+    ghost: (document.body.innerText || '').indexOf('幽灵结果不该出现在这里') >= 0,
+    askedGhost: window.__REQ__.filter(r => r.u.indexOf('sGhost') >= 0).length,
+  }))()`);
+  results.push(["轮询期间确实发出了请求", tokenChk.askedGhost === 1, JSON.stringify(tokenChk)]);
+  results.push(["旧作业的状态不得盖到新作业头上",
+    tokenChk.id === 's2' && tokenChk.state === 'queued', JSON.stringify(tokenChk)]);
+  results.push(["过期响应不再渲染出「幽灵结果」气泡",
+    tokenChk.ghost === false, "含幽灵结果=" + tokenChk.ghost]);
+
+  // 20b) 「停止」被后端拒绝时必须说出来。以前这里是 try/catch(_){} 全吞，
+  //      用户看到「已放弃本次生成」以为停了，后台其实还在跑并把结果写回来。
+  await evalIn(`clearTimeout(pollTimer); activeMsg = addAssistantMsg(); activeMsg.innerHTML = '';
+    currentJob = { id: 'sCancel', state: 'writing', params: { topic: '停止失败用例' } };
+    const of1 = window.fetch.bind(window);
+    window.fetch = function (u, o) {
+      if (String(u).indexOf('/cancel') >= 0) {
+        return Promise.resolve(new Response(
+          JSON.stringify({ detail: '作业状态为 done，不可取消' }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } }));
+      }
+      return of1(u, o);
+    };
+    true`);
+  await evalIn(`abortGeneration(); true`);
+  await sleep(700);
+  const abortChk = await evalIn(`(() => ({
+    toast: document.getElementById('toast').textContent || '',
+    shown: !document.getElementById('toast').classList.contains('hidden'),
+    jobNull: currentJob === null, busy: busyNow,
+  }))()`);
+  results.push(["停止被后端拒绝时明确提示，不再静默吞错",
+    /停止失败/.test(abortChk.toast) && abortChk.shown === true, JSON.stringify(abortChk).slice(0, 160)]);
+  results.push(["停止失败也要解锁界面（不卡在 busy）",
+    abortChk.jobNull === true && abortChk.busy === false, JSON.stringify(abortChk).slice(0, 160)]);
+
+  // 20c) 轮询连续失败要收敛：以前是无限 setTimeout 重试，界面永远停在「生成中」，
+  //      既看不到进度也发不出下一句，只能重启应用。
+  await evalIn(`clearTimeout(pollTimer); currentJob = null; activeMsg = null;
+    clearStreamMsgs();          // 清掉此前失败用例留下的气泡，否则 #retry-gen 会重 id
+    const of2 = window.fetch.bind(window);
+    window.__REQ2__ = 0;
+    window.fetch = function (u, o) {
+      if (String(u).indexOf('/api/jobs/') >= 0) {
+        window.__REQ2__++;
+        return Promise.resolve(new Response(JSON.stringify({ detail: '引擎已退出' }),
+          { status: 502, headers: { 'Content-Type': 'application/json' } }));
+      }
+      return of2(u, o);
+    };
+    currentJob = { id: 'sDown', state: 'writing', params: { topic: '连接中断用例的主题' } };
+    pollMisses = 3;                        // 已是第 3 次失败，下一次就该收敛
+    poll();
+    true`);
+  await sleep(900);
+  const downChk = await evalIn(`(() => ({
+    reqs: window.__REQ2__, jobNull: currentJob === null, busy: busyNow,
+    hasRetry: !!document.getElementById('retry-gen'),
+    nRetry: document.querySelectorAll('#retry-gen').length,
+    body: (document.body.innerText || '').indexOf('连接中断') >= 0,
+  }))()`);
+  results.push(["轮询持续失败会收敛，不再无限重试",
+    downChk.reqs === 1 && downChk.jobNull === true, JSON.stringify(downChk).slice(0, 160)]);
+  results.push(["连接中断给出重试入口并解锁界面",
+    downChk.hasRetry === true && downChk.nRetry === 1 && downChk.body === true && downChk.busy === false,
+    JSON.stringify(downChk).slice(0, 160)]);
+  await evalIn(`window.__GEN__ = []; true`);
+  await evalIn(`(() => { const b = document.getElementById('retry-gen'); if (b) b.click(); })()`);
+  await sleep(500);
+  const downRetry = await evalIn(`window.__GEN__.map(b => String(b))`);
+  results.push(["连接中断的重试带的是本次真正发出的参数",
+    downRetry.some(b => b.indexOf('连接中断用例的主题') >= 0), JSON.stringify(downRetry).slice(0, 140)]);
+
+  // 收尾：把 fetch 与作业状态复位，别污染后面的截图
+  await evalIn(`clearTimeout(pollTimer); clearTimeout(activeRefresh);
+    currentJob = null; currentResult = null; activeMsg = null; pollMisses = 0;
+    setBusy(false); if (window.__OF__) window.fetch = window.__OF__; true`);
+
   // 收尾：清掉测试用的主题，避免污染后面的截图
   await evalIn(`(() => { const t = document.getElementById('topic');
     t.value = ''; t.dispatchEvent(new Event('input', { bubbles: true })); })()`);
