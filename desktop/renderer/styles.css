@@ -143,6 +143,17 @@ body {
 /* 字段标签：小号 + 中等字重，作为"控件说明"存在，不与区块标题抢层级 */
 .lbl { display: block; font-size: var(--f-xs); font-weight: 600; color: var(--text-2); margin-bottom: 6px; letter-spacing: .1px; }
 
+/* 标签行内的小文字按钮（「恢复默认」）：不能抢标签的视觉重量，
+   但要有明确的可点区域与悬停反馈，否则会被当成一段说明文字。 */
+.linkbtn {
+  margin-left: 8px; padding: 2px 6px; border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--text-2); font-size: var(--f-xs);
+  font-weight: 500; cursor: pointer; text-decoration: underline;
+  text-decoration-color: var(--line-strong); text-underline-offset: 2px;
+}
+.linkbtn:hover { background: var(--fill); color: var(--text-1); }
+.linkbtn:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
+
 /* ══════════════ 布局骨架 ══════════════
    main = 左栏（导航）+ 右栏（内容），两栏各自拥有头部；
    不再有通栏 header，导航区与工作区的视觉边界由此确立。 */

@@ -94,6 +94,10 @@ export function bindSettings() {
       dirty.clear();
     } catch (e) { toast("保存失败：" + e.message, 3500); }
   };
+  // 「恢复默认」：base_url / model 填错之后，留空保存是无效的空操作
+  // （后端会过滤空串防手滑），所以回到默认必须是一个显式动作。
+  $("st-reset-baseurl").onclick = () => resetField("base_url", "st-baseurl");
+  $("st-reset-model").onclick = () => resetField("model", "st-model");
   $("st-test").onclick = testConnection;
   $("pi-export").onclick = exportSkill;
   $("pi-undraft").onclick = undraftPack;
@@ -125,6 +129,20 @@ async function saveSettings() {
     emit("meta", state.meta);
   } catch (_) { /* 忽略：保存本身已成功 */ }
   await preloadSettings().catch(() => {});
+}
+
+async function resetField(field, inputId) {
+  try {
+    await api.resetConfig([field]);
+    // 清掉 dirty 标记，否则 preloadSettings 会拒绝回填输入框
+    dirty.delete(inputId);
+    await preloadSettings();
+    toast("已恢复默认值");
+    state.meta = await api.meta();
+    emit("meta", state.meta);
+  } catch (e) {
+    toast("恢复失败：" + e.message, 3500);
+  }
 }
 
 async function testConnection() {

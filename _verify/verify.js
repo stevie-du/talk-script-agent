@@ -159,6 +159,8 @@ addEventListener('unhandledrejection', e => window.__errs.push('rej: ' + String(
       { id:'s2', created_at:'2026-09-13 15:30', pack:'elevator',
         topic:'扶梯突然停了怎么办', duration:null, chars:null, passed:null, state:'writing' } ]);
     if (s.indexOf('/api/config/test') >= 0) return mk({ ok:true, model:'glm-4.7', detail:'延迟 320ms' });
+    // 必须在 /api/config 的通用匹配之前：indexOf('/api/config') 也会命中 reset
+    if (s.indexOf('/api/config/reset') >= 0) return mk({ ok:true, fields:['base_url'] });
     if (s.indexOf('/api/config') >= 0) return mk(CONFIG);
     if (s.indexOf('/api/packs/') >= 0) return mk({ display_name:'电梯行业包', description:'电梯行业口播脚本包',
       draft:false, checklist:'1. 核对参数 / 2. 核对禁用词',
@@ -426,6 +428,15 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await sleep(600);
   const keep = await evalIn("return document.getElementById('st-baseurl').value;");
   check("重开设置不覆盖未保存的输入", keep === "https://typed-by-user/v1", keep);
+
+  // 「恢复默认」：留空保存是无效操作（后端会过滤空串防手滑），
+  // 所以回到默认必须是显式动作 —— 承接上面那个被改脏的输入框。
+  await evalIn(`window.__ts.setPane('llm');
+    document.getElementById('st-reset-baseurl').click(); return true;`);
+  await sleep(500);
+  const restored = await evalIn("return document.getElementById('st-baseurl').value;");
+  check("恢复默认把 base_url 还原为服务端默认值",
+    restored === "https://x/v4", restored);
 
   // ── 12) 快捷键与浮层 ─────────────────────────────────────
   await evalIn(`if (window.__ts.settingsOpen) document.getElementById('btn-close-settings').click();

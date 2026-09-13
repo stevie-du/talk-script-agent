@@ -83,5 +83,6 @@ export const api = {
 
   config: () => request("/api/config"),
   saveConfig: (body) => request("/api/config", { method: "POST", body }),
+  resetConfig: (fields) => request("/api/config/reset", { method: "POST", body: { fields } }),
   testConfig: (body) => request("/api/config/test", { method: "POST", body }),
 };

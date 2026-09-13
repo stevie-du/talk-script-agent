@@ -416,6 +416,37 @@ def test_export_rejects_path_traversal(tmp_path=None):
     shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_reset_restores_defaults(tmp_path=None):
+    """base_url / model 填错之后要能回到默认 —— 留空保存是无效操作。
+
+    `set_config` 会过滤空串（防手滑清空），副作用是一旦填错就再也改不回去，
+    用户只能手工改 config.yaml。「恢复默认」因此必须是显式动作。
+    """
+    from app.config import DEFAULT_CONFIG, load_config
+
+    tmp = _tmp_root()
+    c = _client(tmp)
+    assert c.post("/api/config", json={"base_url": "https://wrong.example/v9",
+                                       "model": "wrong-model"}).status_code == 200
+    assert load_config(tmp).llm.base_url == "https://wrong.example/v9"
+
+    # 留空保存不会清空（空串被过滤）—— 这正是需要 reset 接口的原因
+    assert c.post("/api/config", json={"base_url": "", "model": ""}).status_code == 200
+    assert load_config(tmp).llm.base_url == "https://wrong.example/v9", "空串不该覆盖"
+
+    r = c.post("/api/config/reset", json={"fields": ["base_url", "model"]})
+    assert r.status_code == 200, (r.status_code, r.text)
+    cfg = load_config(tmp)
+    assert cfg.llm.base_url == DEFAULT_CONFIG["llm"]["base_url"], cfg.llm.base_url
+    assert cfg.llm.model == DEFAULT_CONFIG["llm"]["model"], cfg.llm.model
+    # 重置不能顺手把 Key 弄丢
+    assert cfg.llm.api_key == "", cfg.llm.api_key
+
+    # api_key 不在可重置名单里：清空密钥不该是一个顺手的动作
+    assert c.post("/api/config/reset", json={"fields": ["api_key"]}).status_code == 400
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
 # ── 7 版本号单一来源 ────────────────────────────────────────
 def test_version_single_source(tmp_path=None):
     """引擎报出的版本必须与 desktop/package.json 一致。

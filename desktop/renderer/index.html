@@ -299,7 +299,10 @@
         </header>
         <div class="page-card">
           <div class="block-inner">
-            <label class="lbl">Base URL</label>
+            <label class="lbl">Base URL
+              <button class="linkbtn" id="st-reset-baseurl" type="button"
+                      title="恢复为默认值 https://open.bigmodel.cn/api/paas/v4">恢复默认</button>
+            </label>
             <input id="st-baseurl" placeholder="https://open.bigmodel.cn/api/paas/v4">
           </div>
           <div class="block-inner">
@@ -307,7 +310,10 @@
             <input id="st-apikey" type="password" placeholder="已配置时留空即保持不变">
           </div>
           <div class="block-inner">
-            <label class="lbl">模型名</label>
+            <label class="lbl">模型名
+              <button class="linkbtn" id="st-reset-model" type="button"
+                      title="恢复为默认模型">恢复默认</button>
+            </label>
             <input id="st-model" placeholder="glm-4.7 / deepseek-chat">
           </div>
           <div class="block-inner">

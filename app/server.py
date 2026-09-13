@@ -108,6 +108,15 @@ class ConfigIn(BaseModel):
     temperature: float | None = None
 
 
+class ConfigResetIn(BaseModel):
+    fields: list[str]
+
+
+# 允许「恢复默认」的字段。api_key 不在其中：清空密钥不该是一个顺手的动作。
+RESETTABLE_FIELDS = frozenset(
+    {"base_url", "model", "temperature", "retries", "timeout", "max_tokens"})
+
+
 def _renderer_dir(root: Path) -> Path:
     """渲染层目录。
 
@@ -405,6 +414,23 @@ def create_app(root: Path, token: str | None = None,
         updates = {k: v for k, v in body.model_dump().items() if v not in ("", None)}
         save_config(root, updates, config_dir=data_dir)
         return {"ok": True}
+
+    @app.post("/api/config/reset")
+    def reset_config(body: ConfigResetIn):
+        """把指定字段清空回默认值。
+
+        存在的原因：`set_config` 会过滤掉空串（防手滑清空），副作用是
+        base_url / model 一旦填错就再也改不回去 —— 用户只能去手工改 config.yaml。
+        所以「回到默认」必须是**显式**动作，而不是靠留空输入框。
+
+        实现上只是把字段写成空串：`load_config` 里是 `llm.get(x) or DEFAULT`，
+        空串自然落回默认值。api_key 不在可重置名单里 —— 清空密钥不该这么顺手。
+        """
+        bad = [f for f in body.fields if f not in RESETTABLE_FIELDS]
+        if bad:
+            raise HTTPException(400, f"不支持重置的字段：{'、'.join(bad)}")
+        save_config(root, {f: "" for f in body.fields}, config_dir=data_dir)
+        return {"ok": True, "fields": body.fields}
 
     @app.post("/api/config/test")
     def test_config(body: ConfigIn | None = Body(default=None)):
