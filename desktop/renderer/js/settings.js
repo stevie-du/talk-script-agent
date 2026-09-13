@@ -54,6 +54,9 @@ async function preloadSettings() {
   fill("st-baseurl", c.base_url || "");
   fill("st-model", c.model || "");
   fill("st-temperature", c.temperature ?? "");
+  fill("st-retries", c.retries ?? "");
+  fill("st-timeout", c.timeout ?? "");
+  fill("st-maxtokens", c.max_tokens ?? "");
   if (!dirty.has("st-apikey")) $("st-apikey").value = "";
   const env = c.env_override ? "（当前由环境变量 TALKSCRIPT_API_KEY 覆盖）" : "";
   $("st-status").textContent = c.mock
@@ -70,7 +73,8 @@ function fill(id, value) {
 }
 
 export function bindSettings() {
-  ["st-baseurl", "st-model", "st-apikey", "st-temperature"].forEach(id => {
+  ["st-baseurl", "st-model", "st-apikey", "st-temperature",
+   "st-retries", "st-timeout", "st-maxtokens"].forEach(id => {
     $(id).addEventListener("input", () => dirty.add(id));
   });
   document.querySelectorAll(".stg-nav-item").forEach(n => {
@@ -98,6 +102,8 @@ export function bindSettings() {
   // （后端会过滤空串防手滑），所以回到默认必须是一个显式动作。
   $("st-reset-baseurl").onclick = () => resetField("base_url", "st-baseurl");
   $("st-reset-model").onclick = () => resetField("model", "st-model");
+  $("st-reset-adv").onclick = () => resetField(
+    ["retries", "timeout", "max_tokens"], ["st-retries", "st-timeout", "st-maxtokens"]);
   $("st-test").onclick = testConnection;
   $("pi-export").onclick = exportSkill;
   $("pi-undraft").onclick = undraftPack;
@@ -120,6 +126,22 @@ async function saveSettings() {
     }
     body.temperature = num;
   }
+  // 重试 / 超时 / 输出预算：留空表示不改，填了就在前端先卡一遍范围
+  // （后端也会卡，这里只是让错误当场可见，不必等一次往返）
+  for (const [key, id, lo, hi, label] of [
+    ["retries", "st-retries", 0, 10, "重试次数"],
+    ["timeout", "st-timeout", 5, 1800, "单次超时"],
+    ["max_tokens", "st-maxtokens", 256, 200000, "输出预算"],
+  ]) {
+    const raw = $(id).value.trim();
+    if (raw === "") continue;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < lo || n > hi) {
+      toast(`${label}需在 ${lo} ~ ${hi} 之间`);
+      return;
+    }
+    body[key] = n;
+  }
   await api.saveConfig(body);
   $("st-apikey").value = "";
   toast("已保存，下次生成即生效");
@@ -132,10 +154,12 @@ async function saveSettings() {
 }
 
 async function resetField(field, inputId) {
+  const fields = [].concat(field);
+  const ids = [].concat(inputId);
   try {
-    await api.resetConfig([field]);
+    await api.resetConfig(fields);
     // 清掉 dirty 标记，否则 preloadSettings 会拒绝回填输入框
-    dirty.delete(inputId);
+    ids.forEach(id => dirty.delete(id));
     await preloadSettings();
     toast("已恢复默认值");
     state.meta = await api.meta();

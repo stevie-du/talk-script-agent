@@ -447,6 +447,34 @@ def test_reset_restores_defaults(tmp_path=None):
     shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_numeric_settings_editable_and_bounded(tmp_path=None):
+    """重试 / 超时 / 输出预算要能改，且越界要当场报错。
+
+    边界必须在写入前卡：load_config 里是 `llm.get(x) or 默认值`，
+    写进去的 0 或负数会被悄悄换成默认值 —— 界面显示「已保存」、
+    实际值却不是用户填的那个，比直接拒绝更难查。
+    """
+    from app.config import load_config
+
+    tmp = _tmp_root()
+    c = _client(tmp)
+    r = c.post("/api/config", json={"retries": 5, "timeout": 30, "max_tokens": 8000})
+    assert r.status_code == 200, (r.status_code, r.text)
+    cfg = load_config(tmp)
+    assert (cfg.llm.retries, cfg.llm.timeout, cfg.llm.max_tokens) == (5, 30.0, 8000), cfg.llm
+
+    # 越界一律 400，不能写进配置
+    for bad in ({"timeout": 0}, {"timeout": 99999}, {"retries": 99}, {"max_tokens": 1}):
+        r = c.post("/api/config", json=bad)
+        assert r.status_code == 400, (bad, r.status_code, r.text)
+    assert load_config(tmp).llm.timeout == 30.0, "越界值不该落盘"
+
+    # 留空（不传 / None）表示不改
+    assert c.post("/api/config", json={"retries": None}).status_code == 200
+    assert load_config(tmp).llm.retries == 5
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
 # ── 7 版本号单一来源 ────────────────────────────────────────
 def test_version_single_source(tmp_path=None):
     """引擎报出的版本必须与 desktop/package.json 一致。

@@ -322,6 +322,26 @@
                    placeholder="0.7（默认）">
             <p class="hint">越低越稳、越高越发散。文案类建议 0.7~0.9；改完保存即生效。</p>
           </div>
+          <div class="block-inner">
+            <label class="lbl">重试次数
+              <button class="linkbtn" id="st-reset-adv" type="button"
+                      title="恢复为默认：重试 2 次 / 超时 180 秒 / 输出预算 16000">恢复默认</button>
+            </label>
+            <input id="st-retries" type="number" min="0" max="10" step="1" placeholder="2（默认）">
+            <p class="hint">请求失败（网络 / 超时 / 429 / 5xx）时自动重试的次数。</p>
+          </div>
+          <div class="block-inner">
+            <label class="lbl">单次超时（秒）</label>
+            <input id="st-timeout" type="number" min="5" max="1800" step="5"
+                   placeholder="180（默认）">
+          </div>
+          <div class="block-inner">
+            <label class="lbl">输出预算（tokens）</label>
+            <input id="st-maxtokens" type="number" min="256" max="200000" step="500"
+                   placeholder="16000（默认）">
+            <p class="hint">推理型模型的「思考」也计入这个预算，给得太小会拿到空内容
+              （接口仍返回 200），表现为「模型输出无法解析」。</p>
+          </div>
           <p class="hint" id="st-status"></p>
           <div class="page-actions">
             <button class="ghost" id="st-test" title="用上面的配置发一个最小请求，验证是否连通">测试连接</button>

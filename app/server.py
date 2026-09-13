@@ -106,6 +106,10 @@ class ConfigIn(BaseModel):
     api_key: str = ""
     model: str = ""
     temperature: float | None = None
+    # 三项为 None 表示「不改」：界面留空时不能把超时写成 0
+    retries: int | None = None
+    timeout: float | None = None
+    max_tokens: int | None = None
 
 
 class ConfigResetIn(BaseModel):
@@ -412,6 +416,16 @@ def create_app(root: Path, token: str | None = None,
     def set_config(body: ConfigIn):
         # 空 base_url / model 不覆盖（防清空）；api_key 空串=保持不变（合并语义）
         updates = {k: v for k, v in body.model_dump().items() if v not in ("", None)}
+        # 数值项必须在这里卡边界：写进 config.yaml 的 0 / 负数不会被
+        # load_config 拦住（那里是 `or 默认值`，0 会悄悄变回默认），
+        # 于是界面显示保存成功、实际值却不是用户填的那个 —— 更难查。
+        for k, lo, hi in (("retries", 0, 10), ("timeout", 5, 1800),
+                          ("max_tokens", 256, 200000)):
+            v = updates.get(k)
+            if v is None:
+                continue
+            if not (lo <= float(v) <= hi):
+                raise HTTPException(400, f"{k} 需在 {lo} ~ {hi} 之间，当前为 {v}")
         save_config(root, updates, config_dir=data_dir)
         return {"ok": True}
 

@@ -438,6 +438,25 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("恢复默认把 base_url 还原为服务端默认值",
     restored === "https://x/v4", restored);
 
+  // 重试 / 超时 / 输出预算：原来只在状态行里展示、无法修改
+  const adv = await evalIn(`window.__ts.setPane('llm');
+    const t = document.getElementById('st-timeout'); return {
+      retries: document.getElementById('st-retries')?.value,
+      timeout: t?.value,
+      max: document.getElementById('st-maxtokens')?.value,
+      editable: !!t && !t.readOnly && !t.disabled };`);
+  check("重试 / 超时 / 输出预算可编辑且已回填",
+    adv.retries === "2" && adv.timeout === "180" && adv.max === "16000" && adv.editable,
+    JSON.stringify(adv));
+
+  await evalIn(`window.__ts.setPane('llm');
+    const t = document.getElementById('st-timeout');
+    t.value = '60'; t.dispatchEvent(new Event('input', {bubbles:true}));
+    document.getElementById('st-reset-adv').click(); return true;`);
+  await sleep(500);
+  const adv2 = await evalIn("return document.getElementById('st-timeout').value;");
+  check("高级项「恢复默认」还原超时值", adv2 === "180", adv2);
+
   // ── 12) 快捷键与浮层 ─────────────────────────────────────
   await evalIn(`if (window.__ts.settingsOpen) document.getElementById('btn-close-settings').click();
     return true;`);
