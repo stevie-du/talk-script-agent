@@ -200,6 +200,37 @@ def test_registry_prune():
     assert len(reg.snapshots()) == 10
 
 
+def test_stream_buffers_are_bounded():
+    """流式文本不能无上限累积，但界面显示的字数必须是真实值。
+
+    修复前两个缓冲区都是无上限 `+=`，且作业结束**从不释放** —— 注册表
+    要保留 200 个终态作业，推理型模型几万字的思考 + 几十 KB 的正文草稿
+    会一直驻留到被 prune 掉为止。模型若异常持续输出，单个作业就能吃满内存。
+    """
+    from app.jobs import Job, STREAM_TAIL
+
+    j = Job("20260913-000000-aaaaaa", "generate", {})
+    j.begin_stream("文案撰写")
+    for _ in range(50):                       # 思考 5 万字、正文 10 万字
+        j.push_delta("reasoning", "想" * 1000)
+        j.push_delta("content", "x" * 2000)
+
+    assert len(j.stream_reasoning) <= STREAM_TAIL, "思考文本无上限驻留内存"
+    # 字数必须仍是真实累计值：直接截断会让界面停在 1500 字，那是显示错误信息
+    assert j.stream_reasoning_len == 50000, j.stream_reasoning_len
+    assert j.stream_content_len == 100000, j.stream_content_len
+
+    snap = j.snapshot(include_result=False)
+    assert snap["stream"]["reasoning_len"] == 50000
+    assert len(snap["stream"]["reasoning_tail"]) <= STREAM_TAIL
+    assert snap["stream"]["content_len"] == 100000
+
+    # 换阶段要重置（否则上一阶段的思考会串到下一阶段）
+    j.begin_stream("校验")
+    assert j.stream_reasoning_len == 0 and j.stream_content_len == 0
+    assert j.snapshot(include_result=False).get("stream") is None
+
+
 def main() -> int:
     cases = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

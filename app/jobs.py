@@ -72,8 +72,11 @@ class Job:
         self.cancel_event = threading.Event()   # 用户点了「停止」→ 后台线程据此尽早收工
         # 流式过程内容：只驻内存、不落盘（重启即弃，属过程态而非产物）
         self.stream_phase = ""            # 当前阶段名，如「文案撰写」
-        self.stream_reasoning = ""        # 模型思考（展示用）
-        self.stream_content = ""          # 正文（JSON），仅用于展示进度
+        # 思考文本只保留尾部（界面只展示最后 STREAM_TAIL 字），长度另用计数器累计 ——
+        # 见 push_delta 的注释：全量驻留内存没有任何一处会用到。
+        self.stream_reasoning = ""
+        self.stream_reasoning_len = 0
+        self.stream_content_len = 0       # 正文连尾部都不需要，界面只显示字数
         self.started_at = datetime.now().timestamp()
 
     # ── 状态迁移（唯一的写入口）──────────────────────────────
@@ -132,14 +135,28 @@ class Job:
         with self._lock:
             self.stream_phase = phase
             self.stream_reasoning = ""
-            self.stream_content = ""
+            self.stream_reasoning_len = 0
+            self.stream_content_len = 0
 
     def push_delta(self, kind: str, text: str):
+        """累计流式内容。
+
+        文本**只保留会被真正用到的部分**：界面要的只有「思考的最后 1500 字」
+        与「累计字数」。修复前两个缓冲区都是无上限 `+=`：
+          - 推理型模型的思考动辄上万字、正文草稿几十 KB；
+          - 作业结束后缓冲**从不释放**，而注册表要保留 200 个终态作业，
+            于是这些内容全部驻留到被 prune 掉为止；
+          - 模型若异常持续输出，单个作业就能无上限吃内存。
+
+        长度用计数器单独累计，这样界面显示的「思考 N 字」仍是真实值 ——
+        直接截断文本会让字数停在 1500 字，那是**显示错误信息**，比占内存更糟。
+        """
         with self._lock:
             if kind == "reasoning":
-                self.stream_reasoning += text
+                self.stream_reasoning_len += len(text)
+                self.stream_reasoning = (self.stream_reasoning + text)[-STREAM_TAIL:]
             else:
-                self.stream_content += text
+                self.stream_content_len += len(text)
 
     # ── 快照 ────────────────────────────────────────────────
     def snapshot(self, *, include_result: bool = True) -> dict:
@@ -158,12 +175,12 @@ class Job:
             }
             if include_result or self.state in TERMINAL_STATES:
                 snap["result"] = self.result
-            if self.stream_reasoning or self.stream_content:
+            if self.stream_reasoning_len or self.stream_content_len:
                 snap["stream"] = {
                     "phase": self.stream_phase,
                     "reasoning_tail": self.stream_reasoning[-STREAM_TAIL:],
-                    "reasoning_len": len(self.stream_reasoning),
-                    "content_len": len(self.stream_content),
+                    "reasoning_len": self.stream_reasoning_len,
+                    "content_len": self.stream_content_len,
                 }
             return snap
 
