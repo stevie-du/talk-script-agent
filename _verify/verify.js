@@ -488,6 +488,28 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("技能面板只列技能相关文件",
     sk.rows.length === 1 && sk.rows[0] === "skill.yaml", JSON.stringify(sk));
 
+  // 导出内容必须断言，不能只断言「不抛错」——
+  // 错误的字幕（关键词当字幕、句子被砍断）同样能顺利导出。
+  const srt = await evalIn(`return window.__ts.exportSrt({ params:{topic:'测试'},
+    sections:[{type:'hook', text:'家里装电梯／装修先封墙／电梯后上门／特别容易卡住／我干维保这行', subtitle:'先封墙'}],
+    timings:[{start:0,end:12.5}] });`);
+  const cues = srt.split("\r\n").filter(Boolean);
+  const nCue = cues.filter(l => /^\d+$/.test(l)).length;
+  check("SRT 按停顿符切成多行字幕（不再一段一行）",
+    nCue >= 4 && !/subtitle|先封墙/.test(srt.split("\r\n")[2] || ""), `行数=${nCue}`);
+  check("SRT 每行不超长且不截断", cues.filter(l => /-->/.test(l) === false && /^\d+$/.test(l) === false)
+    .every(l => l.length <= 18 && !l.endsWith("装电")), JSON.stringify(cues.slice(0, 3)));
+  check("SRT 时间轴落在段内且递增",
+    /^00:00:00,000 --> /.test(cues[1] || "") && /00:00:12,500/.test(cues[cues.length - 2] || ""),
+    JSON.stringify(cues.slice(0, 2)));
+
+  const md = await evalIn(`return window.__ts.exportMd({ params:{topic:'测试', duration:60},
+    pack:'elevator', sections:[{type:'hook', text:'家里装电梯／装修先封墙'}],
+    timings:[{start:0,end:5}] });`);
+  check("MD 不再把停顿符挤成一行（／ 变换行）",
+    md.includes("家里装电梯\n装修先封墙") && !md.includes("／"), JSON.stringify(md.slice(0, 80)));
+  check("MD 缺失字段不输出 undefined", !/undefined/.test(md), md.slice(0, 120));
+
   // ── 12) 快捷键与浮层 ─────────────────────────────────────
   await evalIn(`if (window.__ts.settingsOpen) document.getElementById('btn-close-settings').click();
     return true;`);

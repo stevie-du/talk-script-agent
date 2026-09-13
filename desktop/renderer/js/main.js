@@ -13,7 +13,7 @@ import { abort, send, autoGrowTopic } from "./jobs.js";
 import { loadSessions, bindSessionList } from "./sessions.js";
 import { bindSettings, openSettings, setPane, settingsOpen, closeSettings } from "./settings.js";
 import { bindOverlays } from "./overlays.js";
-import { setHead } from "./result.js";
+import { setHead, resultSrt, resultMarkdown } from "./result.js";
 import {
   bindShell, renderSamples, refreshGate, gotoView, fillPackSelect, setCfgHint,
   renderSetupNeeded,
@@ -86,6 +86,10 @@ window.__ts = {
   get jobId() { return state.job ? state.job.id : null; },
   get settingsOpen() { return settingsOpen(); },
   get msgCount() { return T.msgCount(); },
+  // 导出是纯函数，挂出来才能在验证脚本里断言**内容** ——
+  // 只断言「点了不报错」是没用的：错误的字幕照样能顺利导出。
+  exportSrt: resultSrt,
+  exportMd: resultMarkdown,
   send,
   abort,
   loadSessions,

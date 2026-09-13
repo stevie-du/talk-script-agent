@@ -362,25 +362,76 @@ function bindActions(body, r, opts) {
 // ── 导出格式 ────────────────────────────────────────────────
 export function resultMarkdown(r) {
   const p = r.params || {};
-  const lines = [`# 口播脚本：${p.topic}`, "",
-    `- ${p.duration}s / ${p.platform} / ${p.style} / ${p.persona}（${r.pack}）`, "",
+  // 字段可能缺失（旧产物 / 不同包），不能让文档里出现 "undefined"
+  const meta = [p.duration && `${p.duration}s`, p.platform, p.style, p.persona]
+    .filter(Boolean).join(" / ");
+  const lines = [`# 口播脚本：${p.topic || "未命名"}`, "",
+    `- ${meta}（${r.pack}）`, "",
     "## 口播文案", ""];
   let pi = 0;
   (r.sections || []).forEach((s, i) => {
     const tm = r.timings?.[i];
     const label = s.type === "point" ? `要点${++pi}` : TYPE_LABEL[s.type];
     lines.push(`**【${label}】** ${tm ? `${tm.start}-${tm.end}秒` : ""}`);
-    lines.push(s.text, "");
+    // ／ 是停顿符：导出成一行会让整段挤成一坨，读的人找不到断句
+    lines.push(String(s.text || "").replace(/／/g, "\n"), "");
   });
+  // 校验信息可能整块缺失（旧产物 / 未校验），不能让文档里出现 "undefined"
   const ch = r.check || {};
-  lines.push("---",
-    `字数 ${ch.chars_total}/${ch.target_total} 字 · 预估 ${ch.estimated_seconds}s · `
-    + `偏差 ${ch.deviation_pct}% · ${ch.passed ? "合格" : (ch.blockers || []).join("；")}`);
+  const stats = [
+    ch.chars_total != null
+      ? `字数 ${ch.chars_total}${ch.target_total != null ? "/" + ch.target_total : ""} 字` : "",
+    ch.estimated_seconds != null ? `预估 ${ch.estimated_seconds}s` : "",
+    ch.deviation_pct != null ? `偏差 ${ch.deviation_pct}%` : "",
+    ch.passed != null ? (ch.passed ? "合格" : (ch.blockers || []).join("；")) : "",
+  ].filter(Boolean);
+  if (stats.length) lines.push("---", stats.join(" · "));
   if (r.placeholders?.length) lines.push("", `> 占位事实：${r.placeholders.join("、")}`);
   return lines.join("\n");
 }
 
-/** SRT：时间轴取 timings，文本优先用字幕关键词，缺则截取口播首句。 */
+// 中文字幕单行建议长度：超过这个数观众读不完
+const SRT_MAX_CHARS = 18;
+
+/** 把一个段落切成若干字幕行，并按字数比例分配 [start, end] 这段时间。 */
+export function srtCues(text, start, end) {
+  const src = String(text || "")
+    .replace(/\*\*/g, "")                 // 加粗符号不进字幕
+    .replace(/\{\{[^}]*\}\}/g, "")        // 占位事实不进字幕
+    .split(/／|\/|\n+/)                    // ／ 是生成时约定的停顿符，天然就是断句点
+    .map(s => s.trim()).filter(Boolean);
+
+  const chunks = [];
+  for (const p of src) {
+    if (p.length <= SRT_MAX_CHARS) { chunks.push(p); continue; }
+    // 超长句先按标点切，仍超长再硬切
+    for (const seg of p.split(/(?<=[，。、！？；：,.!?;:])/)) {
+      let rest = seg;
+      while (rest.length > SRT_MAX_CHARS) {
+        chunks.push(rest.slice(0, SRT_MAX_CHARS));
+        rest = rest.slice(SRT_MAX_CHARS);
+      }
+      if (rest) chunks.push(rest);
+    }
+  }
+  const total = chunks.reduce((a, c) => a + c.length, 0) || 1;
+  let t = start;
+  return chunks.map(c => {
+    const d = (end - start) * (c.length / total);
+    const cue = { start: t, end: t + d, text: c };
+    t += d;
+    return cue;
+  });
+}
+
+/** SRT：每段按停顿符切成多行，时间轴在段内按字数比例展开。
+
+    修复前这里有三个错，导出来的文件根本没法当字幕用：
+      1. 优先取 `subtitle` —— 但那字段是「字幕关键词 ≤12 字」的**摘要**，
+         不是字幕文本，于是 60 秒视频导出 5 行关键词；
+      2. 取不到时回落 `s.text.slice(0, 16)` —— 句子被从中间砍断；
+      3. 一个段落只出一行，13 秒的段落显示一行停 13 秒。
+*/
 export function resultSrt(r) {
   const ts = t => {
     const ms = Math.max(0, Math.round((t || 0) * 1000));
@@ -388,16 +439,14 @@ export function resultSrt(r) {
     return `${pad(Math.floor(ms / 3600000), 2)}:${pad(Math.floor(ms / 60000) % 60, 2)}`
       + `:${pad(Math.floor(ms / 1000) % 60, 2)},${pad(ms % 1000, 3)}`;
   };
-  const clean = s => String(s).replace(/\*\*/g, "").replace(/／/g, " ")
-    .replace(/\{\{[^}]*\}\}/g, "").replace(/\s+/g, " ").trim();
   const lines = [];
   let n = 0;
   (r.sections || []).forEach((s, i) => {
     const tm = (r.timings || [])[i] || { start: 0, end: 0 };
-    const text = clean(s.subtitle || "") || clean(s.text || "").slice(0, 16);
-    if (!text) return;
-    n += 1;
-    lines.push(String(n), `${ts(tm.start)} --> ${ts(tm.end)}`, text, "");
+    for (const cue of srtCues(s.text, tm.start, tm.end)) {
+      n += 1;
+      lines.push(String(n), `${ts(cue.start)} --> ${ts(cue.end)}`, cue.text, "");
+    }
   });
   return lines.join("\r\n");
 }
