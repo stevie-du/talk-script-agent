@@ -537,6 +537,42 @@ def test_numeric_settings_editable_and_bounded(tmp_path=None):
     shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_undraft_clears_flag_and_keeps_rest(tmp_path=None):
+    """草稿转正：此前**零测试**，而它是个写操作。
+
+    除了要把 draft 置 false，还得保证不能顺手把 pack.yaml 里别的内容弄丢
+    （实现是先 load 再改一个键再 dump，理论上安全，但没有测试兜着）。
+    """
+    import yaml
+
+    tmp = _tmp_root()
+    c = _client(tmp)
+    y = tmp / "packs" / "elevator" / "pack.yaml"
+    raw = yaml.safe_load(y.read_text(encoding="utf-8")) or {}
+    assert isinstance(raw, dict)
+    raw["draft"] = True
+    write_atomic(y, yaml.safe_dump(raw, allow_unicode=True, sort_keys=False))
+    assert c.get("/api/packs/elevator").json()["draft"] is True
+
+    r = c.post("/api/packs/elevator/undraft")
+    assert r.status_code == 200, (r.status_code, r.text)
+    assert r.json()["draft"] is False
+    assert c.get("/api/packs/elevator").json()["draft"] is False, "转正没生效"
+
+    after = yaml.safe_load(y.read_text(encoding="utf-8"))
+    for k, v in raw.items():
+        if k == "draft":
+            continue
+        assert after.get(k) == v, f"转正把 {k} 弄丢了"
+
+    # 幂等：已经是正式包时再调一次不该报错
+    assert c.post("/api/packs/elevator/undraft").status_code == 200
+    # 不存在的包 → 404；非法名 → 400
+    assert c.post("/api/packs/nope/undraft").status_code == 404
+    assert c.post("/api/packs/..%2f..%2fetc/undraft").status_code in (400, 404)
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_pack_file_read_is_guarded(tmp_path=None):
     """知识库只读查看器：能读包内文件，但读不到包外的东西。
 

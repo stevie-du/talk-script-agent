@@ -519,6 +519,47 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   // 等它跑完，别把状态留给后面的用例
   for (let i = 0; i < 25 && await evalIn("return window.__ts.busy;"); i++) await sleep(300);
 
+  // 剩余三个零覆盖动作：copy-json / regen / reveal
+  // copy-json 真会踩的坑是循环引用导致 JSON.stringify 直接抛错
+  const j = await evalIn(`try {
+    const s = JSON.stringify(window.__ts.result, null, 2);
+    JSON.parse(s);
+    return { ok: true, len: s.length };
+  } catch (e) { return { ok: false, err: String(e) }; }`);
+  check("复制 JSON 能序列化当前结果（不因循环引用炸掉）", j.ok && j.len > 50,
+    JSON.stringify(j));
+
+  // regen：改参数后应出现「用新参数生成」，点了要真的发起新一次生成
+  await evalIn(`const b = document.getElementById('stale-banner');
+    const sel = document.getElementById('p-duration');
+    if (sel) { sel.value = '90'; sel.dispatchEvent(new Event('change', {bubbles:true})); }
+    return true;`);
+  await sleep(400);
+  const stale = await evalIn(`const b = document.getElementById('stale-banner');
+    return { shown: !b.classList.contains('hidden'),
+             hasBtn: !!b.querySelector('[data-act="regen"]') };`);
+  check("改参数后出现「用新参数生成」提示", stale.shown && stale.hasBtn, JSON.stringify(stale));
+
+  await evalIn(`const b = document.querySelector('#stale-banner [data-act="regen"]');
+    if (b) b.click(); return true;`);
+  await sleep(300);
+  const regen = await evalIn("return window.__ts.busy;");
+  check("点「用新参数生成」真的发起新一次生成", regen === true, String(regen));
+  for (let i = 0; i < 25 && await evalIn("return window.__ts.busy;"); i++) await sleep(300);
+
+  // reveal：无头环境验证不了「真的打开文件夹」，但至少点下去不能报错
+  // 注意 evalIn 会把表达式包进 (() => { ... })()，async IIFE 前必须写 return
+  const revealErr = await evalIn(`return (async () => {
+    const before = document.querySelectorAll('.toast.bad, .toast.err').length;
+    document.querySelector('[data-act="reveal"]')?.click();
+    await new Promise(r => setTimeout(r, 300));
+    return document.querySelectorAll('.toast.bad, .toast.err').length - before; })()`);
+  check("打开文件夹点下去不报错", revealErr === 0, String(revealErr));
+
+  await evalIn(`const s = document.getElementById('stg-search');
+    if (s) { s.value = ''; s.dispatchEvent(new Event('input', {bubbles:true})); }
+    return true;`);
+
   // 设置内搜索：6 个分区以后还会更多，没检索就得一个个点过去
   await evalIn(`document.getElementById('btn-open-settings').click(); return true;`);
   await sleep(300);
