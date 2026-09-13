@@ -316,7 +316,10 @@ export function renderFailure(body, { title, message, detail, retryLabel = "重�
   const q = s => body.querySelector(s);
   q('[data-act="retry"]').onclick = () => opts.onRetry?.();
   q('[data-act="settings"]').onclick = () => opts.onOpenSettings?.();
-  q('[data-act="copy-err"]').onclick = () => copyText(`${title}\n${message}`, "错误信息已复制");
+  // 技术细节必须带上：用户复制错误信息多半是为了去问人 / 提 issue，
+  // 只有标题和一句人话根本定位不了问题。
+  q('[data-act="copy-err"]').onclick = () =>
+    copyText(errorText(title, message, detail), "错误信息已复制");
 }
 
 export function renderStopped(body, opts = {}) {
@@ -336,7 +339,7 @@ function bindActions(body, r, opts) {
   const on = (sel, fn) => { const n = q(sel); if (n) n.onclick = fn; };
 
   on('[data-act="copy-voice"]', () =>
-    copyText(r.sections.map(s => s.text).join("\n\n"), "口播已复制"));
+    copyText(voicePlainText(r), "口播已复制"));
 
   on('[data-act="save-srt"]', () => {
     download(`字幕_${(r.params?.topic || "").slice(0, 12)}.srt`, resultSrt(r));
@@ -388,6 +391,27 @@ export function resultMarkdown(r) {
   if (stats.length) lines.push("---", stats.join(" · "));
   if (r.placeholders?.length) lines.push("", `> 占位事实：${r.placeholders.join("、")}`);
   return lines.join("\n");
+}
+
+/** 复制口播用的纯文本。
+
+    去掉 `**` 这类只服务于界面排版的标记 —— 复制出去是给提词器 / 剪映用的，
+    字面量的星号会直接被念出来或显示出来。
+
+    `／` **不能去掉**：examples/demo-60s.txt 里它就是标准停顿符（每行都有），
+    抹掉等于删掉断句。
+    `{{待补}}` 也保留 —— 那是提醒用户还有事实没填。
+*/
+export function voicePlainText(r) {
+  return (r.sections || [])
+    .map(s => String(s.text || "").replace(/\*\*/g, ""))
+    .join("\n\n");
+}
+
+/** 错误信息文本：技术细节必须带上。 */
+export function errorText(title, message, detail) {
+  return [title, message, detail ? `技术细节：${detail}` : ""]
+    .filter(Boolean).join("\n");
 }
 
 // 中文字幕单行建议长度：超过这个数观众读不完

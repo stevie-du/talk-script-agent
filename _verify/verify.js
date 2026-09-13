@@ -488,6 +488,37 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("技能面板只列技能相关文件",
     sk.rows.length === 1 && sk.rows[0] === "skill.yaml", JSON.stringify(sk));
 
+  // 复制口播：产出的是给提词器用的纯文本，`**` 必须去掉而 `／` 必须保留
+  const voice = await evalIn(`return window.__ts.voicePlainText({ sections:[
+    {type:'hook', text:'先量房／**井道、底坑**／提前确认'},
+    {type:'cta', text:'关注我{{待补：品牌名}}'}] });`);
+  check("复制口播去掉加粗标记但保留停顿符",
+    !voice.includes("**") && voice.includes("／")
+    && voice.includes("井道、底坑") && voice.includes("{{待补：品牌名}}"), voice);
+
+  // 复制错误：技术细节必须带上，否则复制出去根本定位不了问题
+  const err = await evalIn(
+    `return window.__ts.errorText('生成失败','模型无响应','httpx.ConnectTimeout: 30s');`);
+  check("复制错误包含技术细节",
+    /生成失败/.test(err) && /模型无响应/.test(err) && /ConnectTimeout/.test(err), err);
+
+  // 结果页：此前「重跑 / 换一版 / 打开文件夹 / 复制 JSON」这 4 个动作零覆盖
+  await evalIn(`[...document.querySelectorAll('#session-list .sess-item')]
+    .find(n => n.textContent.includes('家用电梯')).click(); return true;`);
+  await sleep(700);
+  const acts = await evalIn(`return [...document.querySelectorAll('[data-act]')]
+    .map(n => n.dataset.act);`);
+  check("结果页操作齐全（复制/导出/重跑/换一版/文件夹/JSON）",
+    ["copy-voice", "save-srt", "save-md", "rerun", "revary", "reveal", "copy-json"]
+      .every(a => acts.includes(a)), JSON.stringify(acts));
+
+  await evalIn(`document.querySelector('[data-act="rerun"]').click(); return true;`);
+  await sleep(300);
+  const reran = await evalIn("return window.__ts.busy;");
+  check("点「重跑」真的发起新一次生成", reran === true, String(reran));
+  // 等它跑完，别把状态留给后面的用例
+  for (let i = 0; i < 25 && await evalIn("return window.__ts.busy;"); i++) await sleep(300);
+
   // 设置内搜索：6 个分区以后还会更多，没检索就得一个个点过去
   await evalIn(`document.getElementById('btn-open-settings').click(); return true;`);
   await sleep(300);
@@ -647,6 +678,16 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     "document.getElementById('btn-open-settings').click(); window.__ts.setPane('gen'); return true;");
   await shot("settings-packinfo.png", "window.__ts.setPane('packinfo'); return true;");
   await shot("settings-llm.png", "window.__ts.setPane('llm'); return true;");
+  await shot("settings-kb.png", "window.__ts.setPane('kb'); return true;");
+  await shot("settings-skills.png", "window.__ts.setPane('skills'); return true;");
+  // 结果页此前**从未截过图** —— 审查时看不到它，才把已实现的重跑/换一版/
+  // 失败重试/版本导航误判成缺失。补上。
+  await shot("result-done.png", `document.getElementById('btn-close-settings').click();
+    [...document.querySelectorAll('#session-list .sess-item')]
+      .find(n => n.textContent.includes('家用电梯')).click(); return true;`);
+  await shot("result-failed.png", `window.__ts.newChat();
+    document.getElementById('topic').value = '会失败的作业';
+    document.getElementById('btn-generate').click(); return true;`);
 
   // ── 输出 ─────────────────────────────────────────────────
   console.log("\n════════ 界面回归结果 ════════");

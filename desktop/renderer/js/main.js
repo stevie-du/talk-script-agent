@@ -13,7 +13,8 @@ import { abort, send, autoGrowTopic } from "./jobs.js";
 import { loadSessions, bindSessionList } from "./sessions.js";
 import { bindSettings, openSettings, setPane, settingsOpen, closeSettings } from "./settings.js";
 import { bindOverlays } from "./overlays.js";
-import { setHead, resultSrt, resultMarkdown } from "./result.js";
+import { setHead, resultSrt, resultMarkdown, voicePlainText,
+  errorText } from "./result.js";
 import {
   bindShell, renderSamples, refreshGate, gotoView, fillPackSelect, setCfgHint,
   renderSetupNeeded,
@@ -91,6 +92,8 @@ window.__ts = {
   // 只断言「点了不报错」是没用的：错误的字幕照样能顺利导出。
   exportSrt: resultSrt,
   exportMd: resultMarkdown,
+  voicePlainText,
+  errorText,
   send,
   abort,
   loadSessions,
