@@ -726,9 +726,23 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await shot("result-done.png", `document.getElementById('btn-close-settings').click();
     [...document.querySelectorAll('#session-list .sess-item')]
       .find(n => n.textContent.includes('家用电梯')).click(); return true;`);
-  await shot("result-failed.png", `window.__ts.newChat();
-    document.getElementById('topic').value = '会失败的作业';
+  // 失败卡要等作业轮询到 failed 才渲染 —— 上次直接 shot 只拍到空态
+  // 必须 dispatch input 事件（只塞 value 不触发监听，send 读不到）
+  await evalIn(`window.__ts.newChat();
+    const t = document.getElementById('topic');
+    t.value = '失败测试'; t.dispatchEvent(new Event('input', {bubbles:true}));
     document.getElementById('btn-generate').click(); return true;`);
+  let failedShown = false;
+  for (let i = 0; i < 30; i++) {
+    failedShown = await evalIn(
+      `return !!document.querySelector('.fail-actions [data-act="retry"]');`);
+    if (failedShown) break;
+    await sleep(300);
+  }
+  check("失败卡真的渲染出来了（截图不是空态）", failedShown === true, String(failedShown));
+  await evalIn(`const d = document.querySelector('#pane-llm, .banner.warn ~ details summary');
+    if (d && d.tagName === 'SUMMARY') d.parentElement.open = true; return true;`);
+  await shot("result-failed.png");
 
   // ── 输出 ─────────────────────────────────────────────────
   console.log("\n════════ 界面回归结果 ════════");
