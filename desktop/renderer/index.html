@@ -33,6 +33,17 @@
     </div>
 
     <div class="left-scroll">
+      <div class="sess-search">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+        <input id="sess-search" type="search" placeholder="搜索会话" aria-label="搜索会话"
+               autocomplete="off">
+        <button id="sess-search-clear" class="icon-btn hidden" title="清空搜索" aria-label="清空搜索">
+          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor"
+               stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
       <button id="btn-new-chat" class="primary new-chat">
         <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
         新建对话
@@ -59,6 +70,8 @@
       </div>
       <div class="rh-actions">
         <span class="rh-state" id="rh-state"></span>
+        <button class="rh-model hidden" id="rh-model"
+                title="当前模型（点击到「模型接口」查看/修改）"></button>
       </div>
     </div>
 

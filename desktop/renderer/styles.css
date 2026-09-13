@@ -192,6 +192,39 @@ body {
 main { display: flex; flex: 1; min-height: 0; }
 
 /* ── 左栏头部：品牌 + 草稿徽标 ── */
+/* 会话搜索：与「新建对话」同宽的检索条（对照成熟 agent 的会话检索） */
+/* 头部模型指示：不抢 rh-state 的视觉重量，但一眼能看到「在用哪个模型」 */
+.rh-model {
+  max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 3px 9px; border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: transparent; color: var(--text-2);
+  font: 12px/1.4 var(--font); cursor: pointer;
+}
+.rh-model:hover { background: var(--fill); color: var(--text-1); }
+.rh-model.is-warn { color: var(--warn); border-color: var(--warn-soft); background: var(--warn-soft); }
+.rh-model.is-mock { color: var(--ok); border-color: var(--ok-soft); background: var(--ok-soft); }
+.rh-model.hidden { display: none; }
+
+.sess-search {
+  position: relative; display: flex; align-items: center; gap: 6px;
+  margin: 0 0 8px; padding: 0 8px; height: 30px;
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--fill);
+}
+.sess-search:focus-within { border-color: var(--line-strong); background: var(--surface); }
+.sess-search > svg { flex: 0 0 auto; color: var(--text-3); }
+.sess-search input {
+  flex: 1; min-width: 0; border: 0; background: transparent;
+  font: 12px/1 var(--font); color: var(--text-1); outline: none;
+}
+.sess-search input::placeholder { color: var(--text-3); }
+.sess-search input::-webkit-search-cancel-button { display: none; }
+.sess-search .icon-btn {
+  flex: 0 0 auto; width: 18px; height: 18px; padding: 0;
+  display: grid; place-items: center; color: var(--text-3);
+}
+.sess-search .icon-btn:hover { color: var(--text-1); background: var(--fill-strong); }
+
 .left-head {
   flex: 0 0 auto; height: 48px; padding: 0 var(--s2);
   display: flex; align-items: center; gap: var(--s2);

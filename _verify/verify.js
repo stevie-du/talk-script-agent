@@ -488,6 +488,37 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("技能面板只列技能相关文件",
     sk.rows.length === 1 && sk.rows[0] === "skill.yaml", JSON.stringify(sk));
 
+  // 头部模型指示：此前只有进设置页才知道在用哪个模型
+  const chip = await evalIn(`const c = document.getElementById('rh-model');
+    return { hidden: c.classList.contains('hidden'), text: c.textContent,
+             title: c.title };`);
+  check("头部显示当前模型（不再只有设置页能看到）",
+    !chip.hidden && chip.text === "glm-4.7" && /模型/.test(chip.title), JSON.stringify(chip));
+
+  // 会话搜索（成熟 agent 的标配；历史一多就找不到）
+  await evalIn(`const b = document.getElementById('sess-search');
+    b.value = '扶梯'; b.dispatchEvent(new Event('input', {bubbles:true})); return true;`);
+  await sleep(200);
+  const searched = await evalIn(`return {
+    rows: document.querySelectorAll('#session-list .sess-item').length,
+    text: document.getElementById('session-list').textContent };`);
+  check("会话搜索能过滤出匹配项",
+    searched.rows === 1 && /扶梯/.test(searched.text), JSON.stringify(searched));
+
+  await evalIn(`const b = document.getElementById('sess-search');
+    b.value = '不存在的词'; b.dispatchEvent(new Event('input', {bubbles:true})); return true;`);
+  await sleep(200);
+  const nomatch = await evalIn(`return document.getElementById('session-list').textContent;`);
+  check("搜索无结果时给出提示而不是空白", /没有匹配/.test(nomatch), nomatch.slice(0, 40));
+
+  await evalIn(`document.getElementById('sess-search-clear').click(); return true;`);
+  await sleep(200);
+  const cleared = await evalIn(`return {
+    rows: document.querySelectorAll('#session-list .sess-item').length,
+    val: document.getElementById('sess-search').value };`);
+  check("清空搜索后恢复全部会话", cleared.rows === 2 && cleared.val === "",
+    JSON.stringify(cleared));
+
   // 导出内容必须断言，不能只断言「不抛错」——
   // 错误的字幕（关键词当字幕、句子被砍断）同样能顺利导出。
   const srt = await evalIn(`return window.__ts.exportSrt({ params:{topic:'测试'},

@@ -10,6 +10,7 @@
 import { $, el, esc, fmtTime, dayKey, toast } from "./util.js";
 import { api } from "./api.js";
 import { state, setResult, detachJob } from "./store.js";
+import { setLeftFolded } from "./ui.js";
 import { attach, openRecord } from "./jobs.js";
 import { STATE_LABEL } from "./progress.js";
 import { appConfirm } from "./overlays.js";
@@ -25,10 +26,24 @@ const DEL_SVG = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" str
 
 const settled = st => st === "done" || st === "failed" || st === "cancelled";
 
+// 会话搜索：历史一多就找不到，这是左栏最缺的一块（对照成熟 agent 的
+// 会话检索）。过滤只在前端做 —— 条目量级是几十到几百，没必要惊动后端。
+let allItems = [];
+let query = "";
+
+function matches(it) {
+  if (!query) return true;
+  const q = query.toLowerCase();
+  return String(it.topic || "").toLowerCase().includes(q)
+    || String(it.pack || "").toLowerCase().includes(q)
+    || String(it.segment || "").toLowerCase().includes(q);
+}
+
 /** 拉取并绘制会话列表。返回本次拿到的条目（首启引导要据此判断是否「真的第一次」）。 */
 export async function loadSessions() {
   let items = [];
   try { items = await api.history(); } catch (_) { /* 引擎不可达时保留上一次列表 */ }
+  allItems = items;
   paint(items);
   clearTimeout(refreshTimer);
   // 还有会话没结束就定期刷新；结束后自动变成普通记录。
@@ -42,6 +57,14 @@ export async function loadSessions() {
 function paint(items) {
   const list = $("session-list");
   Array.from(list.children).forEach(n => { if (!n.dataset.key) n.remove(); });
+
+  const shown = (items || []).filter(matches);
+  if (query && !shown.length) {
+    list.innerHTML = "";
+    list.appendChild(el("p", "hint sess-empty", `没有匹配「${query}」的会话`));
+    return;
+  }
+  items = shown;
 
   if (!items.length) {
     list.innerHTML = "";
@@ -136,7 +159,41 @@ function updateRow(row, it) {
 }
 
 /** 整个列表只在容器上挂一个监听器：行被刷新换掉后绑定不会错位。 */
+export function focusSessionSearch() {
+  const box = $("sess-search");
+  if (!box) return;
+  if ($("left").classList.contains("folded")) setLeftFolded(false);
+  box.focus();
+  box.select();
+}
+
+function bindSearch() {
+  const box = $("sess-search");
+  const clear = $("sess-search-clear");
+  if (!box || box._bound) return;
+  box._bound = true;
+  const apply = () => {
+    query = box.value.trim();
+    clear.classList.toggle("hidden", !query);
+    paint(allItems);
+  };
+  box.addEventListener("input", apply);
+  box.addEventListener("keydown", ev => {
+    if (ev.key === "Escape") {
+      // 先清搜索，不要一按 Esc 就把焦点弄丢（用户可能还想接着输）
+      if (box.value) { box.value = ""; apply(); ev.stopPropagation(); return; }
+      box.blur();
+    }
+    if (ev.key === "Enter") {
+      const first = $("session-list").querySelector(".sess-item");
+      if (first) first.click();
+    }
+  });
+  clear.onclick = () => { box.value = ""; apply(); box.focus(); };
+}
+
 export function bindSessionList() {
+  bindSearch();
   const list = $("session-list");
   if (list._bound) return;
   list._bound = true;

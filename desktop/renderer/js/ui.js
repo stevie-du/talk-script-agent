@@ -10,6 +10,7 @@ import { $, $$, el, esc, toast } from "./util.js";
 import { state, setBusy, on } from "./store.js";
 import { collectParams, updateStale, autoGrowTopic, getParam } from "./jobs.js";
 import { stopTicker } from "./progress.js";
+import { focusSessionSearch } from "./sessions.js";
 import { closeSettings, openSettings, setPane, settingsOpen } from "./settings.js";
 import { anyOverlayOpen, closeOverlays } from "./overlays.js";
 
@@ -56,6 +57,27 @@ export function fillPackSelect({ selectLast = false, prefer = null } = {}) {
   else sel.value = state.meta.default_pack || "";
   if (!sel.value && sel.options.length) sel.selectedIndex = 0;
   renderPackParams();
+}
+
+/** 头部模型指示：主工作区此前完全看不出「现在在用哪个模型」，
+    只有进设置页才知道 —— 生成结果不对时用户连排查方向都没有。 */
+export function renderModelChip() {
+  const m = state.meta;
+  const chip = $("rh-model");
+  if (!chip) return;
+  if (!m) { chip.classList.add("hidden"); return; }
+  if (m.mock) {
+    chip.textContent = "mock 模式";
+    chip.className = "rh-model is-mock";
+    chip.title = "当前返回夹具数据，不调用模型（点击到「模型接口」配置）";
+  } else {
+    chip.textContent = m.model || "未配置模型";
+    chip.className = "rh-model" + (m.has_api_key ? "" : " is-warn");
+    chip.title = m.has_api_key
+      ? `当前模型：${m.model}（点击到「模型接口」修改）`
+      : "未配置 API Key（点击到「模型接口」配置）";
+  }
+  chip.onclick = () => openSettings("llm");
 }
 
 export function renderPackParams() {
@@ -362,7 +384,7 @@ export function bindShell() {
   };
   on("busy", syncGate);
   on("job", syncGate);
-  on("meta", () => { fillPackSelect(); setCfgHint(); });
+  on("meta", () => { fillPackSelect(); setCfgHint(); renderModelChip(); });
 
   $("topic").addEventListener("input", () => { refreshGate(); autoGrowTopic(); });
 
@@ -381,6 +403,11 @@ export function bindShell() {
     if (mod && e.key === ",") {
       e.preventDefault();
       settingsOpen() ? closeSettings() : openSettings();
+      return;
+    }
+    if (mod && (e.key === "k" || e.key === "K")) {
+      e.preventDefault();
+      focusSessionSearch();
       return;
     }
     if (e.key === "Escape") {
