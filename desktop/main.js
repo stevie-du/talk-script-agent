@@ -70,6 +70,11 @@ function startEngine(rootDir, resourcesDir) {
     cwd: rootDir,
     env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
     stdio: ['ignore', 'pipe', 'pipe'],
+    // windowsHide 不能省：python.exe 是 console 子系统程序，Windows 上 spawn
+    // 默认会给它开一个控制台窗口 —— 于是每次启动 TalkScript 都会闪一下黑框。
+    // 引擎的 stdout / stderr 已经被 pipe 到这里并以 [engine] 前缀转发，
+    // 隐藏控制台不会丢任何日志。
+    windowsHide: true,
   });
   engineProc.stdout.on('data', d => console.log('[engine]', String(d).trim()));
   engineProc.stderr.on('data', d => console.error('[engine]', String(d).trim()));
