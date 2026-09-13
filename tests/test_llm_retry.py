@@ -1,4 +1,5 @@
-# 重试与配置保持测试：python tests/test_llm_retry.py
+# 重试、空内容诊断与配置保持测试
+# 跑法：python tests/test_llm_retry.py   或   pytest tests/test_llm_retry.py
 import json
 import sys
 import tempfile
@@ -9,95 +10,213 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import httpx  # noqa: E402
-from app.config import load_config, save_config  # noqa: E402
-from app.llm import LLMClient, LLMError  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
+
+from app.config import load_config, save_config  # noqa: E402
+from app.llm import EmptyContentError, LLMClient, LLMError  # noqa: E402
 
 
 class Out(BaseModel):
     ok: bool
 
 
-def resp(status=200, content='{"ok": true}'):
+def _resp(status=200, content='{"ok": true}'):
     """伪装 OpenAI 补全响应；非 200 时 body 为原样文本"""
     body = content if status != 200 else json.dumps(
         {"choices": [{"message": {"content": content}}]})
-    return httpx.Response(status_code=status, text=body,
-                          request=httpx.Request("POST", "http://test"))
+    return httpx.Response(status_code=status, text=body)
 
 
-def main():
+def _run(handler, fn):
+    """把 LLMClient 的 HTTP 层换成 MockTransport。
+
+    修复后所有请求都走 `app.llm.get_client()`（连接池复用），
+    所以这里替换的是那个工厂，而不是 `httpx.post`（它已经不被调用了）。
+    """
+    transport = httpx.MockTransport(handler)
+    with patch("app.llm.get_client", lambda: httpx.Client(transport=transport)):
+        return fn()
+
+
+def test_network_retry_then_success():
     cfg = load_config(ROOT)
-    cfg.retries = 2
-    cfg.timeout = 5
-
+    cfg.llm.retries = 2
+    cfg.llm.timeout = 5
     notes = []
-    client = LLMClient(cfg.llm, on_retry=lambda note, a, t: notes.append((note, a, t)))
-
-    # ── A. 网络错误两次 → 第三次成功 ──
+    client = LLMClient(cfg.llm, on_retry=lambda n, a, t: notes.append((n, a, t)))
     calls = {"n": 0}
-    def flaky_post(url, **kw):
+
+    def handler(req):
         calls["n"] += 1
         if calls["n"] <= 2:
-            raise httpx.ConnectError("refused", request=httpx.Request("POST", url))
-        return resp(200, '{"ok": true}')
-    with patch.object(httpx, "post", flaky_post):
-        out = client.chat_json("t", "s", "u", Out)
+            raise httpx.ConnectError("refused", request=req)
+        return _resp(200, '{"ok": true}')
+
+    out = _run(handler, lambda: client.chat_json("t", "s", "u", Out))
     assert out.ok is True and calls["n"] == 3, (out, calls)
     assert len(notes) == 2, notes
-    print(f"[A] 网络错误自动重试 OK（共调用 {calls['n']} 次，重试提示 {len(notes)} 条）")
 
-    # ── B. 401 不重试，立即失败 ──
-    calls["n"] = 0
-    def unauthorized(url, **kw):
+
+def test_401_not_retried():
+    cfg = load_config(ROOT)
+    cfg.llm.retries = 2
+    client = LLMClient(cfg.llm)
+    calls = {"n": 0}
+
+    def handler(req):
         calls["n"] += 1
-        return resp(401, "bad key")
-    with patch.object(httpx, "post", unauthorized):
-        try:
-            client.chat_json("t", "s", "u", Out)
-            raise AssertionError("401 应抛错")
-        except LLMError as e:
-            assert "401" in str(e)
-    assert calls["n"] == 1, f"401 不应重试，实际调用 {calls['n']} 次"
-    print("[B] 401 不重试 OK")
+        return _resp(401, "bad key")
 
-    # ── C. 429 两次 → 成功 ──
-    calls["n"] = 0
-    notes.clear()
-    def rate_limited(url, **kw):
+    try:
+        _run(handler, lambda: client.chat_json("t", "s", "u", Out))
+        raise AssertionError("401 应抛错")
+    except LLMError as e:
+        assert "401" in str(e)
+    assert calls["n"] == 1, f"401 不应重试，实际调用 {calls['n']} 次"
+
+
+def test_429_retried():
+    cfg = load_config(ROOT)
+    cfg.llm.retries = 2
+    client = LLMClient(cfg.llm)
+    calls = {"n": 0}
+
+    def handler(req):
         calls["n"] += 1
         if calls["n"] <= 2:
-            return resp(429, "slow down")
-        return resp(200, '{"ok": true}')
-    with patch.object(httpx, "post", rate_limited):
-        out = client.chat_json("t", "s", "u", Out)
+            return _resp(429, "slow down")
+        return _resp(200, '{"ok": true}')
+
+    out = _run(handler, lambda: client.chat_json("t", "s", "u", Out))
     assert out.ok is True and calls["n"] == 3
-    print(f"[C] 429 限流自动重试 OK（共调用 {calls['n']} 次）")
 
-    # ── D. 重试耗尽仍失败 → 报错信息带重试次数 ──
-    def always_down(url, **kw):
-        raise httpx.ConnectError("refused", request=httpx.Request("POST", url))
-    with patch.object(httpx, "post", always_down):
-        try:
-            client.chat_json("t", "s", "u", Out)
-            raise AssertionError("应抛错")
-        except LLMError as e:
-            assert "已重试 3 次" in str(e), str(e)
-    print("[D] 重试耗尽报错 OK")
 
-    # ── E. 设置保存不丢字段：不传 api_key 保持原值，retries/timeout 保留 ──
+def test_retries_exhausted_reports_count():
+    cfg = load_config(ROOT)
+    cfg.llm.retries = 2
+    client = LLMClient(cfg.llm)
+
+    def handler(req):
+        raise httpx.ConnectError("refused", request=req)
+
+    try:
+        _run(handler, lambda: client.chat_json("t", "s", "u", Out))
+        raise AssertionError("应抛错")
+    except LLMError as e:
+        assert "已重试 3 次" in str(e), str(e)
+
+
+def test_streaming_empty_content_gives_actionable_error():
+    """流式分支必须也做空内容诊断。
+
+    修复前 `if on_delta: return self._stream_once(...)` 直接返回，绕过了
+    非流式分支里的那段诊断，而 pipeline 全程都传 on_delta —— 于是
+    「模型返回空内容，请调大 max_tokens」这条提示在真实使用中永远不出现。
+    """
+    cfg = load_config(ROOT)
+    cfg.llm.retries = 0
+    cfg.llm.max_tokens = 1234
+    client = LLMClient(cfg.llm)
+
+    # 只有思考、没有正文：正是推理模型耗尽输出预算时的真实形态
+    sse = (b'data: {"choices":[{"delta":{"reasoning_content":"\\u60f3\\u5f88\\u4e45"}}]}\n\n'
+           b'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n'
+           b"data: [DONE]\n\n")
+
+    def handler(req):
+        return httpx.Response(200, content=iter([sse]),
+                              headers={"content-type": "text/event-stream"})
+
+    seen = []
+    try:
+        _run(handler, lambda: client.chat_json(
+            "t", "s", "u", Out, on_delta=lambda k, t: seen.append((k, t))))
+        raise AssertionError("空内容应抛 EmptyContentError")
+    except EmptyContentError as e:
+        assert "max_tokens" in str(e) and "1234" in str(e), str(e)
+    assert seen and seen[0][0] == "reasoning", seen
+
+
+def test_streaming_content_accumulates_and_excludes_reasoning():
+    cfg = load_config(ROOT)
+    cfg.llm.retries = 0
+    client = LLMClient(cfg.llm)
+    sse = (b'data: {"choices":[{"delta":{"reasoning_content":"\\u60f3"}}]}\n\n'
+           b'data: {"choices":[{"delta":{"content":"{\\"ok\\":"}}]}\n\n'
+           b'data: {"choices":[{"delta":{"content":"true}"}}]}\n\n'
+           b"data: [DONE]\n\n")
+
+    def handler(req):
+        return httpx.Response(200, content=iter([sse]),
+                              headers={"content-type": "text/event-stream"})
+
+    out = _run(handler, lambda: client.chat_json(
+        "t", "s", "u", Out, on_delta=lambda k, t: None))
+    assert out.ok is True
+
+
+def test_config_merge_keeps_untouched_fields():
     tmp = Path(tempfile.mkdtemp(prefix="ts-cfg-"))
     save_config(tmp, {"base_url": "https://x/v4", "api_key": "sk-123",
                       "model": "m1", "retries": 3, "timeout": 240})
-    save_config(tmp, {"base_url": "https://y/v4", "api_key": "", "model": "m2"})  # 不带 key/retries
+    save_config(tmp, {"base_url": "https://y/v4", "api_key": "", "model": "m2"})
     c2 = load_config(tmp)
     assert c2.llm.api_key == "sk-123", f"key 被清空: {c2.llm.api_key}"
     assert c2.llm.retries == 3 and c2.llm.timeout == 240, vars(c2.llm)
     assert c2.llm.model == "m2" and c2.llm.base_url == "https://y/v4"
-    print("[E] 配置合并保存 OK（空 Key 不清空、retries/timeout 保留）")
 
-    print("\n重试与配置测试全部通过 ✅")
-    return 0
+
+def test_broken_config_falls_back_to_defaults():
+    """配置写坏不该让引擎起不来（原来会直接抛异常，界面只剩「无法连接引擎」）。"""
+    tmp = Path(tempfile.mkdtemp(prefix="ts-badcfg-"))
+    (tmp / "config.yaml").write_text("llm: [this is: not a mapping\n", encoding="utf-8")
+    cfg = load_config(tmp)
+    assert cfg.llm.model == "glm-4.7"
+    assert cfg.default_pack == "elevator"
+
+
+def test_env_override_covers_all_fields():
+    """环境变量要能覆盖 retries/timeout/max_tokens（打包版尤其需要）。"""
+    import os
+    tmp = Path(tempfile.mkdtemp(prefix="ts-envcfg-"))
+    keys = ["TALKSCRIPT_API_KEY", "TALKSCRIPT_MODEL", "TALKSCRIPT_RETRIES",
+            "TALKSCRIPT_TIMEOUT", "TALKSCRIPT_MAX_TOKENS", "TALKSCRIPT_TEMPERATURE",
+            "TALKSCRIPT_DEFAULT_PACK", "TALKSCRIPT_MOCK"]
+    old = {k: os.environ.get(k) for k in keys}
+    try:
+        os.environ.update({
+            "TALKSCRIPT_API_KEY": "sk-env", "TALKSCRIPT_MODEL": "env-model",
+            "TALKSCRIPT_RETRIES": "5", "TALKSCRIPT_TIMEOUT": "30",
+            "TALKSCRIPT_MAX_TOKENS": "777", "TALKSCRIPT_TEMPERATURE": "0.1",
+            "TALKSCRIPT_DEFAULT_PACK": "mypack", "TALKSCRIPT_MOCK": "1",
+        })
+        cfg = load_config(tmp)
+        assert cfg.llm.api_key == "sk-env"
+        assert cfg.llm.model == "env-model"
+        assert cfg.llm.retries == 5 and cfg.llm.timeout == 30
+        assert cfg.llm.max_tokens == 777 and cfg.llm.temperature == 0.1
+        assert cfg.default_pack == "mypack" and cfg.mock is True
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def main() -> int:
+    cases = [v for k, v in sorted(globals().items())
+             if k.startswith("test_") and callable(v)]
+    failed = 0
+    for fn in cases:
+        try:
+            fn()
+            print(f"  ✅ {fn.__name__}")
+        except Exception as e:  # noqa: BLE001
+            failed += 1
+            print(f"  ❌ {fn.__name__}: {type(e).__name__}: {e}")
+    print(f"\n{len(cases) - failed}/{len(cases)} 通过")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

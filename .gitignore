@@ -7,6 +7,12 @@ __pycache__/
 # 运行时输出
 generated/
 
+# 「导出为 Agent 技能」的产物目录：**是生成物，不是源码**。
+# 之前被跟踪进仓库，于是它与 packs/elevator 逐渐漂移（skill.yaml 已经不一致），
+# 还带着一份 private/ 目录，和「默认不导出私有资料」的策略相矛盾。
+# 需要时在界面点一次「导出为 Agent 技能」即可重新生成。
+agent-skills/
+
 # Electron 打包产物
 desktop/dist*/
 desktop/dist/
@@ -48,3 +54,5 @@ _verify/_start.bat
 
 # 本地配置：含明文 API Key，绝不入库（模板见 config.example.yaml）
 config.yaml
+# WorkBuddy 会话与记忆数据（非源码，不入库）
+.workbuddy-ai/

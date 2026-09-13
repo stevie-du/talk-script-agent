@@ -7,12 +7,22 @@
 
 支持 mock 模式（TALKSCRIPT_MOCK=1 或 config llm.mock: true），
 无 API Key 也能跑通全流程（返回固定夹具，用于开发与验收）。
+
+两处修复：
+  - **连接复用**：原来每次调用都走 `httpx.post` / `httpx.stream` 顶层函数，
+    每次都新建连接（重新 TCP + TLS 握手）。一次生成 2~4 次调用、外加重试，
+    这部分开销纯属浪费。现在共用一个线程安全的 `httpx.Client`（连接池）。
+  - **流式分支的空内容诊断**：原来 `if on_delta: return self._stream_once(...)`
+    直接返回，绕过了后面那段「模型返回空内容 → 请调大 max_tokens」的诊断，
+    而 pipeline 全程都传 on_delta —— 于是这条最有用的排障提示在真实使用中
+    永远不会出现，用户只会看到误导性的「模型输出无法解析为 ScriptDraft」。
 """
 from __future__ import annotations
 
 import json
 import random
 import re
+import threading
 import time
 
 import httpx
@@ -26,9 +36,49 @@ RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 _JSON_FENCE = re.compile(r"```(?:json)?\s*(.+?)\s*```", re.S)
 
+# 上游响应体回显长度：修复前是 300 字符原样进 error 字段，并落盘进 job.json、
+# 展示在界面上。上游若回显请求上下文，可能把敏感信息一并带出去，收紧到 160。
+ERROR_BODY_CHARS = 160
+
+_client_lock = threading.Lock()
+_client: httpx.Client | None = None
+
+
+def get_client() -> httpx.Client:
+    """进程内共用的 HTTP 客户端（连接池）。
+
+    `httpx.Client` 是线程安全的。刻意不开 `follow_redirects`：
+    跟随跳转会把 `Authorization` 头带到第三方地址上去。
+    """
+    global _client
+    with _client_lock:
+        if _client is None or _client.is_closed:
+            _client = httpx.Client(
+                timeout=httpx.Timeout(180.0, connect=20.0),
+                limits=httpx.Limits(max_connections=8, max_keepalive_connections=4),
+                follow_redirects=False,
+                headers={"User-Agent": "TalkScript/0.2"},
+            )
+        return _client
+
+
+def close_client() -> None:
+    global _client
+    with _client_lock:
+        if _client is not None:
+            try:
+                _client.close()
+            except Exception:                   # noqa: BLE001
+                pass
+            _client = None
+
 
 class LLMError(RuntimeError):
     pass
+
+
+class EmptyContentError(LLMError):
+    """HTTP 200 但 content 为空。单独成类，方便上层识别并给出可操作的提示。"""
 
 
 class RetryableStatus(RuntimeError):
@@ -42,6 +92,11 @@ class RetryableStatus(RuntimeError):
         super().__init__(str(code))
         self.code = code
         self.text = text
+
+
+def _brief(text: str) -> str:
+    """压缩上游响应体：去换行、截断。"""
+    return re.sub(r"\s+", " ", (text or ""))[:ERROR_BODY_CHARS]
 
 
 class LLMClient:
@@ -110,58 +165,70 @@ class LLMClient:
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
         # 输出预算必须显式给足：推理型模型（deepseek 系等）的「思考」token 也计入
-        # 该预算，服务端默认值容易被思考吃光 → content 返回空串（HTTP 仍是 200），
-        # 上层只会看到「模型输出无法解析为 JSON」这种误导性报错。
+        # 该预算，服务端默认值容易被思考吃光 → content 返回空串（HTTP 仍是 200）。
         payload["max_tokens"] = max_tokens or self.cfg.max_tokens
         headers = {"Authorization": f"Bearer {self.cfg.api_key}"}
         attempts = max(1, int(self.cfg.retries) + 1)
+        client = get_client()
         last_err: Exception | None = None
 
         for attempt in range(attempts):
             try:
                 if on_delta:
                     # 流式：边收边把增量交出去；返回值仍是完整正文，调用方无感
-                    return self._stream_once(url, payload, headers, on_delta)
-                resp = httpx.post(url, json=payload, headers=headers, timeout=self.cfg.timeout)
+                    content = self._stream_once(client, url, payload, headers, on_delta)
+                    return self._ensure_content(content, None, streamed=True)
+                resp = client.post(url, json=payload, headers=headers, timeout=self.cfg.timeout)
             except RetryableStatus as e:             # 流式分支里的 429/5xx
                 last_err = e
                 if attempt + 1 < attempts:
                     self._notify(on_retry, f"接口返回 {e.code}", attempt + 1, attempts)
                     time.sleep(self._backoff(attempt))
                     continue
-                raise LLMError(f"模型接口返回 {e.code}: {e.text}") from e
+                raise LLMError(f"模型接口返回 {e.code}: {_brief(e.text)}") from e
             except httpx.RequestError as e:          # 超时 / 连接失败 / 网络中断
                 last_err = e
                 if attempt + 1 < attempts:
                     self._notify(on_retry, f"网络异常（{type(e).__name__}）", attempt + 1, attempts)
                     time.sleep(self._backoff(attempt))
                     continue
-                raise LLMError(f"模型接口连接失败（已重试 {attempts} 次）：{e}") from e
+                raise LLMError(f"模型接口连接失败（已重试 {attempts} 次）："
+                               f"{type(e).__name__}: {_brief(str(e))}") from e
 
             if resp.status_code in RETRYABLE_STATUS and attempt + 1 < attempts:
                 self._notify(on_retry, f"接口返回 {resp.status_code}", attempt + 1, attempts)
                 time.sleep(self._backoff(attempt))
                 continue
             if resp.status_code >= 400:
-                raise LLMError(f"模型接口返回 {resp.status_code}: {resp.text[:300]}")
+                raise LLMError(f"模型接口返回 {resp.status_code}: {_brief(resp.text)}")
 
             try:
                 data = resp.json()
                 content = data["choices"][0]["message"]["content"]
             except (KeyError, IndexError, ValueError) as e:
-                raise LLMError(f"模型接口返回结构异常: {str(resp.text)[:300]}") from e
-            if not (content or "").strip():
-                finish = (data.get("choices") or [{}])[0].get("finish_reason")
-                raise LLMError(
-                    f"模型返回了空内容（HTTP 200，但 content 为空，finish_reason={finish}）。"
-                    "通常原因：输出预算被推理模型的思考 token 用尽。"
-                    f"请调大 config.yaml 里的 llm.max_tokens（当前 {self.cfg.max_tokens}），"
-                    "或改用非推理模型。")
+                raise LLMError(f"模型接口返回结构异常: {_brief(resp.text)}") from e
+            finish = ((data.get("choices") or [{}])[0] or {}).get("finish_reason")
+            return self._ensure_content(content, finish)
+
+        raise LLMError(f"模型接口连续失败（已重试 {attempts} 次）：{_brief(str(last_err))}")
+
+    def _ensure_content(self, content: str, finish, *, streamed: bool = False) -> str:
+        """空内容统一在这里报错。
+
+        修复前只有非流式分支做这个检查，而 pipeline 全程走流式 ——
+        等于这条诊断永远不触发。
+        """
+        if (content or "").strip():
             return content
+        raise EmptyContentError(
+            f"模型返回了空内容（HTTP 200，但 content 为空{'' if finish is None else f'，finish_reason={finish}'}）。"
+            "通常原因：输出预算被推理模型的思考 token 用尽。"
+            f"请调大 config.yaml 里的 llm.max_tokens（当前 {self.cfg.max_tokens}），"
+            "或改用非推理模型。"
+            + ("（本次为流式请求：思考内容已收到，但正文为空。）" if streamed else ""))
 
-        raise LLMError(f"模型接口连续失败（已重试 {attempts} 次）：{last_err}")
-
-    def _stream_once(self, url: str, payload: dict, headers: dict, on_delta) -> str:
+    def _stream_once(self, client: httpx.Client, url: str, payload: dict,
+                     headers: dict, on_delta) -> str:
         """流式请求一次：逐块解析 SSE，把增量交给 on_delta，返回拼接好的正文。
 
         推理型模型在 delta 里分两条通道推送：reasoning_content（思考过程）与
@@ -170,14 +237,14 @@ class LLMClient:
         """
         body = {**payload, "stream": True}
         parts: list[str] = []
-        with httpx.stream("POST", url, json=body, headers=headers,
-                          timeout=self.cfg.timeout) as resp:
+        with client.stream("POST", url, json=body, headers=headers,
+                           timeout=self.cfg.timeout) as resp:
             if resp.status_code in RETRYABLE_STATUS:
                 resp.read()
                 raise RetryableStatus(resp.status_code, resp.text[:300])
             if resp.status_code >= 400:
                 resp.read()
-                raise LLMError(f"模型接口返回 {resp.status_code}: {resp.text[:300]}")
+                raise LLMError(f"模型接口返回 {resp.status_code}: {_brief(resp.text)}")
             for line in resp.iter_lines():
                 if not line:
                     continue
@@ -211,7 +278,7 @@ class LLMClient:
         if on_retry:
             try:
                 on_retry(note, attempt, total)
-            except Exception:
+            except Exception:                   # noqa: BLE001
                 pass
 
 

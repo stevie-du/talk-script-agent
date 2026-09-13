@@ -1,40 +1,41 @@
 # -*- coding: utf-8 -*-
-"""Pydantic 数据模型：请求 / 节点产物 / 校验报告 / 最终输出"""
+"""Pydantic 数据模型：请求 / 节点产物 / 校验报告 / 最终输出
+
+边界校验的意义（修复前完全没有）：
+  - `duration` 无上界 → 实测传 100000 也能受理，配额被线性外推到 14076 字；
+    传 0 甚至算出**负配额**（total=-4）。
+  - `topic` 无上界 → 20 万字符照样进提示词，token 成本由客户端决定。
+  - `facts` 无上界 → 同上，且它是直接拼进 user prompt 的。
+"""
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, field_validator
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+# 时长上下限：低于下限配额会退化成 0，高于上限没有实际业务意义（口播短视频）
+DURATION_MIN = 5.0
+DURATION_MAX = 600.0
+TOPIC_MAX = 200
+FACTS_MAX = 20000
 
 
 class GenerateRequest(BaseModel):
-    pack: str = "elevator"
-    topic: str = Field(min_length=2, description="主题")
-    segment: str | None = None
-    audience: str | None = None
-    duration: float | None = None
-    style: str | None = None
-    platform: str | None = None
-    persona: str | None = None
-    cta: str | None = None
-    facts: str | None = None          # 用户提供的产品手册/数据/案例
-    mode: str = "auto"                # auto=一键直通 / step=分步确认
-    rate: float | None = None         # 覆盖语速
-    voice: str = "strong"             # 人味档位：strong=加强 / standard=仅去AI腔 / off=关闭
-    format: str = "both"              # 输出内容：both=口播+分镜 / voice=仅口播
-    reroll: bool = False              # 「换一版」：同参数重掷，略提温度换取不同表达
-
-    @field_validator("voice")
-    @classmethod
-    def _valid_voice(cls, v: str) -> str:
-        if v not in ("strong", "standard", "off"):
-            raise ValueError("voice 必须是 strong/standard/off")
-        return v
-
-    @field_validator("format")
-    @classmethod
-    def _valid_format(cls, v: str) -> str:
-        if v not in ("both", "voice"):
-            raise ValueError("format 必须是 both/voice")
-        return v
+    pack: str = Field(default="elevator", max_length=64)
+    topic: str = Field(min_length=2, max_length=TOPIC_MAX, description="主题")
+    segment: str | None = Field(default=None, max_length=64)
+    audience: str | None = Field(default=None, max_length=64)
+    duration: float | None = Field(default=None, ge=DURATION_MIN, le=DURATION_MAX)
+    style: str | None = Field(default=None, max_length=64)
+    platform: str | None = Field(default=None, max_length=32)
+    persona: str | None = Field(default=None, max_length=64)
+    cta: str | None = Field(default=None, max_length=32)
+    facts: str | None = Field(default=None, max_length=FACTS_MAX)  # 产品手册/数据/案例
+    mode: Literal["auto", "step"] = "auto"      # auto=一键直通 / step=分步确认
+    rate: float | None = Field(default=None, gt=0, le=20)          # 覆盖语速
+    voice: Literal["strong", "standard", "off"] = "strong"         # 人味档位
+    format: Literal["both", "voice"] = "both"   # 输出内容：both=口播+分镜 / voice=仅口播
+    reroll: bool = False                        # 「换一版」：同参数重掷，略提温度
 
 
 class ConfirmRequest(BaseModel):
@@ -42,13 +43,14 @@ class ConfirmRequest(BaseModel):
 
 
 class RewriteSegmentRequest(BaseModel):
-    index: int
-    feedback: str | None = None
+    index: int = Field(ge=0, le=64)
+    feedback: str | None = Field(default=None, max_length=2000)
 
 
 class PackCreateRequest(BaseModel):
-    industry: str = Field(min_length=2, description="行业名，如：全屋定制/装修")
-    description: str = Field(min_length=4, description="一句话业务描述，如：全屋定制家居品牌，面向新房装修业主获客")
+    industry: str = Field(min_length=2, max_length=40, description="行业名，如：全屋定制/装修")
+    description: str = Field(min_length=4, max_length=500,
+                             description="一句话业务描述，如：全屋定制家居品牌，面向新房装修业主获客")
 
 
 # ── 节点产物 ────────────────────────────────────────────────
@@ -62,16 +64,9 @@ class TopicPlan(BaseModel):
 
 
 class ScriptSection(BaseModel):
-    type: str                         # hook / point / cta
+    type: Literal["hook", "point", "cta"]
     text: str
     subtitle: str = ""                # 字幕关键词 ≤12 字
-
-    @field_validator("type")
-    @classmethod
-    def _valid_type(cls, v: str) -> str:
-        if v not in ("hook", "point", "cta"):
-            raise ValueError("type 必须是 hook/point/cta")
-        return v
 
 
 class StoryboardShot(BaseModel):
@@ -85,19 +80,12 @@ class StoryboardShot(BaseModel):
 
 # ── 场景序列契约（Scene[]）─────────────────────────────────
 # 统一产物模型：口播 = 旁白投影 · 分镜 = 表格投影 · 视频 = 连续投影
-# 约定见 docs/场景序列契约.md；先与 sections/storyboard/timings 并行输出，逐步迁移
+# 约定见 docs/场景序列契约.md
 
 class SceneVisual(BaseModel):
     prompt: str = ""                  # 画面描述 → 素材生成提示词 / 素材库检索 key
-    source: str = "generated"         # generated / stock / user
+    source: Literal["generated", "stock", "user"] = "generated"
     transition: str = "cut"           # cut / dissolve / fade
-
-    @field_validator("source")
-    @classmethod
-    def _valid_source(cls, v: str) -> str:
-        if v not in ("generated", "stock", "user"):
-            raise ValueError("source 必须是 generated/stock/user")
-        return v
 
 
 class SceneAudio(BaseModel):
@@ -119,6 +107,9 @@ class SceneItem(BaseModel):
 
 
 class ScriptResult(BaseModel):
+    """最终产物。修复前这个模型定义了却从未被实例化 —— `_finalize` 手搓 dict，
+    文档里的「场景序列契约」没有任何代码强制，字段漂移无人发现。
+    现在在落盘前用 `model_validate` 卡一道。"""
     id: str
     created_at: str
     pack: str

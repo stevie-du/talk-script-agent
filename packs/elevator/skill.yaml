@@ -6,7 +6,12 @@
 # 可用占位符：
 #   公共   $industry $topic $segment $audience $platform $style $persona $duration $points $rate
 #   配额   $quota_total $quota_hook $quota_body_per $quota_cta
-#   选题   $topics_slice(按细分切片) $audience_slice(按受众切片) $hooks(stages.select.files.hooks 文件内容)
+#   选题   $topics_slice(按细分切片) $audience_slice(按受众切片)
+#   文件   stages.<阶段>.files 里声明的每个 key，都对应一个同名占位符：
+#          select.files.hooks → $hooks ；write.files.growth → $growth
+#          （**必须同名**。曾经这里写成 $growth_block 而 files 的 key 是 growth，
+#            结果 growth.md 从来没被注入过，模型还收到一个字面量 "$growth_block"。
+#            引擎现在会检查未填充的占位符并记进作业日志。）
 #   撰写   $plan_json $facts_block(用户补充+私有资料) $voice_block(按人味档位组成) $feedback_block(回炉反馈)
 #   重写段 $context $seg_type $seg_text $seg_quota $seg_feedback
 #
@@ -75,7 +80,7 @@ stages:
       【平台】$platform　【风格】$style　【人设】$persona
       【字数配额（硬性）】总计≈$quota_total 字：开场钩子≈$quota_hook 字；正文 $points 个要点、每个≈$quota_body_per 字；结尾引导≈$quota_cta 字
       $facts_block
-      $growth_block
+      $growth
       $voice_block
       【输出结构】JSON：
       {

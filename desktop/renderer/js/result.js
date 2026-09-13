@@ -1,0 +1,412 @@
+// 结果渲染：指标速览 / 分段卡片 / 分镜 / 合规 / JSON / 日志 / 后续建议。
+//
+// 三处对齐成熟 agent 的做法：
+//  · 结构化输出当卡片看（Perplexity / Linear 的做法）——分段卡片保留，但每段的
+//    字数与配额**一律用后端算好的值**，不再在前端重算。
+//  · 决策可解释（Claude 的「Why this recommendation?」）——回炉原因、命中词、
+//    单字词被忽略等都以可展开块呈现，而不是一句「未通过校验」。
+//  · 后续建议（Perplexity 的 Related）——给 3 个可点的下一步，点了只**预填参数**、
+//    不自动提交，用户可以改完再发。
+//
+// 修复前最要命的两个问题：
+//  1. 前端 countCN 与后端 count_chars 是两份实现，同一句话差 5~7 字，
+//     于是卡片上的「N/配额 字」和顶部「字数」永远对不上，卡片会莫名标红。
+//  2. 导出 SRT / MD 从不 revokeObjectURL，每导出一次泄漏一个 Blob。
+
+import { $, el, esc, fmtText, sec, copyText, download, toast } from "./util.js";
+import { api } from "./api.js";
+import { state } from "./store.js";
+
+export const TYPE_LABEL = { hook: "开场钩子", point: "要点", cta: "结尾引导" };
+
+const ICONS = {
+  sb: `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="14" rx="2.2"/><path d="M3 9h18M8 18v2.5M16 18v2.5"/></svg>`,
+  shield: `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 3v5.5c0 4.3-2.9 7.7-7 9.5-4.1-1.8-7-5.2-7-9.5V6z"/><path d="M9 12l2 2 4-4"/></svg>`,
+  code: `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 7l-5 5 5 5M15 7l5 5-5 5"/></svg>`,
+  log: `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4h9l5 5v11a1 1 0 01-1 1H5a1 1 0 01-1-1V5a1 1 0 011-1z"/><path d="M14 4v5h5M8 13h8M8 17h5"/></svg>`,
+};
+
+export function nPoints(r) {
+  return Math.max((r.sections || []).filter(s => s.type === "point").length, 1);
+}
+
+/** 该段在后端的字数 / 配额。后端没给就退回空串——**绝不**在前端重算，
+ *  否则又会和 checker 的口径分叉。 */
+function segChars(r, i) {
+  const seg = (r.check?.segments || [])[i];
+  return seg && typeof seg.chars === "number" ? seg : null;
+}
+
+export function setHead(title, sub, stateText, cls) {
+  $("rh-title").textContent = title || "新对话";
+  $("rh-sub").textContent = sub || "";
+  const st = $("rh-state");
+  st.textContent = stateText || "";
+  st.className = "rh-state" + (cls ? " " + cls : "");
+}
+
+// ── 主入口 ──────────────────────────────────────────────────
+/** opts: { rwOk, onRewrite, onRerun, onRevary, onEdit, jumpToPlaceholder } */
+export function renderResult(r, body, opts = {}) {
+  body.innerHTML = "";
+  const ch = r.check || {};
+  const dev = ch.deviation_pct ?? 0;
+  const hardN = (ch.hard_hits || []).reduce((a, h) => a + h.count, 0);
+  const passed = ch.passed ?? true;
+
+  setHead(
+    r.params?.topic || "生成结果",
+    `${r.pack || ""} · ${r.params?.duration ?? "-"}s · ${r.params?.platform || ""}`,
+    passed && hardN === 0 ? "✓ 合格" : `✗ ${hardN ? hardN + " 处硬伤" : "需人工确认"}`,
+    passed && hardN === 0 ? "ok" : "bad"
+  );
+
+  body.appendChild(renderHeader(r, ch, dev, hardN, opts));
+  const banners = renderBanners(r, ch, opts);
+  if (banners) body.appendChild(banners);
+  body.appendChild(renderSections(r, opts));
+  body.appendChild(renderAccordions(r, ch, hardN));
+  body.appendChild(renderFollowups(r, opts));
+  bindActions(body, r, opts);
+}
+
+// ── 1) 头部：主题 + 指标 + 操作 ─────────────────────────────
+function renderHeader(r, ch, dev, hardN, opts) {
+  const head = el("div", "res-head");
+  head.innerHTML = `
+    <div class="res-top">
+      <div class="res-title">${esc(r.params?.topic || "")}</div>
+      <div class="res-tools">
+        <button class="ghost" data-act="copy-voice" title="复制口播文案">复制口播</button>
+        <button class="ghost" data-act="save-srt" title="导出 SRT 字幕（可直接导入剪映 / PR）">导出 SRT</button>
+        <button class="ghost" data-act="save-md" title="另存为 Markdown 文件">另存 MD</button>
+        <button class="ghost" data-act="reveal" title="在文件管理器中打开产物目录">打开文件夹</button>
+        <button class="ghost" data-act="copy-json" title="复制结构化 JSON">JSON</button>
+        <button class="ghost" data-act="rerun" title="用当前参数重新生成（结果基本一致）">重跑</button>
+        <button class="ghost" data-act="revary" title="同主题同参数重掷一次，换一种表达，保留本次为上一个版本">换一版</button>
+      </div>
+    </div>
+    <div class="res-metric-list">
+      <span class="m-chip">${ch.chars_total ?? "-"}/${ch.target_total ?? "-"} 字</span>
+      <span class="m-chip">预计 ${ch.estimated_seconds ?? "-"}s / 目标 ${ch.duration_target ?? "-"}s</span>
+      <span class="m-chip ${Math.abs(dev) <= 10 ? "good" : "bad"}">偏差 ${dev > 0 ? "+" : ""}${dev}%</span>
+      <span class="m-chip ${hardN === 0 ? "good" : "bad"}">禁用词 ${hardN} 硬 · ${(ch.soft_hits || []).length} 待确认</span>
+    </div>`;
+  return head;
+}
+
+// ── 2) 横幅（含「为什么回炉」的可展开解释）──────────────────
+function renderBanners(r, ch, opts) {
+  const items = [];
+  const revs = (r.revisions || []).filter(v => v.action === "全文回炉");
+  if (revs.length) {
+    const why = [...new Set(revs.map(v => (v.report?.blockers || []).join("、")).filter(Boolean))]
+      .join("；") || "未通过校验";
+    const detail = revs.map(v => {
+      const rep = v.report || {};
+      const hard = (rep.hard_hits || []).map(h => `${h.word}×${h.count}`).join("、");
+      return `第 ${v.round} 轮：偏差 ${rep.deviation_pct}%`
+        + (hard ? `，命中 ${hard}` : "")
+        + (rep.chars_total ? `，${rep.chars_total} 字` : "");
+    }).join("\n");
+    items.push(`<details class="banner info why">
+        <summary>首轮${esc(why)}，已自动回炉 ${revs.length} 轮${ch.passed ? "并修正为合格版本" : "后仍未达标"} —— 为什么？</summary>
+        <pre class="why-body">${esc(detail)}</pre>
+      </details>`);
+  }
+  if (!(ch.passed ?? true)) {
+    items.push(`<div class="banner warn">⛔ ${esc((ch.blockers || []).join("；"))}——已达回炉上限，可点「重跑」或按下方建议调整参数</div>`);
+  }
+  if ((r.placeholders || []).length) {
+    items.push(`<div class="banner warn jumpable" data-jump="placeholder">⚠ 含 ${r.placeholders.length} 处占位事实：${r.placeholders.map(esc).join("、")}——点击定位首处，补充后再发布</div>`);
+  }
+  if ((ch.soft_hits || []).length) {
+    items.push(`<div class="banner info">待确认 ${ch.soft_hits.length} 词：${ch.soft_hits.map(h => esc(h.word) + "×" + h.count).join("、")}（语境正常即可放行）</div>`);
+  }
+  if ((ch.dropped_short || []).length) {
+    items.push(`<details class="banner info"><summary>有 ${ch.dropped_short.length} 个单字禁用词被忽略（${ch.dropped_short.map(esc).join("、")}）—— 为什么？</summary>
+        <pre class="why-body">单字词会命中「最${""}近」「第一${""}次」这类正常用词，噪声大于收益，因此不下发匹配。
+若要拦绝对化表述，请在 banwords.yaml 里写具体短语（如「最低价」「最便宜」）。</pre></details>`);
+  }
+  if (r.pack_draft) {
+    items.push(`<div class="banner warn">⚠ 本结果来自草稿行业包，内容需人工校对</div>`);
+  }
+  if (!items.length) return null;
+  const wrap = el("div", "res-banners");
+  wrap.innerHTML = items.join("");
+  const jp = wrap.querySelector('[data-jump="placeholder"]');
+  if (jp) jp.onclick = () => opts.jumpToPlaceholder?.();
+  return wrap;
+}
+
+// ── 3) 分段卡片 ─────────────────────────────────────────────
+function renderSections(r, opts) {
+  const segs = el("div", "script-list");
+  let pi = 0;
+  (r.sections || []).forEach((s, i) => {
+    const label = s.type === "point" ? `要点${++pi}` : TYPE_LABEL[s.type];
+    const tm = (r.timings || [])[i];
+    const info = segChars(r, i);
+    const over = !!(info && info.quota && info.chars > info.quota * 1.3);
+    const card = el("div", `script-card ${s.type}${over ? " over-quota" : ""}`);
+    card.style.setProperty("--i", i);
+    const quota = info
+      ? `<span class="quota ${over ? "over" : ""}"
+             title="${over ? "超过配额 30% 以上，建议压缩" : "后端统计字数 / 该段配额"}">${info.chars}${info.quota ? "/" + info.quota : ""} 字</span>`
+      : "";
+    card.innerHTML = `
+      <div class="card-head">
+        <span class="pill ${s.type}">${esc(label)}</span>
+        ${quota}
+        <span class="meta">${tm ? sec(tm.start) + "–" + sec(tm.end) : ""}${tm ? " · " : ""}字幕：${esc(s.subtitle || "—")}</span>
+      </div>
+      <div class="card-text">${fmtText(s.text)}</div>
+      <div class="card-foot">
+        <button class="ghost rw"${opts.rwOk ? "" : " disabled"} title="${opts.rwOk
+          ? "单段重写：只改这一段并重跑校验，不整篇回炉"
+          : "历史记录不可局部重写（后台作业已释放），可用「换一版」整体重生成"}">✎ 重写本段</button>
+        <input class="rw-feedback" placeholder="给这段的修改意见（可选），回车提交">
+      </div>`;
+    const input = card.querySelector(".rw-feedback");
+    const rwBtn = card.querySelector(".rw");
+    rwBtn.onclick = () => {
+      if (!opts.rwOk) return;
+      const foot = card.querySelector(".card-foot");
+      foot.classList.toggle("editing");
+      if (foot.classList.contains("editing")) input.focus();
+    };
+    input.addEventListener("keydown", ev => {
+      if (ev.key === "Enter" && !ev.shiftKey) {
+        ev.preventDefault();
+        if (!opts.rwOk) { toast("历史记录不支持单段重写，请用「换一版」"); return; }
+        opts.onRewrite?.(i, input.value.trim());
+      }
+    });
+    segs.appendChild(card);
+  });
+  return segs;
+}
+
+// ── 4) 折叠块 ───────────────────────────────────────────────
+function renderAccordions(r, ch, hardN) {
+  const acc = (title, contentHtml, open, badgeHtml = "", icon = "", cls = "") => {
+    const d = el("details", "acc" + (open ? " open" : "") + (cls ? " " + cls : ""));
+    d.innerHTML = `<summary>${icon ? `<span class="acc-ic">${icon}</span>` : ""}
+      <span class="acc-t">${esc(title)}</span>${badgeHtml}</summary>`;
+    const inner = el("div", "acc-body");
+    inner.innerHTML = contentHtml;
+    d.appendChild(inner);
+    return d;
+  };
+  const badge = (text, cls) => `<span class="acc-badge ${cls}">${text}</span>`;
+  const complyOk = (ch.passed ?? true) && hardN === 0;
+  const wrap = el("div", "acc-list");
+  if ((r.storyboard || []).length) {
+    wrap.appendChild(acc("分镜", renderStoryboard(r), true,
+      badge(`${r.storyboard.length} 镜`, "info"), ICONS.sb));
+  }
+  wrap.appendChild(acc("合规检查", renderCompliance(r), !complyOk,
+    badge(complyOk ? "✓ 通过" : `✗ ${hardN ? hardN + " 处硬伤" : "未通过"}`,
+      complyOk ? "ok" : "bad"), ICONS.shield, complyOk ? "ok" : "bad"));
+  wrap.appendChild(acc("JSON", `<pre class="code">${esc(JSON.stringify(r, null, 2))}</pre>`,
+    false, "", ICONS.code));
+  wrap.appendChild(acc("日志", renderLogs(r.logs || []), false,
+    badge(`${(r.logs || []).length} 条`, "info"), ICONS.log));
+  return wrap;
+}
+
+// ── 5) 后续建议（点了只预填，不自动提交）────────────────────
+function renderFollowups(r, opts) {
+  const chips = [];
+  const dur = Number(r.params?.duration) || 60;
+  if (dur > 30) chips.push({ label: `压缩到 30s`, act: "duration", value: 30 });
+  if (dur < 90) chips.push({ label: `扩到 90s`, act: "duration", value: 90 });
+  const platforms = opts.platforms || [];
+  const other = platforms.find(p => p !== r.params?.platform);
+  if (other) chips.push({ label: `换平台：${other}`, act: "platform", value: other });
+  const audiences = opts.audiences || [];
+  const otherAud = audiences.find(a => a !== r.params?.audience);
+  if (otherAud) chips.push({ label: `换个受众：${otherAud}`, act: "audience", value: otherAud });
+  const points = (r.sections || []).map((s, i) => ({ s, i })).filter(x => x.s.type === "point");
+  if (points.length && opts.rwOk) {
+    chips.push({ label: `重写「要点1」`, act: "rewrite", value: points[0].i });
+  }
+  if (!chips.length) return el("div", "followups hidden");
+  const box = el("div", "followups");
+  box.innerHTML = `<span class="fu-label">下一步</span>` +
+    chips.slice(0, 4).map((c, i) =>
+      `<button class="fu-chip" data-i="${i}">${esc(c.label)}</button>`).join("");
+  box.querySelectorAll(".fu-chip").forEach(b => {
+    b.onclick = () => {
+      const c = chips[Number(b.dataset.i)];
+      if (c.act === "rewrite") {
+        const card = box.parentElement.querySelectorAll(".script-card .rw-feedback")[0];
+        card?.closest(".card-foot")?.classList.add("editing");
+        card?.focus();
+        return;
+      }
+      opts.onPrefill?.(c.act, c.value);
+    };
+  });
+  return box;
+}
+
+// ── 子渲染 ──────────────────────────────────────────────────
+export function renderStoryboard(r) {
+  if (!(r.storyboard || []).length) {
+    return `<p class="hint">本次未生成分镜（输出内容选择了「仅口播」）。</p>`;
+  }
+  const rows = r.storyboard.map((sh, i) => {
+    const tm = (r.timings || [])[i];
+    const vo = sh.voiceover || r.sections?.[i]?.text || "";
+    return `<tr>
+      <td>${esc(sh.time || (tm ? `${tm.start}-${tm.end}s` : ""))}</td>
+      <td>${esc(sh.shot || "")}</td><td>${esc(vo)}</td>
+      <td>${esc(sh.subtitle || "")}</td><td>${esc(sh.sfx || "")}</td>
+      <td>${esc(sh.note || "")}</td></tr>`;
+  }).join("");
+  return `<div class="tbl-wrap"><table>
+    <thead><tr><th style="width:86px">时间</th><th>画面/景别</th><th>口播</th>
+    <th>字幕</th><th>音效/BGM</th><th>拍摄提示</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>`;
+}
+
+export function renderCompliance(r) {
+  const ch = r.check || {};
+  const hardN = (ch.hard_hits || []).reduce((a, h) => a + h.count, 0);
+  const dev = ch.deviation_pct ?? 0;
+  const rows = [
+    ["硬禁用词（必改）", hardN === 0 ? `<span class="ok">✅ 无</span>`
+      : `<span class="bad">${(ch.hard_hits || []).map(h => `${esc(h.word)}×${h.count}`).join("、")}</span>`],
+    ["待确认（语境相关）", (ch.soft_hits || []).length
+      ? ch.soft_hits.map(h => `${esc(h.word)}×${h.count}`).join("、") : `<span class="ok">✅ 无</span>`],
+    ["字数与时长", `${ch.chars_total ?? "-"}/${ch.target_total ?? "-"} 字 · 偏差 ${dev > 0 ? "+" : ""}${dev}% → `
+      + (ch.passed ? `<span class="ok">✅ 合格</span>`
+        : `<span class="bad">❌ ${esc((ch.blockers || []).join("；"))}</span>`)],
+    ["占位事实", (r.placeholders || []).length
+      ? `⚠ ${r.placeholders.map(esc).join("、")}` : `<span class="ok">✅ 无</span>`],
+    ["回炉/重写记录", (r.revisions || []).length
+      ? r.revisions.map((v, i) => `第${i + 1}次：${esc(v.action || v.feedback || "单段重写")}`).join("；")
+      : "无"],
+    ["行业包状态", r.pack_draft ? `⚠ 草稿包，内容需人工校对` : `<span class="ok">✅ 精修包</span>`],
+  ];
+  return `<div class="tbl-wrap"><table>
+    <thead><tr><th style="width:160px">检查项</th><th>结果</th></tr></thead>
+    <tbody>${rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("")}</tbody></table></div>`;
+}
+
+export function renderLogs(logs) {
+  if (!logs?.length) return `<p class="hint">暂无日志</p>`;
+  return logs.map(s =>
+    `<details class="log-block"><summary>${esc(s.ts || "")} · ${esc(s.title)}</summary>
+      <pre>${esc(JSON.stringify(s.data, null, 1))}</pre></details>`).join("");
+}
+
+// ── 失败 / 停止态：给可操作的动作，而不是一句话 ─────────────
+export function renderFailure(body, { title, message, detail, retryLabel = "重试" }, opts = {}) {
+  body.innerHTML = `
+    <div class="banner warn"><b>${esc(title)}</b><br>${esc(message)}</div>
+    ${detail ? `<details class="banner info"><summary>技术细节</summary>
+      <pre class="why-body">${esc(detail)}</pre></details>` : ""}
+    <div class="fail-actions">
+      <button class="ghost" data-act="retry">${esc(retryLabel)}</button>
+      <button class="ghost" data-act="settings">检查模型设置</button>
+      <button class="ghost" data-act="copy-err">复制错误</button>
+    </div>`;
+  const q = s => body.querySelector(s);
+  q('[data-act="retry"]').onclick = () => opts.onRetry?.();
+  q('[data-act="settings"]').onclick = () => opts.onOpenSettings?.();
+  q('[data-act="copy-err"]').onclick = () => copyText(`${title}\n${message}`, "错误信息已复制");
+}
+
+export function renderStopped(body, opts = {}) {
+  body.innerHTML = `
+    <div class="banner info">已停止本次生成。已产生的 token 不会退回，产物未落盘。</div>
+    <div class="fail-actions">
+      <button class="ghost" data-act="retry">用同样的参数再来一次</button>
+      <button class="ghost" data-act="revary">换个表达重掷</button>
+    </div>`;
+  body.querySelector('[data-act="retry"]').onclick = () => opts.onRetry?.();
+  body.querySelector('[data-act="revary"]').onclick = () => opts.onRevary?.();
+}
+
+// ── 操作绑定 ────────────────────────────────────────────────
+function bindActions(body, r, opts) {
+  const q = s => body.querySelector(s);
+  const on = (sel, fn) => { const n = q(sel); if (n) n.onclick = fn; };
+
+  on('[data-act="copy-voice"]', () =>
+    copyText(r.sections.map(s => s.text).join("\n\n"), "口播已复制"));
+
+  on('[data-act="save-srt"]', () => {
+    download(`字幕_${(r.params?.topic || "").slice(0, 12)}.srt`, resultSrt(r));
+    toast("SRT 字幕已导出");
+  });
+
+  on('[data-act="save-md"]', () => {
+    download(`口播脚本_${(r.params?.topic || "").slice(0, 12)}.md`,
+      resultMarkdown(r), "text/markdown");
+    toast("Markdown 已导出");
+  });
+
+  on('[data-act="reveal"]', async () => {
+    try { await api.reveal(r.id); toast("已打开产物目录"); }
+    catch (e) { toast("打开失败：" + e.message, 3500); }
+  });
+
+  on('[data-act="copy-json"]', () => copyText(JSON.stringify(r, null, 2), "JSON 已复制"));
+  on('[data-act="rerun"]', () => opts.onRerun?.());
+  on('[data-act="revary"]', () => opts.onRevary?.());
+}
+
+// ── 导出格式 ────────────────────────────────────────────────
+export function resultMarkdown(r) {
+  const p = r.params || {};
+  const lines = [`# 口播脚本：${p.topic}`, "",
+    `- ${p.duration}s / ${p.platform} / ${p.style} / ${p.persona}（${r.pack}）`, "",
+    "## 口播文案", ""];
+  let pi = 0;
+  (r.sections || []).forEach((s, i) => {
+    const tm = r.timings?.[i];
+    const label = s.type === "point" ? `要点${++pi}` : TYPE_LABEL[s.type];
+    lines.push(`**【${label}】** ${tm ? `${tm.start}-${tm.end}秒` : ""}`);
+    lines.push(s.text, "");
+  });
+  const ch = r.check || {};
+  lines.push("---",
+    `字数 ${ch.chars_total}/${ch.target_total} 字 · 预估 ${ch.estimated_seconds}s · `
+    + `偏差 ${ch.deviation_pct}% · ${ch.passed ? "合格" : (ch.blockers || []).join("；")}`);
+  if (r.placeholders?.length) lines.push("", `> 占位事实：${r.placeholders.join("、")}`);
+  return lines.join("\n");
+}
+
+/** SRT：时间轴取 timings，文本优先用字幕关键词，缺则截取口播首句。 */
+export function resultSrt(r) {
+  const ts = t => {
+    const ms = Math.max(0, Math.round((t || 0) * 1000));
+    const pad = (n, w) => String(n).padStart(w, "0");
+    return `${pad(Math.floor(ms / 3600000), 2)}:${pad(Math.floor(ms / 60000) % 60, 2)}`
+      + `:${pad(Math.floor(ms / 1000) % 60, 2)},${pad(ms % 1000, 3)}`;
+  };
+  const clean = s => String(s).replace(/\*\*/g, "").replace(/／/g, " ")
+    .replace(/\{\{[^}]*\}\}/g, "").replace(/\s+/g, " ").trim();
+  const lines = [];
+  let n = 0;
+  (r.sections || []).forEach((s, i) => {
+    const tm = (r.timings || [])[i] || { start: 0, end: 0 };
+    const text = clean(s.subtitle || "") || clean(s.text || "").slice(0, 16);
+    if (!text) return;
+    n += 1;
+    lines.push(String(n), `${ts(tm.start)} --> ${ts(tm.end)}`, text, "");
+  });
+  return lines.join("\r\n");
+}
+
+export function jumpToFirstPlaceholder(body) {
+  const hit = body.querySelector(".script-card .over");
+  if (!hit) { toast("未找到占位事实"); return; }
+  hit.scrollIntoView({ behavior: "smooth", block: "center" });
+  hit.classList.remove("flash");
+  void hit.offsetWidth;
+  hit.classList.add("flash");
+}

@@ -9,6 +9,13 @@ SKILL.md 由包的 pack.yaml + skill.yaml 自动组装：
   - 参数表来自 pack.yaml
   - 知识/合规/方法/规则文件原样复制
 tools/check.py 为引擎校验器的独立副本（默认 pack 目录 = 技能根目录）。
+
+两处修复：
+  1. **默认不再导出 `private/`**。私有资料是产品型号、服务承诺、案例、异议应答，
+     属于商业信息。原来一律复制出去，只在返回的提示里写「分享时自己删」——
+     用户直接打包分享就等于把商业资料外发。现在默认排除，要带得显式开。
+  2. 校验器补丁从「字符串包含 + replace」改为**带锚点的版本化替换**，
+     结构变化时给出明确的重跑指引，而不是一句泛泛的「结构变化」。
 """
 from __future__ import annotations
 
@@ -20,11 +27,19 @@ import yaml
 
 from .knowledge import Pack
 
-COPY_DIRS = ["knowledge", "patterns", "rules", "compliance", "private"]
+# 公共目录（不含 private）
+COPY_DIRS = ["knowledge", "patterns", "rules", "compliance"]
+PRIVATE_DIR = "private"
 COPY_FILES = ["pack.yaml", "banwords.yaml", "skill.yaml"]
-CHECKER_PATCH = (
+
+# checker.py 里要被替换掉的那段（导出后默认包目录 = 技能根目录）
+CHECKER_OLD = (
     'def _default_pack() -> Path:\n'
-    '    return Path(__file__).resolve().parent.parent\n'
+    '    return Path(__file__).resolve().parent.parent / "packs" / "elevator"'
+)
+CHECKER_NEW = (
+    'def _default_pack() -> Path:\n'
+    '    return Path(__file__).resolve().parent.parent'
 )
 
 
@@ -42,7 +57,17 @@ def _clean_system(system: str, display_name: str, anti_ai_rule: str) -> str:
     return "\n".join(keep).strip()
 
 
-def export_agent_skill(root: Path, pack_name: str, out_dir: Path | None = None) -> dict:
+def _checker_source() -> str:
+    src = (Path(__file__).resolve().parent / "checker.py").read_text(encoding="utf-8")
+    if CHECKER_OLD not in src:
+        raise RuntimeError(
+            "checker.py 的 _default_pack() 结构已变化，导出补丁失效。\n"
+            "请同步更新 app/export_skill.py 里的 CHECKER_OLD / CHECKER_NEW 常量。")
+    return src.replace(CHECKER_OLD, CHECKER_NEW)
+
+
+def export_agent_skill(root: Path, pack_name: str, out_dir: Path | None = None,
+                       include_private: bool = False) -> dict:
     pack = Pack(root, pack_name)
     skill = pack.skill() or {}
     stages = skill.get("stages", {})
@@ -51,7 +76,9 @@ def export_agent_skill(root: Path, pack_name: str, out_dir: Path | None = None) 
 
     out = out_dir or (root / "agent-skills" / fm_name)
     out.mkdir(parents=True, exist_ok=True)
-    for d in COPY_DIRS:
+
+    dirs = list(COPY_DIRS) + ([PRIVATE_DIR] if include_private else [])
+    for d in dirs:
         src = pack.dir / d
         if src.exists():
             shutil.copytree(src, out / d, dirs_exist_ok=True)
@@ -60,16 +87,8 @@ def export_agent_skill(root: Path, pack_name: str, out_dir: Path | None = None) 
         if src.exists():
             shutil.copyfile(src, out / f)
 
-    # 校验器独立副本：默认包目录 = 技能根目录
-    checker_src = (Path(__file__).resolve().parent / "checker.py").read_text(encoding="utf-8")
-    if CHECKER_PATCH.strip() not in checker_src:
-        raise RuntimeError("checker.py 结构变化，导出补丁失效——请同步更新 export_skill")
-    checker_src = checker_src.replace(
-        'def _default_pack() -> Path:\n'
-        '    return Path(__file__).resolve().parent.parent / "packs" / "elevator"',
-        CHECKER_PATCH)
     (out / "tools").mkdir(exist_ok=True)
-    (out / "tools" / "check.py").write_text(checker_src, encoding="utf-8")
+    (out / "tools" / "check.py").write_text(_checker_source(), encoding="utf-8")
 
     # ---- 组装 SKILL.md ----
     segments = pack.param_options("segment")
@@ -83,12 +102,26 @@ def export_agent_skill(root: Path, pack_name: str, out_dir: Path | None = None) 
     write_sys = stages.get("write", {}).get("system", "")
     anti_ai = stages.get("write", {}).get("anti_ai", {})
     write_rules = _clean_system(write_sys, info.display_name, anti_ai.get("rule", ""))
-    # 去 markdown 缩进噪音：引擎 system 是块标量，直接使用
 
-    seg_lines = "\n".join(f"| {s} | … | … |" for s in segments)
     desc = (f"生成{info.display_name}行业短视频口播脚本。当用户要求写{info.display_name}相关的"
-            f"口播文案、短视频脚本、分镜脚本时使用。覆盖 {'、'.join(segments)} 等主题，"
+            f"口播文案、短视频脚本、分镜脚本时使用。覆盖 {'、'.join(map(str, segments))} 等主题，"
             f"输出含开场钩子、正文要点、结尾引导与预估时长。")
+
+    private_block = (
+        "\n### 前置：加载私有资料（持久化知识库）\n\n"
+        "`private/` 是持久化的底层知识库，写入一次之后每次生成都自动使用。按需读取：\n"
+        "products.yaml（型号参数，产品推介必读）/ service.yaml（服务承诺，转化类必读）/\n"
+        "cases.yaml（案例背书）/ faq.yaml（异议应答）。`private/raw/` 有未处理文件时先提示用户。\n"
+        "**已填部分优先作为事实来源；未填部分用 `{{待补：xxx}}` 占位，绝不估算。**\n"
+    ) if include_private else (
+        "\n### 前置：私有资料\n\n"
+        "本次导出**未包含** `private/` 目录（商业信息默认不外带）。\n"
+        "如需让本技能引用产品型号 / 服务承诺 / 案例，请自行创建 `private/` 并放入对应 yaml，\n"
+        "或在对话中直接提供事实。**未提供的事实一律用 `{{待补：xxx}}` 占位，绝不估算。**\n"
+    )
+
+    private_index = ("| `private/` | 私有资料（分享技能时删除此目录） |\n"
+                     if include_private else "")
 
     skill_md = f"""---
 name: {fm_name}
@@ -118,14 +151,7 @@ description: {desc}
 | facts | 用户提供的产品手册、数据、案例 | 无 |
 
 ## 执行流程
-
-### 前置：加载私有资料（持久化知识库）
-
-`private/` 是持久化的底层知识库，写入一次之后每次生成都自动使用。按需读取：
-products.yaml（型号参数，产品推介必读）/ service.yaml（服务承诺，转化类必读）/
-cases.yaml（案例背书）/ faq.yaml（异议应答）。`private/raw/` 有未处理文件时先提示用户。
-**已填部分优先作为事实来源；未填部分用 `{{{{待补：xxx}}}}` 占位，绝不估算。**
-
+{private_block}
 ### 第 1 步 参数解析与字数配额
 
 读 `rules/duration.md` 与 `pack.yaml` 的 `quota_table`（配额 = 表值 × 语速 ÷ 5.0）。
@@ -163,10 +189,10 @@ python tools/check.py <脚本文件> --duration <目标秒数> --rate <语速> -
 
 ## 硬约束（输出前再读一遍）
 
-1. 禁止编造事实：`private/` 未填且用户未提供 facts 时，一律 `{{{{待补：xxx}}}}` 占位
+1. 禁止编造事实：私有资料未填且用户未提供 facts 时，一律 `{{{{待补：xxx}}}}` 占位
 2. 禁止绝对化安全承诺与权威背书（见 `compliance/industry.md` 红线）
-3. 禁止危险行为演示（扒门、攀爬轿顶、短接门锁等，包括反面演示）
-4. 救援口径唯一：按警铃或对讲 → 拨打当地电梯应急救援服务电话 → 原地等待；不写死号码
+3. 禁止危险行为演示（包括反面演示）
+4. 救援/应急口径按 `compliance/industry.md`，不写死号码
 5. 不诋毁同行；平台差异按 `compliance/platform.md`
 6. 引用标准编号前查 `knowledge/standards.md`，编号不确定就只说标准名称
 
@@ -185,20 +211,25 @@ python tools/check.py <脚本文件> --duration <目标秒数> --rate <语速> -
 | `patterns/` | 钩子库与风格 / 完播转化 / 反 AI 味清单 |
 | `rules/` | 时长配额 / 输出模板 |
 | `compliance/` | 广告法 / 平台规则 / 行业红线 |
-| `private/` | 私有资料（分享技能时删除此目录） |
-| `tools/check.py` | 校验器：字数 / 时长 / 禁用词 |
+{private_index}| `tools/check.py` | 校验器：字数 / 时长 / 禁用词 |
 """
     (out / "SKILL.md").write_text(skill_md, encoding="utf-8")
 
     fm = yaml.safe_load((out / "SKILL.md").read_text(encoding="utf-8").split("---")[1])
     assert fm.get("name") and fm.get("description"), "SKILL.md frontmatter 校验失败"
 
+    hints = [
+        "把整个目录复制到目标 agent 的技能目录即可使用：",
+        "WorkBuddy: C:\\Users\\<你>\\.workbuddy-ai\\skills\\",
+        "ZCode: C:\\Users\\<你>\\.zcode\\skills\\",
+        "Claude Code: C:\\Users\\<你>\\.claude\\skills\\",
+    ]
+    if include_private:
+        hints.append("本次已包含 private/ 目录 —— 分享给同事前请先删除它（商业信息不外带）。")
+    else:
+        hints.append("已按安全默认排除 private/ 目录（商业信息不外带）。")
+
     return {"path": str(out), "name": fm_name,
             "files": sum(1 for f in out.rglob("*") if f.is_file()),
-            "hints": [
-                "把整个目录复制到目标 agent 的技能目录即可使用：",
-                "WorkBuddy: C:\\Users\\<你>\\.workbuddy\\skills\\",
-                "ZCode: C:\\Users\\<你>\\.zcode\\skills\\",
-                "Claude Code: C:\\Users\\<你>\\.claude\\skills\\",
-                "分享给同事时删除 private/ 目录（商业信息不外带）。",
-            ]}
+            "include_private": include_private,
+            "hints": hints}

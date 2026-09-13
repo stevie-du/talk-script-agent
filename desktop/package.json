@@ -1,7 +1,7 @@
 {
   "name": "talkscript",
   "productName": "TalkScript",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "口播脚本智能体 — 本地引擎 + Electron 壳",
   "main": "main.js",
   "author": "talk-script-agent",
@@ -22,13 +22,12 @@
     },
     "files": [
       "main.js",
-      "preload.js",
-      "renderer/**"
+      "preload.js"
     ],
     "extraResources": [
       { "from": "../app", "to": "engine/app", "filter": ["**/*", "!__pycache__/**"] },
       { "from": "../packs", "to": "engine/packs" },
-      { "from": "../config.yaml", "to": "engine/config.yaml" }
+      { "from": "renderer", "to": "engine/renderer" }
     ],
     "win": {
       "target": ["nsis", "portable"]

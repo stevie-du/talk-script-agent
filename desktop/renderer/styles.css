@@ -95,6 +95,9 @@
   --f-min: 10px; --f-2xs: 11px; --f-xs: 12px; --f-sm: 13px;
   --f-base: 14px; --f-md: 15px; --f-lg: 16px; --f-xl: 20px;
 
+  /* ── 等宽字体（文件清单、代码块、耗时数字）── */
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+
   /* ── 圆角 ── */
   --r-xs: 6px; --r-sm: 8px; --r-ctl: 9px; --r-md: 10px;
   --r-lg: 14px; --r-xl: 18px; --r-pill: 999px;
@@ -579,13 +582,32 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
   display: flex; flex-direction: column; gap: var(--s5);
 }
 .msg { display: flex; gap: 11px; max-width: var(--w-stream); width: 100%; margin-inline: auto; animation: fadeUp .26s var(--ease-pop); }
-.msg-user { justify-content: flex-end; padding-left: 60px; }
+.msg-user { justify-content: flex-end; align-items: flex-start; gap: 4px; padding-left: 60px; }
 .msg-user .bub {
   background: var(--bubble); color: var(--text-1);
   padding: 8px 14px; border-radius: var(--r-xl) var(--r-xl) var(--s1) var(--r-xl);
   font-size: var(--f-md); line-height: 1.6; max-width: 100%;
   word-break: break-word;
 }
+/* 编辑入口：悬停/聚焦才显形（与 .sess-del / .card-foot .rw 同一套路）。
+   修复前用户消息是死的 —— 打错一个字只能重开一条，线程被澄清消息污染。 */
+.msg-edit {
+  flex: 0 0 auto; margin-top: 5px; width: 24px; height: 24px; border-radius: var(--r-xs);
+  display: grid; place-items: center; color: var(--text-3);
+  background: transparent; border: none; cursor: pointer;
+  opacity: 0; transition: opacity .15s var(--ease), background .15s, color .15s;
+}
+.msg-user:hover .msg-edit, .msg-user:focus-within .msg-edit { opacity: .7; }
+.msg-edit:hover { opacity: 1; background: var(--fill); color: var(--ink); }
+.msg-edit:focus-visible { opacity: 1; box-shadow: var(--shadow-focus); outline: none; }
+.bub-edit {
+  width: min(46vw, 420px); min-height: 34px; resize: none; font: inherit;
+  color: var(--text-1); background: var(--surface);
+  border: 1px solid var(--line-strong); border-radius: var(--r-md);
+  padding: 6px 9px; line-height: 1.6;
+}
+.bub-actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 7px; }
+.ghost.tiny, .primary.tiny { height: 24px; font-size: var(--f-xs); padding: 0 10px; }
 .msg-assistant { padding-right: var(--s5); }
 .msg-assistant .avatar {
   width: 26px; height: 26px; flex: 0 0 auto; border-radius: var(--r-sm);
@@ -604,7 +626,32 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
   animation: spin .7s linear infinite; display: inline-flex; flex: 0 0 auto;
 }
 .thinking .t-text { font-size: var(--f-md); font-weight: 500; color: var(--text-1); }
-.t-steps { display: inline-flex; gap: 5px; flex-wrap: wrap; margin-left: auto; }
+.thinking .t-elapsed { margin-left: auto; font-size: var(--f-xs); color: var(--text-3); font-variant-numeric: tabular-nums; }
+
+/* 步骤时间线：每一步都可见并带耗时。
+   参考 Claude / Cursor 的 tool-use 展示 —— 用户能判断是「模型在想」还是「卡住了」。
+   修复前是一个扁平的 pstep 列表，没有耗时、失败也不区分是哪一步。 */
+.steps { list-style: none; margin: 9px 0 2px; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.step {
+  display: flex; align-items: center; gap: 8px;
+  font-size: var(--f-xs); color: var(--text-2); line-height: 1.9;
+}
+.step-dot {
+  width: 5px; height: 5px; border-radius: 50%; flex: 0 0 auto;
+  background: var(--ok); opacity: .75;
+}
+.step.done .step-t { color: var(--text-2); }
+.step-note { color: var(--text-3); }
+.step-dur {
+  margin-left: auto; color: var(--text-3);
+  font-variant-numeric: tabular-nums; font-size: var(--f-min);
+}
+.step.active .step-dot { background: var(--warn); animation: dotPulse 1.4s var(--ease) infinite; }
+.step.active .step-t { color: var(--ink); font-weight: 500; }
+.step.err .step-dot { background: var(--bad); opacity: 1; }
+.step.err .step-t { color: var(--bad); font-weight: 500; }
+.step.stopped .step-dot { background: var(--text-3); }
+.step.stopped .step-t { color: var(--text-3); }
 
 /* 流式思考过程：生成中展开、完成折叠。推理型模型「想」远久于「写」，
    把这部分露出来，用户就不必盯着「正在生成…」干等几十秒 */
@@ -631,15 +678,13 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
   background: transparent; scrollbar-width: thin;
 }
 
-/* 小标签/胶囊（进度、指标、状态徽标共用同一套基础样式） */
-.pstep, .m-chip, .acc-badge {
+/* 小标签/胶囊（指标、状态徽标共用同一套基础样式） */
+.m-chip, .acc-badge {
   font-size: var(--f-xs); padding: 2px 9px; border-radius: var(--r-pill);
   background: var(--fill); color: var(--text-2); font-weight: 500;
   display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;
 }
-.pstep.done::before { content: "✓"; font-weight: 600; color: var(--ok); }
-.pstep.active { background: var(--sel-bg); color: var(--ink); }
-.pstep.err, .m-chip.bad, .acc-badge.bad { background: var(--bad-soft); color: var(--bad); }
+.m-chip.bad, .acc-badge.bad { background: var(--bad-soft); color: var(--bad); }
 .m-chip.good, .acc-badge.ok { color: var(--ok); }
 .acc-badge.info { color: var(--ink); background: var(--sel-bg); }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -929,4 +974,107 @@ pre#pg-checklist {
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}
+
+/* ══════════════════════════════════════════════════════════════
+   本轮重构新增的组件
+   （版本导航 / 后续建议 / 回到最新 / 决策解释 / 行内链接按钮）
+   ══════════════════════════════════════════════════════════════ */
+
+/* 版本导航：「换一版」不再是把旧结果丢掉重画，而是同一个问题下的第 N 个版本，
+   可以来回对照（参考 Claude 的「1 / 2」翻页）。 */
+.ver-bar {
+  display: inline-flex; align-items: center; gap: 2px; margin-bottom: var(--s2);
+  font-size: var(--f-xs); color: var(--text-3);
+  background: var(--fill); border-radius: var(--r-pill); padding: 1px 3px;
+}
+.ver-btn {
+  width: 22px; height: 20px; border: none; background: transparent; cursor: pointer;
+  color: var(--text-2); border-radius: var(--r-pill); font-size: var(--f-sm); line-height: 1;
+  display: grid; place-items: center;
+}
+.ver-btn:hover:not(:disabled) { background: var(--surface); color: var(--ink); }
+.ver-btn:disabled { opacity: .3; cursor: default; }
+.ver-label { padding: 0 4px; font-variant-numeric: tabular-nums; }
+
+/* 后续建议：点了只预填参数、不自动提交，用户改完再发。
+   （Perplexity 的 Related —— 空输入框最劝退，给三个明确的下一步） */
+.followups {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  margin-top: var(--s4); padding-top: var(--s3);
+  border-top: 0.5px solid var(--line);
+}
+.followups.hidden { display: none; }
+.fu-label { font-size: var(--f-xs); color: var(--text-3); margin-right: 2px; }
+.fu-chip {
+  height: 26px; padding: 0 11px; border-radius: var(--r-pill);
+  border: 1px solid var(--line-strong); background: var(--surface);
+  color: var(--text-2); font-size: var(--f-xs); cursor: pointer;
+  transition: background .15s var(--ease), color .15s, border-color .15s;
+}
+.fu-chip:hover { background: var(--sel-bg); color: var(--ink); border-color: var(--line-strong); }
+.fu-chip:focus-visible { outline: none; box-shadow: var(--shadow-focus); }
+
+/* 回到最新：只在用户主动上滚、且不在底部时出现 */
+.scroll-bottom {
+  position: absolute; right: 28px; bottom: 116px; z-index: 30;
+  width: 32px; height: 32px; border-radius: 50%;
+  display: grid; place-items: center; cursor: pointer;
+  background: var(--surface); color: var(--text-2);
+  border: 1px solid var(--line); box-shadow: var(--shadow-raised);
+  transition: transform .15s var(--ease), color .15s;
+}
+.scroll-bottom:hover { color: var(--ink); transform: translateY(-1px); }
+.scroll-bottom.hidden { display: none; }
+
+/* 决策解释：把「为什么回炉 / 为什么忽略这些词」摊开，而不是一句「未通过校验」 */
+.banner.why { cursor: default; }
+.banner.why > summary { cursor: pointer; list-style: none; }
+.banner.why > summary::-webkit-details-marker { display: none; }
+.banner.why > summary::after { content: " ▾"; font-size: var(--f-min); opacity: .6; }
+.banner.why[open] > summary::after { content: " ▴"; }
+.why-body {
+  margin: 7px 0 0; padding: 8px 10px; border-radius: var(--r-sm);
+  background: var(--surface); color: var(--text-2);
+  font-family: var(--mono); font-size: var(--f-min); line-height: 1.7;
+  white-space: pre-wrap; word-break: break-word;
+}
+
+/* 行内链接式按钮（用于「参数已修改」横幅里的「用新参数生成」） */
+.link-btn {
+  border: none; background: none; padding: 0; cursor: pointer;
+  color: inherit; font: inherit; text-decoration: underline;
+  text-underline-offset: 2px; opacity: .9;
+}
+.link-btn:hover { opacity: 1; }
+
+/* 超出配额 30% 以上的段落：给整卡一个左侧强调条，颜色之外还有形状差异 */
+.script-card.over-quota { box-shadow: inset 2px 0 0 var(--warn); padding-left: 10px; }
+
+/* 单段重写的反馈输入：与按钮同排，编辑态才显形 */
+.card-foot .rw-feedback { display: none; }
+.card-foot.editing .rw-feedback { display: block; }
+
+/* 等宽元素统一走 --mono（原来散落着 Consolas 硬编码） */
+pre, code, .code, .why-body, kbd { font-family: var(--mono); }
+
+/* 首启引导卡：安装包不带任何配置，没 Key 时必须说清楚「下一步做什么」 */
+.setup-card {
+  max-width: 460px; margin: 0 auto var(--s5); padding: var(--s5);
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--r-lg); box-shadow: var(--shadow-raised);
+  text-align: center;
+}
+.setup-card .setup-ic {
+  width: 44px; height: 44px; margin: 0 auto var(--s3);
+  display: grid; place-items: center; border-radius: var(--r-md);
+  background: var(--grad-ink); color: var(--text-inv); box-shadow: var(--shadow-ink);
+}
+.setup-card h3 { font-size: var(--f-lg); margin-bottom: 6px; }
+.setup-card p { color: var(--text-2); font-size: var(--f-sm); line-height: 1.7; }
+.setup-card .setup-actions { margin: var(--s4) 0 var(--s3); }
+.setup-card .hint { margin-top: 0; }
+.setup-card code {
+  background: var(--fill); padding: 1px 5px; border-radius: var(--r-xs);
+  font-size: var(--f-min);
 }
