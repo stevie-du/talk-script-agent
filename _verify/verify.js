@@ -488,6 +488,28 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("技能面板只列技能相关文件",
     sk.rows.length === 1 && sk.rows[0] === "skill.yaml", JSON.stringify(sk));
 
+  // 设置内搜索：6 个分区以后还会更多，没检索就得一个个点过去
+  await evalIn(`document.getElementById('btn-open-settings').click(); return true;`);
+  await sleep(300);
+  await evalIn(`const b = document.getElementById('stg-search');
+    b.value = '超时'; b.dispatchEvent(new Event('input', {bubbles:true})); return true;`);
+  await sleep(300);
+  const stgHit = await evalIn(`return {
+    visible: [...document.querySelectorAll('.stg-nav-item')]
+      .filter(n => !n.classList.contains('hidden')).map(n => n.dataset.pane),
+    pane: window.__ts.settingsPane };`);
+  check("设置内搜索能定位到含该字段的分区",
+    stgHit.visible.includes("llm") && stgHit.pane === "llm", JSON.stringify(stgHit));
+
+  await evalIn(`const b = document.getElementById('stg-search');
+    b.value = ''; b.dispatchEvent(new Event('input', {bubbles:true})); return true;`);
+  await sleep(200);
+  const stgAll = await evalIn(`return [...document.querySelectorAll('.stg-nav-item')]
+    .filter(n => !n.classList.contains('hidden')).length;`);
+  check("清空设置搜索后恢复全部分区", stgAll === 6, String(stgAll));
+  await evalIn(`document.getElementById('btn-close-settings').click(); return true;`);
+  await sleep(200);
+
   // 头部模型指示：此前只有进设置页才知道在用哪个模型
   const chip = await evalIn(`const c = document.getElementById('rh-model');
     return { hidden: c.classList.contains('hidden'), text: c.textContent,

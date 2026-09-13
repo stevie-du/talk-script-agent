@@ -193,6 +193,22 @@ main { display: flex; flex: 1; min-height: 0; }
 
 /* ── 左栏头部：品牌 + 草稿徽标 ── */
 /* 会话搜索：与「新建对话」同宽的检索条（对照成熟 agent 的会话检索） */
+/* 设置内搜索：与左栏会话搜索同一套视觉，位置在导航列表顶部 */
+.stg-search {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 6px;
+  margin: 0 var(--s3) var(--s2); padding: 0 8px; height: 30px;
+  border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--fill);
+}
+.stg-search:focus-within { border-color: var(--line-strong); background: var(--surface); }
+.stg-search svg { flex: 0 0 auto; color: var(--text-3); }
+.stg-search input {
+  flex: 1; min-width: 0; border: 0; background: transparent;
+  font: 12px/1 var(--font); color: var(--text-1); outline: none;
+}
+.stg-search input::placeholder { color: var(--text-3); }
+.stg-search input::-webkit-search-cancel-button { display: none; }
+.stg-nav-item.hidden, .stg-nav-scroll .nav-sec.hidden { display: none; }
+
 /* 头部模型指示：不抢 rh-state 的视觉重量，但一眼能看到「在用哪个模型」 */
 .rh-model {
   max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

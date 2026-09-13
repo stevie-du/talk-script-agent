@@ -104,6 +104,16 @@ export function bindSettings() {
   // （后端会过滤空串防手滑），所以回到默认必须是一个显式动作。
   $("st-reset-baseurl").onclick = () => resetField("base_url", "st-baseurl");
   $("st-reset-model").onclick = () => resetField("model", "st-model");
+  const stgSearch = $("stg-search");
+  if (stgSearch && !stgSearch._bound) {
+    stgSearch._bound = true;
+    stgSearch.addEventListener("input", () => filterSettingsNav(stgSearch.value));
+    stgSearch.addEventListener("keydown", ev => {
+      if (ev.key === "Escape" && stgSearch.value) {
+        stgSearch.value = ""; filterSettingsNav(""); ev.stopPropagation();
+      }
+    });
+  }
   $("kb-pack").onchange = () => openPackFiles(state.settingsPane);
   $("st-reset-adv").onclick = () => resetField(
     ["retries", "timeout", "max_tokens"], ["st-retries", "st-timeout", "st-maxtokens"]);
@@ -179,6 +189,31 @@ const PANE_FILE_FILTER = {
   kb: () => true,
   skills: (rel) => rel === "skill.yaml" || /^(rules|patterns|compliance)\//.test(rel),
 };
+
+// ── 设置内搜索：6 个分区以后还会更多，没有检索就得一个个点过去 ──
+// 匹配范围 = 导航项文字 + 该分区面板的全部文本，所以「重试」「超时」
+// 这类字段名也能命中。
+function paneHaystack(id) {
+  const pane = $("pane-" + id);
+  const nav = document.querySelector(`.stg-nav-item[data-pane="${id}"]`);
+  return `${nav?.textContent || ""} ${pane?.textContent || ""}`.toLowerCase();
+}
+
+export function filterSettingsNav(raw) {
+  const q = String(raw || "").trim().toLowerCase();
+  const items = [...document.querySelectorAll(".stg-nav-item")];
+  items.forEach(n =>
+    n.classList.toggle("hidden", !!q && !paneHaystack(n.dataset.pane).includes(q)));
+  // 整组都没命中时把分组标题一起收掉，否则会留下孤零零的标题
+  document.querySelectorAll(".stg-nav-scroll .nav-sec").forEach(sec => {
+    const any = [...sec.querySelectorAll(".stg-nav-item")]
+      .some(n => !n.classList.contains("hidden"));
+    sec.classList.toggle("hidden", !any);
+  });
+  if (!q) return;
+  const first = items.find(n => !n.classList.contains("hidden"));
+  if (first && first.dataset.pane !== state.settingsPane) setPane(first.dataset.pane);
+}
 
 async function openPackFiles(pane) {
   const list = $("kb-list");

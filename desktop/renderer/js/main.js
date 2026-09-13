@@ -85,6 +85,7 @@ window.__ts = {
   get result() { return state.result; },
   get jobId() { return state.job ? state.job.id : null; },
   get settingsOpen() { return settingsOpen(); },
+  get settingsPane() { return state.settingsPane; },
   get msgCount() { return T.msgCount(); },
   // 导出是纯函数，挂出来才能在验证脚本里断言**内容** ——
   // 只断言「点了不报错」是没用的：错误的字幕照样能顺利导出。
