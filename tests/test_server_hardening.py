@@ -12,6 +12,7 @@
   6 导出技能默认不带 private/ —— 商业信息不外带。
 """
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -412,6 +413,34 @@ def test_export_rejects_path_traversal(tmp_path=None):
         raise AssertionError("穿越路径应当被拒绝")
     except PackError:
         pass
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ── 7 版本号单一来源 ────────────────────────────────────────
+def test_version_single_source(tmp_path=None):
+    """引擎报出的版本必须与 desktop/package.json 一致。
+
+    版本曾经三处各写一遍（server.py / package.json / 渲染层 __ts），
+    漏改一处的后果是「安装包 0.2.0、引擎自报 0.3.0」，而没有任何环节会报错。
+    """
+    from app.server import FALLBACK_VERSION, read_version
+
+    pkg = json.loads((ROOT / "desktop" / "package.json").read_text(encoding="utf-8"))
+    # 注意：这里**不能**拿 read_version(ROOT) 去比 package.json —— 两者读同一个文件，
+    # 无论文件改成什么都相等，是同义反复。真正要防的是「读取链路断了、悄悄退回兜底值」。
+    got = read_version(ROOT)
+    assert got != FALLBACK_VERSION, (
+        "没读到 desktop/package.json，悄悄退回了兜底值 —— 引擎会自报 0.0.0-dev")
+    assert got == pkg["version"] and re.match(r"^\d+\.\d+\.\d+", got), got
+    # 读不到时退回兜底值（打包版正是靠 Electron 传参兜住这个缺口）
+    assert read_version(Path(tempfile.mkdtemp())) == FALLBACK_VERSION
+
+    # 打包版路径：Electron 显式传入，优先级高于文件
+    tmp = _tmp_root()
+    c = TestClient(create_app(tmp, token=TOKEN, version="9.9.9"),
+                   base_url=LOOPBACK, raise_server_exceptions=False)
+    c.headers.update({"X-TalkScript-Token": TOKEN})
+    assert c.get("/api/health").json()["version"] == "9.9.9", "显式传入的版本应优先"
     shutil.rmtree(tmp, ignore_errors=True)
 
 

@@ -40,15 +40,19 @@ function resolveEngine(rootDir, resourcesDir) {
   // --data-dir：可写数据目录。打包后 rootDir 在安装目录（Program Files），
   // 配置与产物都不能往那儿写；开发态直接用项目根。
   const dataDir = app.isPackaged ? app.getPath('userData') : rootDir;
+  // --version：版本号的唯一来源是 desktop/package.json（electron-builder 也认它），
+  // 引擎在打包版里读不到这个文件（--root 指向 resources/engine），所以显式传过去。
   const args = ['-m', 'app.server', '--port', String(enginePort),
-                '--root', rootDir, '--data-dir', dataDir, '--token', engineToken];
+                '--root', rootDir, '--data-dir', dataDir, '--token', engineToken,
+                '--version', app.getVersion()];
   const custom = process.env.TALKSCRIPT_PYTHON;
   if (custom) return { cmd: custom, args };
 
   const bundled = path.join(resourcesDir, 'engine', 'engine.exe');
   if (fs.existsSync(bundled)) {
     return { cmd: bundled, args: ['--port', String(enginePort), '--root', rootDir,
-                                  '--data-dir', dataDir, '--token', engineToken] };
+                                  '--data-dir', dataDir, '--token', engineToken,
+                                  '--version', app.getVersion()] };
   }
   const venvPy = process.platform === 'win32'
     ? path.join(rootDir, '.venv', 'Scripts', 'python.exe')

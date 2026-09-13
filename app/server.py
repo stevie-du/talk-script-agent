@@ -22,6 +22,7 @@ Electron:  主进程 spawn 本模块并轮询 /api/health
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -46,7 +47,27 @@ from .schemas import (ConfirmRequest, GenerateRequest, PackCreateRequest,
 from .security import (TOKEN_HEADER, allowed_hostnames, new_token,
                         origin_allowed, token_ok)
 
-VERSION = "0.2.0"
+FALLBACK_VERSION = "0.0.0-dev"
+
+
+def read_version(root: Path | None = None) -> str:
+    """版本号：**唯一来源是 desktop/package.json**。
+
+    曾经三处各写一遍（`server.py` / `desktop/package.json` / 渲染层 `__ts`），
+    改版本号时漏掉一处的后果是「关于页说 0.3.0、安装包还是 0.2.0」，
+    而这类漂移没有任何环节会报错。
+
+    打包后引擎的 --root 指向 resources/engine，那里没有 desktop/ 目录，
+    所以 Electron 会显式把版本传进来（--version）；只有开发态与手工启动
+    才走这里读文件。
+    """
+    if root is not None:
+        f = Path(root) / "desktop" / "package.json"
+        try:
+            return str(json.loads(f.read_text(encoding="utf-8"))["version"])
+        except Exception:                       # noqa: BLE001
+            pass
+    return FALLBACK_VERSION
 
 # 路径参数白名单：作业 id 形如 20260910-010929-ddb666；
 # 行业包名为 slug（允许中英文、数字、下划线与连字符），两者都禁止 . / 等穿越字符。
@@ -101,8 +122,11 @@ def _renderer_dir(root: Path) -> Path:
 
 def create_app(root: Path, token: str | None = None,
                data_dir: Path | None = None,
-               bind_host: str | None = None) -> FastAPI:
+               bind_host: str | None = None,
+               version: str | None = None) -> FastAPI:
     token = token or new_token()
+    # 打包版由 Electron 传入（--version）；开发态回落到读 desktop/package.json
+    version = version or read_version(root)
     # 允许出现在 Host 里的主机名：回环 + 显式绑定的地址。
     # 不传 bind_host 时只有回环 —— 这挡住 DNS rebinding（evil.com → 127.0.0.1）。
     hosts = allowed_hostnames(bind_host)
@@ -117,7 +141,7 @@ def create_app(root: Path, token: str | None = None,
         """每次现读配置：设置里改完 Key，/api/meta 要立刻反映出来。"""
         return load_config(root, data_dir)
 
-    app = FastAPI(title="TalkScript Engine", version=VERSION)
+    app = FastAPI(title="TalkScript Engine", version=version)
     app.state.token = token
     app.state.pipeline = pipeline
 
@@ -176,7 +200,7 @@ def create_app(root: Path, token: str | None = None,
     @app.get("/api/health")
     def health():
         # 刻意不鉴权：主进程要在窗口打开前轮询它；返回内容不含任何敏感信息。
-        return {"ok": True, "version": VERSION, "mock": _cfg().mock}
+        return {"ok": True, "version": version, "mock": _cfg().mock}
 
     @app.get("/api/meta")
     def meta():
@@ -190,7 +214,7 @@ def create_app(root: Path, token: str | None = None,
             "has_api_key": bool(cfg.llm.api_key),
             "mock": cfg.mock,
             "max_concurrent": MAX_CONCURRENT_JOBS,
-            "version": VERSION,
+            "version": version,
         }
 
     # ── 行业包 ──────────────────────────────────────────────
@@ -426,6 +450,8 @@ def main():
                     help="可写数据目录（config.yaml 与 generated/）；默认同 --root。"
                          "打包后安装目录通常不可写，由 Electron 指到用户数据目录。")
     ap.add_argument("--token", default=None, help="访问令牌（默认随机生成）")
+    ap.add_argument("--version", default=None,
+                    help="版本号（打包版由 Electron 传入；不传则读 desktop/package.json）")
     ap.add_argument("--open", action="store_true", help="启动后自动打开浏览器")
     args = ap.parse_args()
 
@@ -433,7 +459,9 @@ def main():
     root = Path(args.root).resolve()
     data_dir = Path(args.data_dir).resolve() if args.data_dir else None
     token = args.token or new_token()
-    app = create_app(root, token=token, data_dir=data_dir, bind_host=args.host)
+    app = create_app(root, token=token, data_dir=data_dir,
+                     bind_host=args.host, version=args.version)
+    VERSION = args.version or read_version(root)
     url = f"http://127.0.0.1:{args.port}/?token={token}"
     print("=" * 62)
     print(f"  TalkScript 引擎已启动（v{VERSION}）")

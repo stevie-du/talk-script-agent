@@ -77,7 +77,8 @@ function showEngineDown(e) {
 // ── 自动化 / 调试接口 ───────────────────────────────────────
 // 只暴露必要的东西；verify.js 与人工排障都通过它，不再依赖散落的全局变量。
 window.__ts = {
-  version: "0.2.0",
+  // 不再写死：来自 /api/meta，源头是 desktop/package.json
+  get version() { return state.meta ? state.meta.version : ""; },
   get meta() { return state.meta; },
   get busy() { return state.busy; },
   get job() { return state.job; },
