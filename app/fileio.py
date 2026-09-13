@@ -6,16 +6,48 @@
 """
 from __future__ import annotations
 
+import logging
 import os
+import shutil
 import time
 import uuid
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 # replace 失败后的重试次数与间隔。Windows 上刚落盘的文件会被杀毒软件 /
 # 搜索索引短暂占用，此刻 rename 会返回 [WinError 5] 拒绝访问 —— 这是瞬时状态，
 # 重试即可；不重试的后果是「写入静默失败」，索引文件就此消失。
 _REPLACE_RETRIES = 5
 _REPLACE_BACKOFF = 0.04
+
+
+# 删目录的重试次数。Windows 上刚写完的文件常被杀毒软件 / 搜索索引短暂占用，
+# 此时 rmtree 会拿到「拒绝访问」。配合 `ignore_errors=True` 就变成
+# 「删不掉也当成功」，后果因场景而异且都不好查：
+#   - 历史记录：目录还在，下次重建索引时记录复活；
+#   - 行业包：半成品目录留着，重试建包被 FileExistsError 挡成 409。
+_RMTREE_RETRIES = 5
+_RMTREE_BACKOFF = 0.05
+
+
+def rmtree_resilient(path: Path) -> bool:
+    """删掉整棵目录树，返回**是否真的删掉了**。
+
+    调用方必须拿这个返回值当回事 —— 静默吞掉失败等于埋雷。
+    """
+    if not path.exists():
+        return True
+    for attempt in range(_RMTREE_RETRIES):
+        try:
+            shutil.rmtree(path)
+            return True
+        except OSError as e:
+            if attempt == _RMTREE_RETRIES - 1:
+                log.warning("目录删除失败：%s —— %s", path, e)
+                return False
+            time.sleep(_RMTREE_BACKOFF * (attempt + 1))
+    return False
 
 
 def _replace_with_retry(tmp: Path, path: Path) -> None:

@@ -22,42 +22,18 @@ from __future__ import annotations
 
 import json
 import logging
-import shutil
 import threading
-import time
 from pathlib import Path
 
-from .fileio import write_atomic
+from .fileio import rmtree_resilient, write_atomic
 
 log = logging.getLogger(__name__)
 
 INDEX_NAME = "index.json"
 INDEX_VERSION = 1
 
-# 删目录的重试次数。Windows 上刚写完的文件常被杀毒软件 / 搜索索引短暂占用，
-# 此时 rmtree 会拿到「拒绝访问」；配合 `ignore_errors=True` 就变成了
-# 「删不掉也当成功」，用户眼看着记录复活，而我们连日志都没有。
-_RMTREE_RETRIES = 5
-_RMTREE_BACKOFF = 0.05
-
 # 墓碑只用于拦住「删除后仍在跑的作业」，不需要长期留存
 _TOMBSTONE_CAP = 512
-
-
-def _rmtree_resilient(path: Path) -> bool:
-    """删掉整棵目录树，返回是否真的删掉了。"""
-    if not path.exists():
-        return True
-    for attempt in range(_RMTREE_RETRIES):
-        try:
-            shutil.rmtree(path)
-            return True
-        except OSError as e:
-            if attempt == _RMTREE_RETRIES - 1:
-                log.warning("产物目录删除失败（记录可能复活）：%s —— %s", path, e)
-                return False
-            time.sleep(_RMTREE_BACKOFF * (attempt + 1))
-    return False
 
 
 def _day_dir(created_at: str) -> str:
@@ -113,13 +89,24 @@ class ArtifactStore:
             write_atomic(job_dir / "脚本.md", render_script_md(result))
             return True
 
-    def write_job(self, snap: dict, job_dir: Path) -> None:
-        write_atomic(job_dir / "job.json",
-                     json.dumps(snap, ensure_ascii=False, indent=1))
-        # 终态才进索引：运行中的作业由内存里的注册表提供，不落索引，
-        # 否则会在「已落盘的记录」和「内存里的作业」之间重复计数。
-        if snap.get("state") in ("failed", "cancelled"):
-            self._upsert(self._summary_from_job(snap))
+    def write_job(self, snap: dict, job_dir: Path) -> bool:
+        """落盘作业快照（失败/取消的作业没有 result.json，只有 job.json）。
+
+        墓碑检查与 `write_result` 一致 —— 两者都必须拦，只拦一个是没用的：
+        `write_atomic` 会 `mkdir(parents=True)`，任何一次落盘都能把删掉的
+        目录重新建出来。今天所有 `_persist` 调用点碰巧都有取消检查兜着，
+        但那是巧合，不该是这个模块的正确性前提。
+        """
+        with self._lock:
+            if job_dir.name in self._tombstones:
+                return False
+            write_atomic(job_dir / "job.json",
+                         json.dumps(snap, ensure_ascii=False, indent=1))
+            # 终态才进索引：运行中的作业由内存里的注册表提供，不落索引，
+            # 否则会在「已落盘的记录」和「内存里的作业」之间重复计数。
+            if snap.get("state") in ("failed", "cancelled"):
+                self._upsert(self._summary_from_job(snap))
+            return True
 
     # ── 读取 ────────────────────────────────────────────────
     def read_result(self, jid: str) -> dict | None:
@@ -172,7 +159,7 @@ class ArtifactStore:
             dirs = self.find_dirs(jid)
             if not dirs:
                 return "missing"
-            removed = [_rmtree_resilient(d) for d in dirs]
+            removed = [rmtree_resilient(d) for d in dirs]
             cur = self._read_index_file()
             if cur.pop(jid, None) is not None:
                 self._write_index(cur)

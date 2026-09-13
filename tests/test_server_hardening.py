@@ -292,6 +292,28 @@ def test_delete_running_job_does_not_resurrect(tmp_path=None):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_write_job_respects_tombstone(tmp_path=None):
+    """删除之后连 job.json 也不该再落盘。
+
+    `write_atomic` 会 `mkdir(parents=True)`，任何一次落盘都能把删掉的目录
+    重建出来，所以 `write_result` 与 `write_job` 必须**都**查墓碑 ——
+    只拦一个等于没拦。
+    """
+    tmp = _tmp_root_mock()
+    c = _client(tmp)
+    jid = c.post("/api/generate", json={"pack": "elevator", "topic": "墓碑"}).json()["job_id"]
+    assert _wait_done(c, jid)["state"] == "done"
+
+    from app.store import ArtifactStore
+    st = ArtifactStore(tmp)
+    d = next((tmp / "generated").glob(f"*/{jid}"))
+    assert st.delete(jid) == "ok"
+    # 模拟「记录已删、后台线程还在收尾」
+    assert st.write_job({"id": jid, "state": "cancelled", "params": {}}, d) is False
+    assert not d.exists(), "已删除的作业又把目录建回来了"
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_delete_reports_failure_instead_of_lying(tmp_path=None):
     """删不掉要如实报 500 —— 假装成功的代价是用户刷新后看到记录自己回来。"""
     tmp = _tmp_root_mock()
@@ -300,34 +322,35 @@ def test_delete_reports_failure_instead_of_lying(tmp_path=None):
     assert _wait_done(c, jid)["state"] == "done"
 
     import app.store as store
-    real = store._rmtree_resilient
-    store._rmtree_resilient = lambda p: False
+    real = store.rmtree_resilient
+    store.rmtree_resilient = lambda p: False
     try:
         r = c.delete(f"/api/history/{jid}")
         assert r.status_code == 500, (r.status_code, r.text)
     finally:
-        store._rmtree_resilient = real
+        store.rmtree_resilient = real
         shutil.rmtree(tmp, ignore_errors=True)
 
 
 # ── 5 建包失败不留半成品 ────────────────────────────────────
+class Partial:
+    """模型返回了结构，但落盘阶段会炸。"""
+    display_name = "半成品行业"
+    segments = ["A", "B"]
+    audiences = ["X"]
+    personas = ["P"]
+    topics = []
+    audience_details = []
+    ideas = []
+    redlines = []
+    banwords_extra_hard = []
+    banwords_extra_soft = []
+    verify_list = []
+
+
 def test_packgen_failure_cleans_up(tmp_path=None):
     tmp = _tmp_root()
     from app import packgen
-
-    class Partial:
-        """模型返回了结构，但落盘阶段会炸。"""
-        display_name = "半成品行业"
-        segments = ["A", "B"]
-        audiences = ["X"]
-        personas = ["P"]
-        topics = []
-        audience_details = []
-        ideas = []
-        redlines = []
-        banwords_extra_hard = []
-        banwords_extra_soft = []
-        verify_list = []
 
     real_write = packgen.write_atomic
 
@@ -345,6 +368,45 @@ def test_packgen_failure_cleans_up(tmp_path=None):
 
     slug = packgen.slugify("半成品行业")
     assert not (tmp / "packs" / slug).exists(), "失败后残留了半成品目录，重试会被 409 挡死"
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_packgen_cleanup_retries_when_locked(tmp_path=None):
+    """清理半成品时若文件被瞬时占用，要重试，而不是静默留下目录。
+
+    留下来的后果：下次建同名行业包被 `FileExistsError` 挡成 409，
+    用户只能自己去文件管理器里删 —— 而且我们连日志都没有。
+    """
+    tmp = _tmp_root()
+    from app import packgen
+
+    real_rmtree = shutil.rmtree
+    calls = {"n": 0}
+
+    def flaky(path, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("文件被占用（模拟杀毒软件扫描）")
+        return real_rmtree(path, **kw)
+
+    real_write = packgen.write_atomic
+
+    def boom(path, text, *a, **kw):
+        if str(path).endswith("pack.yaml"):
+            raise OSError("磁盘满了")
+        return real_write(path, text, *a, **kw)
+
+    with patch.object(shutil, "rmtree", side_effect=flaky), \
+         patch.object(packgen, "write_atomic", side_effect=boom):
+        try:
+            packgen.create_pack(tmp, _FakeLLM(Partial), "半成品行业", "测试描述文本")
+            raise AssertionError("应当抛错")
+        except OSError:
+            pass
+
+    slug = packgen.slugify("半成品行业")
+    assert calls["n"] >= 2, f"没走重试（rmtree 只被调用 {calls['n']} 次）"
+    assert not (tmp / "packs" / slug).exists(), "重试后仍留下半成品目录"
     shutil.rmtree(tmp, ignore_errors=True)
 
 

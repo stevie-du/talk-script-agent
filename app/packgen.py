@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 from pathlib import Path
@@ -23,8 +24,10 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, Field
 
-from .fileio import write_atomic
+from .fileio import rmtree_resilient, write_atomic
 from .knowledge import Pack
+
+log = logging.getLogger(__name__)
 from .llm import LLMClient
 
 GENERIC_FILES = [
@@ -136,7 +139,13 @@ def create_pack(root: Path, llm: LLMClient, industry: str, description: str) -> 
     except Exception:
         # 中途失败就把半成品收走：否则重试会被上面的 FileExistsError 挡成 409，
         # 用户只能自己去文件管理器里删目录。
-        shutil.rmtree(d, ignore_errors=True)
+        #
+        # 用 rmtree_resilient 而不是 `ignore_errors=True`：后者会把「没删掉」
+        # 当成成功，于是半成品目录留在那儿，下次建包照样被 409 挡住，
+        # 而我们已经把成功当成既定事实，连日志都不会有 —— 用户看到的现象
+        # 永远是「重试一直失败」，却查不出为什么。
+        if not rmtree_resilient(d):
+            log.warning("半成品目录未能清除，下次建包同名行业会被挡：%s", d)
         raise
 
     checklist = _checklist(out, slug)
