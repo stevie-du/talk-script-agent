@@ -161,6 +161,9 @@ addEventListener('unhandledrejection', e => window.__errs.push('rej: ' + String(
     if (s.indexOf('/api/config/test') >= 0) return mk({ ok:true, model:'glm-4.7', detail:'延迟 320ms' });
     // 必须在 /api/config 的通用匹配之前：indexOf('/api/config') 也会命中 reset
     if (s.indexOf('/api/config/reset') >= 0) return mk({ ok:true, fields:['base_url'] });
+    // 知识库只读查看器：包文件清单 + 文件内容
+    if (s.indexOf('/api/packs/elevator/file') >= 0) return mk(
+      { rel:'knowledge/topics.md', size:1024, text:'# 选题库 /  / - 家用电梯怎么挑？' });
     if (s.indexOf('/api/config') >= 0) return mk(CONFIG);
     if (s.indexOf('/api/packs/') >= 0) return mk({ display_name:'电梯行业包', description:'电梯行业口播脚本包',
       draft:false, checklist:'1. 核对参数 / 2. 核对禁用词',
@@ -456,6 +459,34 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await sleep(500);
   const adv2 = await evalIn("return document.getElementById('st-timeout').value;");
   check("高级项「恢复默认」还原超时值", adv2 === "180", adv2);
+
+  // 知识库 / 技能：不再是占位面板，而是包内文件的只读查看器。
+  // 技能面板只列技能相关文件（skill.yaml / rules|patterns|compliance 下的）。
+  await evalIn(`window.__ts.setPane('kb'); return true;`);
+  await sleep(400);
+  const kb = await evalIn(`return {
+    rows: document.querySelectorAll('#kb-list .kb-item').length,
+    hasPlaceholder: !!document.querySelector('#pane-kb .placeholder') };`);
+  check("知识库面板列出包内文件（不再是占位）",
+    kb.rows === 3 && !kb.hasPlaceholder, JSON.stringify(kb));
+
+  await evalIn(`[...document.querySelectorAll('#kb-list .kb-item')]
+    .find(n => n.firstChild.textContent.includes('knowledge')).click(); return true;`);
+  await sleep(300);
+  const kbBody = await evalIn(`return {
+    title: document.getElementById('kb-title').textContent,
+    body: document.getElementById('kb-body').textContent };`);
+  check("点击文件显示内容",
+    /选题库/.test(kbBody.body) && kbBody.title === "knowledge/topics.md",
+    JSON.stringify(kbBody));
+
+  await evalIn(`window.__ts.setPane('skills'); return true;`);
+  await sleep(400);
+  const sk = await evalIn(`return {
+    rows: [...document.querySelectorAll('#kb-list .kb-item')]
+            .map(n => n.firstChild.textContent) };`);
+  check("技能面板只列技能相关文件",
+    sk.rows.length === 1 && sk.rows[0] === "skill.yaml", JSON.stringify(sk));
 
   // ── 12) 快捷键与浮层 ─────────────────────────────────────
   await evalIn(`if (window.__ts.settingsOpen) document.getElementById('btn-close-settings').click();

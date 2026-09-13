@@ -84,5 +84,7 @@ export const api = {
   config: () => request("/api/config"),
   saveConfig: (body) => request("/api/config", { method: "POST", body }),
   resetConfig: (fields) => request("/api/config/reset", { method: "POST", body: { fields } }),
+  packFile: (name, rel) =>
+    request(`/api/packs/${encodeURIComponent(name)}/file?rel=${encodeURIComponent(rel)}`),
   testConfig: (body) => request("/api/config/test", { method: "POST", body }),
 };

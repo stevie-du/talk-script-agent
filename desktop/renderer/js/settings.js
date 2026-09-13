@@ -45,6 +45,8 @@ export function setPane(pane) {
   // 行业包详情每次进入都重拉：包可能被切换过，文件清单与草稿角标也可能变了
   if (pane === "packinfo") {
     openPackInfo().catch(e => toast("读取失败：" + e.message, 3500));
+  } else if (pane === "kb" || pane === "skills") {
+    openPackFiles(pane);
   }
   return pane;
 }
@@ -102,6 +104,7 @@ export function bindSettings() {
   // （后端会过滤空串防手滑），所以回到默认必须是一个显式动作。
   $("st-reset-baseurl").onclick = () => resetField("base_url", "st-baseurl");
   $("st-reset-model").onclick = () => resetField("model", "st-model");
+  $("kb-pack").onchange = () => openPackFiles(state.settingsPane);
   $("st-reset-adv").onclick = () => resetField(
     ["retries", "timeout", "max_tokens"], ["st-retries", "st-timeout", "st-maxtokens"]);
   $("st-test").onclick = testConnection;
@@ -166,6 +169,67 @@ async function resetField(field, inputId) {
     emit("meta", state.meta);
   } catch (e) {
     toast("恢复失败：" + e.message, 3500);
+  }
+}
+
+// ── 知识库 / 技能：两个面板共用一套只读文件查看器 ──────────
+// 做成只读而不是增删改，是刻意的：这些文件是行业包的「源码」，写坏了
+// 整个包都废，而浏览器里改文件既没有原子写也没有校验，风险与收益不成比例。
+const PANE_FILE_FILTER = {
+  kb: () => true,
+  skills: (rel) => rel === "skill.yaml" || /^(rules|patterns|compliance)\//.test(rel),
+};
+
+async function openPackFiles(pane) {
+  const list = $("kb-list");
+  const sel = $("kb-pack");
+  if (sel && !sel.options.length && state.meta) {
+    sel.innerHTML = "";
+    for (const p of state.meta.packs) {
+      const o = el("option", "", esc(p.display_name) + (p.draft ? "（草稿）" : ""));
+      o.value = p.name;
+      sel.appendChild(o);
+    }
+    sel.value = state.meta.default_pack || (state.meta.packs[0] || {}).name || "";
+  }
+  const name = sel.value;
+  if (!name) { list.innerHTML = "<p class='hint'>还没有可用的行业包。</p>"; return; }
+  list.innerHTML = "<p class='hint'>载入中…</p>";
+  try {
+    const p = await api.pack(name);
+    const keep = PANE_FILE_FILTER[pane] || (() => true);
+    const files = (p.files || []).filter(f => keep(f.rel));
+    list.innerHTML = "";
+    if (!files.length) {
+      list.innerHTML = "<p class='hint'>这个包没有符合条件的文件。</p>";
+      return;
+    }
+    for (const f of files) {
+      const row = el("button", "kb-item", esc(f.rel));
+      row.type = "button";
+      const role = FILE_ROLE(f.rel);
+      if (role) row.appendChild(el("span", "kb-role", role));
+      row.onclick = () => showPackFile(name, f.rel, row);
+      list.appendChild(row);
+    }
+  } catch (e) {
+    list.innerHTML = `<p class='hint'>载入失败：${esc(e.message)}</p>`;
+  }
+}
+
+async function showPackFile(name, rel, row) {
+  document.querySelectorAll("#kb-list .kb-item").forEach(n => n.classList.remove("on"));
+  if (row) row.classList.add("on");
+  $("kb-title").textContent = rel;
+  $("kb-size").textContent = "";
+  $("kb-body").textContent = "载入中…";
+  try {
+    const d = await api.packFile(name, rel);
+    $("kb-size").textContent =
+      d.size > 1024 ? (d.size / 1024).toFixed(1) + " KB" : d.size + " B";
+    $("kb-body").textContent = d.text;
+  } catch (e) {
+    $("kb-body").textContent = "读取失败：" + e.message;
   }
 }
 

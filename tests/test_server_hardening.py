@@ -537,6 +537,36 @@ def test_numeric_settings_editable_and_bounded(tmp_path=None):
     shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_pack_file_read_is_guarded(tmp_path=None):
+    """知识库只读查看器：能读包内文件，但读不到包外的东西。
+
+    最要紧的一条是穿越 —— `rel=../../config.yaml` 会把含明文 API Key 的
+    配置文件读出去。
+    """
+    tmp = _tmp_root()
+    c = _client(tmp)
+
+    ok = c.get("/api/packs/elevator/file", params={"rel": "knowledge/topics.md"})
+    assert ok.status_code == 200, (ok.status_code, ok.text)
+    body = ok.json()
+    assert body["rel"] == "knowledge/topics.md" and body["text"], body
+    assert body["size"] == len(body["text"].encode("utf-8")) or body["size"] > 0
+
+    # 穿越一律拿不到（config.yaml 里有明文 Key）
+    for bad in ("../../config.yaml", "../config.yaml", "..\\config.yaml",
+                "/etc/passwd", "knowledge/../../config.yaml"):
+        r = c.get("/api/packs/elevator/file", params={"rel": bad})
+        assert r.status_code in (400, 404), (bad, r.status_code, r.text)
+        assert "api_key" not in r.text.lower(), f"配置被读出去了：{bad}"
+
+    # 不存在的普通文件 / 非白名单类型
+    assert c.get("/api/packs/elevator/file",
+                 params={"rel": "nope.md"}).status_code == 404
+    assert c.get("/api/packs/elevator/file",
+                 params={"rel": "knowledge/topics.png"}).status_code == 404
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
 # ── 7 版本号单一来源 ────────────────────────────────────────
 def test_version_single_source(tmp_path=None):
     """引擎报出的版本必须与 desktop/package.json 一致。

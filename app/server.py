@@ -116,6 +116,10 @@ class ConfigResetIn(BaseModel):
     fields: list[str]
 
 
+# 知识库面板可读的文件类型与体积上限（详见 /api/packs/{name}/file 的说明）
+_TEXT_SUFFIXES = frozenset({".md", ".txt", ".yaml", ".yml", ".py", ".json"})
+_MAX_FILE_BYTES = 256 * 1024
+
 # 允许「恢复默认」的字段。api_key 不在其中：清空密钥不该是一个顺手的动作。
 RESETTABLE_FIELDS = frozenset(
     {"base_url", "model", "temperature", "retries", "timeout", "max_tokens"})
@@ -247,6 +251,36 @@ def create_app(root: Path, token: str | None = None,
             checklist = cl.read_text(encoding="utf-8")
         return {**pack.data, "files": files, "checklist": checklist,
                 "has_skill": (base / "skill.yaml").exists()}
+
+    @app.get("/api/packs/{name}/file")
+    def pack_file(name: str, rel: str = ""):
+        """读行业包内单个文件的内容（知识库面板的只读查看器用）。
+
+        三道闸都必须有：
+          1. 包名走 `_safe_name`、`rel` 解析后必须仍在包目录内 ——
+             `rel=../../config.yaml` 会把含明文 API Key 的配置读出去；
+          2. 后缀白名单 —— 包里可能有图片/字体，读出来是一堆乱码不说，
+             直接塞进 <pre> 还可能带出不可见字符；
+          3. 体积上限 —— 包目录理论上可以放任意大文件，全量读进内存没必要。
+        """
+        name = _safe_name(name)
+        Pack(root, name)                       # 不存在 → PackError → 404
+        base = (root / "packs" / name).resolve()
+        try:
+            target = (base / rel).resolve()
+        except Exception:                      # noqa: BLE001
+            raise HTTPException(400, "文件路径不合法")
+        if "__pycache__" in target.parts or not target.is_relative_to(base):
+            raise HTTPException(404, "文件不存在")
+        if not target.is_file():
+            raise HTTPException(404, "文件不存在")
+        if target.suffix.lower() not in _TEXT_SUFFIXES:
+            raise HTTPException(415, f"不支持预览该类型文件：{target.suffix}")
+        size = target.stat().st_size
+        if size > _MAX_FILE_BYTES:
+            raise HTTPException(413, f"文件过大（{size} 字节），暂不支持预览")
+        return {"rel": target.relative_to(base).as_posix(), "size": size,
+                "text": target.read_text(encoding="utf-8")}
 
     @app.post("/api/packs/create")
     def packs_create(req: PackCreateRequest):
