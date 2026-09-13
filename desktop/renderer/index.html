@@ -306,16 +306,24 @@
       <section class="stg-pane hidden" id="pane-skills" data-pane="skills">
         <header class="page-head">
           <h2>技能</h2>
-          <p class="hint">挂载可复用的能力（如合规校验、数据查询），控制它们的启用状态</p>
+          <p class="hint">挂载可复用的能力（如合规校验、禁用词表），决定哪些在生成时被引用</p>
         </header>
         <div class="page-card">
-          <div class="placeholder">
-            <span class="ph-ic">
-              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l2.2 4.5 5 .7-3.6 3.5.9 4.9L12 14.3 7.5 16.6l.9-4.9L4.8 8.2l5-.7z"/></svg>
-            </span>
-            <p class="ph-t">技能即将接入</p>
-            <p class="ph-d">届时可在此浏览、启用/停用技能，并查看每个技能的作用说明。</p>
-            <p class="hint">当前行业包导出的 SKILL.md 已可用，详见「行业包 → 导出为 Agent 技能」。</p>
+          <div class="block-inner">
+            <label class="lbl">行业包</label>
+            <select id="skills-pack"></select>
+            <p class="hint">下面是该包描述技能「怎么写、怎么改、怎么校验」的文件 —— skill.yaml
+              与 rules / patterns / compliance 下的内容。当前为<b>只读</b>查看。</p>
+          </div>
+          <div class="kb-wrap">
+            <div class="kb-list" id="skills-list"><p class="hint">载入中…</p></div>
+            <div class="kb-view">
+              <div class="kb-view-head">
+                <span id="skills-title" class="lbl">未选择文件</span>
+                <span id="skills-size" class="hint"></span>
+              </div>
+              <pre id="skills-body" class="kb-body">从左侧选择一个文件查看内容。</pre>
+            </div>
           </div>
         </div>
       </section>

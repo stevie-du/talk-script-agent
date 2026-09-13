@@ -483,7 +483,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await evalIn(`window.__ts.setPane('skills'); return true;`);
   await sleep(400);
   const sk = await evalIn(`return {
-    rows: [...document.querySelectorAll('#kb-list .kb-item')]
+    rows: [...document.querySelectorAll('#skills-list .kb-item')]
             .map(n => n.firstChild.textContent) };`);
   check("技能面板只列技能相关文件",
     sk.rows.length === 1 && sk.rows[0] === "skill.yaml", JSON.stringify(sk));

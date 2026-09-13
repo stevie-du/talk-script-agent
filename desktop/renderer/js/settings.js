@@ -115,6 +115,7 @@ export function bindSettings() {
     });
   }
   $("kb-pack").onchange = () => openPackFiles(state.settingsPane);
+  $("skills-pack").onchange = () => openPackFiles(state.settingsPane);
   $("st-reset-adv").onclick = () => resetField(
     ["retries", "timeout", "max_tokens"], ["st-retries", "st-timeout", "st-maxtokens"]);
   $("st-test").onclick = testConnection;
@@ -216,8 +217,11 @@ export function filterSettingsNav(raw) {
 }
 
 async function openPackFiles(pane) {
-  const list = $("kb-list");
-  const sel = $("kb-pack");
+  // 知识库与技能两个面板共用一套只读查看器，但 DOM 节点分开
+  // （同一 ID 在一个文档里只能出现一次）
+  const pfx = pane === "skills" ? "skills" : "kb";
+  const list = $(pfx + "-list");
+  const sel = $(pfx + "-pack");
   if (sel && !sel.options.length && state.meta) {
     sel.innerHTML = "";
     for (const p of state.meta.packs) {
@@ -244,7 +248,7 @@ async function openPackFiles(pane) {
       row.type = "button";
       const role = FILE_ROLE(f.rel);
       if (role) row.appendChild(el("span", "kb-role", role));
-      row.onclick = () => showPackFile(name, f.rel, row);
+      row.onclick = () => showPackFile(name, f.rel, row, pfx);
       list.appendChild(row);
     }
   } catch (e) {
@@ -252,19 +256,19 @@ async function openPackFiles(pane) {
   }
 }
 
-async function showPackFile(name, rel, row) {
-  document.querySelectorAll("#kb-list .kb-item").forEach(n => n.classList.remove("on"));
+async function showPackFile(name, rel, row, pfx) {
+  document.querySelectorAll(`#${pfx}-list .kb-item`).forEach(n => n.classList.remove("on"));
   if (row) row.classList.add("on");
-  $("kb-title").textContent = rel;
-  $("kb-size").textContent = "";
-  $("kb-body").textContent = "载入中…";
+  $(pfx + "-title").textContent = rel;
+  $(pfx + "-size").textContent = "";
+  $(pfx + "-body").textContent = "载入中…";
   try {
     const d = await api.packFile(name, rel);
-    $("kb-size").textContent =
+    $(pfx + "-size").textContent =
       d.size > 1024 ? (d.size / 1024).toFixed(1) + " KB" : d.size + " B";
-    $("kb-body").textContent = d.text;
+    $(pfx + "-body").textContent = d.text;
   } catch (e) {
-    $("kb-body").textContent = "读取失败：" + e.message;
+    $(pfx + "-body").textContent = "读取失败：" + e.message;
   }
 }
 
