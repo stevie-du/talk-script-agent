@@ -195,6 +195,44 @@ def test_segment_quota_divided_by_points():
     assert "段落超配额" in fb, fb
 
 
+def test_count_chars_is_the_single_source_of_truth():
+    """字数口径：全项目以 checker.count_chars 为准（前端已不再自己数）。
+
+    这个函数此前**零测试**，而它决定字数、时长、配额与回炉判定 ——
+    错了就是全局错。这里把规则钉死。
+    """
+    from app.checker import count_chars
+
+    assert count_chars("你好，世界！") == 4              # 标点、空白不计
+    assert count_chars("**重点**") == 2                   # 加粗符号不计
+    assert count_chars("开场{{待补：品牌}}结束") == 4      # 占位符整体不计
+    assert count_chars("正文[画面：电梯上升]继续") == 4      # 画面标注整体不计
+    # 数字串按 1 字计（rules/duration.md 口径）
+    assert count_chars("载重1000公斤") == 5               # 载重 + 0 + 公斤
+    assert count_chars("") == 0
+    # 小数按两点各计 1 字（现状语义，改之前请先确认是否要动配额基准）
+    assert count_chars("3.5米高") == 4
+
+
+def test_split_and_estimate():
+    """分段与时长估算：段落间停顿 0.5s；语速非法时不能崩。"""
+    from app.checker import (DEFAULT_RATE, estimate_seconds, split_sections)
+
+    assert split_sections("第一段\n\n第二段") == ["第一段", "第二段"]
+    # 没有空行时退回按行切（否则多行的单段会被当成一段、少算停顿）
+    assert split_sections("第一段\n第二段") == ["第一段", "第二段"]
+    assert split_sections("") == []
+
+    one = estimate_seconds("你好世界", 4.5)               # 单段：无停顿
+    two = estimate_seconds("你好\n\n世界", 4.5)            # 两段：+0.5s
+    assert abs(two - one - 0.5) < 1e-9, (one, two)
+
+    # 语速为 0 / 非法时兜底，而不是 ZeroDivisionError
+    assert estimate_seconds("你好世界", 0) == 4 / DEFAULT_RATE
+    assert estimate_seconds("你好世界", -1) == 4 / DEFAULT_RATE
+    assert estimate_seconds("你好世界", None) == 4 / DEFAULT_RATE
+
+
 def test_banwords_no_double_count():
     ban = Banwords.load(ROOT / "packs" / "elevator" / "banwords.yaml")
     hits = ban.scan("包过检", "抖音")["hard"]

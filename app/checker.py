@@ -32,6 +32,9 @@ SEG_LABEL = {"hook": "开场钩子", "point": "要点", "cta": "结尾引导"}
 MIN_DURATION = 5.0
 MAX_DURATION = 1800.0
 
+# 语速兜底：与 knowledge.rate_for_style 的默认一致（包配置缺失或非法时用）
+DEFAULT_RATE = 4.5
+
 # 单字词不下发匹配：中文里「最」这类单字条目会命中「最近」「最后」「最好」「最终」，
 # 把 soft_hits 变成噪声（实测四种全部命中）。真要拦绝对化表述，应当枚举具体短语
 # （最低价 / 最便宜 / 最好用），而不是裸单字。
@@ -46,8 +49,12 @@ def count_chars(text: str) -> int:
     return len(re.sub(PUNCT, "", text))
 
 
-def split_sections(text: str) -> list[tuple[str, str]]:
-    """按空行分段，供段落数与时长估算"""
+def split_sections(text: str) -> list[str]:
+    """按空行分段，供段落数与时长估算。
+
+    注解原本写成 `list[tuple[str, str]]`，但返回的其实是**字符串列表**
+    （调用方也是这么用的）。错注解比没注解更糟：照着它写的人会去解包。
+    """
     paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
     if len(paras) <= 1:  # 单行多段（用换行分隔）时退回按行
         paras = [p.strip() for p in text.split("\n") if p.strip()]
@@ -56,9 +63,18 @@ def split_sections(text: str) -> list[tuple[str, str]]:
 
 def estimate_seconds(text: str, rate: float) -> float:
     """预估时长 = 字数/语速 + 段落间停顿×0.5s（口径同 rules/duration.md）"""
+    # 语速非法时不能崩：包配置里 `rate_by_style: {快节奏: 0}` 会一路走到这里，
+    # 抛出来的 ZeroDivisionError 用户根本看不懂。校验器是自己要「守下限」的那层，
+    # 它先崩了就没有下限可言。
+    try:
+        r = float(rate)
+    except (TypeError, ValueError):
+        r = DEFAULT_RATE
+    if r <= 0:
+        r = DEFAULT_RATE
     paras = split_sections(text)
     pauses = max(len(paras) - 1, 0) * 0.5
-    return count_chars(text) / rate + pauses
+    return count_chars(text) / r + pauses
 
 
 class Banwords:
