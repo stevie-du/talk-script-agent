@@ -210,26 +210,30 @@ main { display: flex; flex: 1; min-height: 0; }
 .stg-nav-item.hidden, .stg-nav-scroll .nav-sec.hidden { display: none; }
 
 /* 产物分区 tab：文案 / 分镜 / 字幕 / 合规 / 数据。
-   修复前这些全平铺在一条长流里，层级混乱。 */
+   设计极简：只靠「文字深浅 + 一条直线」区分选中态，不加徽标底色、
+   不加粗体（全局 button 已经是 500），让分镜/合规的角标统一降级为
+   次级文字 —— 这样整排 tab 与产品其他导航保持一致。
+   修复前：选中态底线被全局 button 的圆角弯成 U 形 + 合规绿徽标太抢眼。 */
 .res-tabs-wrap { margin-top: var(--s4); }
 .res-tabs {
-  display: flex; align-items: stretch; gap: 2px;
+  display: flex; align-items: stretch; gap: 4px;
   border-bottom: 1px solid var(--line); margin-bottom: var(--s4);
 }
 .res-tab {
   display: flex; align-items: center; gap: 6px;
-  padding: 7px 14px; border: 0; border-bottom: 2px solid transparent;
+  padding: 8px 14px; border: 0; border-radius: 0;
+  border-bottom: 2px solid transparent;
   background: transparent; color: var(--text-2); cursor: pointer;
   font: 13px/1.4 var(--font); white-space: nowrap;
+  margin-bottom: -1px;            /* 让选中态的黑线压在容器分隔线上 */
 }
-.res-tab:hover { color: var(--text-1); background: var(--fill); }
-.res-tab.on { color: var(--text-1); font-weight: 500; border-bottom-color: var(--ink); }
-.res-tab.on .rt-t { font-weight: 500; }
-.res-tab.bad .rt-b { color: var(--bad); }
-.res-tab.ok .rt-b { color: var(--ok); }
+.res-tab:hover { color: var(--text-1); }
+.res-tab.on {
+  color: var(--text-1);
+  border-bottom-color: var(--ink);
+}
 .rt-b {
-  font-size: var(--f-2xs); padding: 1px 6px; border-radius: var(--r-pill);
-  background: var(--fill); color: var(--text-3);
+  font-size: var(--f-xs); color: var(--text-3);    /* 降级为次级文字，无底色 */
 }
 .res-pane.hidden { display: none; }
 
