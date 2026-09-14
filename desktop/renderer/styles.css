@@ -434,7 +434,9 @@ select {
 .select-wrap.pill .select-btn {
   width: auto; height: var(--h-btn-sm); min-height: var(--h-btn-sm);
   padding: 0 10px; gap: 4px; font-size: var(--f-xs);
-  border-radius: var(--r-pill);
+  /* 圆角语言与输入框统一：输入框是 --r-xl(18px) 的圆角矩形，参数条若用
+     pill（半圆头）会像另一种控件。改成圆角矩形，两者才是同一套语言。 */
+  border-radius: var(--r-md);
 }
 .select-wrap.pill .chev { margin-left: 2px; }
 /* 菜单宽度与位置由 JS 量取后写入（贴按钮左沿、可按内容取宽）。
@@ -983,13 +985,14 @@ td.bad { color: var(--bad); font-weight: 500; }
 }
 /* 快捷参数条：高频参数直接放输入框上方，不进设置页 */
 .quick-bar {
-  max-width: var(--w-stream); width: 100%; margin: 0 auto 8px;
+  max-width: var(--w-stream); width: 100%; margin: 0 auto var(--s3);
   /* 不再 padding: 0 6px：会让参数条左/右边缘比输入框多 6px，与下方不对齐 */
+  /* 间距 8px → 12px(--s3)：输入框 50px 比胶囊 28px 高不少，8px 显得挤 */
   display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
 }
 .quick-bar .qp-more {
   margin-left: auto; height: var(--h-btn-sm); padding: 0 12px;
-  font-size: var(--f-xs); border-radius: var(--r-pill);
+  font-size: var(--f-xs); border-radius: var(--r-md);   /* 同上，统一圆角语言 */
 }
 #composer-body {
   max-width: var(--w-stream); width: 100%; margin-inline: auto;

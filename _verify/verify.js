@@ -792,6 +792,24 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     const qb = document.getElementById('quick-params').getBoundingClientRect();
     const cb = document.getElementById('composer-body').getBoundingClientRect();
     return { qbL: qb.left, cbL: cb.left, qbR: qb.right, cbR: cb.right }; })()`);
+  // 圆角语言统一：参数条胶囊不再是 pill（半圆头），与输入框同属圆角矩形
+  const radius = await evalIn(`return (() => {
+    const pill = document.querySelector('#quick-params .select-btn');
+    const more = document.querySelector('#quick-params .qp-more');
+    const cb = document.getElementById('composer-body');
+    return { pill: getComputedStyle(pill).borderRadius,
+             more: getComputedStyle(more).borderRadius,
+             cb: getComputedStyle(cb).borderRadius }; })()`);
+  check("参数条与输入框是同一套圆角语言（都不是 pill）",
+    !/999px/.test(radius.pill) && !/999px/.test(radius.more)
+    && /px/.test(radius.cb), JSON.stringify(radius));
+
+  // 间距：输入框 50px 比胶囊 28px 高不少，8px 太挤
+  const gap = await evalIn(`return Math.round(
+    document.getElementById('composer-body').getBoundingClientRect().top
+    - document.getElementById('quick-params').getBoundingClientRect().bottom);`);
+  check("参数条与输入框间距 12px（原 8px 偏挤）", gap === 12, `gap=${gap}`);
+
   check("参数条与输入框左右对齐（修复前差 6px）",
     Math.abs(align.qbL - align.cbL) < 1 && Math.abs(align.qbR - align.cbR) < 1,
     JSON.stringify(align));
