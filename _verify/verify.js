@@ -800,6 +800,37 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     && inkGeo.容器 === 16 && inkGeo.药丸被裁 === false,
     JSON.stringify(inkGeo));
 
+  // 后续分组标签（更早…）的竖向节奏。桩里只有 1 个分组，硬编码第二个会让测试
+  // 依赖运行日期（今天跑是「昨天」、过几天就并进「更早」），所以**克隆现有的标签**
+  // 插到第一条记录后面来量 —— 克隆体不是 :first-child，拿到的是真实的
+  // margin-top + padding-top，量完立刻移除。
+  // 这里守的是上一版改动的一个连带影响：.group-lbl 的行盒从 22px 收到 16px 后，
+  // 字墨相对盒顶的偏移 d 由 4.8 降到 0.6，分组之间的视觉间距也跟着少了 4.2px。
+  // 判据是"上大下小"——分组头必须贴自己的组，不能读成上一组的尾巴。
+  const rhythm = await evalIn(`const list = document.getElementById('session-list');
+    const lbl = list.querySelector('.group-lbl');
+    const row = list.querySelector('.sess-item');
+    const clone = lbl.cloneNode(true);
+    row.after(clone);
+    const tn = [...clone.childNodes].find(n => n.nodeType === 3 && n.textContent.trim());
+    const rg = document.createRange(); rg.selectNodeContents(tn);
+    const c = document.createElement('canvas').getContext('2d');
+    const cs = getComputedStyle(clone);
+    c.font = cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily;
+    const m = c.measureText(tn.textContent.trim());
+    const box = clone.getBoundingClientRect();
+    const ink = rg.getBoundingClientRect().top
+      + (m.fontBoundingBoxAscent - m.actualBoundingBoxAscent);
+    const next = clone.nextElementSibling;
+    const out = { 上方: +(ink - row.getBoundingClientRect().bottom).toFixed(2),
+                  下方: next ? +(next.getBoundingClientRect().top - box.bottom).toFixed(2) : null,
+                  marginTop: cs.marginTop, paddingTop: cs.paddingTop };
+    clone.remove();
+    return out;`);
+  check("分组标签上间距 > 下间距（头贴自己的组），且上方没被行高收紧吃掉",
+    rhythm.上方 > rhythm.下方 + 6 && rhythm.上方 >= 18,
+    JSON.stringify(rhythm));
+
   // 窗口头部线必须贯通：左栏品牌行和右栏头部都是 48px，两边都要有下边框。
   // 回归的 bug：只有 .right-head 有 border-bottom，线画到侧栏边界就断了。
   const headLine = await evalIn(`const l = document.querySelector('.left-head').getBoundingClientRect();

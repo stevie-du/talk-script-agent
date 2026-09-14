@@ -48,7 +48,12 @@ _verify/_cprof/
 _verify/*.png
 
 # 一次性排查脚本的运行产物与临时批处理
+# 约定：_verify/ 下**下划线开头**的都是临时件（截图、排查脚本、运行日志），
+# 正式工具不带下划线（verify.js / e2e-live.js / shot-live.js / who-locks.js）。
+# 只忽略 .txt/.log 是不够的 —— 排查脚本本身也是 _*.js，漏了这条会被 git add -A 卷进提交。
 _verify/_*.txt
+_verify/_*.log
+_verify/_*.js
 _verify/_app.log
 _verify/_start.bat
 
