@@ -798,6 +798,27 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const fold = await evalIn(`return document.getElementById('left').classList.contains('folded');`);
   check("Ctrl+\\ 折叠后能再展开（监听只注册一次）", fold === false, `folded=${fold}`);
 
+  // 折叠态：除左上角那个展开按钮外，左栏不应残留任何可见内容。
+  // 回归的 bug：折叠时只隐藏了 .left-head 的子项 / .left-scroll / .left-foot，
+  // 漏了 .left-top（搜索 + 新建对话）。左栏宽度归 0 后它仍在布局里，
+  // 「新建对话」被挤成 ~26px 宽的竖排「建/对」小黑块挂在展开按钮下面。
+  // 判据用「有非零尺寸且不在展开按钮内」—— 子项若在 display:none 的祖先下，
+  // 自身 computed display 仍是原值，但 rect 会是 0，所以这个判据是准的。
+  await evalIn(`document.dispatchEvent(new KeyboardEvent('keydown',
+    { key:'\\\\', ctrlKey:true, bubbles:true })); return true;`);
+  await sleep(250);
+  const foldLeak = await evalIn(`const left = document.getElementById('left');
+    const leaked = [...left.querySelectorAll('*')].filter(n => {
+      if (n.closest('#btn-toggle-left')) return false;
+      return n.getBoundingClientRect().width > 0;
+    }).map(n => n.id || n.className || n.tagName);
+    return { folded: left.classList.contains('folded'), leaked: leaked.slice(0, 6) };`);
+  check("折叠左栏后只剩展开按钮，无残留内容",
+    foldLeak.folded && foldLeak.leaked.length === 0, JSON.stringify(foldLeak));
+  await evalIn(`document.dispatchEvent(new KeyboardEvent('keydown',
+    { key:'\\\\', ctrlKey:true, bubbles:true })); return true;`);
+  await sleep(200);
+
   // ── 12b) 刷新行业包列表不丢当前选择 ──────────────────────
   // 修复前 fillPackSelect 每次都跳回 default_pack：保存设置或新建包之后，
   // 用户刚选中的行业包会被悄悄换掉（「已切换到新建的行业包」成了空话）。
@@ -899,6 +920,12 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     JSON.stringify(align));
   await shot("main-sidebar.png",
     "window.__ts.newChat(); document.getElementById('btn-generate'); return true;");
+  // 折叠态截图：左栏收成 0 宽后只应剩左上角的展开按钮。
+  // 回归的 bug 是漏隐藏 .left-top，「新建对话」被挤成竖排「建/对」小黑块。
+  await shot("main-folded.png",
+    "document.getElementById('btn-toggle-left').click(); return true;");
+  await evalIn("document.getElementById('btn-toggle-left').click(); return true;");
+  await sleep(300);
   await shot("settings-gen.png",
     "document.getElementById('btn-open-settings').click(); window.__ts.setPane('gen'); return true;");
   await shot("settings-packinfo.png", "window.__ts.setPane('packinfo'); return true;");

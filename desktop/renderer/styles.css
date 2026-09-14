@@ -503,7 +503,12 @@ select {
    改为只裁内部列表/底栏。
    #left 需要 z-index 抬层，否则同为兄弟节点的 #right 会盖住浮出的按钮。 */
 #left.folded .left-head { padding: 0; gap: 0; height: auto; min-height: 0; }
+/* 折叠态：除左上角那个展开按钮外，左栏不留任何可见内容。
+   注意要连 .left-top（搜索 + 新建对话）一起隐藏 —— 它不在 .left-head 里，
+   漏掉它的话左栏宽度归 0 后它仍在布局中，「新建对话」会被挤成一个
+   竖排「建/对」的小黑块挂在展开按钮下面。 */
 #left.folded .left-head > *:not(#btn-toggle-left),
+#left.folded .left-top,
 #left.folded .left-scroll,
 #left.folded .left-foot { display: none; }
 #left.folded #btn-toggle-left {
