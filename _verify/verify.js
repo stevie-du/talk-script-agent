@@ -634,6 +634,24 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     return true;`);
   await sleep(300);
 
+  // 检索条几何：图标必须在容器内、input 不能自带描边。
+  // 回归的是这一类 bug —— 全局 `input` 规则（styles.css 输入控件节）会给
+  // input 加 box-shadow(0.5px 描边) + min-height:32px，而检索条容器只有 30px；
+  // 容器若只清了 border/background 而没清 box-shadow/min-height，
+  // input 就会在容器里自己画一圈线并撑破容器，看起来像「放大镜跑到搜索框外」。
+  // 只断言「输入能过滤」是不够的：功能一直是好的，坏的是外观。
+  const GEO = sel => `const box = document.querySelector('${sel}');
+    const svg = box.querySelector('svg'), inp = box.querySelector('input');
+    const R = e => { const b = e.getBoundingClientRect();
+      return { left:b.left, right:b.right, top:b.top, bottom:b.bottom, height:b.height }; };
+    const cs = getComputedStyle(inp);
+    return { box: R(box), svg: R(svg), inp: R(inp),
+             shadow: cs.boxShadow, minH: cs.minHeight, pad: cs.paddingTop };`;
+  const geoOK = g => g.shadow === "none" && g.minH === "0px" && g.pad === "0px"
+    && g.svg.left > g.box.left && g.svg.right < g.box.right
+    && g.inp.left > g.svg.right && g.inp.right <= g.box.right
+    && g.inp.height <= g.box.height;
+
   // 设置内搜索：6 个分区以后还会更多，没检索就得一个个点过去
   await evalIn(`document.getElementById('btn-open-settings').click(); return true;`);
   await sleep(300);
@@ -653,6 +671,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const stgAll = await evalIn(`return [...document.querySelectorAll('.stg-nav-item')]
     .filter(n => !n.classList.contains('hidden')).length;`);
   check("清空设置搜索后恢复全部分区", stgAll === 6, String(stgAll));
+
+  const stgGeo = await evalIn(GEO(".stg-search"));
+  check("设置内搜索：图标在框内、input 无自带描边", geoOK(stgGeo), JSON.stringify(stgGeo));
+
   await evalIn(`document.getElementById('btn-close-settings').click(); return true;`);
   await sleep(200);
 
@@ -686,6 +708,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     val: document.getElementById('sess-search').value };`);
   check("清空搜索后恢复全部会话", cleared.rows === 2 && cleared.val === "",
     JSON.stringify(cleared));
+
+  const sessGeo = await evalIn(GEO(".sess-search"));
+  check("会话搜索：图标在框内、input 无自带描边", geoOK(sessGeo), JSON.stringify(sessGeo));
 
   // 导出内容必须断言，不能只断言「不抛错」——
   // 错误的字幕（关键词当字幕、句子被砍断）同样能顺利导出。

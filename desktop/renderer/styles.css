@@ -206,6 +206,8 @@ main { display: flex; flex: 1; min-height: 0; }
 .stg-search svg { flex: 0 0 auto; color: var(--text-3); }
 .stg-search input {
   flex: 1; min-width: 0; border: 0; background: transparent;
+  /* 同 .sess-search input：清掉全局 input 的描边/最小高度/内边距 */
+  border-radius: 0; box-shadow: none; min-height: 0; padding: 0;
   font: 12px/1 var(--font); color: var(--text-1); outline: none;
 }
 .stg-search input::placeholder { color: var(--text-3); }
@@ -274,6 +276,9 @@ main { display: flex; flex: 1; min-height: 0; }
 .sess-search > svg { flex: 0 0 auto; color: var(--text-3); }
 .sess-search input {
   flex: 1; min-width: 0; border: 0; background: transparent;
+  /* 外观由外层 .sess-search 承担，这里必须显式清掉全局 input 的
+     box-shadow / min-height / padding —— 见「输入控件」节的说明 */
+  border-radius: 0; box-shadow: none; min-height: 0; padding: 0;
   font: 12px/1 var(--font); color: var(--text-1); outline: none;
 }
 .sess-search input::placeholder { color: var(--text-3); }
@@ -384,6 +389,19 @@ textarea { resize: vertical; line-height: 1.7; }
 input::placeholder, textarea::placeholder { color: var(--text-3); }
 input:hover, textarea:hover { box-shadow: var(--shadow-input-hover); }
 input:focus, select:focus, textarea:focus { outline: none; box-shadow: var(--shadow-focus); }
+
+/* 检索条内的 input（会话搜索 / 设置内搜索）：只负责排版，外观（白底 + 描边 +
+   圆角）整体由外层容器承担。上面 input:hover / input:focus 与
+   .sess-search input 特异性相同（0,1,1）且位置更靠后，会盖掉容器内的清除规则，
+   所以这里用 (0,2,1) 的 :hover / :focus 明确压回去。
+   不这样做的话：input 会在容器里自己画一圈 0.5px 描边、并以 32px 最小高度
+   撑破 30px 的外层 —— 看起来就是「放大镜图标跑到搜索框外面了」。 */
+.sess-search input, .stg-search input,
+.sess-search input:hover, .stg-search input:hover,
+.sess-search input:focus, .stg-search input:focus {
+  border: 0; border-radius: 0; background: transparent;
+  box-shadow: none; min-height: 0; padding: 0;
+}
 select {
   appearance: none; -webkit-appearance: none;
   padding: 6px 30px 6px 11px; text-overflow: ellipsis;
