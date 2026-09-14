@@ -64,8 +64,7 @@ export function renderResult(r, body, opts = {}) {
   body.appendChild(renderHeader(r, ch, dev, hardN, opts));
   const banners = renderBanners(r, ch, opts);
   if (banners) body.appendChild(banners);
-  body.appendChild(renderSections(r, opts));
-  body.appendChild(renderAccordions(r, ch, hardN));
+  body.appendChild(renderResultTabs(r, ch, hardN, opts));
   body.appendChild(renderFollowups(r, opts));
   bindActions(body, r, opts);
 }
@@ -188,31 +187,118 @@ function renderSections(r, opts) {
 }
 
 // ── 4) 折叠块 ───────────────────────────────────────────────
-function renderAccordions(r, ch, hardN) {
-  const acc = (title, contentHtml, open, badgeHtml = "", icon = "", cls = "") => {
-    const d = el("details", "acc" + (open ? " open" : "") + (cls ? " " + cls : ""));
-    d.innerHTML = `<summary>${icon ? `<span class="acc-ic">${icon}</span>` : ""}
-      <span class="acc-t">${esc(title)}</span>${badgeHtml}</summary>`;
-    const inner = el("div", "acc-body");
-    inner.innerHTML = contentHtml;
-    d.appendChild(inner);
-    return d;
-  };
-  const badge = (text, cls) => `<span class="acc-badge ${cls}">${text}</span>`;
+/** 产物分区：文案 / 分镜 / 字幕 / 合规 / 数据。
+
+    修复前这些全平铺在一条长滚动流里（分镜还默认展开，把主产物文案往下挤），
+    而它们的性质完全不同：文案是主产物、分镜是视觉、JSON 是原始数据、
+    日志是调试信息。混在一起层级就乱了。
+
+    成熟 agent（Claude/ChatGPT 的 Artifacts、WorkBuddy 的产物区）都用
+    「主内容区 + tab 切换视图」：每个视图只放一类产物，互不干扰。
+
+    所有 pane 一次渲染、用 hidden 切换（不销毁重建）—— 否则 bindActions
+    绑的单段重写 / 导出按钮在切回时会失效。
+*/
+function renderResultTabs(r, ch, hardN, opts) {
   const complyOk = (ch.passed ?? true) && hardN === 0;
-  const wrap = el("div", "acc-list");
-  if ((r.storyboard || []).length) {
-    wrap.appendChild(acc("分镜", renderStoryboard(r), true,
-      badge(`${r.storyboard.length} 镜`, "info"), ICONS.sb));
-  }
-  wrap.appendChild(acc("合规检查", renderCompliance(r), !complyOk,
-    badge(complyOk ? "✓ 通过" : `✗ ${hardN ? hardN + " 处硬伤" : "未通过"}`,
-      complyOk ? "ok" : "bad"), ICONS.shield, complyOk ? "ok" : "bad"));
-  wrap.appendChild(acc("JSON", `<pre class="code">${esc(JSON.stringify(r, null, 2))}</pre>`,
-    false, "", ICONS.code));
-  wrap.appendChild(acc("日志", renderLogs(r.logs || []), false,
-    badge(`${(r.logs || []).length} 条`, "info"), ICONS.log));
+  const logs = r.logs || [];
+
+  const defs = [
+    { id: "script", label: "文案", badge: "",
+      render: () => renderSections(r, opts) },
+    { id: "story", label: "分镜", badge: `${(r.storyboard || []).length} 镜`,
+      render: () => renderStoryboard(r),
+      hide: !(r.storyboard || []).length },
+    { id: "subs", label: "字幕", badge: "",
+      render: () => renderSubtitlePane(r) },
+    { id: "comp", label: "合规", cls: complyOk ? "ok" : "bad",
+      badge: complyOk ? "✓ 通过" : `✗ ${hardN ? hardN + " 处硬伤" : "未通过"}`,
+      render: () => renderCompliance(r) },
+    { id: "data", label: "数据", badge: `${logs.length} 条日志`,
+      render: () => renderDataPane(r) },
+  ].filter(d => !d.hide);
+
+  const wrap = el("div", "res-tabs-wrap");
+  const bar = el("div", "res-tabs");
+  bar.setAttribute("role", "tablist");
+  const panes = el("div", "res-panes");
+
+  defs.forEach((d, i) => {
+    const btn = el("button", "res-tab" + (i === 0 ? " on" : "") + (d.cls ? " " + d.cls : ""));
+    btn.type = "button";
+    btn.dataset.tab = d.id;
+    btn.setAttribute("role", "tab");
+    btn.setAttribute("aria-selected", i === 0 ? "true" : "false");
+    btn.innerHTML = `<span class="rt-t">${esc(d.label)}</span>`
+      + (d.badge ? `<span class="rt-b">${esc(d.badge)}</span>` : "");
+    btn.onclick = () => {
+      bar.querySelectorAll(".res-tab").forEach(n => {
+        const on = n === btn;
+        n.classList.toggle("on", on);
+        n.setAttribute("aria-selected", on ? "true" : "false");
+      });
+      panes.querySelectorAll(".res-pane").forEach(p =>
+        p.classList.toggle("hidden", p.dataset.tab !== d.id));
+    };
+    bar.appendChild(btn);
+
+    const pane = el("div", "res-pane" + (i === 0 ? "" : " hidden"));
+    pane.dataset.tab = d.id;
+    pane.setAttribute("role", "tabpanel");
+    const content = d.render();
+    if (typeof content === "string") pane.innerHTML = content;
+    else if (content) pane.appendChild(content);
+    panes.appendChild(pane);
+  });
+
+  wrap.appendChild(bar);
+  wrap.appendChild(panes);
   return wrap;
+}
+
+/** 字幕预览：导出前就能看到 SRT 长什么样。
+
+    以前只能导出成文件后打开才知道对不对 —— SRT 导出曾经出过
+    「把关键词当字幕、句子被砍断」的 bug，而用户在界面上完全无从发现。
+*/
+function renderSubtitlePane(r) {
+  const rows = [];
+  (r.sections || []).forEach((s, i) => {
+    const tm = (r.timings || [])[i] || { start: 0, end: 0 };
+    srtCues(s.text, tm.start, tm.end).forEach(c => rows.push(c));
+  });
+  if (!rows.length) return `<p class="hint">暂无字幕内容。</p>`;
+
+  const fmt = t => {
+    const s = Math.max(0, t);
+    const m = Math.floor(s / 60);
+    return `${m}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+  };
+  const body = rows.map((c, i) => `<tr>
+    <td class="sn">${i + 1}</td>
+    <td class="tm">${fmt(c.start)}–${fmt(c.end)}</td>
+    <td class="tx">${esc(c.text)}</td></tr>`).join("");
+  return `<div class="sub-pane">
+    <p class="hint">下面是导出 SRT 的实际内容（共 ${rows.length} 行），
+      与「导出 SRT」按钮产出的文件一致。</p>
+    <table class="sub-table"><tbody>${body}</tbody></table>
+    <div class="sub-actions">
+      <button class="ghost" data-act="save-srt">导出 SRT</button>
+    </div></div>`;
+}
+
+/** 数据：原始 JSON 与调试日志 —— 明确归到「非产物」的最后一档。 */
+function renderDataPane(r) {
+  const logs = r.logs || [];
+  return `<details class="acc">
+      <summary><span class="acc-t">结构化 JSON</span></summary>
+      <div class="acc-body"><pre class="code">${esc(JSON.stringify(r, null, 2))}</pre></div>
+    </details>
+    <details class="acc">
+      <summary><span class="acc-t">日志</span>
+        <span class="acc-badge info">${logs.length} 条</span></summary>
+      <div class="acc-body">${renderLogs(logs)}</div>
+    </details>`;
 }
 
 // ── 5) 后续建议（点了只预填，不自动提交）────────────────────

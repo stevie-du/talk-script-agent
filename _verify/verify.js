@@ -284,7 +284,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     cards: document.querySelectorAll('.script-card').length,
     metrics: document.querySelectorAll('.res-metric-list .m-chip').length,
     quotaChips: Array.from(document.querySelectorAll('.script-card .quota')).map(e => e.textContent),
-    accs: document.querySelectorAll('.acc-list .acc').length,
+    tabs: Array.from(document.querySelectorAll('.res-tab .rt-t')).map(n => n.textContent),
     followups: document.querySelectorAll('.followups .fu-chip').length,
     whyBlock: document.querySelectorAll('.banner.why').length,
     softBanner: !!Array.from(document.querySelectorAll('.banner')).find(b => /待确认/.test(b.textContent)),
@@ -296,7 +296,33 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("指标速览 4 项", done.metrics === 4, `metrics=${done.metrics}`);
   check("每段字数用后端统计值（12/85 而非前端重算）",
     done.quotaChips.some(t => t.includes("12/85")), JSON.stringify(done.quotaChips));
-  check("折叠区：分镜 / 合规 / JSON / 日志", done.accs === 4, `accs=${done.accs}`);
+  // 产物分区由「一条长流里的折叠区」改为 tab：文案 / 分镜 / 字幕 / 合规 / 数据
+  check("产物分区改为 5 个 tab（文案/分镜/字幕/合规/数据）",
+    done.tabs.join(",") === "文案,分镜,字幕,合规,数据", JSON.stringify(done.tabs));
+  check("默认停在「文案」tab（主产物不被分镜挤下去）",
+    (await evalIn(`return document.querySelector('.res-tab.on .rt-t').textContent;`)) === "文案",
+    await evalIn(`return document.querySelector('.res-tab.on .rt-t').textContent;`));
+  check("切换 tab 后对应的产物可见",
+    (await evalIn(`document.querySelector('[data-tab="subs"].res-tab').click();
+      return !document.querySelector('.res-pane[data-tab="subs"]').classList.contains('hidden')
+        && document.querySelector('.res-pane[data-tab="script"]').classList.contains('hidden');`)) === true,
+    "字幕 tab");
+  // 关键：字幕 tab 预览的**内容**必须与导出的一致且干净。
+  // SRT 曾出过「关键词当字幕、句子被砍断」的 bug，而以前只能导出成文件
+  // 打开才发现 —— 现在界面里就能看见。
+  const subPrev = await evalIn(`return {
+    rows: document.querySelectorAll('.sub-table tbody tr').length,
+    texts: Array.from(document.querySelectorAll('.sub-table .tx')).map(n => n.textContent),
+    srtLines: (window.__ts.result ? window.__ts.exportSrt(window.__ts.result) : '')
+      .split(String.fromCharCode(13) + String.fromCharCode(10))
+      .filter(l => /^[0-9]+$/.test(l)).length };`);
+  check("字幕预览无加粗标记且不为空",
+    subPrev.rows >= 1 && subPrev.texts.every(t => t.length > 0 && t.indexOf("**") < 0),
+    JSON.stringify(subPrev.texts.slice(0, 3)));
+  check("字幕预览行数与导出的 SRT 一致（所见即所得）",
+    subPrev.rows === subPrev.srtLines && subPrev.rows >= 1,
+    `预览=${subPrev.rows} 导出=${subPrev.srtLines}`);
+  await evalIn(`document.querySelector('[data-tab="script"].res-tab').click(); return true;`);
   check("回炉原因可展开（决策解释）", done.whyBlock === 1, "");
   check("单字词被忽略有说明", done.dropBanner, "");
   check("后续建议 chips 出现", done.followups >= 2, `chips=${done.followups}`);
@@ -795,6 +821,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await evalIn(`const d = document.querySelector('#pane-llm, .banner.warn ~ details summary');
     if (d && d.tagName === 'SUMMARY') d.parentElement.open = true; return true;`);
   await shot("result-failed.png");
+  // 产物 tab 化后的界面：文案 tab（默认）与字幕 tab（导出前可预览）
+  await shot("result-tabs-subs.png", `window.__ts.newChat();
+    [...document.querySelectorAll('#session-list .sess-item')]
+      .find(n => n.textContent.includes('家用电梯')).click(); return true;`);
 
   // ── 输出 ─────────────────────────────────────────────────
   console.log("\n════════ 界面回归结果 ════════");
