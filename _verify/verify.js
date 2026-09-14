@@ -831,6 +831,53 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     rhythm.上方 > rhythm.下方 + 6 && rhythm.上方 >= 18,
     JSON.stringify(rhythm));
 
+  // 左栏竖向节奏统一 16px：品牌线→按钮→分隔线→搜索框→列表，四段都是 16。
+  // 原来上三段是 --s3(12)、只有最后一段是 --s4(16)，同一列里两种节奏，
+  // 读起来像"上面挤、下面松" —— 没对齐，不是设计。
+  // 分隔线是 0.5px 发丝线不占节奏，所以量的是「按钮底→分隔线→搜索框顶」两段。
+  // 底部设置区同一套：列表底内边距 16、分隔线→设置按钮 16。
+  //   这条线是 .left-foot 的 border-top（不是 .left-sep 那样的独立元素），
+  //   CSS 写 0.5px 但 Windows/dpr=1 下 Chrome 会向上取整成 1px 渲染 ——
+  //   所以「线底」= border box 顶边 + borderTopWidth，直接拿 foot.top 当线会少算 1px。
+  //   （这正是实测 18 的一半来源；另一半是 .nav-item 的 margin-top:1px 在容器边界
+  //   叠到了 padding 上，已改由 .nav-sec 的 gap 承担。）
+  // 容差收到 0.6：改成精确 16 之后，容差 1 会放过「多 1px」的回归（17 也判绿）。
+  const leftRhythm = await evalIn(`const r = s => {
+      const b = document.querySelector(s).getBoundingClientRect();
+      return { t: +b.top.toFixed(2), b: +b.bottom.toFixed(2) }; };
+    const head = r('.left-head'), btn = r('#btn-new-chat'), sep = r('.left-sep'),
+          sea = r('.sess-search'), sc = r('.left-scroll');
+    const footEl = document.querySelector('.left-foot');
+    const foot = footEl.getBoundingClientRect();
+    const footBorder = parseFloat(getComputedStyle(footEl).borderTopWidth) || 0;
+    return { 线到按钮: +(btn.t - head.b).toFixed(2),
+             按钮到分隔线: +(sep.t - btn.b).toFixed(2),
+             分隔线到搜索: +(sea.t - sep.b).toFixed(2),
+             搜索到列表: +(sc.t - sea.b).toFixed(2),
+             分隔线到设置: +(r('#btn-open-settings').t - (foot.top + footBorder)).toFixed(2),
+             列表底内边距: getComputedStyle(document.querySelector('.left-scroll')).paddingBottom };`);
+  check("左栏竖向节奏统一 16px（含底部设置区）",
+    Object.entries(leftRhythm).every(([k, v]) =>
+      k === "列表底内边距" ? v === "16px" : Math.abs(v - 16) <= 0.6),
+    JSON.stringify(leftRhythm));
+
+  // .nav-item（左栏底部「设置」）与 .stg-nav-item（设置页左导航）是**同一个控件的
+  // 两处实例**，规则内容是复制粘贴的，只是类名不同 —— 改一处漏一处，两边就长得不一样。
+  // 本次「左栏统一 16px」正是踩了这个坑：只把 .nav-item 的 margin 从 1px 0 改成 0，
+  // 设置页那半边残留的 margin: 1px 0 与新加的 .nav-sec gap: 2px 叠成 4px 项间距。
+  // 只比**计算值**（margin/padding/圆角/字号…），不比 height：
+  // 设置页没打开时 .stg-nav-item 在 display:none 的子树里，height 拿不到 used value。
+  const navTwin = await evalIn(`const a = document.querySelector('.nav-item');
+    const b = document.querySelector('.stg-nav-item');
+    if (!a || !b) return { err: '缺少导航项' };
+    const pick = el => { const s = getComputedStyle(el);
+      return { m: s.margin, p: s.padding, r: s.borderRadius, g: s.gap,
+               fs: s.fontSize, fw: s.fontWeight, jc: s.justifyContent, bg: s.backgroundColor }; };
+    return { 左栏: pick(a), 设置页: pick(b) };`);
+  check("左栏导航项与设置页导航项样式同步（同一个控件的两处实例）",
+    !navTwin.err && JSON.stringify(navTwin.左栏) === JSON.stringify(navTwin.设置页),
+    JSON.stringify(navTwin));
+
   // 窗口头部线必须贯通：左栏品牌行和右栏头部都是 48px，两边都要有下边框。
   // 回归的 bug：只有 .right-head 有 border-bottom，线画到侧栏边界就断了。
   const headLine = await evalIn(`const l = document.querySelector('.left-head').getBoundingClientRect();
