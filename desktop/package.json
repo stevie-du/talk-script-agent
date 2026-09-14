@@ -8,6 +8,7 @@
   "license": "MIT",
   "scripts": {
     "start": "electron .",
+    "start:no-sandbox": "electron . --no-sandbox",
     "dist": "electron-builder --win"
   },
   "devDependencies": {

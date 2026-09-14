@@ -56,6 +56,27 @@ cd desktop && npm start
 
 无 Key 调试：设 `TALKSCRIPT_MOCK=1`，引擎返回固定夹具，可跑通全流程（含"政府补贴"拦截回炉演示）。
 
+**窗口空白 / GPU 进程起不来时**：若日志出现
+
+```
+ERROR:gpu_process_host.cc(982)] GPU process exited unexpectedly: exit_code=1
+FATAL:gpu_data_manager_impl_private.cc(423)] GPU process isn't usable. Goodbye.
+```
+
+说明本机**沙箱化的子进程无法启动**（受限环境 / 无桌面会话 / 部分虚拟机常见）。
+改用：
+
+```bash
+cd desktop && npm run start:no-sandbox
+```
+
+它等价于 `electron . --no-sandbox`。
+
+⚠️ **不要用 `--disable-gpu` 那套参数救急**：`--disable-gpu --disable-gpu-compositing
+--in-process-gpu` 虽然能让进程不崩，但窗口会**一片空白**（合成被关掉，什么都不画）；
+只加 `--disable-gpu-sandbox` 也不行，渲染进程仍然起不来、页面根本不会加载。
+真正缺的是 Chromium 自身的沙箱能力，`--no-sandbox` 一个参数即可解决。
+
 ## 测试
 
 ```bash
