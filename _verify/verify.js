@@ -675,6 +675,13 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const stgGeo = await evalIn(GEO(".stg-search"));
   check("设置内搜索：图标在框内、input 无自带描边", geoOK(stgGeo), JSON.stringify(stgGeo));
 
+  // 「返回工作区」与搜索框不能贴死：两者都是圆角矩形，间距 0 时共用一条边，
+  // 看起来像一块被劈开的控件（实测修复前 gap=0）。
+  const stgGap = await evalIn(`const b = document.querySelector('.stg-back').getBoundingClientRect();
+    const s = document.querySelector('.stg-search').getBoundingClientRect();
+    return Math.round(s.top - b.bottom);`);
+  check("设置页「返回工作区」与搜索框有间距", stgGap > 0, `gap=${stgGap}`);
+
   await evalIn(`document.getElementById('btn-close-settings').click(); return true;`);
   await sleep(200);
 
@@ -711,6 +718,41 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   const sessGeo = await evalIn(GEO(".sess-search"));
   check("会话搜索：图标在框内、input 无自带描边", geoOK(sessGeo), JSON.stringify(sessGeo));
+
+  // 左栏会话列表溢出时必须能滚到首尾。
+  // 回归的 bug：.left-scroll 曾用 justify-content: flex-end 贴底 —— flex-end 会让
+  // 溢出发生在**顶部**且不计入 scrollHeight（实测 sh==ch、maxScrollTop==0），
+  // 于是列表一超过容器高度就彻底滚不动，首项被推到负坐标（实测 -3204px）永远看不到。
+  // 桩里只有 2 条会话不会溢出，所以临时插入足量占位项制造溢出，测完移除。
+  const scrollGeo = await evalIn(`const sc = document.querySelector('.left-scroll');
+    const list = document.getElementById('session-list');
+    const dummies = [];
+    for (let i = 0; i < 40; i++) {
+      const d = document.createElement('div');
+      d.className = 'sess-item'; d.style.height = '56px';
+      list.appendChild(d); dummies.push(d);
+    }
+    const first = list.querySelector('.sess-item');
+    const last = list.lastElementChild;
+    sc.scrollTop = 0;
+    const r = {
+      canScroll: sc.scrollHeight > sc.clientHeight,
+      containerTop: Math.round(sc.getBoundingClientRect().top),
+      firstTop: Math.round(first.getBoundingClientRect().top),
+    };
+    sc.scrollTop = 99999;
+    r.maxScrollTop = Math.round(sc.scrollTop);
+    r.containerBottom = Math.round(sc.getBoundingClientRect().bottom);
+    r.lastBottom = Math.round(last.getBoundingClientRect().bottom);
+    r.firstReachable = r.firstTop >= r.containerTop - 1;
+    r.lastReachable = r.lastBottom <= r.containerBottom + 1;
+    dummies.forEach(d => d.remove());
+    sc.scrollTop = 0;
+    return r;`);
+  check("左栏会话溢出时能滚到首尾（不是滚不动）",
+    scrollGeo.canScroll && scrollGeo.maxScrollTop > 0
+      && scrollGeo.firstReachable && scrollGeo.lastReachable,
+    JSON.stringify(scrollGeo));
 
   // 导出内容必须断言，不能只断言「不抛错」——
   // 错误的字幕（关键词当字幕、句子被砍断）同样能顺利导出。
