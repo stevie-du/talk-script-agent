@@ -587,10 +587,16 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 }
 
 /* 会话记录 */
+/* 顶对齐 + line-height:1 —— 这两条合起来，才让「本周」的**字墨顶边**落在标签盒顶边。
+   原来 align-items:center + 继承行高，文字被 18px 的计数药丸垂直居中顶下去，
+   字墨比盒顶低 4.8px：盒子边在 16px、肉眼看到的却在 20.8px，而滚动态看到的是
+   滚动容器被裁的边（16px）—— 同一个位置两个间距，滚一下就变。
+   实测：center/继承行高 → 字墨 20.8；flex-start/行高1 → 字墨 16.6（d 由 4.8 收到 0.6）。
+   断言量盒子是量不出这个的 —— 文字在行盒里天生比盒顶低，必须量字墨。 */
 .group-lbl {
   font-size: var(--f-2xs); font-weight: 600; color: var(--text-3); letter-spacing: .3px;
   padding: var(--s3) 8px var(--s1); margin-top: var(--s2);
-  display: flex; align-items: center; gap: 6px;
+  display: flex; align-items: flex-start; gap: 6px; line-height: 1;
 }
 /* 第一个分组标签是「搜索框的下一行」，不是「上一条记录的下一条」——
    margin-top 和 padding-top 都要归零，让搜索框到「本周」的距离**等于**
@@ -601,7 +607,12 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 .group-lbl:first-child { margin-top: 0; padding-top: 0; }
 .group-lbl .count {
   font-size: var(--f-min); background: var(--fill); color: var(--text-2);
-  border-radius: var(--r-pill); padding: 1px 7px; font-weight: 600; line-height: 1.6;
+  border-radius: var(--r-pill); padding: 1px 7px; font-weight: 600;
+  /* line-height 1.6 → 1：药丸从 18px 收到 12px。
+     文字改成顶对齐后，18px 的药丸会把「59」的基线留在 29.6px，而「本周」在 25.6px，
+     两者错开 4px（实测基线差 -4，肉眼能看出数字被压低）。收紧到 12px 后基线差
+     回到 -0.8px，且药丸顶边仍停在 16px（没有被滚动容器裁掉）。 */
+  line-height: 1;
 }
 /* 列表从容器**顶部**开始排，会话少时也不许贴底。
    曾经写过 margin-top: auto（为了绕开 justify-content: flex-end 的滚动陷阱），

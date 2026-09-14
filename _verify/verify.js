@@ -772,6 +772,33 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("搜索框下方间距统一 16px（滚动态与非滚动态一致）",
     headOrder.gapToScroll === headOrder.gapToLbl && headOrder.gapToScroll === 16,
     `滚动态=${headOrder.gapToScroll} 非滚动态=${headOrder.gapToLbl}`);
+  // 但「量到盒子顶边」还不够 —— 肉眼看到的是**字墨**顶边。
+  // 文字在行盒里天生比盒顶低（11px 字号下字体 ascent 12 / 墨迹 ascent 9，
+  // 再叠上半行距），回归时这一项实测 20.8px：盒子边 16、看到的 20.8，
+  // 而滚动态看到的仍是容器边 16 —— 同一个位置两个间距。
+  // 所以这里必须用 canvas 的 TextMetrics 把 em 盒换算到墨迹，量那条真正看得见的边。
+  // （药丸的顶边也一并量：它不能被滚动容器裁掉，否则「59」会缺一角。）
+  const inkGeo = await evalIn(`const sea = document.querySelector('.sess-search');
+    const sc = document.querySelector('.left-scroll');
+    const lbl = document.querySelector('.group-lbl');
+    const pill = lbl.querySelector('.count');
+    const tn = [...lbl.childNodes].find(n => n.nodeType === 3 && n.textContent.trim());
+    const rg = document.createRange(); rg.selectNodeContents(tn);
+    const c = document.createElement('canvas').getContext('2d');
+    const cs = getComputedStyle(lbl);
+    c.font = cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily;
+    const m = c.measureText(tn.textContent.trim());
+    const ink = rg.getBoundingClientRect().top
+      + (m.fontBoundingBoxAscent - m.actualBoundingBoxAscent);
+    const seaB = sea.getBoundingClientRect().bottom;
+    return { 字墨: +(ink - seaB).toFixed(2),
+             药丸: +(pill.getBoundingClientRect().top - seaB).toFixed(2),
+             容器: +(sc.getBoundingClientRect().top - seaB).toFixed(2),
+             药丸被裁: pill.getBoundingClientRect().top < sc.getBoundingClientRect().top - 0.01 };`);
+  check("搜索框到「本周」字墨顶边 = 16px（三个量都落在 16，且药丸没被裁）",
+    Math.abs(inkGeo.字墨 - 16) <= 1 && inkGeo.药丸 === 16
+    && inkGeo.容器 === 16 && inkGeo.药丸被裁 === false,
+    JSON.stringify(inkGeo));
 
   // 窗口头部线必须贯通：左栏品牌行和右栏头部都是 48px，两边都要有下边框。
   // 回归的 bug：只有 .right-head 有 border-bottom，线画到侧栏边界就断了。
