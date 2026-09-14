@@ -92,7 +92,98 @@ def pack_info(pack_dir: Path) -> PackInfo:
         description=str(data.get("description", "")),
         version=int(data.get("version", 1) or 1),
         params=data.get("params", {}) or {},
+        param_audit=param_audit(pack_dir, data),
     )
+
+
+def _heading_exists(pack_dir: Path, rel: str, keyword: str) -> bool:
+    """知识文件里是否存在标题含 keyword 的 `##` 章节。"""
+    if not keyword:
+        return False
+    text = read_text_cached(pack_dir / rel)
+    return any(re.match(r"^##\s", ln) and keyword in ln for ln in text.split("\n"))
+
+
+def param_audit(pack_dir: Path, data: dict) -> dict[str, dict[str, str]]:
+    """列出「用户能选、但本包没给对应定制」的参数值 → 一句人话降级说明。
+
+    为什么需要
+    ----------
+    这些值不会报错，只会静默走通用默认：用户加了个「快手」以为照常查平台红线，
+    实际平台差异化校验整个不生效；加了新细分领域，注入的却是别的章节。
+    静默降级比报错更危险 —— 与 `checker.Banwords.dropped_short` 同一取向
+    （那里注释写的是「保留可见性，避免包作者以为写了就生效」）。
+
+    只列**有问题**的值；`persona` 只进提示词、无表可查，故不参与审计。
+
+    返回 `{参数键: {选项值: 说明}}`。
+    """
+    params = data.get("params", {}) or {}
+    out: dict[str, dict[str, str]] = {}
+
+    def note(key: str, value, text: str) -> None:
+        out.setdefault(key, {})[str(value)] = text
+
+    def options(key: str) -> list:
+        return (params.get(key, {}) or {}).get("options", []) or []
+
+    def as_keys(table: dict) -> set[str]:
+        return {str(k) for k in (table or {})}
+
+    # 受众：audience_map 无该值 → audience_slice 退化成注入整份 audience.md
+    amap = data.get("audience_map", {}) or {}
+    for v in options("audience"):
+        kw = amap.get(str(v))
+        if not kw:
+            note("audience", v, "未配 audience_map：将注入整份受众知识，而非对应章节")
+        elif not _heading_exists(pack_dir, "knowledge/audience.md", str(kw)):
+            note("audience", v,
+                 f"映射的章节「{kw}」在 audience.md 中不存在：将注入整份文件")
+
+    # 细分领域：topics_map 无该值 → 退到「通用」，注入的是别的章节
+    tmap = data.get("topics_map", {}) or {}
+    for v in options("segment"):
+        kw = tmap.get(str(v))
+        if not kw:
+            g = tmap.get("通用", "")
+            note("segment", v,
+                 f"未配 topics_map：将改用「通用」章节（{g or '整份文件'}），"
+                 "与所选细分领域不匹配")
+        elif not _heading_exists(pack_dir, "knowledge/topics.md", str(kw)):
+            note("segment", v,
+                 f"映射的章节「{kw}」在 topics.md 中不存在：将注入整份文件")
+
+    # 时长：quota_table 缺该键 → 配额按相邻键插值；points_by_duration 缺 → 默认 3
+    quota, points = as_keys(data.get("quota_table", {})), as_keys(
+        data.get("points_by_duration", {}))
+    for v in options("duration"):
+        missing = []
+        if str(v) not in quota:
+            missing.append("字数配额按相邻时长插值")
+        if str(v) not in points:
+            missing.append("正文要点数用默认 3")
+        if missing:
+            note("duration", v, "；".join(missing))
+
+    # 风格：rate_by_style 缺该键 → 语速默认 4.5 字/秒，字数配额随之变化
+    rates = as_keys(data.get("rate_by_style", {}))
+    for v in options("style"):
+        if str(v) not in rates:
+            note("style", v, "rate_by_style 无该风格：语速按默认 4.5 字/秒，"
+                             "字数配额随之变化")
+
+    # 平台：banwords 的平台分级词表缺该键 → 只走基础词表
+    try:
+        ban = read_yaml_cached(pack_dir / str(data.get("banwords", "banwords.yaml")))
+        rules = as_keys((ban or {}).get("platform", {}) or {})
+    except Exception:                            # noqa: BLE001
+        rules = set()
+    for v in options("platform"):
+        if str(v) not in rules:
+            note("platform", v, "平台分级词表未定义该平台：只按通用词表校验，"
+                                "平台差异化红线不生效")
+
+    return out
 
 
 class Pack:

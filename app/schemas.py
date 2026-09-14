@@ -134,3 +134,6 @@ class PackInfo(BaseModel):
     description: str = ""
     version: int = 1
     params: dict = {}
+    # {参数键: {选项值: 降级说明}}，只列「用户能选、但本包没给对应定制」的值。
+    # 这些值不会报错，只会静默走通用默认 —— 摊到界面上，避免用户以为在定制。
+    param_audit: dict = {}

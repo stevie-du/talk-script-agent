@@ -488,6 +488,25 @@ select {
 .select-opt .tick { margin-left: auto; opacity: 0; font-weight: 600; color: var(--ink); }
 .select-opt.on .tick { opacity: 1; }
 
+/* ── 「无行业定制」的可见提示 ──────────────────────────────
+   数据来源：app/knowledge.py 的 param_audit —— 用户能选、但本包没给对应定制的值
+   （没配 topics_map 的细分领域、缺 rate_by_style 的风格、平台词表里没有的平台…）。
+   这些值不会报错，只会静默走通用默认；不标出来的话，用户以为在定制、实际没生效。
+   警示语言与头部模型指示 .rh-model.is-warn 保持一致（同色 + 同底色）。 */
+.select-btn.is-warn { color: var(--warn); background: var(--warn-soft); }
+.select-btn.is-warn .chev { color: var(--warn); }
+.select-btn.is-warn .sel-text::before {
+  content: ""; display: inline-block; width: 5px; height: 5px; border-radius: 50%;
+  background: var(--warn); margin-right: 5px; vertical-align: middle;
+}
+/* 菜单项上的标记：必须在**选中之前**就能看出这个值没定制 */
+.select-opt.uncovered .opt-warn {
+  flex: 0 0 auto; width: 13px; height: 13px; margin-left: 2px;
+  display: grid; place-items: center; border-radius: 50%;
+  background: var(--warn-soft); color: var(--warn);
+  font-size: var(--f-2xs); font-weight: 600; line-height: 1;
+}
+
 /* ══════════════ 骨架布局 ══════════════ */
 #left {
   width: var(--w-side); min-width: var(--w-side); flex: 0 0 auto;

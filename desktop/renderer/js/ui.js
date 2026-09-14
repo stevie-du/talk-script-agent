@@ -126,6 +126,10 @@ function renderQuickParams() {
   box.querySelectorAll(".select-wrap").forEach(w => w._menu?.remove());
   box.innerHTML = "";
   const params = pack.params || {};
+  // 后端给的「哪些值没有行业定制」清单（见 app/knowledge.py 的 param_audit）：
+  // 这些值不报错，只会静默走通用默认 —— 挂到 select 上，由 beautifySelects
+  // 变成胶囊变色 + 菜单里的「!」标记，避免用户以为在定制、实际没生效。
+  const audit = pack.param_audit || {};
   for (const key of FRONT_KEYS) {
     const def = params[key];
     if (!def?.options?.length) continue;
@@ -139,6 +143,7 @@ function renderQuickParams() {
     }
     s.value = String(def.default);
     s.title = def.label || key;
+    s._audit = audit[key] || {};
     box.appendChild(s);
   }
   const more = el("button", "ghost qp-more", "更多设置");
@@ -172,16 +177,32 @@ export function beautifySelects(scope = document) {
     const sync = () => {
       const o = sel.options[sel.selectedIndex];
       btn.querySelector(".sel-text").textContent = o ? o.textContent : "";
+      // 缺行业定制的当前值：胶囊变警示色 + 悬停给出原因。
+      // 依据是 sel._audit（由 renderQuickParams 从 pack.param_audit 挂上）。
+      const note = sel._audit && sel._audit[sel.value];
+      btn.classList.toggle("is-warn", !!note);
+      const base = sel.title || "";
+      btn.title = note ? (base ? base + "\n" : "") + note : base;
       menu.querySelectorAll(".select-opt").forEach(d =>
         d.classList.toggle("on", d.dataset.value === sel.value));
     };
     const build = () => {
       menu.innerHTML = "";
       Array.from(sel.options).forEach(o => {
-        const d = el("div", "select-opt" + (o.value === sel.value ? " on" : ""),
-          `<span>${esc(o.textContent)}</span><span class="tick">✓</span>`);
+        const note = sel._audit && sel._audit[o.value];
+        // 缺定制的选项在**选中之前**就要能看出来，所以标记打在菜单项上，
+        // 而不是只在选中后变色。
+        const d = el("div", "select-opt" + (o.value === sel.value ? " on" : "")
+          + (note ? " uncovered" : ""),
+          `<span>${esc(o.textContent)}</span>` +
+          (note ? `<span class="opt-warn" aria-hidden="true">!</span>` : "") +
+          `<span class="tick">✓</span>`);
         d.dataset.value = o.value;
         d.setAttribute("role", "option");
+        if (note) {
+          d.title = note;
+          d.setAttribute("aria-label", `${o.textContent}：${note}`);
+        }
         d.onclick = () => {
           sel.value = o.value;
           sync();

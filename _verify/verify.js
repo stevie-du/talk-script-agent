@@ -82,7 +82,10 @@ const META = {
         style: { label: "风格", default: "口播科普", options: ["口播科普", "带货"] },
         persona: { label: "人设", default: "维保老师傅", options: ["维保老师傅", "产品经理"] },
         cta: { label: "结尾引导", default: "关注", options: ["关注", "私信", "留资"] },
-      } },
+      },
+      // 后端 param_audit 的桩：桩包里「小红书」没配平台分级词表。
+      // 真值由 app/knowledge.py 的 param_audit() 按包配置算出。
+      param_audit: { platform: { "小红书": "平台分级词表未定义该平台：只按通用词表校验，平台差异化红线不生效" } } },
     { name: "fitment", display_name: "全屋定制包", draft: true,
       params: { segment: { label: "细分领域", default: "全屋定制", options: ["全屋定制"] } } },
   ],
@@ -918,6 +921,49 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("参数条与输入框左右对齐（修复前差 6px）",
     Math.abs(align.qbL - align.cbL) < 1 && Math.abs(align.qbR - align.cbR) < 1,
     JSON.stringify(align));
+
+  // ── 12c) 「无行业定制」的可见提示 ─────────────────────────
+  // 这些值不报错，只会静默走通用默认（没配 topics_map 的细分领域、缺
+  // rate_by_style 的风格、平台词表里没有的平台…）。不标出来的话，用户会
+  // 以为在定制、实际没生效 —— 比报错更危险。数据来自后端 param_audit。
+  const auditIdle = await evalIn(`const sel = document.getElementById('p-platform');
+    const btn = sel.parentNode.querySelector('.select-btn');
+    return { value: sel.value, warn: btn.classList.contains('is-warn'), title: btn.title };`);
+  check("有行业定制的值不显示警示",
+    auditIdle.value === "抖音" && auditIdle.warn === false && auditIdle.title === "平台",
+    JSON.stringify(auditIdle));
+
+  const auditMenu = await evalIn(`const sel = document.getElementById('p-platform');
+    const wrap = sel.parentNode;
+    wrap.querySelector('.select-btn').click();
+    return [...wrap._menu.querySelectorAll('.select-opt')].map(d => ({
+      v: d.dataset.value, unc: d.classList.contains('uncovered'),
+      mark: !!d.querySelector('.opt-warn'), title: d.title }));`);
+  const uncOpt = auditMenu.find(o => o.v === "小红书");
+  const covOpt = auditMenu.find(o => o.v === "抖音");
+  check("菜单里无定制的选项在选中前就带标记",
+    uncOpt?.unc === true && uncOpt?.mark === true
+      && /平台分级词表未定义/.test(uncOpt?.title || "")
+      && covOpt?.unc === false && covOpt?.mark === false,
+    JSON.stringify(auditMenu));
+
+  const auditWarn = await evalIn(`const sel = document.getElementById('p-platform');
+    [...sel.parentNode._menu.querySelectorAll('.select-opt')]
+      .find(d => d.dataset.value === '小红书').click();
+    const btn = sel.parentNode.querySelector('.select-btn');
+    return { value: sel.value, warn: btn.classList.contains('is-warn'), title: btn.title };`);
+  check("选中无定制的值后胶囊变警示色并说明原因",
+    auditWarn.value === "小红书" && auditWarn.warn === true
+      && /平台分级词表未定义/.test(auditWarn.title),
+    JSON.stringify(auditWarn));
+
+  await shot("param-audit.png", `const sel = document.getElementById('p-platform');
+    sel.parentNode.querySelector('.select-btn').click(); return true;`);
+
+  const auditBack = await evalIn(`const sel = document.getElementById('p-platform');
+    sel.value = '抖音'; sel._syncDropdown();
+    return { warn: sel.parentNode.querySelector('.select-btn').classList.contains('is-warn') };`);
+  check("换回有定制的值后警示消失", auditBack.warn === false, JSON.stringify(auditBack));
   await shot("main-sidebar.png",
     "window.__ts.newChat(); document.getElementById('btn-generate'); return true;");
   // 折叠态截图：左栏收成 0 宽后只应剩左上角的展开按钮。
