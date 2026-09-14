@@ -800,6 +800,23 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     return { pill: getComputedStyle(pill).borderRadius,
              more: getComputedStyle(more).borderRadius,
              cb: getComputedStyle(cb).borderRadius }; })()`);
+  // 描边语言统一：三者都是 .07 发丝线；主输入框靠**阴影**突出，
+  // 而不是把描边加深（修复前「更多设置」用 .12，比主输入框还深，层级倒置）
+  const stroke = await evalIn(`return (() => {
+    const g = (sel) => { const n = document.querySelector(sel);
+      return n ? getComputedStyle(n).boxShadow : ""; };
+    return { pill: g('#quick-params .select-btn'),
+             more: g('#quick-params .qp-more'),
+             composer: g('#composer-body') }; })()`);
+  const hair = (s) => s.indexOf("rgba(0, 0, 0, 0.07) 0px 0px 0px 0.5px") === 0;
+  check("胶囊 / 更多设置 / 主输入框 描边一致（.07 发丝线）",
+    hair(stroke.pill) && hair(stroke.more) && hair(stroke.composer),
+    JSON.stringify(stroke).slice(0, 150));
+  check("主输入框靠阴影突出，而非描边加深",
+    stroke.composer.split("rgba").length > stroke.pill.split("rgba").length
+    && stroke.pill.split("rgba").length === 2,
+    `pill=${stroke.pill.split("rgba").length} composer=${stroke.composer.split("rgba").length}`);
+
   check("参数条与输入框是同一套圆角语言（都不是 pill）",
     !/999px/.test(radius.pill) && !/999px/.test(radius.more)
     && /px/.test(radius.cb), JSON.stringify(radius));

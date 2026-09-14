@@ -993,7 +993,12 @@ td.bad { color: var(--bad); font-weight: 500; }
 .quick-bar .qp-more {
   margin-left: auto; height: var(--h-btn-sm); padding: 0 12px;
   font-size: var(--f-xs); border-radius: var(--r-md);   /* 同上，统一圆角语言 */
+  /* 覆盖 .ghost 的 --shadow-ghost（描边 .12）：同一个参数条里胶囊用 .07、
+     「更多设置」用 .12，深浅不一；而且次级控件比主输入框描边还深，层级倒置。
+     统一为 .07，与主输入框同描边，主控件靠阴影突出而非描边深浅。 */
+  box-shadow: var(--shadow-input);
 }
+.quick-bar .qp-more:hover { box-shadow: var(--shadow-input-hover); }
 #composer-body {
   max-width: var(--w-stream); width: 100%; margin-inline: auto;
   display: flex; gap: 6px; align-items: flex-end;
