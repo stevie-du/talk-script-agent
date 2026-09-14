@@ -778,6 +778,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   // 而滚动态看到的仍是容器边 16 —— 同一个位置两个间距。
   // 所以这里必须用 canvas 的 TextMetrics 把 em 盒换算到墨迹，量那条真正看得见的边。
   // （药丸的顶边也一并量：它不能被滚动容器裁掉，否则「59」会缺一角。）
+  // 容差 1 → 0.6：**这条曾经是 <= 1，于是字墨顶 17 也判绿**，是用户肉眼抓出来的。
+  // 根因在 line-height:1 —— 行盒(11px)比内容区(15px)矮，内容区溢出、字墨顶下沉 1px。
+  // 改成 line-height:9px 后字墨顶与盒顶/药丸顶/容器顶四者重合，才敢把容差收紧。
   const inkGeo = await evalIn(`const sea = document.querySelector('.sess-search');
     const sc = document.querySelector('.left-scroll');
     const lbl = document.querySelector('.group-lbl');
@@ -795,10 +798,36 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
              药丸: +(pill.getBoundingClientRect().top - seaB).toFixed(2),
              容器: +(sc.getBoundingClientRect().top - seaB).toFixed(2),
              药丸被裁: pill.getBoundingClientRect().top < sc.getBoundingClientRect().top - 0.01 };`);
-  check("搜索框到「本周」字墨顶边 = 16px（三个量都落在 16，且药丸没被裁）",
-    Math.abs(inkGeo.字墨 - 16) <= 1 && inkGeo.药丸 === 16
-    && inkGeo.容器 === 16 && inkGeo.药丸被裁 === false,
+  check("搜索框到「本周」字墨顶边 = 16px（字墨/药丸/容器三者都落在 16，且药丸没被裁）",
+    Math.abs(inkGeo.字墨 - 16) <= 0.6 && Math.abs(inkGeo.药丸 - 16) <= 0.6
+    && Math.abs(inkGeo.容器 - 16) <= 0.6 && inkGeo.药丸被裁 === false,
     JSON.stringify(inkGeo));
+
+  // 「本周」与计数药丸的**墨底**必须齐平。并排的两个字形，肉眼对齐看的是墨迹下边缘，
+  // 不是抽象基线 —— 中文与数字的「基线→墨底」关系不同（「本周」墨底比基线低 1px，
+  // 「54」墨底就在基线上），拿基线比会得出反的结论（实测基线差 +1 但墨底完全重合）。
+  // 这条是 `.group-lbl` 行盒 11px→9px 的连带检查点：文字上移 1px 后墨底 187.5→186.5，
+  // 正好与药丸重合（改前是药丸比文字高 1px）。只改行高、不动药丸就会再次错开。
+  const inkPair = await evalIn(`const c = document.createElement('canvas').getContext('2d');
+    const inkBottom = (el, node) => {
+      const rg = document.createRange(); rg.selectNodeContents(node);
+      const cs = getComputedStyle(el);
+      c.font = cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily;
+      const m = c.measureText(node.textContent.trim());
+      const top = rg.getBoundingClientRect().top
+        + (m.fontBoundingBoxAscent - m.actualBoundingBoxAscent);
+      return top + m.actualBoundingBoxAscent + m.actualBoundingBoxDescent;
+    };
+    const lbl = document.querySelector('.group-lbl');
+    const pill = lbl.querySelector('.count');
+    const tn = [...lbl.childNodes].find(n => n.nodeType === 3 && n.textContent.trim());
+    const pn = [...pill.childNodes].find(n => n.nodeType === 3 && n.textContent.trim());
+    return { 文字: tn.textContent.trim(), 药丸: pn.textContent.trim(),
+             文字墨底: +inkBottom(lbl, tn).toFixed(2),
+             药丸墨底: +inkBottom(pill, pn).toFixed(2) };`);
+  check("「本周」与计数药丸的墨底齐平（行高改动的连带检查点）",
+    Math.abs(inkPair.文字墨底 - inkPair.药丸墨底) <= 0.6,
+    JSON.stringify(inkPair));
 
   // 后续分组标签（更早…）的竖向节奏。桩里只有 1 个分组，硬编码第二个会让测试
   // 依赖运行日期（今天跑是「昨天」、过几天就并进「更早」），所以**克隆现有的标签**

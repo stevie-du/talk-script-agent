@@ -598,16 +598,24 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 }
 
 /* 会话记录 */
-/* 顶对齐 + line-height:1 —— 这两条合起来，才让「本周」的**字墨顶边**落在标签盒顶边。
-   原来 align-items:center + 继承行高，文字被 18px 的计数药丸垂直居中顶下去，
-   字墨比盒顶低 4.8px：盒子边在 16px、肉眼看到的却在 20.8px，而滚动态看到的是
-   滚动容器被裁的边（16px）—— 同一个位置两个间距，滚一下就变。
-   实测：center/继承行高 → 字墨 20.8；flex-start/行高1 → 字墨 16.6（d 由 4.8 收到 0.6）。
-   断言量盒子是量不出这个的 —— 文字在行盒里天生比盒顶低，必须量字墨。 */
+/* 顶对齐 + 精确行高 —— 这两条合起来，才让「本周」的**字墨顶边**落在标签盒顶边。
+   演进史：align-items:center + 继承行高 → 字墨比盒顶低 4.8px（盒子边在 16、
+   肉眼看到的在 20.8，而滚动态看到的是容器被裁的边 —— 同一个位置两个间距）；
+   改成 flex-start + line-height:1 后收到 **1px**，字墨顶 17 而不是 16 ——
+   断言容差 1 恰好把它放过了，是用户肉眼又抓出来的。
+   为什么 line-height:1 还差 1px：11px 字号的**内容区**高 = fontAsc(12) + fontDesc(3) = 15px，
+   比行盒(11px)还高，负半行距让内容区**溢出**行盒上下各 2px。于是
+     内容区顶 = 盒顶 + (LH − 15)/2
+     字墨顶  = 内容区顶 + (fontAsc − inkAsc) = 内容区顶 + 3
+   要让字墨顶与盒顶重合：(LH − 15)/2 + 3 = 0 → **LH = 9px**。
+   实测：LH 11px → 字墨顶 17；LH 9px → 字墨顶 16（盒顶 / 药丸顶 / 容器顶也全是 16）。
+   9px 是按当前字体度量（A=12 D=3 墨A=9）算出来的，字体换了要重算。
+   注意：行盒比内容区矮，文字是**溢出**行盒的（overflow 可见，不会被裁），
+   标签的实际高度由 12px 的计数药丸撑起，所以改行高不动布局。 */
 .group-lbl {
   font-size: var(--f-2xs); font-weight: 600; color: var(--text-3); letter-spacing: .3px;
   padding: var(--s3) 8px var(--s1); margin-top: var(--s2);
-  display: flex; align-items: flex-start; gap: 6px; line-height: 1;
+  display: flex; align-items: flex-start; gap: 6px; line-height: 9px;
 }
 /* 第一个分组标签是「搜索框的下一行」，不是「上一条记录的下一条」——
    margin-top 和 padding-top 都要归零，让搜索框到「本周」的距离**等于**
@@ -621,8 +629,12 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
   border-radius: var(--r-pill); padding: 1px 7px; font-weight: 600;
   /* line-height 1.6 → 1：药丸从 18px 收到 12px。
      文字改成顶对齐后，18px 的药丸会把「59」的基线留在 29.6px，而「本周」在 25.6px，
-     两者错开 4px（实测基线差 -4，肉眼能看出数字被压低）。收紧到 12px 后基线差
-     回到 -0.8px，且药丸顶边仍停在 16px（没有被滚动容器裁掉）。 */
+     两者错开 4px（实测基线差 -4，肉眼能看出数字被压低）。收紧到 12px 后错位消失，
+     药丸顶边仍停在 16px（没有被滚动容器裁掉）。
+     ⚠ 连带关系：并排的「本周」与「54」要对齐的是**墨底**，不是抽象基线 ——
+     中文与数字的「基线→墨底」关系不同，拿基线比会得出反的结论。
+     .group-lbl 的行盒后来从 11px 收到 9px（让字墨顶对齐），文字墨底随之从 187.5
+     上移到 186.5，正好与药丸墨底重合（改前是药丸高 1px）。两边必须一起改。 */
   line-height: 1;
 }
 /* 列表从容器**顶部**开始排，会话少时也不许贴底。
