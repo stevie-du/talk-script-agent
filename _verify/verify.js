@@ -166,7 +166,8 @@ addEventListener('unhandledrejection', e => window.__errs.push('rej: ' + String(
     if (s.indexOf('/api/packs/elevator/export-skill') >= 0) return mk(
       { path:'C:/tmp/agent-skills/elevator', name:'elevator', files:12,
         include_private:false, hints:['已按安全默认排除 private/ 目录（商业信息不外带）。'] });
-    if (s.indexOf('/api/packs/elevator/undraft') >= 0) {
+    // 匹配任意包名的转正：实际请求可能是 fitment（测试里切过包）
+    if (s.indexOf('/undraft') >= 0) {
       ELEVATOR_DRAFT = false;                 // 服务端状态真的变了
       return mk({ ok:true, name:'elevator', draft:false });
     }
@@ -596,12 +597,12 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await sleep(300);
   await evalIn(`document.getElementById('cd-yes').click(); return true;`);   // 确认弹窗
   await sleep(700);
-  // 注：按钮是否消失取决于服务端返回的 draft —— 后端已有测试覆盖
-  // （test_undraft_clears_flag_and_keeps_rest），这里只能验证流程跑通没报错。
-  const afterUndraft = await evalIn(`return [...document.querySelectorAll('.toast')]
-    .map(t => t.textContent).join('|');`);
-  check("转正流程跑通（确认后无报错）", /已标记为校对完成/.test(afterUndraft),
-    afterUndraft.slice(0, 60));
+  const afterUndraft = await evalIn(`return {
+    hidden: document.getElementById('pi-undraft').classList.contains('hidden'),
+    title: document.getElementById('pi-title').textContent };`);
+  check("转正后「标记为已校对」按钮消失（刷新生效）",
+    afterUndraft.hidden === true && !/草稿/.test(afterUndraft.title),
+    JSON.stringify(afterUndraft));
   await evalIn(`const sel = document.getElementById('pack');
     sel.value = 'elevator'; sel.dispatchEvent(new Event('change', {bubbles:true}));
     return true;`);
@@ -765,6 +766,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await shot("settings-gen.png",
     "document.getElementById('btn-open-settings').click(); window.__ts.setPane('gen'); return true;");
   await shot("settings-packinfo.png", "window.__ts.setPane('packinfo'); return true;");
+  // 草稿态的行业包面板（能看到「标记为已校对」按钮）—— 新建的包本来就是草稿
+  await shot("settings-packinfo-draft.png", `const sel = document.getElementById('pack');
+    sel.value = 'fitment'; sel.dispatchEvent(new Event('change', {bubbles:true}));
+    window.__ts.setPane('packinfo'); return true;`);
   await shot("settings-llm.png", "window.__ts.setPane('llm'); return true;");
   await shot("settings-kb.png", "window.__ts.setPane('kb'); return true;");
   await shot("settings-skills.png", "window.__ts.setPane('skills'); return true;");
