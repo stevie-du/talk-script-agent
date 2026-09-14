@@ -85,6 +85,9 @@
   /* 选中/打开态：与输入框同级的淡描边，避免"选中就变粗框" */
   --shadow-selected: 0 0 0 0.5px var(--line-strong);
   --shadow-composer: 0 1px 3px rgba(0, 0, 0, .05), 0 4px 14px rgba(0, 0, 0, .05);
+  /* 以下两个原本散落在具体规则里写死，收进变量以保证视觉语言统一 */
+  --shadow-lift: 0 3px 10px rgba(0, 0, 0, .05);      /* 卡片 hover 抬升 */
+  --shadow-flash: 0 0 0 3px rgba(0, 0, 0, .09);      /* 占位事实跳转后的闪烁高亮 */
   --shadow-pop: 0 0 0 0.5px rgba(0, 0, 0, .06), 0 8px 24px rgba(0, 0, 0, .12),
                 0 24px 64px rgba(0, 0, 0, .12);
 
@@ -346,7 +349,9 @@ button {
               transform var(--dur) var(--ease), box-shadow .15s var(--ease);
 }
 button:active { transform: scale(.96); }
-button:focus-visible { outline: none; box-shadow: 0 0 0 1px rgba(0, 0, 0, .18), 0 0 0 4px var(--ring-focus); }
+/* 原本这里写死了 1px rgba(0,0,0,.18)，与 --shadow-focus 的 .22 不一致 ——
+   同一个「聚焦」语义却有两个描边深度。统一用变量。 */
+button:focus-visible { outline: none; box-shadow: var(--shadow-focus); }
 button.ghost, button.bordered {
   background: var(--surface); color: var(--text-1);
   box-shadow: var(--shadow-ghost);
@@ -719,7 +724,7 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 .msg-user { justify-content: flex-end; align-items: flex-start; gap: 4px; padding-left: 60px; }
 .msg-user .bub {
   background: var(--bubble); color: var(--text-1);
-  padding: 8px 14px; border-radius: var(--r-xl) var(--r-xl) var(--s1) var(--r-xl);
+  padding: 8px 14px; border-radius: var(--r-xl) var(--r-xl) var(--r-xs) var(--r-xl);
   font-size: var(--f-md); line-height: 1.6; max-width: 100%;
   word-break: break-word;
 }
@@ -853,7 +858,7 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 .card-text .over.flash { animation: flashHit 1.1s var(--ease) 2; }
 @keyframes flashHit {
   0%, 100% { box-shadow: 0 0 0 0 transparent; }
-  50% { box-shadow: 0 0 0 3px rgba(0, 0, 0, .09); }
+  50% { box-shadow: var(--shadow-flash); }
 }
 
 /* ══════════════ 脚本段落流（分隔线内容流，非卡片）══════════════ */
@@ -872,7 +877,7 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 }
 .card-text { line-height: 1.92; white-space: pre-wrap; font-size: var(--f-md); color: var(--text-1); letter-spacing: .1px; }
 .card-text strong { font-weight: 600; }
-.card-text .over { color: var(--warn); background: var(--warn-soft); border-radius: var(--s1); padding: 0 3px; }
+.card-text .over { color: var(--warn); background: var(--warn-soft); border-radius: var(--r-xs); padding: 0 3px; }
 .card-foot { margin-top: 8px; display: flex; gap: var(--s2); align-items: center; }
 .card-foot .rw {
   height: 24px; font-size: var(--f-xs); padding: 0 9px; flex: 0 0 auto;
@@ -965,7 +970,7 @@ td.bad { color: var(--bad); font-weight: 500; }
 }
 .sample-card:hover {
   background: var(--fill-hover);
-  box-shadow: 0 0 0 0.5px var(--line-strong), 0 3px 10px rgba(0, 0, 0, .05);
+  box-shadow: 0 0 0 0.5px var(--line-strong), var(--shadow-lift);
   transform: translateY(-1px);
 }
 .sample-card .sc-t { font-size: var(--f-sm); font-weight: 500; line-height: 1.45; }
@@ -1091,7 +1096,7 @@ pre#pg-checklist {
 
 /* ══════════════ 滚动条（macOS 式极细、贴边悬浮） ══════════════ */
 ::-webkit-scrollbar { width: 12px; height: 12px; }
-::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 8px; border: 3.5px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: var(--r-sm); border: 3.5px solid transparent; background-clip: content-box; }
 ::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-hover); background-clip: content-box; }
 ::-webkit-scrollbar-track { background: transparent; }
 
