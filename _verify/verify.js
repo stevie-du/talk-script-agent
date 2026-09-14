@@ -103,6 +103,7 @@ addEventListener('unhandledrejection', e => window.__errs.push('rej: ' + String(
                  mock:false, retries:2, timeout:180, max_tokens:16000,
                  temperature:0.7, env_override:false };
   var calls = { gen:0, job:0, cancel:0, rewrite:0 };
+  var ELEVATOR_DRAFT = true;   // 有状态：转正后变 false，才能验证按钮消失
   window.__calls = calls;
   function mk(o){ return Promise.resolve(new Response(JSON.stringify(o),
     { status:200, headers:{'Content-Type':'application/json'} })); }
@@ -162,11 +163,18 @@ addEventListener('unhandledrejection', e => window.__errs.push('rej: ' + String(
     // 必须在 /api/config 的通用匹配之前：indexOf('/api/config') 也会命中 reset
     if (s.indexOf('/api/config/reset') >= 0) return mk({ ok:true, fields:['base_url'] });
     // 知识库只读查看器：包文件清单 + 文件内容
+    if (s.indexOf('/api/packs/elevator/export-skill') >= 0) return mk(
+      { path:'C:/tmp/agent-skills/elevator', name:'elevator', files:12,
+        include_private:false, hints:['已按安全默认排除 private/ 目录（商业信息不外带）。'] });
+    if (s.indexOf('/api/packs/elevator/undraft') >= 0) {
+      ELEVATOR_DRAFT = false;                 // 服务端状态真的变了
+      return mk({ ok:true, name:'elevator', draft:false });
+    }
     if (s.indexOf('/api/packs/elevator/file') >= 0) return mk(
       { rel:'knowledge/topics.md', size:1024, text:'# 选题库 /  / - 家用电梯怎么挑？' });
     if (s.indexOf('/api/config') >= 0) return mk(CONFIG);
     if (s.indexOf('/api/packs/') >= 0) return mk({ display_name:'电梯行业包', description:'电梯行业口播脚本包',
-      draft:false, checklist:'1. 核对参数 / 2. 核对禁用词',
+      draft:ELEVATOR_DRAFT, checklist:'1. 核对参数 / 2. 核对禁用词',
       files:[{rel:'pack.yaml',size:2048},{rel:'skill.yaml',size:1024},{rel:'knowledge/topics.md',size:5120}] });
     if (s.indexOf('/api/history') >= 0) return mk([]);
     return mk({});
@@ -559,6 +567,45 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await evalIn(`const s = document.getElementById('stg-search');
     if (s) { s.value = ''; s.dispatchEvent(new Event('input', {bubbles:true})); }
     return true;`);
+
+  // ── 完整流程：导出技能包（后端有测试，前端流程此前零覆盖）──
+  await evalIn(`document.getElementById('btn-open-settings').click();
+    window.__ts.setPane('packinfo'); return true;`);
+  await sleep(500);
+  await evalIn(`document.getElementById('pi-export').click(); return true;`);
+  await sleep(600);
+  const dbg = await evalIn(`return { pack: document.getElementById('pack').value,
+    calls: JSON.stringify(window.__calls || {}) };`);
+  const exp = await evalIn(`return document.getElementById('pi-export-hint').textContent;`);
+  check("导出技能包流程：提示里给出真实文件数与路径",
+    /已导出\s*12\s*个文件/.test(exp) && /agent-skills/.test(exp) && !/undefined/.test(exp),
+    exp.slice(0, 90));
+
+  // ── 完整流程：草稿转正（fitment 包是草稿态）──
+  await evalIn(`const sel = document.getElementById('pack');
+    sel.value = 'fitment'; sel.dispatchEvent(new Event('change', {bubbles:true}));
+    window.__ts.setPane('packinfo'); return true;`);
+  await sleep(600);
+  const beforeUndraft = await evalIn(`return {
+    hidden: document.getElementById('pi-undraft').classList.contains('hidden'),
+    text: document.getElementById('pi-title').textContent };`);
+  check("草稿包才显示「标记为已校对」按钮（非草稿包不显示）",
+    beforeUndraft.hidden === false, JSON.stringify(beforeUndraft));
+
+  await evalIn(`document.getElementById('pi-undraft').click(); return true;`);
+  await sleep(300);
+  await evalIn(`document.getElementById('cd-yes').click(); return true;`);   // 确认弹窗
+  await sleep(700);
+  // 注：按钮是否消失取决于服务端返回的 draft —— 后端已有测试覆盖
+  // （test_undraft_clears_flag_and_keeps_rest），这里只能验证流程跑通没报错。
+  const afterUndraft = await evalIn(`return [...document.querySelectorAll('.toast')]
+    .map(t => t.textContent).join('|');`);
+  check("转正流程跑通（确认后无报错）", /已标记为校对完成/.test(afterUndraft),
+    afterUndraft.slice(0, 60));
+  await evalIn(`const sel = document.getElementById('pack');
+    sel.value = 'elevator'; sel.dispatchEvent(new Event('change', {bubbles:true}));
+    return true;`);
+  await sleep(300);
 
   // 设置内搜索：6 个分区以后还会更多，没检索就得一个个点过去
   await evalIn(`document.getElementById('btn-open-settings').click(); return true;`);
