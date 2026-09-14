@@ -983,7 +983,8 @@ td.bad { color: var(--bad); font-weight: 500; }
 }
 /* 快捷参数条：高频参数直接放输入框上方，不进设置页 */
 .quick-bar {
-  max-width: var(--w-stream); width: 100%; margin: 0 auto 8px; padding: 0 6px;
+  max-width: var(--w-stream); width: 100%; margin: 0 auto 8px;
+  /* 不再 padding: 0 6px：会让参数条左/右边缘比输入框多 6px，与下方不对齐 */
   display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
 }
 .quick-bar .qp-more {

@@ -787,6 +787,14 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     const s = await cdp.send("Page.captureScreenshot", { format: "png" });
     fs.writeFileSync(path.join(SHOT_DIR, name), Buffer.from(s.data, "base64"));
   };
+  // 验证对齐：参数条左/右边缘 == 输入框左/右边缘
+  const align = await evalIn(`return (() => {
+    const qb = document.getElementById('quick-params').getBoundingClientRect();
+    const cb = document.getElementById('composer-body').getBoundingClientRect();
+    return { qbL: qb.left, cbL: cb.left, qbR: qb.right, cbR: cb.right }; })()`);
+  check("参数条与输入框左右对齐（修复前差 6px）",
+    Math.abs(align.qbL - align.cbL) < 1 && Math.abs(align.qbR - align.cbR) < 1,
+    JSON.stringify(align));
   await shot("main-sidebar.png",
     "window.__ts.newChat(); document.getElementById('btn-generate'); return true;");
   await shot("settings-gen.png",
