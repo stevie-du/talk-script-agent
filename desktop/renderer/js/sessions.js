@@ -26,6 +26,16 @@ const DEL_SVG = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" str
 
 const settled = st => st === "done" || st === "failed" || st === "cancelled";
 
+/** 行业包 slug → 界面显示名（取自 pack.yaml 的 display_name）。
+ *  此前列表直接吐 slug，界面上出现的是「elevator」这种内部标识；而包里早就有
+ *  display_name: 电梯，前端别处（ui.js 的下拉、settings.js 的包详情）也一直在用它 ——
+ *  只有会话列表漏了。找不到对应包时退回 slug，不要显示空白。 */
+function packLabel(slug) {
+  if (!slug) return "";
+  const p = (state.meta?.packs || []).find(x => x.name === slug);
+  return (p && (p.display_name || p.name)) || slug;
+}
+
 // 会话搜索：历史一多就找不到，这是左栏最缺的一块（对照成熟 agent 的
 // 会话检索）。过滤只在前端做 —— 条目量级是几十到几百，没必要惊动后端。
 let allItems = [];
@@ -36,6 +46,7 @@ function matches(it) {
   const q = query.toLowerCase();
   return String(it.topic || "").toLowerCase().includes(q)
     || String(it.pack || "").toLowerCase().includes(q)
+    || packLabel(it.pack).toLowerCase().includes(q)   // 显示名也要能搜到，否则界面上写「电梯」却搜不出来
     || String(it.segment || "").toLowerCase().includes(q);
 }
 
@@ -135,9 +146,10 @@ function updateRow(row, it) {
   row.dataset.id = it.id;
   row.classList.toggle("active", isCur);
 
+  const packName = packLabel(it.pack);
   const sub = st === "done"
-    ? `${it.pack || ""} · ${fmtTime(it.created_at)} · ${it.duration ?? "-"}s`
-    : `${it.pack || ""} · ${STATE_LABEL[st] || st} · ${fmtTime(it.created_at)}`;
+    ? `${packName} · ${fmtTime(it.created_at)} · ${it.duration ?? "-"}s`
+    : `${packName} · ${STATE_LABEL[st] || st} · ${fmtTime(it.created_at)}`;
   const sig = [isCur, st, it.topic, sub].join("\u0001");
   if (row._sig === sig) return;
   row._sig = sig;
@@ -152,7 +164,7 @@ function updateRow(row, it) {
   row.setAttribute("aria-label", `${it.topic || "未命名"}，${stateText}`);
   row.querySelector(".sess-topic").textContent = it.topic || "";
   row.querySelector(".sess-sub").textContent = sub;
-  row.title = `${it.topic || ""}\n${it.pack || ""} · ${fmtTime(it.created_at)}${done ? "" : " · 生成中"}`;
+  row.title = `${it.topic || ""}\n${packName} · ${fmtTime(it.created_at)}${done ? "" : " · 生成中"}`;
   const del = row.querySelector(".sess-del");
   del.title = done ? "删除这条记录" : "放弃这次生成并移除记录";
   del.dataset.act = done ? "del" : "cancel";

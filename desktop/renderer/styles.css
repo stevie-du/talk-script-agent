@@ -199,8 +199,10 @@ main { display: flex; flex: 1; min-height: 0; }
 /* 设置内搜索：与左栏会话搜索同一套视觉，位置在导航列表顶部 */
 .stg-search {
   flex: 0 0 auto; display: flex; align-items: center; gap: 6px;
-  margin: 0 var(--s3) var(--s2); padding: 0 8px; height: 30px;
-  border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--fill);
+  /* 与 .sess-search 同一套视觉：高度/圆角同样走 --h-ctl / --r-ctl，
+     否则「两处搜索框一致」只在改了其中一处时才成立。 */
+  margin: 0 var(--s3) var(--s2); padding: 0 8px; height: var(--h-ctl);
+  border: 1px solid var(--line); border-radius: var(--r-ctl); background: var(--fill);
 }
 .stg-search:focus-within { border-color: var(--line-strong); background: var(--surface); }
 .stg-search svg { flex: 0 0 auto; color: var(--text-3); }
@@ -268,8 +270,14 @@ main { display: flex; flex: 1; min-height: 0; }
 
 .sess-search {
   position: relative; display: flex; align-items: center; gap: 6px;
-  margin: 0 0 8px; padding: 0 8px; height: 30px;
-  border: 1px solid var(--line); border-radius: var(--r-sm);
+  /* 高度/圆角必须走 --h-ctl / --r-ctl：这是「输入类控件」的基准 token。
+     此前硬编码 30px + --r-sm，与正上方同宽的「新建对话」(32px / --r-ctl) 差
+     2px 高、1px 圆角 —— 两个通栏控件叠放时这点差会读成失误而不是设计。
+     同理 styles.css 里另一个输入框一直是 var(--h-ctl)。 */
+  /* 上下间距全部交给 .left-top 的 gap：上方是分隔线，下方直接贴列表。
+     不要再给 margin —— 否则「搜索」和它过滤的列表之间会被撑开。 */
+  margin: 0; padding: 0 8px; height: var(--h-ctl);
+  border: 1px solid var(--line); border-radius: var(--r-ctl);
   background: var(--fill);
 }
 .sess-search:focus-within { border-color: var(--line-strong); background: var(--surface); }
@@ -292,6 +300,10 @@ main { display: flex; flex: 1; min-height: 0; }
 .left-head {
   flex: 0 0 auto; height: 48px; padding: 0 var(--s2);
   display: flex; align-items: center; gap: var(--s2);
+  /* 窗口级头部线：与 .right-head 的 border-bottom 同高（两者都是 48px），
+     合起来是横贯全窗的一条线。缺了它，右侧那条线会断在侧栏边界上。
+     注意：折叠态下 #left 宽度归 0，这条线自然不可见，不会留残影。 */
+  border-bottom: 0.5px solid var(--line);
 }
 .left-head #btn-toggle-left { margin-left: -6px; }
 .brand { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
@@ -538,13 +550,27 @@ select {
 #left.folded #btn-toggle-left:hover { box-shadow: var(--shadow-input-hover); }
 .left-foot { flex: 0 0 auto; padding: 8px var(--s3) 10px; border-top: 0.5px solid var(--line); }
 /* 顶部固定区：搜索 + 新建对话，flex: 0 0 auto 防止被滚动区挤压 */
-.left-top { flex: 0 0 auto; padding: 0 var(--s3) 8px;
-  display: flex; flex-direction: column; gap: 8px; }
-/* 会话列表：会话少时贴左栏底部，多了由容器滚动。
-   贴底**不能**用 justify-content: flex-end —— flex-end 会让溢出发生在顶部，
+/* padding-top 12：品牌行下方多了一条窗口级头部线，「新建对话」不能贴着它。
+   gap 12：动作区被上下两条线夹住，间距要对称，否则读起来是「漏了一边」。
+   padding-bottom 16（= --s4）：搜索框到下方内容的间距**必须只有一个来源**。
+   这里定义的 16px 就是滚动区容器的上边界，滚动后内容被裁在它下面 —— 所以
+   滚动态看到的间距就是这 16px。非滚动态要读到同一个 16px，第一个分组标签
+   就不能再叠加自己的 padding-top（见 .group-lbl:first-child）。 */
+.left-top { flex: 0 0 auto; padding: var(--s3) var(--s3) var(--s4);
+  display: flex; flex-direction: column; gap: var(--s3); }
+/* 「新建对话」动作区 与 「搜索 + 列表」内容区 之间的发丝分隔线。
+   负 margin 抵消 .left-top 的左右内边距，让它横贯整个侧栏宽度 ——
+   否则线会缩在内容宽度里，看起来像一根断掉的短线，也接不上左右两侧的竖线。 */
+.left-sep {
+  flex: 0 0 auto; height: 0.5px; background: var(--line);
+  margin: 0 calc(-1 * var(--s3));
+}
+/* 会话列表：从顶部开始排，多了由容器滚动。
+   历史上这里用过 justify-content: flex-end（贴底）—— 那会让溢出发生在顶部，
    且不计入 scrollHeight（实测 scrollHeight == clientHeight、maxScrollTop == 0），
    于是列表一旦超过容器高度就彻底滚不动：首项被推到负坐标，永远看不到。
-   正确做法是让 #session-list 用 margin-top: auto 贴底。 */
+   现在既不 flex-end 也不 margin-top: auto，就是最普通的顶部对齐 + overflow-y: auto，
+   两条路都通：内容少时贴搜索框，内容多时正常向下滚。 */
 .left-scroll {
   flex: 1; min-height: 0; overflow-y: auto; padding: 0 var(--s3) var(--s3);
   display: flex; flex-direction: column; gap: 1px;
@@ -566,15 +592,27 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
   padding: var(--s3) 8px var(--s1); margin-top: var(--s2);
   display: flex; align-items: center; gap: 6px;
 }
+/* 第一个分组标签是「搜索框的下一行」，不是「上一条记录的下一条」——
+   margin-top 和 padding-top 都要归零，让搜索框到「本周」的距离**等于**
+   滚动区上边界的距离（即 .left-top 的 padding-bottom 16px）。
+   只归零 margin-top 是不够的：padding-top 还在，非滚动态会读出 8+12=20px，
+   而滚动态只有 8px —— 同一个位置出现两个间距，正是"间距不统一"的来源。
+   后续分组（更早…）保留 padding-top 与 margin-top，与上一组拉开。 */
+.group-lbl:first-child { margin-top: 0; padding-top: 0; }
 .group-lbl .count {
   font-size: var(--f-min); background: var(--fill); color: var(--text-2);
   border-radius: var(--r-pill); padding: 1px 7px; font-weight: 600; line-height: 1.6;
 }
-/* margin-top: auto = 会话少时贴底；flex: 0 0 auto = 不被压缩。
-   少了 flex-shrink: 0，列表会被压到容器高度，子项溢出到列表盒之外，
-   既滚不动也画不出来。 */
-#session-list { display: flex; flex-direction: column; gap: 1px;
-  margin-top: auto; flex: 0 0 auto; }
+/* 列表从容器**顶部**开始排，会话少时也不许贴底。
+   曾经写过 margin-top: auto（为了绕开 justify-content: flex-end 的滚动陷阱），
+   但 auto 的语义就是「把剩余空间全吃掉」= 贴底：只剩 2 条会话时，列表被推到
+   侧栏底部，搜索框与第一条记录之间空出 400+px，读起来像布局塌了；
+   空态/无结果提示（.sess-empty 也是 #session-list 的子节点）更是直接沉到最底下。
+   现在改成纯顶部对齐 —— 溢出走容器 overflow-y: auto 正常向下滚，
+   scrollHeight 照常计入，既不会滚不动，也不会贴底。
+   flex: 0 0 auto 仍然必需：少了 flex-shrink: 0，列表会被压到容器高度，
+   子项溢出到列表盒之外，既滚不动也画不出来。 */
+#session-list { display: flex; flex-direction: column; gap: 1px; flex: 0 0 auto; }
 .sess-item {
   position: relative; padding: 7px 9px; border-radius: var(--r-sm); cursor: pointer;
   transition: background .12s var(--ease);

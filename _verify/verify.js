@@ -710,6 +710,17 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await sleep(200);
   const nomatch = await evalIn(`return document.getElementById('session-list').textContent;`);
   check("搜索无结果时给出提示而不是空白", /没有匹配/.test(nomatch), nomatch.slice(0, 40));
+  // 提示必须是「搜索框下面那一行」，不能沉到侧栏底部。
+  // 回归的 bug：.sess-empty 也是 #session-list 的子节点，而 #session-list 曾经
+  // margin-top: auto 贴底 —— 于是「没有匹配…」飘在 500px 空白之下，像渲染残渣。
+  const emptyGeo = await evalIn(`const e = document.querySelector('#session-list .sess-empty');
+    const sc = document.querySelector('.left-scroll');
+    if (!e) return null;
+    return { gap: Math.round(e.getBoundingClientRect().top - sc.getBoundingClientRect().top),
+             scH: Math.round(sc.getBoundingClientRect().height) };`);
+  check("无结果提示紧贴搜索框下方，不沉底",
+    emptyGeo && emptyGeo.gap >= 0 && emptyGeo.gap < 40,
+    JSON.stringify(emptyGeo));
 
   await evalIn(`document.getElementById('sess-search-clear').click(); return true;`);
   await sleep(200);
@@ -721,6 +732,89 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   const sessGeo = await evalIn(GEO(".sess-search"));
   check("会话搜索：图标在框内、input 无自带描边", geoOK(sessGeo), JSON.stringify(sessGeo));
+
+  // 左栏头部顺序：新建对话在上、搜索在下。
+  // 搜索过滤的对象就是会话列表，两者应相邻；中间夹一个「新建对话」会把
+  // 「动作」和「被检索的内容」切开（ChatGPT / Cursor 等也是新建在上、搜索紧贴历史）。
+  const headOrder = await evalIn(`const top = document.querySelector('.left-top');
+    const btn = document.getElementById('btn-new-chat');
+    const sea = document.querySelector('.sess-search');
+    const sc = document.querySelector('.left-scroll');
+    const list = document.getElementById('session-list');
+    const lbl = document.querySelector('.group-lbl');
+    return {
+      order: Array.from(top.children).map(n => n.id || n.className).join(','),
+      btnTop: Math.round(btn.getBoundingClientRect().top),
+      seaTop: Math.round(sea.getBoundingClientRect().top),
+      gapUp: Math.round(sea.getBoundingClientRect().top - btn.getBoundingClientRect().bottom),
+      gapToScroll: Math.round(sc.getBoundingClientRect().top - sea.getBoundingClientRect().bottom),
+      scrollTop: Math.round(sc.getBoundingClientRect().top),
+      listTop: Math.round(list.getBoundingClientRect().top),
+      gapToLbl: lbl ? Math.round(lbl.getBoundingClientRect().top - sea.getBoundingClientRect().bottom) : -1 };`);
+  check("左栏顺序：新建对话在上、搜索在下",
+    headOrder.btnTop < headOrder.seaTop
+    && headOrder.order.indexOf('btn-new-chat') < headOrder.order.indexOf('sess-search'),
+    JSON.stringify(headOrder));
+  // 会话少时列表必须从容器顶部开始 —— 不许被 margin-top: auto 之类推到底部。
+  // 桩里只有 2 条会话，一旦贴底这里就是 400+px 的差；改成顶部对齐后两者恒等。
+  check("会话少时列表贴搜索框、不沉到侧栏底部",
+    headOrder.listTop === headOrder.scrollTop,
+    `listTop=${headOrder.listTop} scrollTop=${headOrder.scrollTop}`);
+  // 间距要落在搜索框**上方**，这样它读起来是「贴着列表」而不是「贴着按钮」。
+  check("搜索框与列表更近、与按钮更远（间距落在上方）",
+    headOrder.gapToLbl >= 0 && headOrder.gapToLbl < headOrder.gapUp,
+    `距按钮=${headOrder.gapUp} 距首条记录=${headOrder.gapToLbl}`);
+  // 搜索框到下方内容的间距必须**只有一个来源**，两态读同一个数：
+  //   滚动态 = 滚动区容器上边界 - 搜索框底边（.left-top 的 padding-bottom）
+  //   非滚动态 = 第一个分组标签顶边 - 搜索框底边
+  // 回归的 bug：第一个分组标签自带 padding-top 12px，于是非滚动态读出
+  // 8+12=20px 而滚动态只有 8px —— 上下滚一下间距就变了，读起来像布局在抖。
+  check("搜索框下方间距统一 16px（滚动态与非滚动态一致）",
+    headOrder.gapToScroll === headOrder.gapToLbl && headOrder.gapToScroll === 16,
+    `滚动态=${headOrder.gapToScroll} 非滚动态=${headOrder.gapToLbl}`);
+
+  // 窗口头部线必须贯通：左栏品牌行和右栏头部都是 48px，两边都要有下边框。
+  // 回归的 bug：只有 .right-head 有 border-bottom，线画到侧栏边界就断了。
+  const headLine = await evalIn(`const l = document.querySelector('.left-head').getBoundingClientRect();
+    const r = document.querySelector('.right-head').getBoundingClientRect();
+    return {
+      lBottom: Math.round(l.bottom), rBottom: Math.round(r.bottom),
+      lb: parseFloat(getComputedStyle(document.querySelector('.left-head')).borderBottomWidth) || 0,
+      rb: parseFloat(getComputedStyle(document.querySelector('.right-head')).borderBottomWidth) || 0 };`);
+  check("窗口头部线贯通：左栏品牌行与右栏头部同高且都有下边框",
+    headLine.lBottom === headLine.rBottom && headLine.lb > 0 && headLine.rb > 0,
+    JSON.stringify(headLine));
+
+  // 动作区（新建对话）与内容区（搜索 + 列表）之间的分隔线，必须横贯侧栏全宽。
+  // 若把线画在 .left-top 的内容宽度里，它会缩成一根断掉的短线，接不上两侧竖线。
+  // 容差 1px：#left 自己有一条 0.5px 的 border-right，border-box 宽 276，
+  // 内容宽 275.5 —— 分隔线铺到 275 就已经是"铺满"了，不能用 276 去比。
+  const sepGeo = await evalIn(`const s = document.querySelector('.left-sep');
+    const b = s.getBoundingClientRect();
+    const side = document.querySelector('#left');
+    return { h: +b.height.toFixed(2), left: Math.round(b.left), right: Math.round(b.right),
+             sideContentW: Math.round(side.clientWidth) };`);
+  check("动作区与内容区之间有分隔线，且横贯侧栏全宽",
+    sepGeo.h > 0 && sepGeo.h <= 1 && sepGeo.left === 0
+    && sepGeo.right >= sepGeo.sideContentW - 1,
+    JSON.stringify(sepGeo));
+
+  // 两个通栏控件必须同高同圆角。
+  // 回归的 bug：.sess-search 硬编码 30px + --r-sm，而新建对话是 --h-btn-lg(32px) + --r-ctl(9px)，
+  // 叠放时差 2px 高、1px 圆角 —— 读成失误而不是设计。输入控件应走 --h-ctl / --r-ctl。
+  const headSize = await evalIn(`const s = getComputedStyle(document.querySelector('.sess-search'));
+    const n = getComputedStyle(document.getElementById('btn-new-chat'));
+    return { sh: s.height, nh: n.height, sr: s.borderRadius, nr: n.borderRadius };`);
+  check("搜索框与新建对话同高同圆角（输入控件走 --h-ctl / --r-ctl）",
+    headSize.sh === headSize.nh && headSize.sr === headSize.nr, JSON.stringify(headSize));
+
+  // 会话行副标题显示行业包的 display_name，不是 slug。
+  // 回归的 bug：sessions.js 直接吐 it.pack，界面上出现「elevator」这种内部标识，
+  // 而 pack.yaml 里早就有 display_name（ui.js / settings.js 也一直在用）。
+  const rowSub = await evalIn(`const r = document.querySelector('#session-list .sess-item');
+    return r ? r.querySelector('.sess-sub').textContent : '';`);
+  check("会话行副标题用行业包显示名而非 slug",
+    /电梯行业包/.test(rowSub) && !/elevator/.test(rowSub), rowSub);
 
   // 左栏会话列表溢出时必须能滚到首尾。
   // 回归的 bug：.left-scroll 曾用 justify-content: flex-end 贴底 —— flex-end 会让
