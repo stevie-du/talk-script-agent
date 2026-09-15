@@ -281,10 +281,67 @@ function installDeps() {
   // `--only-binary=:all:` ：这 5 个依赖都有 wheel，禁止现场编译 ——
   // 否则一旦某个包只能从源码装，构建机会悄悄依赖上编译器，换台机器就挂。
   const pyVer = PY_VERSION.split('.').slice(0, 2).join('.');
+  // `--no-compile`：**不让 pip 生成字节码**。原因见下面的 compileBytecode() ——
+  // pip 是用**宿主**解释器编译 .pyc 的，`--python-version` 只管 wheel 的 ABI 标签、
+  // 不管字节码版本。实测宿主 3.14 跑 pip 时，装出来的是 404 个 `cpython-314.pyc`，
+  // 而运行时是 3.13 —— **一个都用不上**，纯 1.8 MB 死重，还得重编一次。
   execFileSync(py, ['-m', 'pip', 'install', '--upgrade', '--target', SITE_PACKAGES,
                     '--python-version', pyVer, '--implementation', 'cp',
-                    '--only-binary=:all:', '--no-cache-dir', '-r', RUNTIME_REQ],
+                    '--only-binary=:all:', '--no-cache-dir', '--no-compile',
+                    '-r', RUNTIME_REQ],
                { stdio: 'inherit' });
+}
+
+/** 用**运行时自己的**解释器编译一遍字节码。
+ *
+ *  为什么必须自己编（实测踩到的第二个 ABI 类问题）：
+ *  pip 编译 .pyc 用的是**正在跑 pip 的那个解释器**。开发机上是 3.14，
+ *  而运行时是 3.13 —— 装出来的 `__pycache__` 全是 `cpython-314.pyc`，
+ *  3.13 一个都认不了：这些缓存**一个都用不上**，纯死重。
+ *
+ *  ⚠ **不要声称它影响启动速度** —— 这条曾经写错过，别再改回去。
+ *  第一次量到「无缓存 1.15s vs 有缓存 0.67s，差 0.5 秒」，但那是重建后
+ *  磁盘冷缓存的假象；换成「多次取最小值」的稳定测法后差异只有 ~0.03s，
+ *  在噪声内。**所以这条修的是「交付物里不该有错版本的内容」，不是性能。**
+ */
+function compileBytecode() {
+  const pyExe = path.join(OUT_DIR, 'python.exe');
+  execFileSync(pyExe, ['-m', 'compileall', '-q', '-j', '0', 'Lib/site-packages'],
+               { cwd: OUT_DIR, stdio: 'inherit' });
+}
+
+/** 断言 site-packages 里**没有**「不是本运行时版本」的 .pyc。
+ *
+ *  这条是上面那个坑的哨兵：只靠「构建成功」看不出来，得显式比对标签。
+ *  万一将来有人把 `--no-compile` 去掉、或忘了调 compileBytecode，
+ *  这里会直接报红，而不是等用户觉得「启动怎么有点慢」。
+ */
+function assertBytecodeMatchesRuntime() {
+  const tag = `cpython-${PY_TAG}`;
+  const bad = [];
+  let good = 0;
+  const walk = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) { walk(p); continue; }
+      if (!e.name.endsWith('.pyc')) continue;
+      const m = e.name.match(/\.cpython-(\d+)/);
+      if (!m) continue;
+      if (`cpython-${m[1]}` === tag) good++;
+      else bad.push(path.relative(OUT_DIR, p));
+    }
+  };
+  walk(SITE_PACKAGES);
+  if (bad.length) {
+    throw new Error(
+      `site-packages 里有 ${bad.length} 个版本对不上的 .pyc（运行时是 ${tag}），` +
+      `前几个：${bad.slice(0, 3).join(' / ')}\n` +
+      '  多半是 pip 用宿主解释器编译了字节码 —— 见 compileBytecode 的注释。');
+  }
+  if (good === 0) {
+    throw new Error('site-packages 里一个可用的 .pyc 都没有 —— compileBytecode 没生效？');
+  }
+  log(`字节码校验通过：${good} 个 ${tag}.pyc，无版本错配`);
 }
 
 function copyDir(src, dest) {
@@ -410,6 +467,9 @@ async function main() {
   log('写入 ._pth（stdlib zip / . / Lib\\site-packages / .. / import site）');
   log('安装运行依赖 …');
   installDeps();
+  log('用运行时自己的解释器编译字节码 …');
+  compileBytecode();
+  assertBytecodeMatchesRuntime();
   verifyRuntime();
 
   // 5) 落 stamp

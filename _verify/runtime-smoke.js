@@ -130,6 +130,34 @@ function killTree(pid) {
   check('sys.path 含 py/ 的上一级（app/ 在那儿）',
         has((p) => path.resolve(p) === path.resolve(ROOT)));
 
+  // ── 1b) 字节码缓存的版本标签必须与解释器一致 ──────────────
+  // pip 编译 .pyc 用的是**跑 pip 的那个解释器**（开发机 3.14），而运行时是 3.13
+  // —— 装出来的 `__pycache__` 全是 `cpython-314.pyc`，3.13 一个都认不了。
+  // 后果是发行包里躺着 6.8 MB **永远用不上**的字节码（404 个；同口径复测：
+  // 3.14 编出来 6.76 MB，用运行时自己编是 5.77 MB，净减约 1 MB）。
+  // ⚠ 实测：**不要声称它影响启动速度** —— 取最小值测下来差 ~0.03s，在噪声内。
+  // 这条修的是「交付物里有错版本的内容」，以及防止将来有人把编译步骤去掉。
+  const tag = execFileSync(PY, ['-c', 'import sys; print(sys.implementation.cache_tag)'],
+                           { encoding: 'utf8' }).trim();   // 例如 cpython-313
+  const pyc = { good: 0, bad: [] };
+  const walkPyc = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) { walkPyc(p); continue; }
+      const m = e.name.endsWith('.pyc') && e.name.match(/\.(cpython-\d+)\.pyc$/);
+      if (!m) continue;
+      if (m[1] === tag) pyc.good++;
+      else pyc.bad.push(path.relative(ROOT, p));
+    }
+  };
+  const sitePkgs = path.join(ROOT, 'py', 'Lib', 'site-packages');
+  if (fs.existsSync(sitePkgs)) walkPyc(sitePkgs);
+  check(`site-packages 里的 .pyc 全部匹配 ${tag}（没有别的版本的死重）`,
+        pyc.bad.length === 0,
+        pyc.bad.length ? `${pyc.bad.length} 个错配，如 ${pyc.bad.slice(0, 2).join(' / ')}`
+                       : `${pyc.good} 个`);
+  check('确实存在可用的字节码缓存（不是零个）', pyc.good > 0, `${pyc.good} 个`);
+
   // ── 2) 按打包布局起引擎 ──────────────────────────────────
   // 不带 --root 时：`desktop/vendor/` 是构建用的暂存目录（已 gitignore），
   // `app` / `packs` / `renderer` 都是**铺过来的副本**，跑完就删。所以这里

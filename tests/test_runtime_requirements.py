@@ -152,3 +152,22 @@ def test_build_script_pins_python_and_hash():
     assert "--python-version" in src, "装依赖时没有钉住目标 Python 版本（ABI 会装错）"
     assert "--only-binary=:all:" in src, "没禁止现场编译，构建机会悄悄依赖编译器"
     assert "verifyRuntime" in src and "import app.server" in src, "缺少导入自检"
+
+
+def test_build_script_compiles_bytecode_with_the_target_interpreter():
+    """字节码必须用**运行时自己**的解释器编译。
+
+    pip 编译 .pyc 用的是正在跑 pip 的那个解释器，而 `--python-version` 只管
+    wheel 的 ABI 标签、**不管字节码版本**。开发机是 3.14 时，装出来的是
+    `cpython-314.pyc`，3.13 一个都认不了 —— 实测发行包里躺着 404 个
+    **永远用不上**的字节码。同口径复测：3.14 编出来 6.76 MB，
+    用运行时自己编是 5.77 MB（净减约 1 MB）。
+
+    修法是 `--no-compile`（不让 pip 编）+ 用运行时自己的解释器 `compileall`。
+    这两步**必须成对**：只去掉 `--no-compile` 会退回错版本，
+    只加 compileall 会留下一份错版本再叠一份对的。
+    """
+    src = (PKG.parent / "scripts" / "build-python-runtime.mjs").read_text(encoding="utf-8")
+    assert "--no-compile" in src, "pip 会用它自己的解释器编译 .pyc（版本会错）"
+    assert "compileBytecode" in src and "compileall" in src, "没有用运行时自己的解释器重编"
+    assert "assertBytecodeMatchesRuntime" in src, "缺少「.pyc 版本标签必须匹配」的校验"
