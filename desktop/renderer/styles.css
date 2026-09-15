@@ -194,28 +194,6 @@ body {
    不再有通栏 header，导航区与工作区的视觉边界由此确立。 */
 main { display: flex; flex: 1; min-height: 0; }
 
-/* ── 左栏头部：品牌 + 草稿徽标 ── */
-/* 会话搜索：与「新建对话」同宽的检索条（对照成熟 agent 的会话检索） */
-/* 设置内搜索：与左栏会话搜索同一套视觉，位置在导航列表顶部 */
-.stg-search {
-  flex: 0 0 auto; display: flex; align-items: center; gap: 6px;
-  /* 与 .sess-search 同一套视觉：高度/圆角同样走 --h-ctl / --r-ctl，
-     否则「两处搜索框一致」只在改了其中一处时才成立。 */
-  margin: 0 var(--s3) var(--s2); padding: 0 8px; height: var(--h-ctl);
-  border: 1px solid var(--line); border-radius: var(--r-ctl); background: var(--fill);
-}
-.stg-search:focus-within { border-color: var(--line-strong); background: var(--surface); }
-.stg-search svg { flex: 0 0 auto; color: var(--text-3); }
-.stg-search input {
-  flex: 1; min-width: 0; border: 0; background: transparent;
-  /* 同 .sess-search input：清掉全局 input 的描边/最小高度/内边距 */
-  border-radius: 0; box-shadow: none; min-height: 0; padding: 0;
-  font: 12px/1 var(--font); color: var(--text-1); outline: none;
-}
-.stg-search input::placeholder { color: var(--text-3); }
-.stg-search input::-webkit-search-cancel-button { display: none; }
-.stg-nav-item.hidden, .stg-nav-scroll .nav-sec.hidden { display: none; }
-
 /* 产物分区 tab：文案 / 分镜 / 字幕 / 合规 / 数据。
    设计极简：只靠「文字深浅 + 一条直线」区分选中态，不加徽标底色、
    不加粗体（全局 button 已经是 500），让分镜/合规的角标统一降级为
@@ -297,6 +275,7 @@ main { display: flex; flex: 1; min-height: 0; }
 }
 .sess-search .icon-btn:hover { color: var(--text-1); background: var(--fill-strong); }
 
+/* ── 左栏头部：品牌 + 草稿徽标 ── */
 .left-head {
   flex: 0 0 auto; height: 48px; padding: 0 var(--s2);
   display: flex; align-items: center; gap: var(--s2);
@@ -402,15 +381,15 @@ input::placeholder, textarea::placeholder { color: var(--text-3); }
 input:hover, textarea:hover { box-shadow: var(--shadow-input-hover); }
 input:focus, select:focus, textarea:focus { outline: none; box-shadow: var(--shadow-focus); }
 
-/* 检索条内的 input（会话搜索 / 设置内搜索）：只负责排版，外观（白底 + 描边 +
+/* 检索条内的 input（会话搜索）：只负责排版，外观（白底 + 描边 +
    圆角）整体由外层容器承担。上面 input:hover / input:focus 与
    .sess-search input 特异性相同（0,1,1）且位置更靠后，会盖掉容器内的清除规则，
    所以这里用 (0,2,1) 的 :hover / :focus 明确压回去。
    不这样做的话：input 会在容器里自己画一圈 0.5px 描边、并以 32px 最小高度
    撑破 30px 的外层 —— 看起来就是「放大镜图标跑到搜索框外面了」。 */
-.sess-search input, .stg-search input,
-.sess-search input:hover, .stg-search input:hover,
-.sess-search input:focus, .stg-search input:focus {
+.sess-search input,
+.sess-search input:hover,
+.sess-search input:focus {
   border: 0; border-radius: 0; background: transparent;
   box-shadow: none; min-height: 0; padding: 0;
 }
@@ -790,10 +769,12 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
   border-right: 0.5px solid var(--line);
 }
 /* 「返回工作区」= 返回项，按 Zcode 放在导航首项而非标题栏。
-   下边距必须留出来：它是导航项不是标题栏，与下方搜索框贴死（间距 0）时
-   两个圆角矩形共用一条边，看起来像一块被劈开的控件。 */
+   下边距 8px → 16px：原先这 8px 只是为了不跟下方的搜索框贴死（两个圆角矩形
+   共用一条边会读成一块被劈开的控件）。搜索框删掉后，间距改为「返回项 → 导航列表」，
+   直接给足 16px —— 与左栏同一套节奏（两侧栏同宽，读作"另一层工作区"）。
+   同时 .stg-nav-scroll 的 padding-top 归 0，见那里的说明。 */
 .stg-back {
-  flex: 0 0 auto; height: 36px; margin: var(--s3) var(--s3) var(--s2);
+  flex: 0 0 auto; height: 36px; margin: var(--s3) var(--s3) var(--s4);
   padding: 0 9px; justify-content: flex-start; gap: 8px;
   border-radius: var(--r-sm);
   background: transparent; color: var(--text-2); font-size: var(--f-sm); font-weight: 500;
@@ -803,7 +784,12 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 .stg-back:hover svg { color: inherit; }
 .stg-nav-scroll {
   flex: 1; min-height: 0; overflow-y: auto;
-  padding: var(--s4) var(--s3) var(--s5);
+  /* padding-top 16 → 0：上间距改由 .stg-back 的 margin-bottom 提供（见上）。
+     留着会与它叠成 32px；更要紧的是容器内边距在滚动时留不住 —— 内容可以滚进
+     padding 区，滚到中间时首项会一路贴到返回按钮下沿，所以"永久间距"只能由
+     margin 给。留 0 之后，内容滚到顶也被裁在容器上边，而容器上边距返回按钮
+     恒定 16px。 */
+  padding: 0 var(--s3) var(--s5);
   display: flex; flex-direction: column;
 }
 /* ⚠ 与左栏底部的 .nav-item 是**同一个控件的两处实例**（类名不同、规则内容一致）。

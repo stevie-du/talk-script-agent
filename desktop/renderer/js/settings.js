@@ -104,16 +104,6 @@ export function bindSettings() {
   // （后端会过滤空串防手滑），所以回到默认必须是一个显式动作。
   $("st-reset-baseurl").onclick = () => resetField("base_url", "st-baseurl");
   $("st-reset-model").onclick = () => resetField("model", "st-model");
-  const stgSearch = $("stg-search");
-  if (stgSearch && !stgSearch._bound) {
-    stgSearch._bound = true;
-    stgSearch.addEventListener("input", () => filterSettingsNav(stgSearch.value));
-    stgSearch.addEventListener("keydown", ev => {
-      if (ev.key === "Escape" && stgSearch.value) {
-        stgSearch.value = ""; filterSettingsNav(""); ev.stopPropagation();
-      }
-    });
-  }
   $("kb-pack").onchange = () => openPackFiles(state.settingsPane);
   $("skills-pack").onchange = () => openPackFiles(state.settingsPane);
   $("st-reset-adv").onclick = () => resetField(
@@ -191,30 +181,15 @@ const PANE_FILE_FILTER = {
   skills: (rel) => rel === "skill.yaml" || /^(rules|patterns|compliance)\//.test(rel),
 };
 
-// ── 设置内搜索：6 个分区以后还会更多，没有检索就得一个个点过去 ──
-// 匹配范围 = 导航项文字 + 该分区面板的全部文本，所以「重试」「超时」
-// 这类字段名也能命中。
-function paneHaystack(id) {
-  const pane = $("pane-" + id);
-  const nav = document.querySelector(`.stg-nav-item[data-pane="${id}"]`);
-  return `${nav?.textContent || ""} ${pane?.textContent || ""}`.toLowerCase();
-}
-
-export function filterSettingsNav(raw) {
-  const q = String(raw || "").trim().toLowerCase();
-  const items = [...document.querySelectorAll(".stg-nav-item")];
-  items.forEach(n =>
-    n.classList.toggle("hidden", !!q && !paneHaystack(n.dataset.pane).includes(q)));
-  // 整组都没命中时把分组标题一起收掉，否则会留下孤零零的标题
-  document.querySelectorAll(".stg-nav-scroll .nav-sec").forEach(sec => {
-    const any = [...sec.querySelectorAll(".stg-nav-item")]
-      .some(n => !n.classList.contains("hidden"));
-    sec.classList.toggle("hidden", !any);
-  });
-  if (!q) return;
-  const first = items.find(n => !n.classList.contains("hidden"));
-  if (first && first.dataset.pane !== state.settingsPane) setPane(first.dataset.pane);
-}
+// ── 设置内搜索已移除 ──────────────────────────────────────
+// 曾经的 filterSettingsNav() 按「导航项文字 + 分区面板全文」过滤左导航，
+// 匹配不到就把整组连同标题一起收掉。删掉的理由：设置一共 6 个分区，
+// 一屏就能看全，检索框的收益抵不上它在「返回工作区」下方多占的一行，
+// 而且它是**唯一**会隐藏导航项的入口 —— 一旦过滤词留在框里（比如上次
+// 输的「超时」），用户回到设置页会看到一份缺项却没有任何提示的导航，
+// 像个 bug。现在导航恒定完整，所见即所得。
+// 连带清理：.stg-search 的 HTML / CSS，以及只为它服务的
+// `.stg-nav-item.hidden` / `.nav-sec.hidden` 两条规则。
 
 async function openPackFiles(pane) {
   // 知识库与技能两个面板共用一套只读查看器，但 DOM 节点分开

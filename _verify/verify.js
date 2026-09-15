@@ -594,10 +594,6 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     return document.querySelectorAll('.toast.bad, .toast.err').length - before; })()`);
   check("打开文件夹点下去不报错", revealErr === 0, String(revealErr));
 
-  await evalIn(`const s = document.getElementById('stg-search');
-    if (s) { s.value = ''; s.dispatchEvent(new Event('input', {bubbles:true})); }
-    return true;`);
-
   // ── 完整流程：导出技能包（后端有测试，前端流程此前零覆盖）──
   await evalIn(`document.getElementById('btn-open-settings').click();
     window.__ts.setPane('packinfo'); return true;`);
@@ -655,35 +651,39 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     && g.inp.left > g.svg.right && g.inp.right <= g.box.right
     && g.inp.height <= g.box.height;
 
-  // 设置内搜索：6 个分区以后还会更多，没检索就得一个个点过去
+  // ── 设置导航：删掉搜索框之后，返回项 → 列表的间距必须补回来 ──
+  // 搜索框曾占着「返回工作区」下面那一行。删掉它是个**布局改动**而不只是删 DOM：
+  // 原先 .stg-back 的 margin-bottom 只有 8px（唯一目的是不跟搜索框贴死），
+  // 列表容器的 padding-top 是 16px —— 搜索框一走，两者直接叠成 24px。
+  // 更要紧的是容器内边距在滚动时留不住（内容能滚进 padding 区），
+  // 所以"永久间距"只能由 margin 给。现在 = margin-bottom 16px + padding-top 0：
+  // 间距恒定 16px，滚到中间首项也不会贴住返回按钮。
+  // 顺带守住「导航不再缺项」：搜索是**唯一**会隐藏导航项的入口，
+  // 过滤词残留在框里时用户会看到一份缺项却毫无提示的导航，像个 bug。
   await evalIn(`document.getElementById('btn-open-settings').click(); return true;`);
   await sleep(300);
-  await evalIn(`const b = document.getElementById('stg-search');
-    b.value = '超时'; b.dispatchEvent(new Event('input', {bubbles:true})); return true;`);
-  await sleep(300);
-  const stgHit = await evalIn(`return {
-    visible: [...document.querySelectorAll('.stg-nav-item')]
-      .filter(n => !n.classList.contains('hidden')).map(n => n.dataset.pane),
-    pane: window.__ts.settingsPane };`);
-  check("设置内搜索能定位到含该字段的分区",
-    stgHit.visible.includes("llm") && stgHit.pane === "llm", JSON.stringify(stgHit));
+  const stgNavGeo = await evalIn(`const b = document.querySelector('.stg-back').getBoundingClientRect();
+    const s = document.querySelector('.stg-nav-scroll');
+    const sr = s.getBoundingClientRect();
+    const items = [...document.querySelectorAll('.stg-nav-item')];
+    return { 返回项到列表: +(sr.top - b.bottom).toFixed(2),
+             列表内上边距: getComputedStyle(s).paddingTop,
+             导航项数: items.length,
+             被隐藏的项: items.filter(n => n.classList.contains('hidden')).length,
+             首项文字: (items[0] || {}).textContent };`);
+  check("设置导航：返回项 → 列表恒定 16px，六项全在且无隐藏项（搜索框已删）",
+    Math.abs(stgNavGeo.返回项到列表 - 16) <= 0.6
+    && stgNavGeo.列表内上边距 === "0px"
+    && stgNavGeo.导航项数 === 6 && stgNavGeo.被隐藏的项 === 0,
+    JSON.stringify(stgNavGeo));
 
-  await evalIn(`const b = document.getElementById('stg-search');
-    b.value = ''; b.dispatchEvent(new Event('input', {bubbles:true})); return true;`);
-  await sleep(200);
-  const stgAll = await evalIn(`return [...document.querySelectorAll('.stg-nav-item')]
-    .filter(n => !n.classList.contains('hidden')).length;`);
-  check("清空设置搜索后恢复全部分区", stgAll === 6, String(stgAll));
-
-  const stgGeo = await evalIn(GEO(".stg-search"));
-  check("设置内搜索：图标在框内、input 无自带描边", geoOK(stgGeo), JSON.stringify(stgGeo));
-
-  // 「返回工作区」与搜索框不能贴死：两者都是圆角矩形，间距 0 时共用一条边，
-  // 看起来像一块被劈开的控件（实测修复前 gap=0）。
-  const stgGap = await evalIn(`const b = document.querySelector('.stg-back').getBoundingClientRect();
-    const s = document.querySelector('.stg-search').getBoundingClientRect();
-    return Math.round(s.top - b.bottom);`);
-  check("设置页「返回工作区」与搜索框有间距", stgGap > 0, `gap=${stgGap}`);
+  // 搜索框要连 DOM 一起删干净 —— 留一个隐藏的空壳，下一个人会以为它还在。
+  const stgSearchGone = await evalIn(`return {
+    box: !!document.querySelector('.stg-search'),
+    input: !!document.getElementById('stg-search') };`);
+  check("设置页搜索框已从 DOM 移除（不是只藏起来）",
+    stgSearchGone.box === false && stgSearchGone.input === false,
+    JSON.stringify(stgSearchGone));
 
   await evalIn(`document.getElementById('btn-close-settings').click(); return true;`);
   await sleep(200);
