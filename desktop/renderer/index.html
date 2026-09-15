@@ -180,6 +180,7 @@
               </button>
             </div>
           </div>
+          <p class="hint cfg-err hidden" id="pack-err"></p>
           <div id="param-front" class="fg"></div>
         </div>
         <div class="page-card">
@@ -348,9 +349,10 @@
           </div>
           <div class="block-inner">
             <label class="lbl">采样温度</label>
-            <input id="st-temperature" type="number" min="0" max="1.5" step="0.1"
+            <input id="st-temperature" type="number" min="0" max="2" step="0.1"
                    placeholder="0.7（默认）">
-            <p class="hint">越低越稳、越高越发散。文案类建议 0.7~0.9；改完保存即生效。</p>
+            <p class="hint">越低越稳、越高越发散。文案类建议 0.7~0.9；0 表示尽量确定性输出；
+              改完保存即生效。（min/max 由 <code>NUMERIC_BOUNDS</code> 统一写入）</p>
           </div>
           <div class="block-inner">
             <label class="lbl">重试次数
@@ -372,6 +374,7 @@
             <p class="hint">推理型模型的「思考」也计入这个预算，给得太小会拿到空内容
               （接口仍返回 200），表现为「模型输出无法解析」。</p>
           </div>
+          <p class="hint cfg-err hidden" id="st-cfg-err"></p>
           <p class="hint" id="st-status"></p>
           <div class="page-actions">
             <button class="ghost" id="st-test" title="用上面的配置发一个最小请求，验证是否连通">测试连接</button>

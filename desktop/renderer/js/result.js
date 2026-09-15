@@ -127,6 +127,16 @@ function renderBanners(r, ch, opts) {
         <pre class="why-body">单字词会命中「最${""}近」「第一${""}次」这类正常用词，噪声大于收益，因此不下发匹配。
 若要拦绝对化表述，请在 banwords.yaml 里写具体短语（如「最低价」「最便宜」）。</pre></details>`);
   }
+  if (r.quota_degraded) {
+    const q = (r.quota || {}).total;
+    items.push(`<details class="banner info"><summary>字数配额${q ? `（总计 ${esc(String(q))} 字）` : ""}是按「时长 × 语速」估算的通用值，不是本行业包配的 —— 为什么？</summary>
+        <pre class="why-body">这个行业包的 pack.yaml 里没有 quota_table，引擎只能按 时长 × 语速 × 0.95 估一个总量，
+再按 15% / 65% / 20% 分给开场、正文、结尾。各段卡片上的「x/y 字」用的就是这个估算值，
+所以它跟本行业的真实表达习惯可能有偏差。
+
+要让它贴合本行业：在 packs/<行业>/pack.yaml 里补 quota_table，
+按 60/90/120 秒等档位写 total/hook/body/cta 四个数（见 docs/ 里的建包说明）。</pre></details>`);
+  }
   if (r.pack_draft) {
     items.push(`<div class="banner warn">⚠ 本结果来自草稿行业包，内容需人工校对</div>`);
   }
@@ -352,7 +362,7 @@ export function renderStoryboard(r) {
       <td>${esc(sh.note || "")}</td></tr>`;
   }).join("");
   return `<div class="tbl-wrap"><table>
-    <thead><tr><th style="width:86px">时间</th><th>画面/景别</th><th>口播</th>
+    <thead><tr><th class="col-time">时间</th><th>画面/景别</th><th>口播</th>
     <th>字幕</th><th>音效/BGM</th><th>拍摄提示</th></tr></thead>
     <tbody>${rows}</tbody></table></div>`;
 }
@@ -377,7 +387,7 @@ export function renderCompliance(r) {
     ["行业包状态", r.pack_draft ? `⚠ 草稿包，内容需人工校对` : `<span class="ok">✅ 精修包</span>`],
   ];
   return `<div class="tbl-wrap"><table>
-    <thead><tr><th style="width:160px">检查项</th><th>结果</th></tr></thead>
+    <thead><tr><th class="col-item">检查项</th><th>结果</th></tr></thead>
     <tbody>${rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("")}</tbody></table></div>`;
 }
 

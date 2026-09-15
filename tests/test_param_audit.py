@@ -33,7 +33,12 @@ BASE = {
     "topics_map": {"维保": "维保", "通用": "安全科普"},
     "audience_map": {"业主": "业主"},
     "rate_by_style": {"亲和": 4.5},
-    "quota_table": {60: {"total": 290, "hook": 45, "body": 190, "cta": 55}},
+    # 两档（30/60）—— 这样「45 秒」才是真的**插值**。
+    # 只有一档时 `Quota._row` 是「任何时长都取该档」，说成插值是误导，
+    # 已单独修正；整表缺失 / 单档 / 缺档三条路径的断言见
+    # tests/test_quota_degraded_signal.py 第 5 组。
+    "quota_table": {30: {"total": 145, "hook": 25, "body": 90, "cta": 30},
+                    60: {"total": 290, "hook": 45, "body": 190, "cta": 55}},
     "points_by_duration": {60: 3},
 }
 

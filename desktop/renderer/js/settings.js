@@ -16,6 +16,41 @@ import { fillPackSelect } from "./ui.js";
 const PANES = ["gen", "packinfo", "packgen", "llm", "kb", "skills"];
 const dirty = new Set();
 
+// 数值项的合法区间。**必须与后端 `app/server.py` 的 `NUMERIC_BOUNDS` 逐项相等** ——
+// 前后端没法共享代码，一致性由 `tests/test_numeric_bounds_consistency.py`
+// 同时读这两个文件比对，别只改一处。
+//
+// 为什么要专门钉：这两处曾经不一致 —— 前端卡 0 ~ 1.5、后端卡 0.0 ~ 2.0，
+// 用户填 1.8 会被**前端**拒掉而后端完全接受。前端比后端更严是更坏的一种不一致：
+// 用户看到「界面说不行」，绕不过去，也想不到是界面在凭想象设限。
+export const NUMERIC_BOUNDS = {
+  temperature: [0, 2],
+  retries: [0, 10],
+  timeout: [5, 1800],
+  max_tokens: [256, 200000],
+};
+
+// 区间 → 输入框的对应关系。校验与 min/max 都从这一张表来，
+// 避免「能填的范围」和「能存的范围」变成两套数（temperature 曾经就是这样）。
+const NUM_FIELDS = [
+  ["temperature", "st-temperature", "采样温度"],
+  ["retries", "st-retries", "重试次数"],
+  ["timeout", "st-timeout", "单次超时"],
+  ["max_tokens", "st-maxtokens", "输出预算"],
+];
+
+// 把区间写到输入框的 min/max 上。HTML 里那对属性只是**初始值**，
+// 以这里为准 —— 否则改一处忘了另一处，浏览器照样能填出越界值。
+function applyNumericBounds() {
+  for (const [key, id] of NUM_FIELDS) {
+    const n = $(id);
+    if (!n) continue;
+    const [lo, hi] = NUMERIC_BOUNDS[key];
+    n.min = lo;
+    n.max = hi;
+  }
+}
+
 export function settingsOpen() {
   return !$("settings-screen").classList.contains("hidden");
 }
@@ -60,12 +95,29 @@ async function preloadSettings() {
   fill("st-timeout", c.timeout ?? "");
   fill("st-maxtokens", c.max_tokens ?? "");
   if (!dirty.has("st-apikey")) $("st-apikey").value = "";
+  renderConfigError(c.config_error);
   const env = c.env_override ? "（当前由环境变量 TALKSCRIPT_API_KEY 覆盖）" : "";
   $("st-status").textContent = c.mock
     ? `当前为 mock 模式（返回夹具，不调模型）${env}`
     : c.api_key_set
       ? `已配置 Key · 模型 ${c.model} · 重试 ${c.retries} 次 / 超时 ${c.timeout}s${env}`
       : `未配置 API Key${env}`;
+}
+
+// config.yaml 读坏时的提示。
+//
+// 为什么必须显示：读坏之后上面那些输入框填的全是**内置默认值**，
+// 而下面那行状态会照常说「已配置 Key · 模型 glm-4.7」——
+// 用户以为配置还在，其实自己填的 base_url 一次都没生效过。
+// 提示里要写清两件事：①上面显示的不是你的配置；②怎么恢复（重新保存一次）。
+function renderConfigError(msg) {
+  const n = $("st-cfg-err");
+  if (!n) return;
+  if (!msg) { n.classList.add("hidden"); n.textContent = ""; return; }
+
+  n.textContent = `⚠ ${msg}。上面显示的是内置默认值，不是你保存过的配置 ——`
+    + `重新填一次并点「保存」即可覆盖修复。`;
+  n.classList.remove("hidden");
 }
 
 function fill(id, value) {
@@ -75,6 +127,7 @@ function fill(id, value) {
 }
 
 export function bindSettings() {
+  applyNumericBounds();          // 区间由 JS 统一写入输入框的 min/max
   ["st-baseurl", "st-model", "st-apikey", "st-temperature",
    "st-retries", "st-timeout", "st-maxtokens"].forEach(id => {
     $(id).addEventListener("input", () => dirty.add(id));
@@ -120,26 +173,17 @@ async function saveSettings() {
   };
   const key = $("st-apikey").value.trim();
   if (key) body.api_key = key;
-  // 温度是可选项：留空表示沿用服务端当前值，不覆盖
-  const t = $("st-temperature").value.trim();
-  if (t !== "") {
-    const num = Number(t);
-    if (!Number.isFinite(num) || num < 0 || num > 1.5) {
-      toast("采样温度需在 0 ~ 1.5 之间");
-      return;
-    }
-    body.temperature = num;
-  }
-  // 重试 / 超时 / 输出预算：留空表示不改，填了就在前端先卡一遍范围
-  // （后端也会卡，这里只是让错误当场可见，不必等一次往返）
-  for (const [key, id, lo, hi, label] of [
-    ["retries", "st-retries", 0, 10, "重试次数"],
-    ["timeout", "st-timeout", 5, 1800, "单次超时"],
-    ["max_tokens", "st-maxtokens", 256, 200000, "输出预算"],
-  ]) {
+  // 数值项（含采样温度）：留空表示不改，填了就在前端先卡一遍范围。
+  // 后端也会卡，这里只是让错误当场可见，不必等一次往返；
+  // 区间与输入框 min/max 共用 NUMERIC_BOUNDS 这一张表。
+  //
+  // 温度修复前是单独一个 if、区间写死 1.5（与后端的 2.0 不一致），
+  // 现在并入同一张表 —— 少一处「凭想象设限」的机会。
+  for (const [key, id, label] of NUM_FIELDS) {
     const raw = $(id).value.trim();
     if (raw === "") continue;
     const n = Number(raw);
+    const [lo, hi] = NUMERIC_BOUNDS[key];
     if (!Number.isFinite(n) || n < lo || n > hi) {
       toast(`${label}需在 ${lo} ~ ${hi} 之间`);
       return;
@@ -362,13 +406,13 @@ export async function openPackInfo() {
   const box = $("pi-files");
   box.innerHTML = "";
   const tb = el("table");
-  tb.innerHTML = "<thead><tr><th>文件</th><th style='width:90px'>大小</th>"
-    + "<th style='width:110px'>说明</th></tr></thead>";
+  tb.innerHTML = "<thead><tr><th>文件</th><th class='col-size'>大小</th>"
+    + "<th class='col-role'>说明</th></tr></thead>";
   const body = el("tbody");
   for (const f of p.files || []) {
     const tr = el("tr");
     const kb = f.size > 1024 ? (f.size / 1024).toFixed(1) + " KB" : f.size + " B";
-    tr.innerHTML = `<td style="font-family:var(--mono);font-size:12px">${esc(f.rel)}</td>
+    tr.innerHTML = `<td class="cell-mono">${esc(f.rel)}</td>
       <td>${kb}</td><td>${FILE_ROLE(f.rel)}</td>`;
     body.appendChild(tr);
   }

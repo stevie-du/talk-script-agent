@@ -16,13 +16,16 @@
 """
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 
-from .fileio import write_atomic
+from .fileio import read_yaml_file, write_atomic
+
+log = logging.getLogger(__name__)
 
 DEFAULT_CONFIG = {
     "llm": {
@@ -58,6 +61,9 @@ class AppConfig:
     default_pack: str = "elevator"
     root: Path = Path(".")
     mock: bool = False
+    # config.yaml 读坏时的一句话说明（读坏才非空）。随 /api/config 下发，
+    # 让设置页能提示「你的配置没生效」—— 否则退回全默认这件事完全不可见。
+    config_error: str = ""
 
 
 def config_path(root: Path, config_dir: Path | None = None) -> Path:
@@ -154,20 +160,53 @@ def _truthy(v) -> bool:
     return str(v or "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def _num(data: dict, key: str, default, cast):
+    """取一个数值配置项：**只有键缺失或为空时才用默认值**。
+
+    为什么不能写成 `data.get(key) or default` —— 那会把合法的 0 当成「没填」。
+    `temperature` 的合法区间包含 0.0（见 `server.set_config` 的 0.0 ~ 2.0），
+    于是「把温度调到 0 求确定性输出」会变成静默无效：设置页提示保存成功，
+    写进 config.yaml 的也是 0.0，但每次生成实际仍用默认的 0.7 ——
+    不报错、不可见、与用户意图相反，正是本项目一直在整治的「静默降级」。
+
+    同类写法在 timeout / max_tokens 上也有，当前只是靠接口层的区间校验挡着
+    才没出事（0 不在它们的合法区间里），但 `TALKSCRIPT_TIMEOUT=0` 这类
+    环境变量路径绕得过去，所以一并收口到这里。
+
+    值非法（如 `temperature: 快`）时退回默认并留一条日志 —— 不回退会让
+    `float("快")` 的 ValueError 冒到 `create_app`，引擎直接起不来。
+    """
+    v = data.get(key)
+    if v is None or v == "":
+        return default
+    try:
+        return cast(v)
+    except (TypeError, ValueError):
+        log.warning("配置项 %s 的值 %r 不是合法的 %s，已改用默认值 %r",
+                    key, v, cast.__name__, default)
+        return default
+
+
+def read_config_file(p: Path) -> tuple[dict, str]:
+    """读 config.yaml，返回 `(数据, 错误说明)`；错误说明为空串表示读成功。
+
+    抽出来是因为 `load_config` 与 `save_config` 各自抄了一份同样的
+    try/except（**且两处都静默**），修的时候很容易只修一处。
+
+    真正的读取在 `fileio.read_yaml_file` —— 那是**全项目读 YAML 的唯一口径**，
+    行业包（pack / banwords / skill / private）走的是同一个函数。
+    这里只补一条 WARNING：config 读坏会退回内置默认值，而默认值里的
+    base_url / model 是能跑通的，用户很容易以为「我的配置生效了」。
+    """
+    data, err = read_yaml_file(p)
+    if err:
+        log.warning("config.yaml 读取失败（%s），本次改用内置默认值：%s", p, err)
+    return data, err
+
+
 def load_config(root: Path, config_dir: Path | None = None) -> AppConfig:
-    data: dict = {}
     p = config_path(root, config_dir)
-    if p.exists():
-        try:
-            with open(p, encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
-            if not isinstance(data, dict):
-                data = {}
-        except (OSError, yaml.YAMLError):
-            # 配置读坏不该让引擎起不来：退回默认值，界面照常能打开，
-            # 用户在设置里重新保存一次即可。修复前这里会直接抛异常，
-            # 表现为「无法连接本地引擎」，用户完全无从下手。
-            data = {}
+    data, config_error = read_config_file(p)
 
     llm = data.get("llm", {}) or {}
     if not isinstance(llm, dict):
@@ -177,10 +216,10 @@ def load_config(root: Path, config_dir: Path | None = None) -> AppConfig:
         base_url=str(llm.get("base_url") or DEFAULT_CONFIG["llm"]["base_url"]).rstrip("/"),
         api_key=str(llm.get("api_key") or ""),
         model=str(llm.get("model") or DEFAULT_CONFIG["llm"]["model"]),
-        temperature=float(llm.get("temperature", 0.7) or 0.7),
-        retries=int(llm.get("retries", 2) or 0),
-        timeout=float(llm.get("timeout", 180) or 180),
-        max_tokens=int(llm.get("max_tokens") or DEFAULT_CONFIG["llm"]["max_tokens"]),
+        temperature=_num(llm, "temperature", 0.7, float),
+        retries=_num(llm, "retries", 2, int),
+        timeout=_num(llm, "timeout", 180.0, float),
+        max_tokens=_num(llm, "max_tokens", DEFAULT_CONFIG["llm"]["max_tokens"], int),
     )
 
     # 环境变量覆盖（避免密钥落盘）
@@ -196,6 +235,7 @@ def load_config(root: Path, config_dir: Path | None = None) -> AppConfig:
         llm=cfg,
         default_pack=_env("TALKSCRIPT_DEFAULT_PACK", str(data.get("default_pack", "elevator"))),
         root=root,
+        config_error=config_error,
     )
     app.mock = (_truthy(os.environ.get("TALKSCRIPT_MOCK"))
                 or _truthy(llm.get("mock"))
@@ -206,17 +246,15 @@ def load_config(root: Path, config_dir: Path | None = None) -> AppConfig:
 def save_config(root: Path, llm: dict, default_pack: str | None = None,
                 config_dir: Path | None = None) -> None:
     """合并保存：只覆盖传入的字段；api_key 传空串表示保持不变；
-    未传入的字段（如 retries/timeout/mock）原样保留。"""
-    data: dict = {}
+    未传入的字段（如 retries/timeout/mock）原样保留。
+
+    ⚠ 文件读坏时这里会把**整份配置重置为只剩本次写入的字段**（旧的
+    `default_pack` / `mock` 会丢）。但这是有意为之、且优于另一条路：
+    不重置就没法把文件写回合法状态，用户只能去手工修 YAML。
+    `read_config_file` 已经为此留了 WARNING，别让它变成静默丢失。
+    """
     p = config_path(root, config_dir)
-    if p.exists():
-        try:
-            with open(p, encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
-            if not isinstance(data, dict):
-                data = {}
-        except (OSError, yaml.YAMLError):
-            data = {}
+    data, _ = read_config_file(p)
     existing = data.get("llm", {}) or {}
     if not isinstance(existing, dict):
         existing = {}

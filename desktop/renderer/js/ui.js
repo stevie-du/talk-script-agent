@@ -48,7 +48,11 @@ export function fillPackSelect({ selectLast = false, prefer = null } = {}) {
   const keep = prefer || sel.value;
   sel.innerHTML = "";
   for (const p of state.meta.packs) {
-    const o = el("option", "", esc(p.display_name) + (p.draft ? "（草稿）" : ""));
+    // 「（损坏）」不是装饰：坏包的 display_name 会退成目录 slug，
+    // 而参数条会空掉 —— 不标出来，用户只会觉得「这个包没配好」。
+    const o = el("option", "",
+                 esc(p.display_name) + (p.draft ? "（草稿）" : "")
+                 + (p.pack_error ? "（损坏）" : ""));
     o.value = p.name;
     sel.appendChild(o);
   }
@@ -84,6 +88,20 @@ export function renderPackParams() {
   const pack = currentPack();
   if (!pack) return;
   $("pack-badge").classList.toggle("hidden", !pack.draft);
+
+  // 包坏了要**说出来**（P1-6 / P2-7）。不说的话，界面呈现的是「这个包参数很少」——
+  // 而真相是 pack.yaml 没解析出来（或内容不符合约定），下面的 params 全是降级值，
+  // 真去生成还会被引擎拒绝。两件事差得远。
+  // 措辞用「不可用」而不是「读不出来」：坏法有两类，一类是 YAML 语法错、
+  // 另一类是语法对但结构不对（`version: v2`），后者说「读不出来」就不准确了。
+  const perr = $("pack-err");
+  if (perr) {
+    perr.textContent = pack.pack_error
+      ? "⚠ 这个行业包不可用：" + pack.pack_error
+        + "。下面的参数与知识切片都是降级值，生成会被拒绝 —— 修好该文件后重试。"
+      : "";
+    perr.classList.toggle("hidden", !pack.pack_error);
+  }
   const front = $("param-front");
   // 只清 innerHTML 就够：下拉菜单虽然挂在 body 下，但 beautifySelects() 末尾有一段
   // 全局的孤儿菜单清扫（「清除脱离 DOM 的孤儿菜单」），会按 .select-wrap 反查并删掉

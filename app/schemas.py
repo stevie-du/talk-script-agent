@@ -116,6 +116,11 @@ class ScriptResult(BaseModel):
     pack_draft: bool = False
     params: dict
     quota: dict                       # {total, hook, body, cta}
+    # True = 这个 quota **不是**查 quota_table 得来的，而是按「时长×语速×0.95」
+    # 估的通用值（行业包没配 quota_table）。必须随产物落盘：
+    # 否则 `quota: {total: 256, ...}` 与包作者真正配过的配额长得一模一样，
+    # 用户与包作者都看不出这份配额没为本行业定制过。
+    quota_degraded: bool = False
     plan: TopicPlan
     sections: list[ScriptSection]
     storyboard: list[StoryboardShot]
@@ -137,3 +142,8 @@ class PackInfo(BaseModel):
     # {参数键: {选项值: 降级说明}}，只列「用户能选、但本包没给对应定制」的值。
     # 这些值不会报错，只会静默走通用默认 —— 摊到界面上，避免用户以为在定制。
     param_audit: dict = {}
+    # 非空 = 这个包的 pack.yaml 或它引用的 banwords.yaml 读不出来（人话说明，
+    # 含「第 N 行第 M 列」）。此时 params / display_name 全是降级值，
+    # **不能拿它生成**（`Pack` 会抛 PackBrokenError）。列表里仍要显示这个包，
+    # 但要标出来 —— 让它静默消失或静默降级都是更差的处理。
+    pack_error: str = ""

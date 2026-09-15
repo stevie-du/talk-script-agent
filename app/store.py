@@ -208,15 +208,35 @@ class ArtifactStore:
         return out
 
     def _count_on_disk(self) -> int:
-        """磁盘上的作业**目录**数（不是文件数）。
+        """磁盘上**已落盘的记录**数 —— 判据必须与索引的口径完全一致。
 
-        一个作业会同时留下 result.json 与 job.json，按文件数统计会得到 2 倍，
-        与索引条目数永远对不上 —— 那样每次 history() 都会白重建一次索引，
-        索引等于没做。
+        索引收录的是「有产物或快照的作业」，所以这里也数
+        「含 result.json 或 job.json 的目录」，**不能数目录**。
+
+        为什么不能数目录（修复前的写法是 `sum(1 for p in self.gen.glob("*/*") if p.is_dir())`）：
+        `job_dir()` 在 `start_generate` 里就 `mkdir`，作业一开工就有一个**空目录**，
+        而它还没进索引。于是只要有一个作业在跑，`len(index) != 目录数` 就**恒成立**，
+        每次 `history()` 都会走 `_rebuild()` —— 全量 glob + 解析所有
+        result.json/job.json + 重写 index.json。
+
+        而前端在有未结束会话时会每 3 秒轮询一次 `/api/history`
+        （`sessions.js` 的 `loadSessions`），于是整个生成期间就是
+        **每 3 秒一次 O(N) 解析 + 一次磁盘写**，索引这个优化变成负收益。
+        实测：40 条记录 16.4 ms/次，400 条记录 **115.2 ms/次**，
+        且重建次数 == 调用次数（5 次调用重建 5 次）。
+
+        改成按「已落盘」计数后，「在跑的作业」不再污染判据：
+        每完成一个作业最多触发一次重建（`write_result` 写盘与 `_upsert` 之间
+        有一个瞬时窗口），而不是每 3 秒一次。
+
+        注意这里数的**不是文件数**：一个作业会同时留下 result.json 与 job.json，
+        按文件数统计会得到 2 倍，与索引条目数永远对不上 —— 那样每次 history()
+        都会白重建一次，索引等于没做。
         """
         if not self.gen.exists():
             return 0
-        return sum(1 for p in self.gen.glob("*/*") if p.is_dir())
+        return sum(1 for p in self.gen.glob("*/*")
+                   if (p / "result.json").exists() or (p / "job.json").exists())
 
     def _rebuild(self) -> dict[str, dict]:
         """从磁盘重建索引：job.json 先铺底（含失败/取消），result.json 覆盖它。"""
@@ -322,6 +342,13 @@ def render_script_md(result: dict) -> str:
               f"{'✅ 合格' if ch['passed'] else '❌ ' + '；'.join(ch['blockers'])}", ""]
     if result.get("placeholders"):
         lines += ["> 含占位事实：" + "、".join(result["placeholders"]) + "，请补充后再发布。", ""]
+    if result.get("quota_degraded"):
+        # 导出的 脚本.md 是最终交付物，降级说明必须跟着走 ——
+        # 只在界面上提示、导出后却看不出配额是估的，等于降级又变回不可见。
+        lines += [f"> ⚠ 本行业包没配 quota_table，字数配额（总计 "
+                  f"{result.get('quota', {}).get('total', '-')} 字）是按「时长 × 语速」"
+                  "估算的通用值，不是为本行业定制的。要拿到贴合本行业的配额，"
+                  "请在 packs/<行业>/pack.yaml 里补 quota_table。", ""]
     if result.get("storyboard"):
         lines += ["## 分镜表", "", "| 时间 | 画面/景别 | 口播 | 字幕 | 音效 | 提示 |",
                   "|---|---|---|---|---|---|"]

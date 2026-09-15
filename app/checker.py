@@ -32,7 +32,10 @@ SEG_LABEL = {"hook": "开场钩子", "point": "要点", "cta": "结尾引导"}
 MIN_DURATION = 5.0
 MAX_DURATION = 1800.0
 
-# 语速兜底：与 knowledge.rate_for_style 的默认一致（包配置缺失或非法时用）
+# 语速兜底。**这是全局唯一的一份** —— knowledge.rate_for_style 也 import 它，
+# 两处必须给出同一个答案，否则同一份包配置会在「校验」与「组装时间轴」上
+# 得出不同结论（修复前就是这样：estimate_seconds 有兜底、_compute_timings 没有，
+# 于是 rate=0 的包在组装阶段炸出 ZeroDivisionError）。
 DEFAULT_RATE = 4.5
 
 # 单字词不下发匹配：中文里「最」这类单字条目会命中「最近」「最后」「最好」「最终」，

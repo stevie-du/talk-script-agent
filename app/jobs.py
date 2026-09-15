@@ -26,6 +26,24 @@ from datetime import datetime
 # 终态：进入后不再流转。同时用于「停止」的幂等判断。
 TERMINAL_STATES = frozenset({"done", "failed", "cancelled"})
 
+# 真正占用模型资源的作业状态 —— **并发额度只看这些**。
+#
+# `paused_awaiting_confirmation`（分步确认卡住）刻意不计入：它既不烧 token
+# 也不占线程，只是在等用户编辑选题卡。
+#
+# 修复前它是被算作「运行中」的，而 `prune()` 又只回收终态作业 —— 于是连开 4 条
+# 分步生成、都不点「继续」，之后**所有** /api/generate 一律 409「已达上限」，
+# 用户看到的是一句与自己操作无关的错误，唯一出路是重启应用。
+# 而「开着确认卡慢慢想」恰恰是分步模式的正常用法，不是异常操作。
+BUSY_STATES = frozenset({"queued", "selecting", "writing", "checking", "rewriting"})
+
+# 待确认作业的保留上限。
+#
+# 把它们排除出并发额度之后，数量就不再被 MAX_CONCURRENT_JOBS 兜住了，
+# 所以这里补一道单独的内存上界：超出就丢最旧的。
+# 每个待确认作业都花过一次选题 LLM 调用，正常使用远到不了这个数。
+PAUSED_KEEP = 20
+
 # 合法迁移表：from_state -> 允许去的 to_state。
 # 写成表而不是散落在各方法里的 if，是为了让「谁能到哪儿」一眼可查，
 # 也让非法迁移统一变成 409 而不是静默写坏状态。
@@ -209,6 +227,26 @@ class JobRegistry:
         with self._lock:
             self._jobs[job.id] = job
 
+    def add_if_room(self, job: Job, limit: int) -> bool:
+        """**同一把锁内**检查并发额度并插入；返回 False 表示已满（未插入）。
+
+        为什么不写成「先 `running_count() >= limit` 判断、再 `add(job)`」：
+        那是两次独立的加锁，中间有窗口。而 `/api/generate` 是**同步 `def`**
+        （FastAPI 丢线程池执行，是真并发），两个请求可以同时通过检查、
+        双双插入 —— 额度形同虚设，`MAX_CONCURRENT_JOBS` 只保证「通常有效」。
+
+        `Job.transition()` 修的是同一类 TOCTOU（检查与置位同锁），
+        这里照同一套做法收口：**把判断和写入放进同一个临界区**。
+
+        插入时 `job.state` 已是 `queued`（在 `BUSY_STATES` 里），
+        所以额度从这一刻起就被占住，不必等 `_spawn` 起线程。
+        """
+        with self._lock:
+            if sum(1 for j in self._jobs.values() if j.state in BUSY_STATES) >= limit:
+                return False
+            self._jobs[job.id] = job
+            return True
+
     def get(self, jid: str) -> Job:
         with self._lock:
             job = self._jobs.get(jid)
@@ -232,15 +270,35 @@ class JobRegistry:
         return [j.snapshot(include_result=include_result) for j in jobs]
 
     def running_count(self) -> int:
+        """占用并发额度的作业数（口径见 BUSY_STATES）。
+
+        **不是**「非终态作业数」：待确认的作业不该算并发 ——
+        否则 4 张没人理的确认卡就能把后续所有生成永久挡在 409 之外。
+
+        ⚠ 仅供展示（`/api/meta` 的 `max_concurrent` 说明、测试）。
+        **不要**用它做「够不够再开一个」的判断再另行 `add()` ——
+        那是一次 TOCTOU，用 `add_if_room()`。
+        """
         with self._lock:
-            return sum(1 for j in self._jobs.values() if j.state not in TERMINAL_STATES)
+            return sum(1 for j in self._jobs.values() if j.state in BUSY_STATES)
 
     def prune(self, keep: int = 200) -> None:
-        """只保留最近 keep 个终态作业，防止长跑进程内存无界增长。"""
+        """回收作业，防止长跑进程内存无界增长。
+
+        两类分开处理：
+          - **终态**作业只保留最近 `keep` 个（原有行为）；
+          - **待确认**作业只保留最近 `PAUSED_KEEP` 个 —— 它们被排除出并发额度后
+            数量不再受 MAX_CONCURRENT_JOBS 约束，需要单独一道上界。
+        """
         with self._lock:
-            terminal = [j for j in self._jobs.values() if j.state in TERMINAL_STATES]
-            if len(terminal) <= keep:
-                return
-            terminal.sort(key=lambda j: j.created_at)
-            for j in terminal[: len(terminal) - keep]:
-                self._jobs.pop(j.id, None)
+            self._trim(lambda j: j.state in TERMINAL_STATES, keep)
+            self._trim(lambda j: j.state == "paused_awaiting_confirmation", PAUSED_KEEP)
+
+    def _trim(self, pred, keep: int) -> None:
+        """丢掉匹配 pred 的、最旧的超出部分（调用方须持锁）。"""
+        hit = [j for j in self._jobs.values() if pred(j)]
+        if len(hit) <= keep:
+            return
+        hit.sort(key=lambda j: j.created_at)
+        for j in hit[: len(hit) - keep]:
+            self._jobs.pop(j.id, None)

@@ -10,6 +10,7 @@
   4 历史索引自愈 —— 手工往 generated/ 拷一份产物，索引要能重建出来。
   5 建包失败不留半成品目录 —— 否则重试会被 409「已存在」挡死。
   6 导出技能默认不带 private/ —— 商业信息不外带。
+  7 渲染层下发 CSP 且没有 'unsafe-inline' 后门（纵深防御，P2-5）。
 """
 import json
 import re
@@ -74,6 +75,19 @@ def _wait_done(c, jid: str, timeout=30.0):
             return snap
         time.sleep(0.1)
     raise AssertionError(f"作业超时：{snap}")
+
+
+def _wait_state(c, jid: str, want: str, timeout=30.0):
+    import time
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        snap = c.get(f"/api/jobs/{jid}").json()
+        if snap.get("state") == want:
+            return snap
+        if snap.get("state") in ("done", "failed", "cancelled"):
+            raise AssertionError(f"作业提前落到 {snap['state']}，没等到 {want}：{snap}")
+        time.sleep(0.1)
+    raise AssertionError(f"没等到 {want}：{snap}")
 
 
 # ── 1 配置现读 ──────────────────────────────────────────────
@@ -222,6 +236,72 @@ def test_index_rebuilds_when_disk_changes(tmp_path=None):
     shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_index_cache_survives_inflight_job(tmp_path=None):
+    """有作业在跑（目录已建、还没落盘）时，`history()` **不得**重建索引。
+
+    修复前 `_count_on_disk()` 数的是**目录**数，而 `job_dir()` 在 `start_generate`
+    里就 `mkdir` —— 作业一开工就有一个空目录，而索引只收录已落盘的作业。
+    于是只要有一个作业在跑，判据就**恒不相等**，每次 `history()` 都走全量重建：
+    glob + 解析所有 result.json/job.json + 重写 index.json。
+
+    而前端在有未结束会话时每 3 秒轮询一次 `/api/history`（`sessions.js`），
+    所以整个生成期间就是每 3 秒一次 O(N) 解析 + 一次磁盘写。
+    实测 400 条记录时单次 **115 ms**，重建次数 == 调用次数。
+
+    这条断言盯的就是「判据口径」：空目录不该被算作一条记录。
+    """
+    from app.store import ArtifactStore
+
+    tmp = _tmp_root_mock()
+    c = _client(tmp)
+    for i in range(3):
+        jid = c.post("/api/generate",
+                     json={"pack": "elevator", "topic": f"在跑作业{i}"}).json()["job_id"]
+        assert _wait_done(c, jid)["state"] == "done"
+
+    st = ArtifactStore(tmp, data_dir=tmp)
+    assert len(st.history()) == 3, st.history()
+
+    rebuilds = []
+    orig = ArtifactStore._rebuild
+
+    def counting(self):
+        rebuilds.append(1)
+        return orig(self)
+
+    with patch.object(ArtifactStore, "_rebuild", counting):
+        # 稳定态：一次都不该重建
+        st.history()
+        assert rebuilds == [], "稳定态就重建了，缓存等于没做"
+
+        # 模拟 start_generate：目录建出来，但还没有任何落盘文件
+        inflight = st.job_dir("20260915-120000-aaaaaa", "2026-09-15T12:00:00")
+        for _ in range(5):
+            st.history()
+        assert rebuilds == [], (
+            f"有作业在跑时空转重建了 {len(rebuilds)} 次（5 次调用）—— "
+            "索引缓存失效，生成期间每 3 秒全量解析一次")
+
+        # 落一个 job.json（失败/取消/待确认的作业会走 write_job）——
+        # 此刻磁盘上确实多了一条「已落盘」记录，允许重建，但之后必须重新收敛
+        st.write_job({"id": "20260915-120000-aaaaaa",
+                      "created_at": "2026-09-15T12:00:00",
+                      "state": "failed", "error": "模拟失败",
+                      "params": {"pack": "elevator", "topic": "在跑作业"}},
+                     inflight)
+        st.history()
+        assert len(st.history()) == 4, "落盘后应被收进索引"
+        rebuilds.clear()
+        for _ in range(3):
+            st.history()
+        assert rebuilds == [], f"落盘收敛后又开始空转重建 {len(rebuilds)} 次"
+
+    # 功能面不能为了性能退步：删掉那条记录后仍要能自愈
+    assert st.delete("20260915-120000-aaaaaa") == "ok"
+    assert len(st.history()) == 3
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_delete_removes_all_duplicate_dirs(tmp_path=None):
     """跨零点分裂出的两个目录必须一起删，否则记录会「复活」。"""
     tmp = _tmp_root_mock()
@@ -239,6 +319,67 @@ def test_delete_removes_all_duplicate_dirs(tmp_path=None):
     assert c.delete(f"/api/history/{jid}").status_code == 200
     assert list((tmp / "generated").glob(f"*/{jid}")) == [], "只删了一个目录，记录会复活"
     assert not any(x["id"] == jid for x in c.get("/api/history").json())
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_paused_jobs_do_not_block_new_generations(tmp_path=None):
+    """停在「待确认」的作业不该占并发额度。
+
+    用户可见的症状（修复前）：连开 4 条**分步确认**生成、都不点「继续」，
+    之后每次点发送都只得到「同时进行的生成已达上限（4 个）」——
+    而用户根本没在跑任何东西，唯一出路是重启应用。
+
+    根因是两处口径凑在一起：`running_count()` 数「所有非终态作业」（含待确认），
+    而 `prune()` 只回收终态作业，待确认的永不出栈。
+    而「开着确认卡慢慢想」恰恰是分步模式的**正常用法**，不是异常操作。
+    """
+    from app.jobs import PAUSED_KEEP
+
+    tmp = _tmp_root_mock()
+    c = _client(tmp)
+
+    for i in range(4):
+        r = c.post("/api/generate",
+                   json={"pack": "elevator", "topic": f"分步{i}", "mode": "step"})
+        assert r.status_code == 200, (r.status_code, r.text)
+        _wait_state(c, r.json()["job_id"], "paused_awaiting_confirmation")
+
+    items = c.get("/api/history").json()
+    paused = [x for x in items if x.get("state") == "paused_awaiting_confirmation"]
+    assert len(paused) == 4, items
+    assert len(items) == 4, f"待确认作业仍要留在列表里（界面要能点回去）：{items}"
+
+    # ★ 关键：4 张没人理的确认卡不该把后续生成挡死
+    r = c.post("/api/generate", json={"pack": "elevator", "topic": "第 5 条"})
+    assert r.status_code == 200, (
+        f"待确认作业占满了并发额度：{r.status_code} {r.text}")
+    assert _wait_done(c, r.json()["job_id"])["state"] == "done"
+
+    # 真正在跑的作业仍然要算满额度 —— 修复不能把上限一起放开
+    from app.jobs import Job
+    reg = c.app.state.pipeline.registry
+    for i in range(4):
+        j = Job(f"20260915-00000{i}-busy01", "generate", {})
+        j.state = "writing"
+        reg.add(j)
+    r = c.post("/api/generate", json={"pack": "elevator", "topic": "应被挡"})
+    assert r.status_code == 409, (r.status_code, r.text)
+    assert "上限" in r.json()["detail"], r.json()
+    # 清掉这 4 个假作业，别影响后面的清理
+    for i in range(4):
+        reg.remove(f"20260915-00000{i}-busy01")
+
+    # 待确认作业另有一道上界：被排除出额度后，数量不再受 MAX_CONCURRENT_JOBS 约束
+    for i in range(PAUSED_KEEP + 5):
+        j = Job(f"20260915-1000{i:02d}-paa{i:03d}", "generate", {})
+        j.state = "paused_awaiting_confirmation"
+        reg.add(j)
+    reg.prune()
+    left = [s for s in reg.snapshots()
+            if s["state"] == "paused_awaiting_confirmation"]
+    assert len(left) == PAUSED_KEEP, (
+        f"待确认作业没有上界，会无界增长：{len(left)}（上限 {PAUSED_KEEP}）")
+
     shutil.rmtree(tmp, ignore_errors=True)
 
 
@@ -512,9 +653,12 @@ def test_reset_restores_defaults(tmp_path=None):
 def test_numeric_settings_editable_and_bounded(tmp_path=None):
     """重试 / 超时 / 输出预算要能改，且越界要当场报错。
 
-    边界必须在写入前卡：load_config 里是 `llm.get(x) or 默认值`，
-    写进去的 0 或负数会被悄悄换成默认值 —— 界面显示「已保存」、
-    实际值却不是用户填的那个，比直接拒绝更难查。
+    边界必须在写入前卡：这些项的合法区间都不包含 0（timeout ≥ 5、max_tokens ≥ 256），
+    而 `load_config` 的历史写法是 `llm.get(x) or 默认值`，写进去的 0 会被悄悄换成
+    默认值 —— 界面显示「已保存」、实际值却不是用户填的那个，比直接拒绝更难查。
+    （`load_config` 现已改成「只有键缺失才取默认」，见
+    `test_temperature_zero_roundtrip`；这里的区间校验仍然要保留，
+    因为它还负责挡住负数与超上限这类**非 0** 的非法值。）
     """
     from app.config import load_config
 
@@ -535,6 +679,59 @@ def test_numeric_settings_editable_and_bounded(tmp_path=None):
     assert c.post("/api/config", json={"retries": None}).status_code == 200
     assert load_config(tmp).llm.retries == 5
     shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_temperature_zero_roundtrip(tmp_path=None):
+    """`temperature: 0.0` 必须原样读回 0.0。
+
+    修复前 `load_config` 写的是 `float(llm.get("temperature", 0.7) or 0.7)` ——
+    `0.0` 是 falsy，于是「把温度调到 0 求确定性输出」变成**静默无效**：
+    界面提示「已保存，下次生成即生效」、config.yaml 里也确实写着 0.0，
+    但每次生成实际仍用 0.7。不报错、不可见、与用户意图相反。
+
+    这条断言要同时守住三件事：
+      1. 接口能存进 0.0（`set_config` 的 `v not in ("", None)` 过滤不能把 0.0 吃掉）；
+      2. `load_config` 能读回 0.0（不能用真值判断取默认）；
+      3. 0.0 是合法边界值，不能像 timeout=0 那样被 400 挡掉。
+    """
+    import yaml
+    from app.config import config_path, load_config
+
+    # ── 1) 走接口：0.0 既不被过滤，也不被区间校验拒绝 ──
+    tmp = _tmp_root()
+    c = _client(tmp)
+    r = c.post("/api/config", json={"temperature": 0.0})
+    assert r.status_code == 200, (r.status_code, r.text)
+    raw = yaml.safe_load(config_path(tmp, tmp).read_text(encoding="utf-8"))
+    assert raw["llm"]["temperature"] == 0.0, f"0.0 没写进 config.yaml：{raw}"
+    got = load_config(tmp).llm.temperature
+    assert got == 0.0, f"temperature 被静默改写成了 {got}（期望 0.0）"
+
+    # 上边界同样要能存能读；越界仍要 400
+    assert c.post("/api/config", json={"temperature": 2.0}).status_code == 200
+    assert load_config(tmp).llm.temperature == 2.0
+    assert c.post("/api/config", json={"temperature": 2.01}).status_code == 400
+    assert c.post("/api/config", json={"temperature": -0.01}).status_code == 400
+    shutil.rmtree(tmp, ignore_errors=True)
+
+    # ── 2) 直接写盘：绕开接口，单独盯 load_config 的取值口径 ──
+    tmp2 = Path(tempfile.mkdtemp(prefix="talkscript-temp-"))
+    config_path(tmp2, tmp2).write_text(
+        yaml.safe_dump({"llm": {"temperature": 0.0, "retries": 0}}, allow_unicode=True),
+        encoding="utf-8")
+    cfg = load_config(tmp2, tmp2)
+    assert cfg.llm.temperature == 0.0, cfg.llm.temperature
+    assert cfg.llm.retries == 0, cfg.llm.retries
+    shutil.rmtree(tmp2, ignore_errors=True)
+
+    # ── 3) 键真的缺失时才取默认（别把修复改成「永不取默认」）──
+    tmp3 = Path(tempfile.mkdtemp(prefix="talkscript-temp-"))
+    config_path(tmp3, tmp3).write_text(
+        yaml.safe_dump({"llm": {"model": "m"}}, allow_unicode=True), encoding="utf-8")
+    cfg3 = load_config(tmp3, tmp3)
+    assert cfg3.llm.temperature == 0.7, f"缺失时应取默认 0.7，实际 {cfg3.llm.temperature}"
+    assert cfg3.llm.timeout == 180.0 and cfg3.llm.retries == 2
+    shutil.rmtree(tmp3, ignore_errors=True)
 
 
 def test_undraft_clears_flag_and_keeps_rest(tmp_path=None):
@@ -603,6 +800,39 @@ def test_pack_file_read_is_guarded(tmp_path=None):
     shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_pack_detail_rejects_traversal(tmp_path=None):
+    """GET /api/packs/{name} 也必须挡穿越 —— 它是唯一漏了白名单的那个。
+
+    修复前 `get_pack` 没有 `_safe_name`：`%2e%2e` 被解码成 `..`（单段，路由匹配得上，
+    不像 `%2f` 会被路由挡掉），于是 `Pack(root, "..")` 命中 `root/pack.yaml`，
+    接口回 200，并附带 `base.rglob("*")` 的**整棵目录树清单** ——
+    含 `config.yaml` 与各行业包 `private/` 下的文件名与体积。
+    实测：25 条清单 + 一个包外 pack.yaml 的内容。
+
+    这里同时守住「包外没有 pack.yaml」时也不能变成目录列举：
+    只看状态码不够，还要确认响应里没有泄漏清单。
+    """
+    tmp = _tmp_root()
+    c = _client(tmp)
+    # 在 packs/ 的上一级放一个 pack.yaml，作为穿越的着陆点
+    (tmp / "pack.yaml").write_text(
+        "name: LEAKED\ndisplay_name: 包外的包\ndraft: false\nparams: {}\n",
+        encoding="utf-8")
+
+    for bad in ("%2e%2e", ".%2e", "%2e%2e%2f", "..%2f.."):
+        r = c.get(f"/api/packs/{bad}")
+        assert r.status_code in (400, 404), (bad, r.status_code, r.text)
+        assert "LEAKED" not in r.text, f"包外 pack.yaml 被读出去了：{bad}"
+        assert "api_key" not in r.text.lower(), f"配置被列举了：{bad}"
+
+    # 正常包不受影响
+    ok = c.get("/api/packs/elevator")
+    assert ok.status_code == 200, (ok.status_code, ok.text)
+    assert ok.json()["name"] == "elevator"
+    assert ok.json()["files"], "文件清单不该为空"
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
 # ── 7 版本号单一来源 ────────────────────────────────────────
 def test_version_single_source(tmp_path=None):
     """引擎报出的版本必须与 desktop/package.json 一致。
@@ -629,6 +859,48 @@ def test_version_single_source(tmp_path=None):
     c.headers.update({"X-TalkScript-Token": TOKEN})
     assert c.get("/api/health").json()["version"] == "9.9.9", "显式传入的版本应优先"
     shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ── 7 渲染层 CSP（P2-5）─────────────────────────────────────
+def test_renderer_sends_csp(tmp_path=None):
+    """渲染层必须带 CSP，且**没有 'unsafe-inline' 后门**。
+
+    为什么要有这条：转义目前是全量排查过的（12 个模块的 innerHTML 写入点都过
+    `esc` / `fmtText` / `textContent`），所以这**不是**一个现成漏洞 —— 但渲染层要
+    展示**模型生成的内容**，一旦将来某处漏了转义，没有 CSP 就没有第二道防线。
+
+    而 CSP 最容易「加上去但没人验证」：头没下发、或下发了却被 'unsafe-inline'
+    抵消，界面看起来**一模一样**。所以这里钉死两件事：头在、且没有那两个后门。
+
+    UI 侧（`_verify/verify.js`）另有一组断言：桩服务原样下发这份 CSP
+    （测试环境不宽松于生产）+ 全流程监听 `securitypolicyviolation` 零违规
+    + 一条正对照证明监听器真的在工作。这里只守「头在不在、内容对不对」。
+    """
+    data = _tmp_root()
+    # root 用仓库根目录，才有真实渲染层（_tmp_root 只拷了 packs）
+    app = create_app(ROOT, token=TOKEN, data_dir=data)
+    c = TestClient(app, base_url=LOOPBACK, raise_server_exceptions=False)
+
+    r = c.get("/")
+    assert r.status_code == 200, r.status_code
+    assert '<script type="module"' in r.text, "前提守卫：渲染层真的被服务出来了"
+
+    csp = r.headers.get("content-security-policy", "")
+    assert csp, "渲染层没有下发 CSP"
+    for directive in ("default-src 'self'", "script-src 'self'", "style-src 'self'",
+                      "img-src 'self' data:", "font-src 'self'", "connect-src 'self'",
+                      "object-src 'none'", "base-uri 'none'", "form-action 'none'",
+                      "frame-ancestors 'none'"):
+        assert directive in csp, f"缺 {directive}：{csp}"
+    assert "unsafe-inline" not in csp, f"留了 unsafe-inline 后门：{csp}"
+    assert "unsafe-eval" not in csp, f"留了 unsafe-eval 后门：{csp}"
+
+    # 子资源也要带：CSP 挂在中间件上，不是只挂 index —— 免得将来有人
+    # 新加一类响应（比如某个 /download 路由）时漏挂。
+    js = c.get("/static/js/main.js")
+    assert js.status_code == 200, js.status_code
+    assert js.headers.get("content-security-policy") == csp, "子资源没带 CSP"
+    shutil.rmtree(data, ignore_errors=True)
 
 
 # ── runner ──────────────────────────────────────────────────

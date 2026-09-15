@@ -50,6 +50,28 @@ class ScriptDraft(BaseModel):
     storyboard: list[StoryboardShot]
 
 
+def check_contract_complete(raw: dict) -> None:
+    """`raw` 与 `ScriptResult` 契约的字段集合必须**完全一致**。
+
+    为什么不能只靠 `model_validate`：它卡的是「类型对不对」，不是「字段有没有」。
+      - **少**给一个字段 → 静默取默认值。`quota_degraded` 就是这么丢的：
+        `_finalize` 的白名单里没有它，于是「配额是估的」这个信号在落盘那一步
+        无声消失，而契约层一声不吭。
+      - **多**给一个字段 → 静默丢弃（Pydantic 默认忽略未声明的键）。
+    两头都是「信号掉了但没人知道」—— 正是本项目一直在整治的静默降级。
+
+    用显式比对而不是 `model_config = ConfigDict(extra="forbid")`：
+    后者只堵「多」这一头，而且会一并改变 `_run_rewrite_segment` 里那次
+    「读旧产物再校验」的语义 —— 升级路径上的宽容度不该被顺手收掉。
+    """
+    declared = set(ScriptResult.model_fields)
+    if set(raw) != declared:
+        raise ValueError(
+            "产物字段与 ScriptResult 契约不一致 —— "
+            f"契约有但 raw 没给：{sorted(declared - set(raw))}；"
+            f"raw 给了但契约没声明：{sorted(set(raw) - declared)}")
+
+
 class SegmentRewrite(BaseModel):
     """模型在「单段重写」阶段要返回的结构。"""
     text: str
@@ -61,6 +83,37 @@ log = logging.getLogger(__name__)
 # 同时进行的作业上限。修复前没有任何限制：一个（本机）脚本可以无限调
 # /api/generate，每个作业开一个线程、各自烧 token，直到内存和额度一起见底。
 MAX_CONCURRENT_JOBS = 4
+
+# ── `_normalize` 的产出，每个键都必须有着落 ──────────────────────
+#
+# `_finalize` 曾经用一份手写白名单从 `p` 里挑参数落盘，而 `quota_degraded`
+# 不在其中 —— 于是「行业包没配 quota_table」这个信号被算出来、存进内存，
+# 然后在落盘那一刻**无声地掉了**：`result.json` 里一个字都没有，
+# 而 `quota: {total: 256, ...}` 与真配额长得一模一样。
+# 更要命的是 `ScriptResult.model_validate(raw)` 对**缺失**字段只会取默认值，
+# 不会报错，所以契约层也拦不住。
+#
+# 下面三张表把「每个键去哪」写成显式声明。**新增键时
+# `tests/test_quota_degraded_signal.py::test_normalize_keys_are_all_accounted_for`
+# 会报红**，逼作者表态 —— 而不是靠记得去改那份白名单。
+#
+# 1) 落进 result.json 的 `params`
+PERSISTED_PARAMS: tuple[str, ...] = (
+    "topic", "segment", "audience", "duration", "style",
+    "platform", "persona", "cta", "mode", "rate", "voice", "format",
+)
+# 2) 不进 params，但在 result.json 顶层另有落点
+PARAMS_ELSEWHERE: dict[str, str] = {
+    "pack": "raw['pack']",
+    "quota": "raw['quota']",
+    "quota_degraded": "raw['quota_degraded']",
+}
+# 3) 显式不持久化，附理由
+PARAMS_DROPPED: dict[str, str] = {
+    "facts": "用户临时粘贴的资料，可能很长/含私密内容，不属于产物属性",
+    "reroll": "本次「换一版」的开关，不属于产物属性",
+    "points": "已由提示词占位符 $points 消费；产物里的要点数看 len(plan.points)",
+}
 
 
 class Pipeline:
@@ -79,7 +132,7 @@ class Pipeline:
     # ── 兼容旧调用点的薄封装 ────────────────────────────────
     @property
     def jobs(self) -> dict:
-        """只读视图（供旧测试/调试）。真正写入请用 registry.add()。"""
+        """只读视图（供旧测试/调试）。真正写入请用 registry.add_if_room()。"""
         return {s["id"]: s for s in self.registry.snapshots()}
 
     def add_job(self, job: Job) -> None:
@@ -123,14 +176,23 @@ class Pipeline:
 
     # ── 对外接口 ────────────────────────────────────────────
     def start_generate(self, req: GenerateRequest) -> str:
-        if self.registry.running_count() >= MAX_CONCURRENT_JOBS:
-            raise StateConflict(
-                f"同时进行的生成已达上限（{MAX_CONCURRENT_JOBS} 个），请等其中一条完成后再试")
-        pack = Pack(self.root, req.pack)          # 包不存在 → PackError（HTTP 层转 404）
+        # 顺序：**先验包、再占额度**。
+        #
+        # 包不存在是永久性错误（404），比「额度满了」（409，可重试）更该先报；
+        # 而且反过来写会留一条漏额度的路径 —— 若先占额度再验包，PackError 抛出去
+        # 时那条 `queued` 作业已经插进注册表，没人回收它，额度被永久吃掉一个。
+        # （这正是 P0-3 的形态：额度被没人管的作业占住。）
+        pack = Pack(self.root, req.pack)
         jid = new_job_id()
         job = Job(jid, "generate", req.model_dump())
         job.work_dir = self.store.job_dir(jid, job.created_at)
-        self.registry.add(job)
+        # 检查与插入在同一把锁内（add_if_room）。修复前是
+        # `running_count() >= MAX` 判断之后另一次加锁 `add()` ——
+        # 两次加锁之间有窗口，而 /api/generate 是同步 def（线程池真并发），
+        # 两个请求能同时通过检查、双双插入，额度只保证「通常有效」。
+        if not self.registry.add_if_room(job, MAX_CONCURRENT_JOBS):
+            raise StateConflict(
+                f"同时进行的生成已达上限（{MAX_CONCURRENT_JOBS} 个），请等其中一条完成后再试")
         self._spawn(job, lambda: self._run_generate(job, pack))
         return jid
 
@@ -397,10 +459,14 @@ class Pipeline:
         raw = {
             "id": job.id, "created_at": job.created_at,
             "pack": pack.name, "pack_draft": pack.draft,
-            "params": {k: p[k] for k in ("topic", "segment", "audience", "duration", "style",
-                                         "platform", "persona", "cta", "mode", "rate", "voice",
-                                         "format")},
+            "params": {k: p[k] for k in PERSISTED_PARAMS},
             "quota": p["quota"],
+            # 字数配额是「按 时长×语速 估算」而不是查表得来的 —— 必须随产物一起
+            # 落盘，否则界面看到的 `quota: {total: 256, ...}` 与包作者真正配过的
+            # 配额完全无法区分（P2-8：信号算对了却没人接）。
+            # 用 `p[...]` 而不是 `p.get(...)`：键缺失时这里必须炸，
+            # 「缺了就当成没降级」正是本项目一直在整治的那种静默。
+            "quota_degraded": bool(p["quota_degraded"]),
             "plan": plan.model_dump(),
             "sections": sections,
             "storyboard": storyboard,
@@ -413,6 +479,7 @@ class Pipeline:
         }
         # 契约校验：修复前 ScriptResult / SceneItem 定义了却从未实例化，
         # docs/场景序列契约.md 的约定没有任何代码强制，字段漂移无人发现。
+        check_contract_complete(raw)
         result = ScriptResult.model_validate(raw).model_dump()
 
         # 先落盘、后置 done —— 顺序一旦反了，不变量就是破的。

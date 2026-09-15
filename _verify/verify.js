@@ -15,7 +15,25 @@ const { freePort, killTree, launchChrome, waitTarget, connect, serve } =
   require("./lib/cdp");
 
 const RENDERER = path.resolve(__dirname, "..", "desktop", "renderer");
+const REPO_ROOT = path.resolve(__dirname, "..");
 const SHOT_DIR = __dirname;
+
+/**
+ * 从 `app/server.py` 里读出**生产那份** CSP 常量。
+ *
+ * 为什么要费这个劲：CSP 断言最容易变成空转 —— 桩服务不发 CSP 头，
+ * 页面就在「没有 CSP」的环境里跑完全部断言，全绿，但什么也没验证。
+ * 所以这里把真实值取过来，由桩服务原样下发；解析失败就**直接抛**，
+ * 绝不允许「解析不出来 → 静默跳过 CSP 断言」。
+ */
+function readCsp() {
+  const src = fs.readFileSync(path.join(REPO_ROOT, "app", "server.py"), "utf8");
+  const m = src.match(/^CSP = \(([\s\S]*?)\)$/m);
+  if (!m) throw new Error("没能从 app/server.py 解析出 CSP 常量");
+  const parts = [...m[1].matchAll(/"([^"]*)"/g)].map(x => x[1]);
+  if (!parts.length) throw new Error("解析出的 CSP 为空");
+  return parts.join("");
+}
 
 let PORT = 8931;
 let CDP_PORT = 9333;
@@ -92,19 +110,57 @@ const META = {
 };
 
 function stubScript() {
-  return `<script>
+  // ⚠ 返回的是**纯 JS**，不带 <script> 包装 —— 它现在由 serve() 作为同源外部
+  // 脚本 /_stub.js 提供。以前是内联注入，所以包装标签写在这里；
+  // 改成外部脚本时若忘了剥掉，整个文件会以字面量 `<script>` 开头 → 语法错误
+  // → 桩完全没跑起来（`__INJECTED__` 是 undefined）。
+  return `
 window.__INJECTED__ = 1;
 window.__errs = [];
 addEventListener('error', e => window.__errs.push(String(e.message)));
 addEventListener('unhandledrejection', e => window.__errs.push('rej: ' + String(e.reason)));
+
+// CSP 违规监听（P2-5）。桩脚本是 <head> 里的阻塞外部脚本，**先于 body 解析**，
+// 所以初始 HTML 里的内联样式/脚本也逃不掉。
+// 用 sessionStorage 累计：每次 Page.navigate 都会重跑本脚本，不这么做就只剩
+// 最后一次导航的记录，前面几次的违规会被悄悄丢掉。
+window.__csp = JSON.parse(sessionStorage.getItem('__csp') || '[]');
+addEventListener('securitypolicyviolation', e => {
+  window.__csp.push({ directive: e.violatedDirective, blocked: e.blockedURI,
+                      sample: (e.sample || '').slice(0, 80) });
+  sessionStorage.setItem('__csp', JSON.stringify(window.__csp));
+});
 (function(){
   var META = ${JSON.stringify(META)};
+  // 行业包读坏的情形：&packerr=1（P1-6）。坏包的四个特征会**同时**出现，
+  // 桩必须一起改 —— 只改 pack_error 而留着 params，测不出「静默降级」：
+  //   display_name 退成目录 slug、params 空、param_audit 也空
+  //   （它要审计的数据就是 pack.yaml —— 防线与数据同生共死）。
+  var PACKERR = /(^|[?&])packerr=1/.test(location.search);
+  if (PACKERR) {
+    var _p0 = META.packs[0];
+    _p0.pack_error = "pack.yaml 语法有误（while parsing a block collection，第 3 行第 3 列）";
+    _p0.display_name = _p0.name;
+    _p0.params = {};
+    _p0.param_audit = {};
+  }
   var RESULT = ${JSON.stringify(RESULT)};
+  // 字数配额降级的情形：&quotadeg=1（P2-8）。
+  // 行业包没配 quota_table 时引擎按「时长×语速」估一个通用配额 ——
+  // 算出来的 quota 数字与真配额**长得一模一样**，只有这个标记能区分。
+  var QUOTADEG = /(^|[?&])quotadeg=1/.test(location.search);
+  if (QUOTADEG) { RESULT.quota_degraded = true; }
   // 首启引导要测「没配 Key」的情形：用 URL 上的 &nokey=1 切换
   var NOKEY = /(^|[?&])nokey=1/.test(location.search);
+  // config.yaml 读坏的情形：&cfgerr=1（文案由后端 _yaml_error_brief 生成，
+  // 这里只取形态：原因 + 中文行列号，且**不含**配置正文）
+  var CFGERR = /(^|[?&])cfgerr=1/.test(location.search);
   var CONFIG = { base_url:"https://x/v4", model:"glm-4.7", api_key_set:!NOKEY,
                  mock:false, retries:2, timeout:180, max_tokens:16000,
-                 temperature:0.7, env_override:false };
+                 temperature:0.7, env_override:false,
+                 config_error: CFGERR
+                   ? "config.yaml 语法有误（mapping values are not allowed here，第 2 行第 44 列）"
+                   : "" };
   var calls = { gen:0, job:0, cancel:0, rewrite:0 };
   var ELEVATOR_DRAFT = true;   // 有状态：转正后变 false，才能验证按钮消失
   window.__calls = calls;
@@ -176,7 +232,13 @@ addEventListener('unhandledrejection', e => window.__errs.push('rej: ' + String(
     }
     if (s.indexOf('/api/packs/elevator/file') >= 0) return mk(
       { rel:'knowledge/topics.md', size:1024, text:'# 选题库 /  / - 家用电梯怎么挑？' });
-    if (s.indexOf('/api/config') >= 0) return mk(CONFIG);
+    // 只在**有 body** 时记录：GET /api/config 会把 __lastConfigBody 覆盖成空，
+    // 而 saveSettings 在 POST 之后还会走一次 preloadSettings（内含 GET）。
+    if (s.indexOf('/api/config') >= 0) {
+      var raw = (o && o.body) || '';
+      if (raw) { try { window.__lastConfigBody = JSON.parse(raw); } catch (_) {} }
+      return mk(CONFIG);
+    }
     if (s.indexOf('/api/packs/') >= 0) return mk({ display_name:'电梯行业包', description:'电梯行业口播脚本包',
       draft:ELEVATOR_DRAFT, checklist:'1. 核对参数 / 2. 核对禁用词',
       files:[{rel:'pack.yaml',size:2048},{rel:'skill.yaml',size:1024},{rel:'knowledge/topics.md',size:5120}] });
@@ -184,7 +246,7 @@ addEventListener('unhandledrejection', e => window.__errs.push('rej: ' + String(
     return mk({});
   };
 })();
-</script>`;
+`;
 }
 
 // ── 断言工具 ────────────────────────────────────────────────
@@ -198,7 +260,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   CDP_PORT = await freePort(9333);
   _tmpProfile = fs.mkdtempSync(path.join(os.tmpdir(), "ts-cprof-"));
 
-  server = await serve(RENDERER, PORT, { inject: stubScript() });
+  const CSP = readCsp();
+  server = await serve(RENDERER, PORT, { inject: stubScript(), csp: CSP });
   chromeProc = launchChrome(CDP_PORT, _tmpProfile);
   const wsUrl = await waitTarget(CDP_PORT);
   cdp = await connect(wsUrl);
@@ -229,6 +292,41 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     }
     return r.result.value;
   };
+
+  // ── CSP（P2-5）：先证明测试环境没有比生产宽松 ─────────────
+  // 桩服务必须原样下发**生产那份** CSP。如果它不发头，页面就在「没有 CSP」
+  // 的环境里跑完全部断言 —— 全绿，但什么也没验证（典型的断言空转）。
+  const servedCsp = (await fetch(`http://127.0.0.1:${PORT}/`))
+    .headers.get("content-security-policy") || "";
+  check("桩服务下发的 CSP 与生产逐字相同（测试环境不宽松于生产）",
+    servedCsp === CSP, `桩=${JSON.stringify(servedCsp)}`);
+  check("CSP 收紧到 style-src 'self'（没有 'unsafe-inline' 后门）",
+    /style-src 'self'/.test(servedCsp) && !/unsafe-inline/.test(servedCsp),
+    servedCsp);
+
+  // 正对照：故意造一次内联样式违规。
+  // **没有这一步，「零违规」可能只是监听器压根没装上** —— 那才是最容易发生的事。
+  //
+  // ⚠ 两个实测出来的坑（用 _verify/_csp-probe.js 逐向量测过）：
+  //   1. `securitypolicyviolation` 是**异步派发**的 —— 注入完立刻读计数会是 0。
+  //      第一版就是这么写的，6 个向量全报「没拦」，而实际拦了 14 次。
+  //   2. 一次违规会派发 **2 条**事件（Chromium 重复上报），所以只能断言
+  //      「增加了」，不能断言「恰好 +1」。
+  //   实测被拦的向量：`setAttribute('style')` / innerHTML 带 style /
+  //   insertAdjacentHTML 带 style → `style-src-attr`；
+  //   `createElement('style')` → `style-src-elem`；`createElement('script')` → `script-src-elem`。
+  //   **CSSOM（`el.style.setProperty`）不被拦** —— 界面里那些动态样式全靠它，
+  //   这也正是「收紧 style-src 之后界面照常工作」的原因。
+  const cspBefore = await evalIn(`return window.__csp.length;`);
+  await evalIn(`const d = document.createElement('div');
+    d.setAttribute('style', 'color:red');
+    document.body.appendChild(d); d.remove(); return 1;`);
+  await sleep(250);                        // 等事件派发，别立刻读
+  const cspAfterCtrl = await evalIn(`return window.__csp.length;`);
+  const cspLast = await evalIn(`return window.__csp[window.__csp.length - 1] || null;`);
+  check("CSP 真的在拦（正对照：故意写一次内联 style，必须被拦下并记到）",
+    cspAfterCtrl > cspBefore && /style/.test(cspLast?.directive || ""),
+    JSON.stringify({ before: cspBefore, after: cspAfterCtrl, last: cspLast }));
 
   // ── 1) 启动 ──────────────────────────────────────────────
   const boot = await evalIn(`return {
@@ -292,6 +390,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     whyBlock: document.querySelectorAll('.banner.why').length,
     softBanner: !!Array.from(document.querySelectorAll('.banner')).find(b => /待确认/.test(b.textContent)),
     dropBanner: !!Array.from(document.querySelectorAll('.banner')).find(b => /单字禁用词/.test(b.textContent)),
+    quotaDegBanner: !!Array.from(document.querySelectorAll('.banner')).find(b => /字数配额/.test(b.textContent)),
     verBar: document.querySelectorAll('.ver-bar').length,
   };`);
   check("完成后渲染出结果", done.hasResult && !done.busy, JSON.stringify(done));
@@ -328,8 +427,26 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await evalIn(`document.querySelector('[data-tab="script"].res-tab').click(); return true;`);
   check("回炉原因可展开（决策解释）", done.whyBlock === 1, "");
   check("单字词被忽略有说明", done.dropBanner, "");
+  // 对照组：正常包不该出现配额降级提示（否则提示变成背景噪音）。
+  // 对应的正向断言在 12f。
+  check("正常包不出现配额降级提示", !done.quotaDegBanner, JSON.stringify(done.quotaDegBanner));
   check("后续建议 chips 出现", done.followups >= 2, `chips=${done.followups}`);
   check("单版本时不显示版本导航", done.verBar === 0, "");
+
+  // 真实导出走的是 `a.href = URL.createObjectURL(blob)` + `a.click()`。
+  // 这条路径**没被任何纯函数断言覆盖**（exportSrt/exportMd 是直接调用的），
+  // 而 `blob:` 恰好是 CSP 最可能拦下来的一类 URL —— 所以必须真的点一次，
+  // 由结尾的「零违规」断言兜住。点了没报错不代表没被拦，所以两边都要看。
+  await cdp.send("Page.setDownloadBehavior",
+    { behavior: "allow", downloadPath: _tmpProfile }).catch(() => { /* 版本差异，忽略 */ });
+  const dl = await evalIn(`return (function(){
+    var n = document.querySelector('[data-act="save-srt"]');
+    if (!n) return { clicked: false };
+    n.click();
+    return { clicked: true, toast: document.querySelector('.toast')?.textContent || '' };
+  })()`);
+  check("导出 SRT 按钮真的点了（覆盖 blob: 下载路径）",
+    dl.clicked && /SRT/.test(dl.toast), JSON.stringify(dl));
 
   // ── 4) 后续建议只预填、不提交 ────────────────────────────
   const before = await evalIn("return window.__calls.gen;");
@@ -452,11 +569,34 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const llm = await evalIn(`return {
     temp: document.getElementById('st-temperature')?.value,
     base: document.getElementById('st-baseurl')?.value,
-    status: document.getElementById('st-status').textContent };`);
+    status: document.getElementById('st-status').textContent,
+    cfgErrHidden: document.getElementById('st-cfg-err')?.classList.contains('hidden'),
+    cfgErrText: document.getElementById('st-cfg-err')?.textContent || '' };`);
   check("模型接口分区回填 base_url 与温度",
     llm.base === "https://x/v4" && llm.temp !== undefined && llm.temp !== "",
     JSON.stringify(llm));
   check("接口状态显示重试/超时等实际生效值", /重试/.test(llm.status), llm.status);
+  // 前端**不许**比后端更严：1.8 是后端接受的合法值（区间 0 ~ 2）。
+  // 修复前前端单独一个 if 卡 1.5 → 点保存弹 toast 并 return，
+  // 请求根本不发出去，后端那句更宽松的校验永远不会被触发。
+  // 这条断言驱动的是**真实行为**（请求体），不是 DOM 属性 ——
+  // 曾想断言「min/max 被 JS 写对了」，但 HTML 属性本来就对，
+  // 去掉 applyNumericBounds() 也照样绿，属于空转，故弃用。
+  await evalIn(`var n = document.getElementById('st-temperature');
+    n.value = '1.8'; n.dispatchEvent(new Event('input', {bubbles:true})); return true;`);
+  await evalIn(`document.getElementById('st-save').click(); return true;`);
+  await sleep(800);
+  const t18 = await evalIn(`return window.__lastConfigBody || null;`);
+  check("保存请求真的发出去了（未被前端区间拦下）",
+    !!(t18 && 'base_url' in t18), JSON.stringify(t18));
+  check("前端接受 1.8 采样温度（与后端区间一致，不再比后端更严）",
+    !!t18 && t18.temperature === 1.8, JSON.stringify(t18));
+  // 还原成默认值，免得影响后面的保存相关用例
+  await evalIn(`var n = document.getElementById('st-temperature');
+    n.value = '0.7'; n.dispatchEvent(new Event('input', {bubbles:true})); return true;`);
+  // 配置正常时不能误报 —— 误报会让这条警示彻底失去可信度
+  check("config.yaml 正常时「配置读坏」警示隐藏且无文案",
+    llm.cfgErrHidden === true && llm.cfgErrText === '', JSON.stringify(llm));
 
   // 未保存的输入不被覆盖（修复点：每次打开设置都 preloadSettings 会冲掉编辑）
   await evalIn(`window.__ts.setPane('llm');
@@ -1179,7 +1319,134 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("引导卡与示例卡共存（不互相顶掉）",
     firstRun.setup && firstRun.samples === 4, JSON.stringify(firstRun));
 
+  // ── 12d) config.yaml 读坏时的警示 ────────────────────────
+  // 读坏之后设置页里填的全是**内置默认值**，而状态行会照常说
+  // 「已配置 Key · 模型 glm-4.7」—— 不显式提示，用户看不出自己填的
+  // base_url 一次都没生效过。这是「静默降级」的典型形态。
+  await cdp.send("Page.navigate",
+    { url: `http://127.0.0.1:${PORT}/?token=stubtoken&cfgerr=1` });
+  await sleep(1800);
+  // 显式打开设置并落在「模型接口」—— 这条路径才会调 preloadSettings()，
+  // 也就是把 /api/config 的 config_error 变成那行警示的唯一入口。
+  await evalIn(`document.getElementById('btn-open-settings').click();
+    window.__ts.setPane('llm'); return true;`);
+  await sleep(700);
+  const cfgErr = await evalIn(`return (function(){
+    var n = document.getElementById('st-cfg-err');
+    if (!n) return { missing: true };
+    var cs = getComputedStyle(n);
+    return { hidden: n.classList.contains('hidden'), display: cs.display,
+             text: n.textContent, color: cs.color,
+             status: document.getElementById('st-status').textContent };
+  })()`);
+  check("config.yaml 读坏时设置页给出警示（不是静默用默认值）",
+    !cfgErr.missing && cfgErr.hidden !== true && cfgErr.display !== 'none'
+      && /默认值/.test(cfgErr.text) && /保存/.test(cfgErr.text),
+    JSON.stringify(cfgErr));
+  // 两个条件各自吃劲：颜色证明用的是 --warn 而不是普通 hint 灰；
+  // status 证明警示是**追加**的，没有把原来的状态行顶掉。
+  check("警示用 warn 色且不顶掉原状态行",
+    cfgErr.color === 'rgb(178, 94, 0)' && /已配置 Key/.test(cfgErr.status),
+    JSON.stringify(cfgErr));
+
   // 回到正常模式，继续后面的布局检查
+  await cdp.send("Page.navigate", { url: `http://127.0.0.1:${PORT}/?token=stubtoken` });
+  await sleep(1600);
+  await evalIn(`document.getElementById('settings-screen').classList.add('hidden'); return true;`);
+
+  // ── 12e) 行业包读坏时的警示 ──────────────────────────────
+  // pack.yaml 解析失败时，界面会呈现成「这个包参数很少」：display_name 退成
+  // 目录 slug、参数条空掉、param_audit 也空（防线依赖它要审计的数据）。
+  // 不标出来的话，用户看到的就是一份「没配好」的包 —— 而真去生成会被引擎
+  // 拒绝（409），两件事差得远。
+  await cdp.send("Page.navigate",
+    { url: `http://127.0.0.1:${PORT}/?token=stubtoken&packerr=1` });
+  await sleep(1800);
+  const packErr = await evalIn(`return (function(){
+    var sel = document.getElementById('pack');
+    var n = document.getElementById('pack-err');
+    if (!n) return { missing: true };
+    var cs = getComputedStyle(n);
+    return { opt: sel.options[sel.selectedIndex].textContent,
+             hidden: n.classList.contains('hidden'), display: cs.display,
+             text: n.textContent, color: cs.color,
+             badge: !document.getElementById('pack-badge').classList.contains('hidden'),
+             fields: document.querySelectorAll('#param-front .fg, #param-front > *').length };
+  })()`);
+  check("坏包在包下拉里被标出来（不是静默退成 slug）",
+    !packErr.missing && /（损坏）/.test(packErr.opt) && /elevator/.test(packErr.opt),
+    JSON.stringify(packErr));
+  check("坏包给出人话警示，且含原因与行列号",
+    packErr.hidden !== true && packErr.display !== 'none'
+      && /不可用/.test(packErr.text) && /pack.yaml/.test(packErr.text)
+      && /第 3 行第 3 列/.test(packErr.text),
+    JSON.stringify(packErr));
+  check("警示用 warn 色（不是普通 hint 灰）",
+    packErr.color === 'rgb(178, 94, 0)', JSON.stringify(packErr));
+  // 这条是「为什么需要警示」的证据：坏包的参数条**真的是空的**，
+  // 界面本身看不出异常 —— 除非有人明确告诉用户。
+  check("坏包的参数条是空的（证明不提示就看不出异常）",
+    packErr.fields === 0, JSON.stringify(packErr));
+
+  // 对照：正常包不能出现任何警示（否则警示变成背景噪音）
+  await cdp.send("Page.navigate", { url: `http://127.0.0.1:${PORT}/?token=stubtoken` });
+  await sleep(1600);
+  const packOk = await evalIn(`return (function(){
+    var sel = document.getElementById('pack');
+    var n = document.getElementById('pack-err');
+    return { opt: sel.options[sel.selectedIndex].textContent,
+             hidden: n.classList.contains('hidden'),
+             text: n.textContent };
+  })()`);
+  check("正常包不出现损坏标记与警示",
+    !/（损坏）/.test(packOk.opt) && packOk.hidden === true && packOk.text === "",
+    JSON.stringify(packOk));
+
+  await evalIn(`document.getElementById('settings-screen').classList.add('hidden'); return true;`);
+
+  // ── 12f) 字数配额降级时的提示 ────────────────────────────
+  // 行业包没配 quota_table 时，引擎按「时长×语速」估一个通用配额。
+  // 估出来的 quota 与包作者真配过的**数字长得一模一样**：结果页照常显示
+  // 「261 字」、每段卡片照常显示「12/85 字」，用户完全看不出这份配额
+  // 没为本行业定制过。这就是本项目一直在整治的静默降级 —— 信号算对了、
+  // 也落盘了，但界面不读它等于白算。
+  await cdp.send("Page.navigate",
+    { url: `http://127.0.0.1:${PORT}/?token=stubtoken&quotadeg=1` });
+  await sleep(1600);
+  await evalIn(`const t = document.getElementById('topic');
+    t.value = '家用电梯怎么挑？'; t.dispatchEvent(new Event('input', {bubbles:true}));
+    document.getElementById('btn-generate').click(); return true;`);
+  await sleep(2600);
+  const qdeg = await evalIn(`return (function(){
+    var chips = Array.from(document.querySelectorAll('.script-card .quota'))
+      .map(function(e){ return e.textContent; });
+    var b = Array.from(document.querySelectorAll('.banner'))
+      .find(function(x){ return /字数配额/.test(x.textContent); });
+    // ⚠ 横幅缺失时也必须把 chips 带回去 —— 否则下面的断言会在
+    // undefined 上取 .length 抛异常，**后面所有断言（含布局组）都不会执行**。
+    // 变异检验时踩到过：提示删掉后脚本直接崩在第 1358 行，红是红了，
+    // 但红得毫无信息量，还掩盖了后续回归。
+    if (!b) return { missing: true, chips: chips };
+    var body = b.querySelector('.why-body');
+    return { tag: b.tagName, expandable: b.tagName === 'DETAILS' && !!body,
+             summary: b.querySelector('summary').textContent,
+             body: body ? body.textContent : '',
+             chips: chips };
+  })()`);
+  check("配额降级时结果页给出提示（不是静默用估算值）",
+    !qdeg.missing && qdeg.expandable, JSON.stringify(qdeg));
+  // 折叠行是给用户看的：说「估的、不是本行业配的」+ 带上具体数字。
+  // `quota_table` 是配置键（行话），放在展开后的正文里给包作者看。
+  check("折叠行说清配额是估的、不是本行业配的，并带上具体数字",
+    /估算/.test(qdeg.summary) && /不是本行业/.test(qdeg.summary)
+      && /261/.test(qdeg.summary), JSON.stringify(qdeg.summary));
+  check("展开后给出补救办法（怎么补 quota_table）",
+    /pack\.yaml/.test(qdeg.body) && /quota_table/.test(qdeg.body), JSON.stringify(qdeg.body));
+  // 这条是「为什么需要提示」的证据：降级后的配额数字看着完全正常。
+  check("降级配额与正常配额在界面上无法区分（证明不提示就看不出来）",
+    qdeg.chips.length === 4 && qdeg.chips.some(function(t){ return /12\/85/.test(t); }),
+    JSON.stringify(qdeg.chips));
+
   await cdp.send("Page.navigate", { url: `http://127.0.0.1:${PORT}/?token=stubtoken` });
   await sleep(1600);
   await evalIn(`document.getElementById('settings-screen').classList.add('hidden'); return true;`);
@@ -1193,6 +1460,15 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("存在「回到最新」按钮", layout.scrollBtn, "");
 
   check("全流程无 JS 错误", errs.length === 0, errs.slice(0, 3).join(" | "));
+
+  // 收口：整轮跑下来（含 6 次 Page.navigate、生成全流程、blob: 导出下载）
+  // 除正对照那一次之外，不能再有任何 CSP 违规。
+  // 谁以后再往模板里写 style="..."，内联样式会被**静默忽略**（列宽失效但不报错）
+  // —— 这条断言就是那种「静默失效」的哨兵。
+  const cspAll = await evalIn(`return window.__csp;`);
+  check("全流程零 CSP 违规（正对照那几条除外）",
+    cspAll.length === cspAfterCtrl,
+    JSON.stringify(cspAll.slice(cspAfterCtrl).slice(0, 3)));
 
   // ── 截图 ─────────────────────────────────────────────────
   const shot = async (name, expr) => {

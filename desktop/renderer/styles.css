@@ -143,6 +143,12 @@ body {
 /* ══════════════ 工具类 ══════════════ */
 .hidden { display: none !important; }
 .hint { font-size: var(--f-xs); color: var(--text-3); margin-top: var(--s1); line-height: 1.55; }
+/* config.yaml 读坏时的警示行（#st-cfg-err）。用 --warn 而不是 --bad：
+   配置读坏不是错误状态，引擎照常起来、用户重存一次就好 —— 吓人的红字反而
+   会让人以为数据丢了。它要传达的是「现在显示的这份不是你的」。 */
+.hint.cfg-err { color: var(--warn); background: var(--warn-soft);
+  border-radius: var(--r-xs); padding: var(--s2) var(--s3); margin-top: var(--s3); }
+
 .row { display: flex; gap: var(--s2); align-items: center; }
 .row > :first-child { flex: 1; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s3); }
@@ -1066,6 +1072,16 @@ th { color: var(--text-2); font-size: var(--f-xs); font-weight: 500; }
 tr:last-child td { border-bottom: none; }
 td.ok { color: var(--ok); font-weight: 500; }
 td.bad { color: var(--bad); font-weight: 500; }
+/* 列宽与等宽单元格：以前这几处写成内联 style="width:86px"。
+   CSP 收紧到 style-src 'self'（不带 'unsafe-inline'）之后，内联属性会被
+   **静默忽略** —— 列宽失效、界面不会报错，正是本项目最忌讳的那种失效。
+   ⚠ 新增列宽一律加在这里，不要在 HTML/模板串里写 style=。
+   `_verify/verify.js` 会监听 securitypolicyviolation，写回去就会报红。 */
+.col-time { width: 86px; }
+.col-item { width: 160px; }
+.col-size { width: 90px; }
+.col-role { width: 110px; }
+.cell-mono { font-family: var(--mono); font-size: 12px; }
 .log-block { border-bottom: 0.5px solid var(--line); padding: var(--s3) 0; }
 .log-block:last-child { border-bottom: none; }
 .log-block summary { cursor: pointer; color: var(--text-2); font-size: var(--f-sm); display: flex; align-items: center; gap: 6px; }

@@ -38,7 +38,7 @@ from pydantic import BaseModel
 from .config import ensure_config_template, load_config, save_config
 from .fileio import write_atomic
 from .jobs import StateConflict
-from .knowledge import Pack, PackError, list_packs
+from .knowledge import Pack, PackBrokenError, PackError, list_packs
 from .llm import LLMClient
 from .packgen import create_pack
 from .pipeline import MAX_CONCURRENT_JOBS, Pipeline
@@ -124,6 +124,54 @@ _MAX_FILE_BYTES = 256 * 1024
 RESETTABLE_FIELDS = frozenset(
     {"base_url", "model", "temperature", "retries", "timeout", "max_tokens"})
 
+# 数值项的合法区间。**这是唯一的一份** —— 前端 `settings.js` 的
+# `NUMERIC_BOUNDS` 必须与它逐项相等，`tests/test_numeric_bounds_consistency.py`
+# 会同时读这两个文件比对（前后端没法共享代码，只能靠断言钉住）。
+#
+# 为什么要专门钉：这两处曾经不一致 —— 前端卡 0 ~ 1.5、后端卡 0.0 ~ 2.0，
+# 于是用户填 1.8 会被**前端**拒掉，而后端完全接受。前端比后端更严，
+# 用户看到的是「界面说不行」，没有任何办法绕过，也不会想到是界面在凭想象设限。
+#
+# temperature 的下界含 0.0：0 是合法采样温度（求确定性输出），
+# 而 `load_config` 曾经用 `or 默认值` 把它当成「没填」—— 见 P0-2。
+NUMERIC_BOUNDS: dict[str, tuple[float, float]] = {
+    "retries": (0, 10),
+    "timeout": (5, 1800),
+    "max_tokens": (256, 200000),
+    "temperature": (0.0, 2.0),
+}
+
+# ── 纵深防御：渲染层的 CSP（P2-5）────────────────────────────
+#
+# 渲染层要展示**模型生成的内容**，而且不再是 `file://` 加载 —— 它从引擎
+# 同源加载（`loadURL` 到 127.0.0.1:<port>，见 desktop/main.js）。转义目前是
+# 全量排查过的：12 个模块所有 `innerHTML` 写入点的动态值都过了
+# `esc()` / `fmtText()` / `textContent`，**所以这不是一个现成漏洞**。
+# 但一旦将来某处漏了转义，没有第二道防线 —— CSP 就是那第二道。
+#
+# 刻意**不带** `'unsafe-inline'`：
+#   - `script-src`：index.html 里没有内联 `<script>`，也没有内联事件处理器
+#     （`onclick=` 之类全项目 0 处）；
+#   - `style-src` ：仅有的 5 处内联 `style=` 已改成 class（`.col-*` / `.cell-mono`）；
+#     `el.style.setProperty(...)` 走 CSSOM，不受 `style-src` 管辖。
+#
+# 收紧不是「但愿没事」，是**可证伪**的：`_verify/verify.js` 全程监听
+# `securitypolicyviolation`，跑完整流程 + 真实下载（`blob:`）都必须是 0 条。
+# 谁以后再往模板里写 `style="..."`，那条断言就会红 ——
+# 否则内联样式会被**静默忽略**（列宽失效但界面不报错），正是本项目最忌讳的失效。
+CSP = (
+    "default-src 'self'; "
+    "script-src 'self'; "
+    "style-src 'self'; "
+    "img-src 'self' data:; "      # styles.css 的下拉箭头是 data:image/svg+xml
+    "font-src 'self'; "
+    "connect-src 'self'; "
+    "object-src 'none'; "
+    "base-uri 'none'; "
+    "form-action 'none'; "
+    "frame-ancestors 'none'"
+)
+
 
 def _renderer_dir(root: Path) -> Path:
     """渲染层目录。
@@ -189,10 +237,30 @@ def create_app(root: Path, token: str | None = None,
 
         return await call_next(request)
 
+    @app.middleware("http")
+    async def security_headers(request: Request, call_next):
+        """给每个响应挂上 CSP（P2-5）。
+
+        挂在**所有**响应上而不是只挂 `index.html`：`/static/js/*.js` 这些子资源
+        的 CSP 由**文档**响应决定，逐个挂没有意义；而挂全量只是多一个几十字节的
+        响应头，换来的是「不会有人漏挂某一类响应」。
+        """
+        resp = await call_next(request)
+        resp.headers["Content-Security-Policy"] = CSP
+        return resp
+
     # ── 异常 → HTTP 状态码 ──────────────────────────────────
+    # 顺序无关：Starlette 沿 `type(exc).__mro__` 找第一个注册的处理器，
+    # 所以子类 PackBrokenError 会命中下面那条，不会被 PackError 抢走。
     @app.exception_handler(PackError)
     async def _pack_error(_req, exc: PackError):
         return JSONResponse({"detail": str(exc)}, status_code=404)
+
+    @app.exception_handler(PackBrokenError)
+    async def _pack_broken(_req, exc: PackBrokenError):
+        # 409 而不是 404：包**就在那儿**，是内容要人去修。给 404 会让用户
+        # 在列表里反复找一个明明看得见的包（这是 P1-5/P1-6 的修复之一）。
+        return JSONResponse({"detail": str(exc)}, status_code=409)
 
     @app.exception_handler(StateConflict)
     async def _conflict(_req, exc: StateConflict):
@@ -237,6 +305,14 @@ def create_app(root: Path, token: str | None = None,
     # ── 行业包 ──────────────────────────────────────────────
     @app.get("/api/packs/{name}")
     def get_pack(name: str):
+        # 必须与 pack_file / export-skill / undraft 走同一套白名单。
+        # 这里曾经漏了 —— 后果不是「读不到包」，而是 `%2e%2e` 解码成 `..` 后
+        # `Pack(root, "..")` 成功命中 `root/pack.yaml`，接口回 200 并附带
+        # `base.rglob("*")` 的**整棵目录树清单**（含 config.yaml 与各包 private/ 的
+        # 文件名与体积）。实测复现：GET /api/packs/%2e%2e → 200 + 25 条文件清单。
+        # `_safe_name` 的 `..` 与 `/` 检查正好堵住它（`%2f` 因路由不匹配进不来，
+        # 但 `%2e%2e` 是单段，能进来）。
+        name = _safe_name(name)
         pack = Pack(root, name)                  # 不存在 → PackError → 404
         base = root / "packs" / name
         files = []
@@ -303,6 +379,9 @@ def create_app(root: Path, token: str | None = None,
         _safe_name(name)
         try:
             return export_agent_skill(root, name, include_private=include_private)
+        except PackBrokenError as e:
+            # 必须先于 PackError 捕获（它是子类），否则「包坏了」会被报成 404。
+            raise HTTPException(409, str(e))
         except PackError as e:
             raise HTTPException(404, str(e))
         except Exception as e:  # noqa: BLE001
@@ -444,17 +523,27 @@ def create_app(root: Path, token: str | None = None,
                 "api_key_set": bool(cfg.llm.api_key), "temperature": cfg.llm.temperature,
                 "retries": cfg.llm.retries, "timeout": cfg.llm.timeout,
                 "max_tokens": cfg.llm.max_tokens, "mock": cfg.mock,
+                # 读坏 config.yaml 时非空：上面这些字段全是**内置默认值**，
+                # 不是用户存过的那份。不下发这个，界面就会把默认值当用户配置
+                # 显示出来（「已配置 Key · 模型 glm-4.7」），用户完全看不出
+                # 自己填的 base_url 其实没生效 —— 又一处静默降级。
+                "config_error": cfg.config_error,
                 "env_override": bool(os.environ.get("TALKSCRIPT_API_KEY"))}
 
     @app.post("/api/config")
     def set_config(body: ConfigIn):
         # 空 base_url / model 不覆盖（防清空）；api_key 空串=保持不变（合并语义）
         updates = {k: v for k, v in body.model_dump().items() if v not in ("", None)}
-        # 数值项必须在这里卡边界：写进 config.yaml 的 0 / 负数不会被
-        # load_config 拦住（那里是 `or 默认值`，0 会悄悄变回默认），
-        # 于是界面显示保存成功、实际值却不是用户填的那个 —— 更难查。
-        for k, lo, hi in (("retries", 0, 10), ("timeout", 5, 1800),
-                          ("max_tokens", 256, 200000)):
+        # 数值项必须在这里卡边界：越界的 0 / 负数一旦写进 config.yaml，
+        # `load_config` 是**照单全收**的（P0-2 之后 `_num` 只在键缺失或值为空时
+        # 才取默认，不再把 0 当「没填」），于是界面显示保存成功、实际值就是那个
+        # 越界值 —— 更难查。
+        #
+        # temperature 曾经是唯一漏网的一个：999 与 -5 都能存进 config.yaml，
+        # 之后**每一次生成**都带着这个越界值去请求模型，上游多半回 400，
+        # 用户看到的是「模型接口返回 400」，而根因是几天前存下的一个错数字。
+        # 界面上那个 input 的 min/max 是纯客户端约束，绕开它只要一条 curl。
+        for k, (lo, hi) in NUMERIC_BOUNDS.items():
             v = updates.get(k)
             if v is None:
                 continue
@@ -471,7 +560,8 @@ def create_app(root: Path, token: str | None = None,
         base_url / model 一旦填错就再也改不回去 —— 用户只能去手工改 config.yaml。
         所以「回到默认」必须是**显式**动作，而不是靠留空输入框。
 
-        实现上只是把字段写成空串：`load_config` 里是 `llm.get(x) or DEFAULT`，
+        实现上只是把字段写成空串：`load_config` 里 base_url / model 走
+        `llm.get(x) or DEFAULT`，数值项走 `_num()`（它对空串同样取默认），
         空串自然落回默认值。api_key 不在可重置名单里 —— 清空密钥不该这么顺手。
         """
         bad = [f for f in body.fields if f not in RESETTABLE_FIELDS]

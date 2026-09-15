@@ -147,11 +147,30 @@ const MIME = {
   ".svg": "image/svg+xml",
 };
 
-/** 静态服务：把 / 与 /static/* 都映射到 renderer 目录（与引擎同构）。 */
-function serve(rendererDir, port, { inject = "" } = {}) {
+/**
+ * 静态服务：把 / 与 /static/* 都映射到 renderer 目录（与引擎同构）。
+ *
+ * `inject`：桩脚本内容。**作为同源外部脚本 `/_stub.js` 提供，不再内联。**
+ *   原因（P2-5）：页面现在带生产 CSP（`script-src 'self'`，不含 `'unsafe-inline'`），
+ *   内联桩会被 CSP 直接拦掉 —— 那时要么整个测试跑不起来，要么为了让它跑起来
+ *   给测试环境放宽 CSP，**而「测试环境比生产宽松」正是断言空转的温床**。
+ *   改成外部脚本后，桩自己也在生产 CSP 下运行，顺带证明「同源外部脚本能加载」。
+ *   注入点从 `</body>` 前的 module 脚本挪到了 `<head>` 开头：经典脚本在这里是
+ *   阻塞执行，**先于 body 被解析** —— 这样连初始 HTML 里的内联样式都能被
+ *   违规监听器抓到，不只是运行期动态插入的那些。
+ *
+ * `csp`：CSP 响应头。由调用方传入（verify.js 从 `app/server.py` 读出**真实值**），
+ *   传空串就不发 —— 但那会让 CSP 断言失去意义，所以调用方必须传。
+ */
+function serve(rendererDir, port, { inject = "", csp = "" } = {}) {
   return new Promise(res => {
     const s = http.createServer((req, rq) => {
       let p = decodeURIComponent(req.url.split("?")[0]);
+      if (p === "/_stub.js") {
+        rq.writeHead(200, { "Content-Type": MIME[".js"] });
+        rq.end(inject);
+        return;
+      }
       if (p === "/") p = "/index.html";
       if (p.startsWith("/static/")) p = p.slice("/static".length);
       const f = path.join(rendererDir, p);
@@ -159,11 +178,11 @@ function serve(rendererDir, port, { inject = "" } = {}) {
       fs.readFile(f, "utf8", (e, txt) => {
         if (e) { rq.writeHead(404); rq.end("404"); return; }
         if (p === "/index.html" && inject) {
-          // 经典脚本在解析期立即执行，module 脚本是 deferred —— 所以桩一定先于 main.js
-          txt = txt.replace('<script type="module"',
-            `${inject}<script type="module"`);
+          txt = txt.replace("<head>", '<head>\n<script src="/_stub.js"></script>');
         }
-        rq.writeHead(200, { "Content-Type": MIME[path.extname(f)] || "application/octet-stream" });
+        const headers = { "Content-Type": MIME[path.extname(f)] || "application/octet-stream" };
+        if (csp) headers["Content-Security-Policy"] = csp;
+        rq.writeHead(200, headers);
         rq.end(txt);
       });
     });
