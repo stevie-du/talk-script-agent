@@ -85,6 +85,9 @@ export function renderPackParams() {
   if (!pack) return;
   $("pack-badge").classList.toggle("hidden", !pack.draft);
   const front = $("param-front");
+  // 只清 innerHTML 就够：下拉菜单虽然挂在 body 下，但 beautifySelects() 末尾有一段
+  // 全局的孤儿菜单清扫（「清除脱离 DOM 的孤儿菜单」），会按 .select-wrap 反查并删掉
+  // 没人引用的菜单。这里**不要**再补一遍 —— 重复机制只会让人以为少了它就会漏。
   front.innerHTML = "";
   const params = pack.params || {};
   const placed = new Set();
@@ -412,6 +415,16 @@ export function bindShell() {
   // 参数变更：检测结果过期 + 刷新侧栏摘要。
   // 不能只认 #settings-screen —— 快捷条上的时长/平台/人设才是最常被改的几个。
   document.addEventListener("change", () => { updateStale(); setCfgHint(); });
+
+  // 换行业包必须重渲染它带来的那批参数。
+  // 快捷条胶囊（#quick-params）和「生成偏好」里的 #param-front 都是**按包**生成的，
+  // 而 fillPackSelect() 只在启动 / 新建包 / meta 事件时被调用 —— 用户在下拉里换包
+  // 这条路径**没有人接**（自定义下拉的选中只做 `sel.value=… + dispatchEvent('change')`，
+  // 而 document 级那个 change 监听只管 updateStale/setCfgHint，不重渲染）。
+  // 后果不只是"显示旧字段"：`cta` 这类参数的值域来自**包**，换了包却还留着上一个包的
+  // 取值，生成时那个值在新包里不存在 → 静默降级（见 app/knowledge.py 的 param_audit），
+  // 用户以为在定制、实际没生效。所以这里必须重渲染。
+  $("pack").addEventListener("change", () => renderPackParams());
 
   document.addEventListener("keydown", e => {
     const mod = e.ctrlKey || e.metaKey;

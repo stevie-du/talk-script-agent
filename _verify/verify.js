@@ -685,6 +685,94 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     stgSearchGone.box === false && stgSearchGone.input === false,
     JSON.stringify(stgSearchGone));
 
+  // 「生成偏好」是**单列整行**的表单：每个字段控件都要占满内容宽。
+  // 曾经 #param-front 是 `grid-template-columns: 1fr 1fr`（仓库第一个提交就留下的，
+  // 那时它装着好几个「更多参数」，两列正好配对），而 MORE_KEYS 后来只剩 `cta` 一个，
+  // 于是「结尾引导」被按在左半格（实测 328px）、右半格空着，夹在一堆整行字段之间
+  // —— 读起来就是没对齐。删掉那条覆盖后回到 `.page-card .fg` 的单列整行。
+  // 断言口径：除「行业包」行（它的下拉与 详情/新建 并排，共同占满整行）之外，
+  // 所有字段控件 + 分段控件 + 字段组容器的宽度都必须等于面板内容宽。
+  // 容差 0.6，与左栏那组几何断言一致。
+  const genWidths = await evalIn(`window.__ts.setPane('gen');
+    const pane = document.getElementById('pane-gen');
+    const cs = getComputedStyle(pane);
+    const inner = +(pane.getBoundingClientRect().width
+      - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)).toFixed(2);
+    const packRow = pane.querySelector('.pack-row');
+    const W = e => +e.getBoundingClientRect().width.toFixed(2);
+    // ⚠ 直接量 #param-front 的子元素，不要量 .select-btn。
+    // 这条断言第一版量的是 .select-btn，结果漏掉了「结尾引导」——
+    // 它在被测状态里没有被 beautifySelects 换成自绘按钮，于是整条断言空转，
+    // 把两列栅格加回去也照样全绿（假绿）。栅格/弹性项就是这些子元素本身，
+    // 量它们不依赖下拉被换成了什么形态。
+    // （注：这段是 evalIn 的模板字符串，注释里不能出现反引号 —— 会把字符串截断。）
+    const front = document.getElementById('param-front');
+    const frontKids = [...front.children]
+      .map(e => ({ t: (e.textContent || '').trim().slice(0, 6), w: W(e) }));
+    const ctrls = [...pane.querySelectorAll('.select-btn, select, textarea')]
+      .filter(e => !packRow || !packRow.contains(e))
+      .filter(e => !e.classList.contains('native-hidden'))
+      .map(e => ({ t: (e.textContent || e.id || e.tagName).trim().slice(0, 5), w: W(e) }));
+    const seg = pane.querySelector('.segmented');
+    const groups = [...pane.querySelectorAll('.fg, .block-inner')].map(W);
+    return { 内容宽: inner, 参数组子项: frontKids, 控件: ctrls,
+             分段: seg ? W(seg) : null, 字段组: groups,
+             行业包行: packRow ? W(packRow) : null,
+             paramFront布局: getComputedStyle(front).display };`);
+  check("「生成偏好」字段一律占满内容宽（不留半宽孤儿，如曾经 328px 的「结尾引导」）",
+    genWidths.参数组子项.length >= 1                                  // 非空：防假绿
+    && genWidths.参数组子项.some(c => /结尾引导/.test(c.t))            // 确实测到了那个字段
+    && genWidths.参数组子项.every(c => Math.abs(c.w - genWidths.内容宽) <= 0.6)
+    && genWidths.控件.every(c => Math.abs(c.w - genWidths.内容宽) <= 0.6)
+    && Math.abs(genWidths.分段 - genWidths.内容宽) <= 0.6
+    && genWidths.字段组.every(w => Math.abs(w - genWidths.内容宽) <= 0.6)
+    && Math.abs(genWidths.行业包行 - genWidths.内容宽) <= 0.6,
+    JSON.stringify(genWidths));
+
+  // 换行业包必须重渲染它带来的那批参数。
+  // #param-front 与快捷条胶囊都是**按包**生成的，而 fillPackSelect() 只在
+  // 启动 / 新建包 / meta 事件时被调用 —— 「用户在下拉里换包」这条路径曾经**没人接**：
+  // 自定义下拉的选中只做 sel.value=… + dispatchEvent('change')，而 document 级那个
+  // change 监听只管 updateStale / setCfgHint，不重渲染。
+  // 后果不只是"显示旧字段"：cta 这类参数的值域来自**包**，换了包却留着上一个包的取值，
+  // 生成时那个值在新包里不存在 → 静默降级（app/knowledge.py 的 param_audit），
+  // 用户以为在定制、实际没生效。
+  // 期望值由桩里的 META 现算（不硬编码数字）：
+  //   胶囊 = 该包 params 里属于 FRONT_KEYS 且有 options 的键数
+  //   参数组 = 其余有 options 的键数（MORE_KEYS 只有 cta，所以等价）
+  const FRONT_KEYS = ["segment", "audience", "duration", "platform", "style", "persona"];
+  const expectFor = name => {
+    const p = (META.packs.find(x => x.name === name) || {}).params || {};
+    const keys = Object.keys(p).filter(k => p[k] && p[k].options && p[k].options.length);
+    return { 胶囊: keys.filter(k => FRONT_KEYS.includes(k)).length,
+             参数组: keys.filter(k => !FRONT_KEYS.includes(k)).length };
+  };
+  // 下拉菜单挂在 body 下、与 .select-wrap 一一对应 —— 这条不变量顺手守住
+  // 「重渲染时把旧菜单摘掉」：renderPackParams 曾经只清 innerHTML，不摘菜单。
+  const packSwap = await evalIn(`const sel = document.getElementById('pack');
+    const snap = () => ({ pack: sel.value,
+      胶囊: document.querySelectorAll('#quick-params .select-btn').length,
+      参数组: [...document.getElementById('param-front').children].length,
+      菜单数: document.querySelectorAll('.select-menu').length,
+      下拉数: document.querySelectorAll('.select-wrap').length });
+    const first = sel.value;
+    const before = snap();
+    const other = [...sel.options].map(o => o.value).find(v => v !== first);
+    sel.value = other; sel.dispatchEvent(new Event('change', { bubbles: true }));
+    const after = snap();
+    sel.value = first; sel.dispatchEvent(new Event('change', { bubbles: true }));
+    return { before, after, other, 首个: first, 还原: snap() };`);
+  check("切换行业包会重渲染参数（不留上一个包的字段/取值，也不留游离菜单）",
+    packSwap.after.pack === packSwap.other
+    && packSwap.after.胶囊 === expectFor(packSwap.other).胶囊
+    && packSwap.after.参数组 === expectFor(packSwap.other).参数组
+    && packSwap.after.菜单数 === packSwap.after.下拉数
+    && packSwap.还原.pack === packSwap.首个
+    && packSwap.还原.胶囊 === expectFor(packSwap.首个).胶囊
+    && packSwap.还原.参数组 === expectFor(packSwap.首个).参数组
+    && packSwap.还原.菜单数 === packSwap.还原.下拉数,
+    JSON.stringify(packSwap));
+
   await evalIn(`document.getElementById('btn-close-settings').click(); return true;`);
   await sleep(200);
 
@@ -896,9 +984,15 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   // 设置页那半边残留的 margin: 1px 0 与新加的 .nav-sec gap: 2px 叠成 4px 项间距。
   // 只比**计算值**（margin/padding/圆角/字号…），不比 height：
   // 设置页没打开时 .stg-nav-item 在 display:none 的子树里，height 拿不到 used value。
+  // ⚠ 设置页那半边必须挑**未选中**的那一个（`:not(.on)`）：`.stg-nav-item.on`
+  // 会带上 font-weight 600 + 选中底色，而左栏的 .nav-item（「设置」入口）没有选中态。
+  // 拿选中项去比，比的是「选中态 vs 常态」，必然不等。
+  // 这条断言第一版写的是 `document.querySelector('.stg-nav-item')`（第一个），
+  // 只在「当前分区恰好不是第一项」时才碰巧通过 —— 加了一条 `setPane('gen')` 的
+  // 断言之后，第一项变成选中态，它立刻报红。选中态不是同一件东西，要显式排掉。
   const navTwin = await evalIn(`const a = document.querySelector('.nav-item');
-    const b = document.querySelector('.stg-nav-item');
-    if (!a || !b) return { err: '缺少导航项' };
+    const b = document.querySelector('.stg-nav-item:not(.on)');
+    if (!a || !b) return { err: '缺少导航项（或设置页只剩选中项）' };
     const pick = el => { const s = getComputedStyle(el);
       return { m: s.margin, p: s.padding, r: s.borderRadius, g: s.gap,
                fs: s.fontSize, fw: s.fontWeight, jc: s.justifyContent, bg: s.backgroundColor }; };

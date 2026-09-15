@@ -836,7 +836,16 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 /* 设置抽屉：一级 tabs + 二级字段组 */
 .pack-row .row > :first-child { flex: 1.6; }
 .pack-row .row button { flex: 0 0 auto; height: var(--h-ctl); }   /* 与 select 同高 */
-#param-front { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s3) var(--s4); }
+/* #param-front（「生成偏好」里由行业包参数填充的字段组）曾经是
+   `grid-template-columns: 1fr 1fr` —— 仓库第一个提交就是这样，那时它装着好几个
+   「更多参数」，两列正好两两配对。后来「输出内容」「文案人昧」搬进了下面的
+   「进阶」卡片（改成 .block-inner 整行），MORE_KEYS 只剩 `cta` 一个
+   （ui.js: `const MORE_KEYS = ["cta"]`），于是这条栅格把**唯一**的
+   「结尾引导」按在左半格（实测 328px），右半格空着 —— 而同一张卡下面的每个
+   字段都是整行 672px。一个半宽的下拉夹在整行字段之间，读起来就是没对齐。
+   删掉这条覆盖，让它回到 `.page-card .fg` 的单列整行（与「进阶」卡片同一套
+   语言）；自定义包多出来的参数也会顺理成章地整行排列。
+   ⚠ 不要再为了「省高度」把它改回两列：字段一旦是奇数个，最后一个必然半宽。 */
 
 /* ══════════════ 消息流 ══════════════ */
 #chat-stream {
