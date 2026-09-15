@@ -206,9 +206,12 @@ def test_no_hardcoded_measurement_numbers_in_comments():
       · 运行时目录大小：`du -sm desktop/vendor/py`
     注释里要引用就**指路**，不许抄值。「几十 MB」这种量级词可以，数字不行。
     """
+    # 按**类别**扫，不按文件名枚举 —— 枚举出来的清单，新文件加入时不会自动覆盖：
+    # `pyc-cost.js` 自己头部的注释就曾因此漏网（它不在清单里，于是照抄旧数字）。
+    # `_verify/[!_]*.js`：下划线开头的是临时件（.gitignore 的 `_verify/_*`），跳过。
     targets = [
-        PKG.parent / "scripts" / "build-python-runtime.mjs",
-        ROOT / "_verify" / "runtime-smoke.js",
+        *sorted((PKG.parent / "scripts").glob("*.mjs")),
+        *sorted((ROOT / "_verify").glob("[!_]*.js")),
         Path(__file__),
     ]
     # 「数字 + 体积/时间单位」—— 正是会随版本与机器漂移的那类值
