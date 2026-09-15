@@ -10,8 +10,10 @@
 // 还提示用户 `pip install -r requirements.txt` —— 对 NSIS 安装包来说不可接受。
 // 详见 `代码审查报告-20260915.md` 的 P1-3。
 //
-// 做法：抄 WorkBuddy 的「zip 随包」形态，但用 **embeddable 免 pip 版**（约 10 MB
-// 压缩 / 约 38 MB 解开），且**不解压到用户目录** —— 运行时目录只读即可
+// 做法：抄 WorkBuddy 的「zip 随包」形态，但用 **embeddable 免 pip 版**
+// （压缩包十来 MB、解开几十 MB —— 实际值看 `du -sm desktop/vendor/py`，
+// ⚠ 别抄数字进来，它会随 Python 版本与依赖变），且**不解压到用户目录**
+// —— 运行时目录只读即可
 // （`--data-dir` 已指向 userData，配置与产物都不写在这里）。
 //
 // 用法
@@ -273,8 +275,8 @@ function installDeps() {
   // ⚠ `--python-version` **不能省**。宿主 Python 的版本与内嵌运行时未必相同
   //   （本项目开发机是 3.14，而运行时钉 3.13），不钉版本的话 pip 会按**宿主**
   //   的 ABI 挑 wheel —— 装进去 `pydantic_core-…-cp314-…whl`，
-  //   而 3.13 的解释器加载不了它。后果是：**构建显示成功、目录也有 38 MB，
-  //   直到用户机器上才炸** `ModuleNotFoundError: No module named
+//   而 3.13 的解释器加载不了它。后果是：**构建显示成功、目录看着也正常
+//   （几十 MB 都在），直到用户机器上才炸** `ModuleNotFoundError: No module named
   //   'pydantic_core._pydantic_core'`。这正是本项目一直在整治的静默降级。
   //   实测踩过：不钉版本时 5 个依赖里 2 个（pydantic_core / pyyaml）装错 ABI。
   //
@@ -283,9 +285,9 @@ function installDeps() {
   const pyVer = PY_VERSION.split('.').slice(0, 2).join('.');
   // `--no-compile`：**不让 pip 生成字节码**。原因见下面的 compileBytecode() ——
   // pip 是用**宿主**解释器编译 .pyc 的，`--python-version` 只管 wheel 的 ABI 标签、
-  // 不管字节码版本。实测宿主 3.14 跑 pip 时，装出来的是 404 个 `cpython-314.pyc`，
-  // 而运行时是 3.13 —— **一个都用不上**，纯死重（同口径复测 6.76 MB；
-  // 换成用运行时自己编是 5.77 MB，净减约 1 MB）。
+  // 不管字节码版本。宿主比运行时新时，装出来的**整份**缓存运行时一个都用不上（纯死重）。
+  // ⚠ **别在这儿抄体积/耗时数字**：抄进来就会过期（这个坑踩过两次）。
+  //   要量就跑 `node _verify/pyc-cost.js`，数字以跑出来的为准。
   execFileSync(py, ['-m', 'pip', 'install', '--upgrade', '--target', SITE_PACKAGES,
                     '--python-version', pyVer, '--implementation', 'cp',
                     '--only-binary=:all:', '--no-cache-dir', '--no-compile',
@@ -301,9 +303,11 @@ function installDeps() {
  *  3.13 一个都认不了：这些缓存**一个都用不上**，纯死重。
  *
  *  ⚠ **不要声称它影响启动速度** —— 这条曾经写错过，别再改回去。
- *  第一次量到「无缓存 1.15s vs 有缓存 0.67s，差 0.5 秒」，但那是重建后
- *  磁盘冷缓存的假象；换成「多次取最小值」的稳定测法后差异只有 ~0.03s，
- *  在噪声内。**所以这条修的是「交付物里不该有错版本的内容」，不是性能。**
+ *  单次测量能得到一个漂亮但假的数字（重建后磁盘冷缓存的假象）；换成
+ *  「多次取最小值」的稳定测法后差异落在噪声内 —— 复测时甚至出现过
+ *  **有缓存比无缓存还慢**的情况，方向都不稳定。
+ *  **所以这条修的是「交付物里不该有错版本的内容」，不是性能。**
+ *  ⚠ 同理别抄数字：要量跑 `node _verify/pyc-cost.js`（它会自己取最小值）。
  */
 function compileBytecode() {
   const pyExe = path.join(OUT_DIR, 'python.exe');

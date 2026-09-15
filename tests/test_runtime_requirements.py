@@ -159,9 +159,12 @@ def test_build_script_compiles_bytecode_with_the_target_interpreter():
 
     pip 编译 .pyc 用的是正在跑 pip 的那个解释器，而 `--python-version` 只管
     wheel 的 ABI 标签、**不管字节码版本**。开发机是 3.14 时，装出来的是
-    `cpython-314.pyc`，3.13 一个都认不了 —— 实测发行包里躺着 404 个
-    **永远用不上**的字节码。同口径复测：3.14 编出来 6.76 MB，
-    用运行时自己编是 5.77 MB（净减约 1 MB）。
+    `cpython-314.pyc`，3.13 一个都认不了 —— 发行包里会躺着一整份
+    **永远用不上**的字节码。
+
+    ⚠ **别把体积/耗时数字抄进注释或 docstring**：它们每次跑都可能变，
+    抄进来就会过期（这个坑踩过两次，见报告教训 36）。
+    要引用就写「跑 `node _verify/pyc-cost.js` 自己量」。
 
     修法是 `--no-compile`（不让 pip 编）+ 用运行时自己的解释器 `compileall`。
     这两步**必须成对**：只去掉 `--no-compile` 会退回错版本，
@@ -171,3 +174,55 @@ def test_build_script_compiles_bytecode_with_the_target_interpreter():
     assert "--no-compile" in src, "pip 会用它自己的解释器编译 .pyc（版本会错）"
     assert "compileBytecode" in src and "compileall" in src, "没有用运行时自己的解释器重编"
     assert "assertBytecodeMatchesRuntime" in src, "缺少「.pyc 版本标签必须匹配」的校验"
+
+
+def _comment_lines(path: Path):
+    """取出注释 / docstring 行 —— 只查这些行，免得误伤代码里的合法数字。"""
+    in_doc = False
+    for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        s = line.strip()
+        if path.suffix == ".py":
+            if '"""' in s:
+                if s.count('"""') == 1:
+                    in_doc = not in_doc
+                yield i, line          # 起止行本身也算注释
+                continue
+            if in_doc or s.startswith("#"):
+                yield i, line
+        else:
+            if s.startswith(("//", "*", "/*")):
+                yield i, line
+
+
+def test_no_hardcoded_measurement_numbers_in_comments():
+    """实测数字不许抄进注释 / docstring —— 抄了必然过期。
+
+    **根因不是记性差，是数字写在自然语言里就一定会和多份副本脱节** ——
+    同一个量复测两次都不一样，更别说抄在好几处。
+    完整经过（连踩两次）见报告的「教训 36」：**注释里只写该怎么做，不写历史。**
+
+    所以判据定为：数字的可信来源只能有一个 —— **跑出来**。
+      · 体积 / 耗时：`node _verify/pyc-cost.js`（自己取最小值）
+      · 运行时目录大小：`du -sm desktop/vendor/py`
+    注释里要引用就**指路**，不许抄值。「几十 MB」这种量级词可以，数字不行。
+    """
+    targets = [
+        PKG.parent / "scripts" / "build-python-runtime.mjs",
+        ROOT / "_verify" / "runtime-smoke.js",
+        Path(__file__),
+    ]
+    # 「数字 + 体积/时间单位」—— 正是会随版本与机器漂移的那类值
+    stale = re.compile(r"\d+(?:\.\d+)?\s*(?:MB|s\b|秒)")
+    offenders = []
+    for f in targets:
+        if not f.exists():
+            continue
+        for lineno, line in _comment_lines(f):
+            if stale.search(line):
+                offenders.append(f"{f.name}:{lineno}: {line.strip()[:90]}")
+
+    assert not offenders, (
+        "注释 / docstring 里出现了实测数字，它会过期（教训 36，已踩两次）：\n  "
+        + "\n  ".join(offenders)
+        + "\n\n改法：删掉数字改成指路 —— 「跑 node _verify/pyc-cost.js 自己量」。"
+    )
