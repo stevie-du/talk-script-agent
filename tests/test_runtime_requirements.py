@@ -270,6 +270,34 @@ def test_python_tag_is_derived_from_version_not_hardcoded():
     )
 
 
+def test_engine_path_matches_extra_resources_target():
+    """运行时代码里写的出厂路径，必须和 `extraResources` 的**落点**一致。
+
+    同一个落点在两个地方各写了一遍：`package.json` 的 `{"to": "engine/py"}`
+    与 `engine-path.js` 的 `path.join(o.resourcesDir, 'engine', 'py', 'python.exe')`。
+    改了 `to` 没改代码（或反过来）的后果尤其坏：出厂运行时找不到 →
+    **悄悄降级到系统 Python**，用户根本不知道自己用的不是内嵌的那个 ——
+    这正是本项目一直在整治的静默降级，而且它**不会报错**。
+
+    上面那条断言守的是 `from`（构建脚本输出），这条守的是 `to`（运行时查找），
+    两侧都钉住，才不会「只守了一半」。
+    """
+    src = (PKG.parent / "engine-path.js").read_text(encoding="utf-8")
+    m = re.search(r"path\.join\(o\.resourcesDir,\s*([^)]*)'python\.exe'\)", src)
+    assert m, "engine-path.js 里读不到出厂运行时路径（改写法了？这条断言也要跟着改）"
+
+    parts = re.findall(r"'([^']+)'", m.group(1))     # 'engine', 'py' → engine/py
+    code_path = "/".join(parts)
+    assert code_path, f"没解析出出厂路径：{m.group(1)}"
+
+    pkg = json.loads(PKG.read_text(encoding="utf-8"))
+    tos = [e.get("to") for e in pkg["build"].get("extraResources", []) if isinstance(e, dict)]
+    assert code_path in tos, (
+        f"engine-path.js 写的出厂路径是 `{code_path}`，而 extraResources 的落点是 {tos} —— "
+        "两边不一致会让出厂运行时找不到，然后**静默降级到系统 Python**（不报错）。"
+    )
+
+
 def test_extra_resources_points_at_the_runtime_build_output():
     """`extraResources` 里那条必须指向构建脚本**实际输出**的目录。
 

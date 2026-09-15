@@ -240,10 +240,14 @@ function unzip(zipPath, outDir) {
 // 即 resources/engine —— `app/` 就在那儿），并取消 `import site` 的注释。
 function writePth() {
   const p = path.join(OUT_DIR, `python${PY_TAG}._pth`);
+  // ⚠ 别把 'Lib\site-packages' 写死 —— 它和 `SITE_PACKAGES` 是同一个信息的两份写法，
+  //   改了目录结构忘了改这里，第三方包就全找不到了（而且**不报错**）。
+  //   所以从 SITE_PACKAGES 相对 OUT_DIR 推导（Windows 下 path.relative 给的就是反斜杠）。
+  const siteRel = path.relative(OUT_DIR, SITE_PACKAGES);
   const lines = [
     `python${PY_TAG}.zip`,
     '.',
-    'Lib\\site-packages',
+    siteRel,
     '..',
     'import site',
   ];
