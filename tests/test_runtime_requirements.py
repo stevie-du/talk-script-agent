@@ -249,3 +249,22 @@ def test_readme_python_version_matches_build_script():
         f"README 没提到构建脚本钉住的 Python {pinned} —— 改了版本忘了改文档？\n"
         "  来源：desktop/scripts/build-python-runtime.mjs 的 PY_VERSION"
     )
+
+
+def test_python_tag_is_derived_from_version_not_hardcoded():
+    """`PY_TAG`（313）必须**从版本号推导**，不能写成硬编码的字面量。
+
+    同一个信息的两种表示必然漂移：改了 `PY_VERSION` 却忘了改 tag，
+    就会生成 `python313._pth` 去找其实并不存在的 `python314.zip` ——
+    **构建照样报「成功」，产物却是坏的**（和 ABI 装错是同一类静默失败）。
+    所以这里守住的不是「值对不对」，而是「它有没有自己的来源」。
+    """
+    src = (PKG.parent / "scripts" / "build-python-runtime.mjs").read_text(encoding="utf-8")
+    tag_lines = [ln for ln in src.splitlines() if ln.strip().startswith("const PY_TAG")]
+    assert tag_lines, "找不到 PY_TAG 定义（改名了？那这条断言也要跟着改）"
+
+    tag_line = tag_lines[0]
+    assert "PY_VERSION" in tag_line, (
+        "PY_TAG 是硬编码的字面量 —— 它会和 PY_VERSION 漂移。\n"
+        "  改成从版本号推导：PY_VERSION.split('.').slice(0, 2).join('')"
+    )

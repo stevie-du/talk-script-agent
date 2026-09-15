@@ -43,7 +43,11 @@ const REPO = path.resolve(DESKTOP, '..');
 // 哈希取自一次 TLS 验证过的 python.org 下载；官方在同一 URL 下另提供
 // `.sigstore` 与 `.asc`（GPG），需要更强证明的人可以自行核验。
 const PY_VERSION = '3.13.12';
-const PY_TAG = '313';                     // → python313.zip / python313._pth
+// ⚠ **tag 只能从版本号推导，不许硬编码成 '313'**。
+// 同一个信息的两种表示必然漂移：改了 PY_VERSION 忘了改它，就会写出
+// `python313._pth` 去找其实并不存在的 `python314.zip` ——
+// 构建照样报「成功」，产物却是坏的（和 ABI 装错是同一类静默失败）。
+const PY_TAG = PY_VERSION.split('.').slice(0, 2).join('');   // 3.13.12 → 313
 const ZIP_NAME = `python-${PY_VERSION}-embed-amd64.zip`;
 const ZIP_URL = `https://www.python.org/ftp/python/${PY_VERSION}/${ZIP_NAME}`;
 const ZIP_SHA256 = '76f238f606250c87c6beac75dccd35ee99070a13490555936abb6cb64ecce3d0';
