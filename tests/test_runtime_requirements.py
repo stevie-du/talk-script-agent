@@ -1,0 +1,154 @@
+# -*- coding: utf-8 -*-
+"""内嵌运行时的依赖清单与打包接线（P1-3）。
+
+跑法：pytest tests/test_runtime_requirements.py
+
+为什么要有这个文件
+------------------
+`requirements-runtime.txt`（装进发行包的那 5 个）与 `requirements.txt`（开发/测试）
+**必然有一份是抄来的**，而抄来的东西会漂移：改了开发依赖的版本区间、忘了改运行时那份，
+结果是「本地跑得好好的，装出来的包 import 失败」。
+
+同一个道理，`desktop/package.json` 里那几行接线（`extraResources` 带 `vendor/py`、
+`beforePack` 钩子、`files` 含 `engine-path.js`）**漏掉任何一条的表现都是
+「构建成功、安装包装完启动即失败」** —— 一句提示都没有。所以在这里钉住。
+"""
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+DEV_REQ = ROOT / "requirements.txt"
+RUNTIME_REQ = ROOT / "requirements-runtime.txt"
+PKG = ROOT / "desktop" / "package.json"
+
+LINE_RE = re.compile(r"^([A-Za-z0-9_.\-]+)(\[[^\]]*\])?(.*)$")
+
+
+def _parse(path: Path) -> dict[str, dict[str, str]]:
+    out: dict[str, dict[str, str]] = {}
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        m = LINE_RE.match(line)
+        assert m, f"{path.name} 里有解析不了的行：{raw!r}"
+        out[m.group(1).lower()] = {"extras": m.group(2) or "",
+                                   "spec": m.group(3).strip()}
+    return out
+
+
+@pytest.fixture(scope="module")
+def dev():
+    return _parse(DEV_REQ)
+
+
+@pytest.fixture(scope="module")
+def runtime():
+    return _parse(RUNTIME_REQ)
+
+
+def test_runtime_file_is_not_empty(runtime):
+    """前提守卫：解析出空字典的话，下面每条断言都会空转。"""
+    assert len(runtime) == 5, f"运行时应恰好 5 个依赖，实际 {sorted(runtime)}"
+    assert {"fastapi", "uvicorn", "httpx", "pydantic", "pyyaml"} == set(runtime)
+
+
+def test_runtime_packages_all_come_from_dev(dev, runtime):
+    """运行时里的每个包都必须在 requirements.txt 里出现过。"""
+    missing = sorted(set(runtime) - set(dev))
+    assert not missing, f"这些包只写在 requirements-runtime.txt 里：{missing}"
+
+
+def test_runtime_version_ranges_match_dev(dev, runtime):
+    """版本区间必须逐字相同 —— 这才是防漂移的那一条。
+
+    只比「包名存在」是不够的：两边都写了 fastapi，一边 `>=0.115` 一边 `>=0.90`，
+    装出来的东西照样和本地不一样。
+    """
+    diff = {name: (dev[name]["spec"], runtime[name]["spec"])
+            for name in runtime if dev[name]["spec"] != runtime[name]["spec"]}
+    assert not diff, f"版本区间不一致（开发态, 运行时）：{diff}"
+
+
+def test_runtime_excludes_test_dependencies(runtime):
+    """pytest 不该进发行包 —— 装进去只是白送体积。"""
+    assert "pytest" not in runtime
+
+
+def test_runtime_drops_uvicorn_extras(runtime):
+    """uvicorn 不带 [standard] extras。
+
+    引擎走 `uvicorn.run(app, ...)`，没有 `--reload`，所以 httptools /
+    watchfiles / websockets 全都用不上，`uvicorn.run` 会自动退回纯 Python 的
+    h11 解析器。去掉 extras 少两个编译扩展、少几 MB，
+    也少两个「这台机器没有对应 wheel」的可能。
+    """
+    assert runtime["uvicorn"]["extras"] == "", \
+        f"运行时不该带 extras：{runtime['uvicorn']['extras']}"
+    # 反过来确认开发态确实带了 —— 否则这条断言可能只是在测一个恒空的值
+    assert _parse(DEV_REQ)["uvicorn"]["extras"] == "[standard]"
+
+
+# ── 打包接线 ────────────────────────────────────────────────
+@pytest.fixture(scope="module")
+def pkg():
+    return json.loads(PKG.read_text(encoding="utf-8"))
+
+
+def test_extra_resources_ship_the_runtime(pkg):
+    """`vendor/py` 必须被搬进 `engine/py` —— 这是 P1-3 的落地点。
+
+    少了它：`resolveEngine` 找不到出厂运行时，安装包里没有解释器，
+    在没装过 Python 的机器上启动即失败。
+    """
+    pairs = {(e.get("from"), e.get("to")) for e in pkg["build"]["extraResources"]}
+    assert ("vendor/py", "engine/py") in pairs, f"extraResources 缺 vendor/py：{pairs}"
+    # 另外三份也要在（引擎源码 / 行业包 / 渲染层）
+    for src, dst in (("../app", "engine/app"), ("../packs", "engine/packs"),
+                     ("renderer", "engine/renderer")):
+        assert (src, dst) in pairs, f"extraResources 缺 {src} → {dst}"
+
+
+def test_before_pack_hook_is_wired(pkg):
+    """构建运行时挂在 electron-builder 的钩子上，而不是串在 npm script 里。
+
+    串命令只有走 `npm run dist` 才会跑；直接调 electron-builder 就漏了，
+    而漏了的后果是安装包里没有解释器、构建过程一句提示都没有。
+    """
+    assert pkg["build"].get("beforePack") == "scripts/before-pack.js"
+    hook = PKG.parent / "scripts" / "before-pack.js"
+    assert hook.exists(), "beforePack 指向的钩子文件不存在"
+    assert "build-python-runtime.mjs" in hook.read_text(encoding="utf-8"), \
+        "钩子没有真的去调构建脚本"
+
+
+def test_packaged_files_include_the_engine_path_module(pkg):
+    """`engine-path.js` 必须进 asar。
+
+    它是 main.js `require('./engine-path')` 的目标 —— 漏了它，
+    打包后的主进程直接 `MODULE_NOT_FOUND`，窗口都开不出来。
+    """
+    files = pkg["build"]["files"]
+    for name in ("main.js", "preload.js", "engine-path.js"):
+        assert name in files, f"files 缺 {name}：{files}"
+
+
+def test_build_script_pins_python_and_hash():
+    """构建脚本必须钉住版本与 sha256，且带导入自检。
+
+    三条都容易被「顺手简化」掉，而少了任何一条都会变成静默失败：
+      · 不钉版本 → 装的 wheel ABI 与运行时不一致（实测踩过：cp314 装进 3.13）；
+      · 不校验 sha256 → 下载被截断/被替换也不知道；
+      · 去掉导入自检 → 上面两类问题都只能等用户在安装版上遇到。
+    """
+    src = (PKG.parent / "scripts" / "build-python-runtime.mjs").read_text(encoding="utf-8")
+    assert re.search(r"const PY_VERSION = '\d+\.\d+\.\d+'", src), "没有钉住 Python 版本"
+    assert re.search(r"const ZIP_SHA256 = '[0-9a-f]{64}'", src), "没有钉住 sha256"
+    assert "--python-version" in src, "装依赖时没有钉住目标 Python 版本（ABI 会装错）"
+    assert "--only-binary=:all:" in src, "没禁止现场编译，构建机会悄悄依赖编译器"
+    assert "verifyRuntime" in src and "import app.server" in src, "缺少导入自检"

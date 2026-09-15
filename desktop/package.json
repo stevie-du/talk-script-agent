@@ -9,6 +9,7 @@
   "scripts": {
     "start": "electron .",
     "start:no-sandbox": "electron . --no-sandbox",
+    "build:python": "node scripts/build-python-runtime.mjs",
     "dist": "electron-builder --win"
   },
   "devDependencies": {
@@ -23,12 +24,15 @@
     },
     "files": [
       "main.js",
-      "preload.js"
+      "preload.js",
+      "engine-path.js"
     ],
+    "beforePack": "scripts/before-pack.js",
     "extraResources": [
       { "from": "../app", "to": "engine/app", "filter": ["**/*", "!__pycache__/**"] },
       { "from": "../packs", "to": "engine/packs" },
-      { "from": "renderer", "to": "engine/renderer" }
+      { "from": "renderer", "to": "engine/renderer" },
+      { "from": "vendor/py", "to": "engine/py" }
     ],
     "win": {
       "target": ["nsis", "portable"]

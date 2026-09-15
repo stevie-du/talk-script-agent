@@ -18,6 +18,11 @@ desktop/dist*/
 desktop/dist/
 desktop/release/
 
+# 构建出来的内嵌 Python 运行时（约 38 MB）与下载缓存 —— **不入库**。
+# 由 desktop/scripts/build-python-runtime.mjs 在打包前生成（electron-builder 的
+# beforePack 钩子会调它），zip 从 python.org 下载并校验 sha256。
+desktop/vendor/
+
 # node
 node_modules/
 

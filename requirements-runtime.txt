@@ -1,0 +1,18 @@
+# 内嵌 Python 运行时（打包用）的依赖 —— 由 desktop/scripts/build-python-runtime.mjs
+# 装进 resources/engine/py/Lib/site-packages/。
+#
+# 与根目录 requirements.txt 的差别，以及为什么不能直接复用它：
+#   1. **不带 pytest** —— 那是开发/测试依赖，装进发行包只是白送体积；
+#   2. **uvicorn 不带 [standard] extras** —— 引擎走 `uvicorn.run(app, ...)`，
+#      没有 `--reload`，所以 `httptools` / `watchfiles` / `websockets` 全都用不上，
+#      `uvicorn.run` 会自动退回纯 Python 的 `h11` 解析器。
+#      去掉 extras 少两个编译扩展、少几 MB，也少两个「这台机器没有对应 wheel」的可能。
+#
+# ⚠ 这两个文件会漂移。`tests/test_runtime_requirements.py` 会断言：
+#   本文件里的每个包都在 requirements.txt 里出现过、且版本区间一致；
+#   并断言这里**不含** pytest 与 [standard] extras。改任何一边都要跑那条测试。
+fastapi>=0.115,<1.0
+uvicorn>=0.30,<1.0
+httpx>=0.27,<1.0
+pydantic>=2.7,<3.0
+pyyaml>=6.0,<7.0

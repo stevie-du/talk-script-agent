@@ -35,39 +35,31 @@ function findFreePort() {
   });
 }
 
-// 引擎启动命令解析：TALKSCRIPT_PYTHON > 打包资源里的 engine.exe > 项目 .venv > PATH 中的 python
-function resolveEngine(rootDir, resourcesDir) {
-  // --data-dir：可写数据目录。打包后 rootDir 在安装目录（Program Files），
-  // 配置与产物都不能往那儿写；开发态直接用项目根。
-  const dataDir = app.isPackaged ? app.getPath('userData') : rootDir;
-  // --version：版本号的唯一来源是 desktop/package.json（electron-builder 也认它），
-  // 引擎在打包版里读不到这个文件（--root 指向 resources/engine），所以显式传过去。
-  const args = ['-m', 'app.server', '--port', String(enginePort),
-                '--root', rootDir, '--data-dir', dataDir, '--token', engineToken,
-                '--version', app.getVersion()];
-  const custom = process.env.TALKSCRIPT_PYTHON;
-  if (custom) return { cmd: custom, args };
+// 引擎启动命令解析已拆到 `engine-path.js`（纯逻辑，可脱离 Electron 单测）——
+// 「降级链的顺序」是 P1-3 的核心，读码确认不了，得能跑断言。
+const { resolveEngine } = require('./engine-path');
 
-  const bundled = path.join(resourcesDir, 'engine', 'engine.exe');
-  if (fs.existsSync(bundled)) {
-    return { cmd: bundled, args: ['--port', String(enginePort), '--root', rootDir,
-                                  '--data-dir', dataDir, '--token', engineToken,
-                                  '--version', app.getVersion()] };
-  }
-  const venvPy = process.platform === 'win32'
-    ? path.join(rootDir, '.venv', 'Scripts', 'python.exe')
-    : path.join(rootDir, '.venv', 'bin', 'python');
-  if (fs.existsSync(venvPy)) return { cmd: venvPy, args };
-
-  const py = process.platform === 'win32' ? 'python' : 'python3';
-  return { cmd: py, args };
+function engineCommand() {
+  return resolveEngine({
+    rootDir: rootDirCached,
+    resourcesDir: resourcesDirCached,
+    // --data-dir：可写数据目录。打包后 rootDir 在安装目录（Program Files），
+    // 配置与产物都不能往那儿写；开发态直接用项目根。
+    dataDir: app.isPackaged ? app.getPath('userData') : rootDirCached,
+    // --version：版本号的唯一来源是 desktop/package.json（electron-builder 也认它），
+    // 引擎在打包版里读不到这个文件（--root 指向 resources/engine），所以显式传过去。
+    version: app.getVersion(),
+    port: enginePort, token: engineToken,
+  });
 }
 
-function startEngine(rootDir, resourcesDir) {
-  const { cmd, args } = resolveEngine(rootDir, resourcesDir);
-  console.log('[talkscript] engine:', cmd, args.join(' '));
+function startEngine() {
+  const { cmd, args, via } = engineCommand();
+  // 把「从哪条路起的」也打出来：引擎起不来时第一件要问的就是这个，
+  // 而它以前只存在于代码的 if 顺序里，日志看不出来。
+  console.log(`[talkscript] engine (${via}):`, cmd, args.join(' '));
   engineProc = spawn(cmd, args, {
-    cwd: rootDir,
+    cwd: rootDirCached,
     env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
     stdio: ['ignore', 'pipe', 'pipe'],
     // windowsHide 不能省：python.exe 是 console 子系统程序，Windows 上 spawn
@@ -128,7 +120,7 @@ async function restartEngine() {
   killEngine();
   try {
     enginePort = await findFreePort();
-    startEngine(rootDirCached, resourcesDirCached);
+    startEngine();
     await waitHealth();
     if (win && !win.isDestroyed()) {
       await win.loadURL(engineUrl());
@@ -204,7 +196,7 @@ app.whenReady().then(async () => {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       enginePort = await findFreePort();
-      startEngine(rootDir, resourcesDir);
+      startEngine();
       await waitHealth();
       lastErr = null;
       break;
