@@ -1,14 +1,19 @@
 // 内嵌运行时的端到端冒烟（零依赖）。
 //
-// 跑法：node _verify/runtime-smoke.js
-//   前置：先构建运行时 —— node desktop/scripts/build-python-runtime.mjs
+// 跑法：
+//   node _verify/runtime-smoke.js
+//   node _verify/runtime-smoke.js --root desktop/dist/win-unpacked/resources/engine
+//     ↑ 直接验**打出来的安装产物**（`npm run dist` 之后），不是构建树
+//
+//   前置（不带 --root 时）：先构建运行时 ——
+//     node desktop/scripts/build-python-runtime.mjs
 //
 // 验证什么
 // --------
 // `desktop/scripts/build-python-runtime.mjs` 自己的导入自检只证明「能 import」。
 // 这个工具按**打包后的真实布局**把引擎真正跑起来：
 //
-//   <临时 stage>/           ← 打包后对应 resources/engine/
+//   <root>/                 ← 打包后对应 resources/engine/
 //     app/  packs/  renderer/
 //     py/                   ← 内嵌运行时（`._pth` 里的 `..` 指向这一层）
 //
@@ -17,8 +22,9 @@
 //      —— 这是内嵌发行版最容易踩的坑，不验就只能等用户报错
 //   2. 引擎能起来，`/api/health` 通
 //   3. `/api/meta` 能下发行业包与参数（证明 `..` 那条路径真的能读到 packs/）
-//   4. **清掉 PYTHONPATH / PYTHONHOME 之后依然能起来** —— 否则「自带运行时」
-//      可能只是借了宿主环境的光，换台机器就废
+//   4. 真跑一次生成（mock 夹具），走完 参数归一 → 选题 → 撰写 → 校验 → 落盘
+//   5. **清掉 PYTHONPATH / PYTHONHOME / VIRTUAL_ENV 之后依然能起来** ——
+//      否则「自带运行时」可能只是借了宿主环境的光，换台机器就废
 'use strict';
 const fs = require('fs');
 const os = require('os');
@@ -29,7 +35,13 @@ const { spawn, execFileSync } = require('child_process');
 
 const REPO = path.resolve(__dirname, '..');
 const VENDOR = path.join(REPO, 'desktop', 'vendor');
-const PY = path.join(VENDOR, 'py', 'python.exe');
+
+// --root：直接验一个已经成型的 engine 目录（打出来的产物）。此时**不铺也不删**
+// 任何东西 —— 那个目录是交付物，冒烟只读它。
+const argIdx = process.argv.indexOf('--root');
+const GIVEN_ROOT = argIdx > 0 ? path.resolve(process.argv[argIdx + 1]) : null;
+const ROOT = GIVEN_ROOT || VENDOR;
+const PY = path.join(ROOT, 'py', 'python.exe');
 
 const results = [];
 const check = (name, ok, detail) => {
@@ -97,9 +109,13 @@ function killTree(pid) {
 (async function main() {
   if (!fs.existsSync(PY)) {
     console.error(`❌ 找不到内嵌运行时：${path.relative(REPO, PY)}\n` +
-                  '   先跑：node desktop/scripts/build-python-runtime.mjs');
+                  (GIVEN_ROOT
+                    ? '   --root 指向的目录里没有 py/python.exe'
+                    : '   先跑：node desktop/scripts/build-python-runtime.mjs'));
     process.exit(2);
   }
+  console.log(`目标：${path.relative(REPO, ROOT) || ROOT}` +
+              (GIVEN_ROOT ? '（已成型产物，只读）' : '（构建树，会临时铺 app/packs/renderer）'));
 
   // ── 1) sys.path：`._pth` 到底生效没有 ────────────────────
   const pathOut = execFileSync(PY, ['-c', 'import sys; print("\\n".join(sys.path))'],
@@ -112,19 +128,23 @@ function killTree(pid) {
         has((p) => /Lib[\\/]site-packages$/i.test(p)));
   // `..` 那条：指向 py/ 的上一级，也就是打包后的 resources/engine
   check('sys.path 含 py/ 的上一级（app/ 在那儿）',
-        has((p) => path.resolve(p) === path.resolve(VENDOR)));
+        has((p) => path.resolve(p) === path.resolve(ROOT)));
 
   // ── 2) 按打包布局起引擎 ──────────────────────────────────
-  // `desktop/vendor/` 是构建用的暂存目录（已 gitignore）：`app` / `packs` /
-  // `renderer` 都是**铺过来的副本**，跑完就删。所以这里**总是**先删再铺 ——
-  // 早先写成「已存在就跳过」，结果是上一次跑崩留下的残留让这次直接跳过，
-  // 而跳过之后 `staged` 是空的、清理也不删它，残留会一直攒着。
+  // 不带 --root 时：`desktop/vendor/` 是构建用的暂存目录（已 gitignore），
+  // `app` / `packs` / `renderer` 都是**铺过来的副本**，跑完就删。所以这里
+  // **总是**先删再铺 —— 早先写成「已存在就跳过」，上一次跑崩留下的残留会让这次
+  // 直接跳过，而跳过之后 `staged` 是空的、清理也不删它，残留一直攒着。
+  //
+  // 带 --root 时（验已成型产物）：目录里本来就什么都有，**一个字都不动**。
   const staged = [];
-  for (const name of ['app', 'packs', 'renderer']) {
-    const dest = path.join(VENDOR, name);
-    fs.rmSync(dest, { recursive: true, force: true });
-    copyDir(path.join(REPO, name === 'renderer' ? 'desktop/renderer' : name), dest);
-    staged.push(dest);
+  if (!GIVEN_ROOT) {
+    for (const name of ['app', 'packs', 'renderer']) {
+      const dest = path.join(VENDOR, name);
+      fs.rmSync(dest, { recursive: true, force: true });
+      copyDir(path.join(REPO, name === 'renderer' ? 'desktop/renderer' : name), dest);
+      staged.push(dest);
+    }
   }
   const port = await freePort();
   const token = 'smoke-token';
@@ -135,11 +155,14 @@ function killTree(pid) {
   delete env.VIRTUAL_ENV;
   // 走 mock 夹具跑一次真生成 —— 不碰模型、不需要 Key。
   env.TALKSCRIPT_MOCK = '1';
+  // data-dir 一律放临时目录：打包后的安装目录通常**不可写**，
+  // 而且往交付物里写数据会把产物弄脏。
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ts-smoke-data-'));
 
   const proc = spawn(PY, ['-m', 'app.server', '--port', String(port),
-                          '--root', VENDOR, '--data-dir', path.join(VENDOR, '.smoke-data'),
+                          '--root', ROOT, '--data-dir', dataDir,
                           '--token', token, '--version', '0.0.0-smoke'],
-                     { cwd: VENDOR, env, stdio: ['ignore', 'pipe', 'pipe'] });
+                     { cwd: ROOT, env, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
   proc.stdout.on('data', (d) => (out += d));
   proc.stderr.on('data', (d) => (out += d));
@@ -203,7 +226,7 @@ function killTree(pid) {
   } finally {
     killTree(proc.pid);
     for (const d of staged) fs.rmSync(d, { recursive: true, force: true });
-    fs.rmSync(path.join(VENDOR, '.smoke-data'), { recursive: true, force: true });
+    fs.rmSync(dataDir, { recursive: true, force: true });
   }
 
   const bad = results.filter((r) => !r[1]).length;
