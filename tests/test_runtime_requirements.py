@@ -268,3 +268,32 @@ def test_python_tag_is_derived_from_version_not_hardcoded():
         "PY_TAG 是硬编码的字面量 —— 它会和 PY_VERSION 漂移。\n"
         "  改成从版本号推导：PY_VERSION.split('.').slice(0, 2).join('')"
     )
+
+
+def test_extra_resources_points_at_the_runtime_build_output():
+    """`extraResources` 里那条必须指向构建脚本**实际输出**的目录。
+
+    同一个路径在两个地方各写一遍就会漂移：改了 `OUT_DIR` 忘了改 `package.json`
+    （或反过来），构建出来的运行时**根本不会进包** ——
+    而构建全程一句警告都没有，要等用户在自己机器上装完、启动失败才发现。
+
+    JSON 没法引用 JS 常量，所以这里**推导不了**，只能让断言盯着两处一致
+    （按「推导 > 校验 > 删掉」的优先级，这是中间那一档）。
+    """
+    src = (PKG.parent / "scripts" / "build-python-runtime.mjs").read_text(encoding="utf-8")
+    m = re.search(r"OUT_DIR\s*=\s*path\.join\(DESKTOP,\s*([^)]+)\)", src)
+    assert m, "读不到 OUT_DIR 的定义（改写法了？这条断言也要跟着改）"
+
+    parts = re.findall(r"'([^']+)'", m.group(1))     # 'vendor', 'py' → vendor/py
+    rel = "/".join(parts)
+    assert rel, f"从 OUT_DIR 里没解析出相对路径：{m.group(1)}"
+
+    pkg = json.loads(PKG.read_text(encoding="utf-8"))
+    # 注意在 `build` 节点下；上面那条断言守的是「package.json 侧写错了吗」，
+    # 这条守的是「构建脚本的输出目录改了、package.json 没跟上」（那一侧更隐蔽）。
+    extra = pkg["build"].get("extraResources", [])
+    froms = [e.get("from") for e in extra if isinstance(e, dict)]
+    assert rel in froms, (
+        f"package.json 的 extraResources 里没有 `{rel}`（现在是 {froms}）—— "
+        "改了构建脚本的输出目录却忘了改打包配置？运行时不会被打进包。"
+    )
