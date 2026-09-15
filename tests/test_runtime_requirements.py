@@ -229,3 +229,23 @@ def test_no_hardcoded_measurement_numbers_in_comments():
         + "\n  ".join(offenders)
         + "\n\n改法：删掉数字改成指路 —— 「跑 node _verify/pyc-cost.js 自己量」。"
     )
+
+
+def test_readme_python_version_matches_build_script():
+    """README 里写的 Python 版本，必须和构建脚本钉住的一致。
+
+    版本号放在两个地方就会各自漂移：改了 `PY_VERSION` 忘了改 README，
+    用户读到的是错的。**把 README 里的数字删掉**是一种解法，
+    但这个信息对用户是有用的 —— 所以改成**让不一致可见**：
+    构建脚本是唯一来源，README 必须跟上，跟不上就报红。
+    """
+    src = (PKG.parent / "scripts" / "build-python-runtime.mjs").read_text(encoding="utf-8")
+    m = re.search(r"PY_VERSION\s*=\s*['\"]([0-9][0-9.]*)['\"]", src)
+    assert m, "构建脚本里读不到 PY_VERSION（改名了？那这条断言也要跟着改）"
+
+    pinned = m.group(1)
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert pinned in readme, (
+        f"README 没提到构建脚本钉住的 Python {pinned} —— 改了版本忘了改文档？\n"
+        "  来源：desktop/scripts/build-python-runtime.mjs 的 PY_VERSION"
+    )

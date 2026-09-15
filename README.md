@@ -116,8 +116,10 @@ cd desktop && npm run dist
 → import 自检，落到 `resources/engine/py/`。主进程优先用它，
 找不到才退回系统 Python / `engine.exe`；显式设 `TALKSCRIPT_PYTHON` 仍可覆盖。
 
-代价是安装包约 96 MB（运行时占 38 MB）。构建缓存 `desktop/vendor/` 已 gitignore，
-首次打包会下载；版本/依赖不变时后续打包会跳过重建（`--force` 可强制）。
+代价是安装包约 96 MB —— **这是当前版本的实测值，会随 Python 版本与依赖变化**，
+实际以 `desktop/dist/` 里打出来的为准（运行时目录大小看 `du -sm desktop/vendor/py`）。
+构建缓存 `desktop/vendor/` 已 gitignore，首次打包会下载；
+版本/依赖不变时后续打包会跳过重建（`--force` 可强制）。
 
 ## 日常使用
 
