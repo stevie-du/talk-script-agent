@@ -92,7 +92,7 @@ node _verify/e2e-live.js              # 真实端到端（真引擎 + 真页面 
 
 ```bash
 cd desktop && npm run dist
-# 产物在 desktop/dist/：TalkScript Setup.exe（NSIS 安装包）+ portable exe
+# 产物在 desktop/dist/：TalkScript Setup 0.2.0.exe（NSIS 安装包）+ TalkScript 0.2.0.exe（portable）
 ```
 
 打包包含引擎代码、行业包与渲染层。**不含任何配置**（连模板都不带）——用户自己配置：
@@ -110,8 +110,14 @@ cd desktop && npm run dist
 > 首次启动若检测到「没有 Key 且没有历史记录」，界面会显示引导卡并自动打开
 > 「模型接口」设置页。
 
-运行打包版需要目标机器装有 Python + 依赖（或先用 PyInstaller 把引擎打成 engine.exe
-放进 `desktop/extraResources`，主进程会自动优先使用）。
+**打包版自带 Python 运行时，目标机器不需要装 Python。**
+`npm run dist` 的 beforePack 阶段会自动构建一份内嵌的 Python 3.13.12：
+下载官方 embeddable 包 → 校验 sha256 → 装依赖 → 用**运行时自己**的解释器编译字节码
+→ import 自检，落到 `resources/engine/py/`。主进程优先用它，
+找不到才退回系统 Python / `engine.exe`；显式设 `TALKSCRIPT_PYTHON` 仍可覆盖。
+
+代价是安装包约 96 MB（运行时占 38 MB）。构建缓存 `desktop/vendor/` 已 gitignore，
+首次打包会下载；版本/依赖不变时后续打包会跳过重建（`--force` 可强制）。
 
 ## 日常使用
 
@@ -150,7 +156,8 @@ packs/elevator/
 ## 已知边界（v0.2）
 
 - 真实生成质量取决于所配模型；草稿行业包内容必须人工校对后再投产
-- 打包版依赖目标机器 Python 环境（自包含 engine.exe 打包见上）
+- 内嵌运行时已用**打出来的产物本身**验过（解包核对 + 冒烟 12/12 + 真启动 app），
+  但 **NSIS 安装流程本身未在干净机器上验过**（真装一次、开始菜单启动、卸载残留）
 - 私有资料仍以编辑 yaml 文件维护，界面化管理未做
 - 历史列表最多返回 100 条；单段重写要求后台作业仍在内存中（重启应用后请用「换一版」）
 - 「版本导航」是**会话内**的：刷新或重开应用后，每个版本会各自成为一条独立记录
