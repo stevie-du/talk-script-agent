@@ -77,19 +77,54 @@ function measurePyc(dir) {
   return { count, mb: bytes / 1048576 };
 }
 
-/** 多次取最小值：单次测量会被磁盘冷缓存骗出一个巨大的假差异。 */
-function bench(py, sp, { noCache }) {
+/** 多次取最小值：单次测量会被磁盘冷缓存骗出一个巨大的假差异。
+ *
+ * ⚠ 两个容易搞错的点（第一版正好全踩了，测出来「有缓存反而更慢」的鬼结论）：
+ *   1. `-B` 只禁止**写** .pyc，**不禁止读** —— 所以「无缓存」组必须喂一个
+ *      **没编译过**的目录；光加 `-B` 只是「有缓存但不写」，对照组是假的。
+ *   2. 「有缓存」组**不能**加 `-B`，否则它也不能写，测的就不是真实场景。
+ */
+/** 分辨力门槛（秒）：正对照若测不出至少这么大的差异，
+ *  就判定「这把尺子没刻度」—— 之后量出来的差值一律不可信。 */
+const MIN_RESOLUTION = 0.1;
+
+const BASE_MODULES = '("pydantic","fastapi","httpx","uvicorn","yaml")';
+const IMPORTS = `import importlib; [importlib.import_module(m) for m in ${BASE_MODULES}]`;
+
+function bench(py, sp, { noCache, code = IMPORTS, rounds = 5 }) {
   const env = { ...process.env, PYTHONPATH: sp };
-  if (noCache) env.PYTHONDONTWRITEBYTECODE = '1';
-  const code = 'import importlib; [importlib.import_module(m) for m in ("pydantic","fastapi","httpx","uvicorn","yaml")]';
+  const args = noCache ? ['-B', '-c', code] : ['-c', code];
   let best = Infinity;
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < rounds; i++) {
     const t = Date.now();
-    const r = spawnSync(py, ['-B', '-c', code], { env, encoding: 'utf8' });
+    const r = spawnSync(py, args, { env, encoding: 'utf8' });
     if (r.status !== 0) return null;
     best = Math.min(best, Date.now() - t);
   }
   return best;
+}
+
+/** 正对照：这个环境**到底能不能**测出导入量的差异？
+ *
+ * 「在噪声内」有两种可能：真的没差异，或者**我测不出来**。
+ * 不区分这两种，就会把「测不出来」当成「没问题」—— 正是这个项目一直在整治的
+ * 静默降级。所以先量一个**已知有差异**的东西：多导入 30 个 stdlib 模块。
+ * 连这个都测不出来，说明刻度是坏的，后面的结论只能说「本环境测不准」。
+ */
+function sanityCheck(py, sp) {
+  const extra = '("json","re","os","sys","math","random","datetime","collections","itertools",'
+    + '"functools","typing","pathlib","subprocess","shutil","glob","csv","sqlite3","hashlib",'
+    + '"base64","urllib.parse","email","html","xml.etree.ElementTree","zlib","gzip","tarfile",'
+    + '"zipfile","tempfile","logging","unittest")';
+  // ⚠ 两个模块名列表都必须是 **tuple**：`tuple + list` 在 Python 里是类型错误，
+  //   会静默把正对照变成「跑不起来」（第一版就是这么错的，而且失败时一声不吭）。
+  const many = `import importlib; [importlib.import_module(m) for m in ${BASE_MODULES} + ${extra}]`;
+  // 取 5 轮（与正式测量一致）：分辨力**本身**也会波动（实测 0.03 ~ 0.19），
+  // 轮次少了会把「本环境测不准」误判成「刻度可用」。
+  const few = bench(py, sp, { noCache: false, rounds: 5 });
+  const lot = bench(py, sp, { noCache: false, code: many, rounds: 5 });
+  if (few == null || lot == null) return null;
+  return (lot - few) / 1000;
 }
 
 function main() {
@@ -128,13 +163,37 @@ function main() {
     console.log(`对版本缓存（cpython-${targetVersion.replace('.', '')}）: ${right.count} 个 / ${right.mb.toFixed(2)} MB`);
     console.log(`死重：约 ${(wrong.mb - right.mb).toFixed(2)} MB 的差额 + 整份错版本缓存本身`);
 
+    // **先看这把尺子有没有刻度，再量东西**：分辨力不足时，后面的差值
+    // 无论多大都只是噪声，绝不能拿来下结论（第一版就这么输出过「差异显著」）。
+    const resolution = sanityCheck(target, rightDir);
+    if (resolution == null) {
+      console.log('\n⚠ 正对照没跑起来（导入失败）—— 无法判断分辨力，下面的耗时别当定论。');
+    } else {
+      console.log(`\n正对照（本环境分辨力）：多导入 30 个 stdlib → +${resolution.toFixed(2)}s`);
+      console.log(resolution < MIN_RESOLUTION
+        ? `→ ⚠ 刻度不足（< ${MIN_RESOLUTION}s）：进程启动开销淹没了导入耗时，`
+          + '**这把尺子量不出字节码的收益**'
+        : '→ 刻度可用');
+    }
+
     console.log('\n── 启动耗时（各跑 5 次取最小值）──────');
-    const cold = bench(target, rightDir, { noCache: true });
+    // ⚠ cold 组必须是**没编译过**的目录：`-B` 只禁写不禁读，
+    //   给一份编译好的目录，两组都在读缓存，这个对照就没有意义了。
+    const coldDir = path.join(tmp, 'cold');
+    copyDir(sp, coldDir);
+    purgePyc(coldDir);
+    const cold = bench(target, coldDir, { noCache: true });
     const warm = bench(target, rightDir, { noCache: false });
     if (cold != null && warm != null) {
       const diff = (cold - warm) / 1000;
       console.log(`无缓存 ${(cold / 1000).toFixed(2)}s vs 有缓存 ${(warm / 1000).toFixed(2)}s → 差 ${diff.toFixed(2)}s`);
-      console.log(diff < 0.1 ? '判定：在噪声内，**不要拿它当性能收益**' : '判定：差异显著，可以写进结论');
+      if (resolution == null || resolution < MIN_RESOLUTION) {
+        console.log('⚠ **这个差值不可信**（刻度不足）：既不能说有收益，也不能说没差异。');
+      } else if (Math.abs(diff) < resolution) {
+        console.log('判定：在噪声内，**不要拿它当性能收益**');
+      } else {
+        console.log('判定：差异超过分辨力，可以写进结论');
+      }
     } else {
       console.log('（依赖导入失败，跳过耗时测量）');
     }
