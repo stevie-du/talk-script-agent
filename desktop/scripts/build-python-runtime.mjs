@@ -284,7 +284,8 @@ function installDeps() {
   // `--no-compile`：**不让 pip 生成字节码**。原因见下面的 compileBytecode() ——
   // pip 是用**宿主**解释器编译 .pyc 的，`--python-version` 只管 wheel 的 ABI 标签、
   // 不管字节码版本。实测宿主 3.14 跑 pip 时，装出来的是 404 个 `cpython-314.pyc`，
-  // 而运行时是 3.13 —— **一个都用不上**，纯 1.8 MB 死重，还得重编一次。
+  // 而运行时是 3.13 —— **一个都用不上**，纯死重（同口径复测 6.76 MB；
+  // 换成用运行时自己编是 5.77 MB，净减约 1 MB）。
   execFileSync(py, ['-m', 'pip', 'install', '--upgrade', '--target', SITE_PACKAGES,
                     '--python-version', pyVer, '--implementation', 'cp',
                     '--only-binary=:all:', '--no-cache-dir', '--no-compile',
