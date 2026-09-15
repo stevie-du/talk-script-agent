@@ -3,7 +3,7 @@
 // 场景切换时统一收口（closeOverlays）——修复前新建对话 / 切历史 / 打开设置
 // 只关设置不关浮层，确认卡会孤儿一样盖在新内容上，点哪儿都先命中它。
 
-import { $, esc, toast } from "./util.js";
+import { $, esc, toast, bindOnce } from "./util.js";
 import { abort, confirmPlan, reselect } from "./jobs.js";
 
 export function closeOverlays() {
@@ -61,7 +61,7 @@ export function editedPlan() {
   };
 }
 
-export function bindOverlays() {
+export const bindOverlays = bindOnce(function bindOverlays() {
   $("cf-continue").onclick = async () => {
     const plan = editedPlan();
     if (!plan.points.length) { toast("至少保留一个要点"); return; }
@@ -77,4 +77,4 @@ export function bindOverlays() {
     // 停轮询 + 解锁 + 通知后端放弃（原先只置空 currentJob，会锁死界面）
     abort();
   };
-}
+});

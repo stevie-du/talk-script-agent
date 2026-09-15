@@ -7,7 +7,7 @@
 // 新增：运行中的会话在副标题上带一个**进度点**，并且失败记录现在也能点开看原因
 //（后端会把 job.json 摘要返回给 /api/history/{id}）。
 
-import { $, el, esc, fmtTime, dayKey, toast } from "./util.js";
+import { $, el, esc, fmtTime, dayKey, toast, bindOnce } from "./util.js";
 import { api } from "./api.js";
 import { state, setResult, detachJob } from "./store.js";
 import { setLeftFolded } from "./ui.js";
@@ -182,8 +182,7 @@ export function focusSessionSearch() {
 function bindSearch() {
   const box = $("sess-search");
   const clear = $("sess-search-clear");
-  if (!box || box._bound) return;
-  box._bound = true;
+  if (!box) return;
   const apply = () => {
     query = box.value.trim();
     clear.classList.toggle("hidden", !query);
@@ -204,11 +203,9 @@ function bindSearch() {
   clear.onclick = () => { box.value = ""; apply(); box.focus(); };
 }
 
-export function bindSessionList() {
+export const bindSessionList = bindOnce(function bindSessionList() {
   bindSearch();
   const list = $("session-list");
-  if (list._bound) return;
-  list._bound = true;
   const activate = (row) => {
     const it = index.get(row.dataset.id);
     if (!it) return;
@@ -234,7 +231,7 @@ export function bindSessionList() {
     ev.preventDefault();
     activate(row);
   });
-}
+});
 
 /** 删除：已结束的记录走 DELETE 删产物；进行中的走 DELETE 也会顺带停掉后台作业
  *  （后端 discard = 取消 + 移出注册表 + 删目录），所以两种情形是同一个请求。

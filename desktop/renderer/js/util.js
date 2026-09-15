@@ -12,6 +12,34 @@ export function el(tag, cls, html) {
   return e;
 }
 
+/** 把「只应绑定一次」的函数包一层幂等守卫：第二次调用直接返回。
+ *
+ *  为什么需要
+ *  ----------
+ *  绑定函数里混着两类写法：
+ *    · `addEventListener` —— **会重复挂**，一次点击触发两次；
+ *    · `onclick =`        —— 天然幂等（后写的覆盖前写的）。
+ *  重复调用时后者没事、前者出事，而症状（点一下保存发两次请求、
+ *  `appConfirm` 的 Promise resolve 两次）出现的位置离原因很远，很难查。
+ *
+ *  为什么收成一个函数
+ *  ----------------
+ *  修复前这里有**三种写法**：`bindShell` 用 `fn._bound`、`bindSessionList`
+ *  和它内部的 `bindSearch` 用 `el._bound`、`bindSettings` / `bindOverlays` /
+ *  `bindScrollPin` 干脆没有。只补一处正是「同一个口径抄了几份，下次只修一半」
+ *  的经典形态。统一到这里之后，`main.js` 的 `__ts.rebind()` 会**同时**再跑一遍
+ *  全部绑定，`_verify/verify.js` 断言「没有新增任何监听器」——
+ *  漏掉任何一个包装，那条断言就会红。
+ */
+export function bindOnce(fn) {
+  const wrapped = function (...args) {
+    if (wrapped._bound) return undefined;
+    wrapped._bound = true;
+    return fn.apply(this, args);
+  };
+  return wrapped;
+}
+
 /** HTML 转义。
  *  修复前不转义单引号 —— 当前所有动态值都进文本节点或双引号属性，没有可利用路径，
  *  但行业包的 label 等是用户可编辑内容，一旦将来用于单引号属性就会破。补上更省心。 */

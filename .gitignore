@@ -48,14 +48,16 @@ _verify/_cprof/
 _verify/*.png
 
 # 一次性排查脚本的运行产物与临时批处理
-# 约定：_verify/ 下**下划线开头**的都是临时件（截图、排查脚本、运行日志），
-# 正式工具不带下划线（verify.js / e2e-live.js / shot-live.js / who-locks.js）。
-# 只忽略 .txt/.log 是不够的 —— 排查脚本本身也是 _*.js，漏了这条会被 git add -A 卷进提交。
-_verify/_*.txt
-_verify/_*.log
-_verify/_*.js
-_verify/_app.log
-_verify/_start.bat
+# 约定：_verify/ 下**下划线开头**的都是临时件（截图、排查脚本、运行日志、临时 profile），
+# 正式工具与有意保留的目录不带下划线（verify.js / e2e-live.js / shot-live.js /
+# who-locks.js / ink-measure.js / csp-probe.js / lib/ / legacy/）。
+#
+# 原来这里按扩展名一条条列（`_*.txt` / `_*.log` / `_*.js` / `_app.log` / `_start.bat`），
+# **每冒出一类新临时件就要回来补一条** —— `_net_probe.py` / `_scan_trace.py` 两个
+# 临时 py 就是这么漏掉的（P2-4）。按扩展名列举永远追不上新写法，
+# 所以改成「下划线开头 + 任意扩展名」一把覆盖。
+# 已核对：_verify/ 下**没有**任何已跟踪文件以下划线开头，`git add -A` 不会误伤。
+_verify/_*
 
 # 本地配置：含明文 API Key，绝不入库（模板见 config.example.yaml）
 config.yaml

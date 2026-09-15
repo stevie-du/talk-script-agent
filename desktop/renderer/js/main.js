@@ -102,6 +102,14 @@ window.__ts = {
   setPane,
   gotoView,
   newChat,
+  // 把全部绑定函数**再跑一遍**。幂等守卫的验证入口：
+  // 绑定里混着 `addEventListener`（会重复挂，一次点击触发两次）与
+  // `onclick =`（天然幂等），重复挂的症状离原因很远、很难查。
+  // `_verify/verify.js` 会先数一遍监听器，调这里，再数一遍 —— 必须一个都没多。
+  // 这条断言**同时**覆盖五个绑定函数：漏掉任何一个的 bindOnce 包装都会报红。
+  rebind: () => {
+    bindShell(); bindSettings(); bindOverlays(); bindSessionList(); T.bindScrollPin();
+  },
 };
 
 // 兼容旧调用点（verify.js 以全局函数名调用）

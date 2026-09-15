@@ -6,7 +6,7 @@
 //  · 全局 change / keydown 监听只注册一次（修复前「新建行业包完成」会二次
 //    boot()，导致 Ctrl+\ 连翻两次等于没翻）。
 
-import { $, $$, el, esc, toast } from "./util.js";
+import { $, $$, el, esc, toast, bindOnce } from "./util.js";
 import { state, setBusy, on } from "./store.js";
 import { collectParams, updateStale, autoGrowTopic, getParam } from "./jobs.js";
 import { stopTicker } from "./progress.js";
@@ -403,10 +403,10 @@ export function gotoView(name) {
   $("view-" + name)?.classList.remove("hidden");
 }
 
-export function bindShell() {
-  if (bindShell._bound) return;
-  bindShell._bound = true;
-
+// `bindOnce`：全局监听只注册一次（修复前「新建行业包完成」会二次 boot()，
+// 导致 Ctrl+\ 连翻两次等于没翻）。守卫从「只有 bindShell 有」统一到了
+// util.bindOnce —— 五个绑定函数一处都不能漏，漏了 _verify 会报红。
+export const bindShell = bindOnce(function bindShell() {
   if (localStorage.getItem("ts.left.folded") === "1") setLeftFolded(true);
   $("btn-toggle-left").onclick = () => setLeftFolded(!$("left").classList.contains("folded"));
   $("btn-open-settings").onclick = () => openSettings();
@@ -473,4 +473,4 @@ export function bindShell() {
       }
     }
   });
-}
+});

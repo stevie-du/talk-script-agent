@@ -130,6 +130,19 @@ addEventListener('securitypolicyviolation', e => {
                       sample: (e.sample || '').slice(0, 80) });
   sessionStorage.setItem('__csp', JSON.stringify(window.__csp));
 });
+
+// 监听器计数（P2-2）。绑定函数重复调用时，\`onclick =\` 天然幂等、但
+// \`addEventListener\` 会**重复挂**（一次点击触发两次）。症状离原因很远，
+// 所以要能主动数：调 \`__ts.rebind()\` 前后，注册的监听器数量必须**一个都没多**。
+// 桩是 <head> 里的阻塞脚本，早于 main.js 执行 —— 计数从页面第一刻就开始了。
+window.__addCount = 0;
+(function () {
+  var orig = EventTarget.prototype.addEventListener;
+  EventTarget.prototype.addEventListener = function (type, fn, opts) {
+    window.__addCount++;
+    return orig.call(this, type, fn, opts);
+  };
+})();
 (function(){
   var META = ${JSON.stringify(META)};
   // 行业包读坏的情形：&packerr=1（P1-6）。坏包的四个特征会**同时**出现，
@@ -327,6 +340,30 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("CSP 真的在拦（正对照：故意写一次内联 style，必须被拦下并记到）",
     cspAfterCtrl > cspBefore && /style/.test(cspLast?.directive || ""),
     JSON.stringify({ before: cspBefore, after: cspAfterCtrl, last: cspLast }));
+
+  // ── 绑定函数的幂等守卫（P2-2）────────────────────────────
+  // 绑定里混着 `addEventListener`（**会重复挂**，一次点击触发两次）与
+  // `onclick =`（天然幂等）。重复挂的症状离原因很远，很难查 —— 所以要能主动数。
+  // 修复前守卫只有 `bindShell` 一处有，`bindSettings` / `bindOverlays` /
+  // `bindScrollPin` 是裸的（`bindSessionList` 又是第三种写法）。
+  // 现在统一走 util.bindOnce，`__ts.rebind()` 把五个绑定函数全再跑一遍。
+  const ctrlAdd = await evalIn(`return (function(){
+    var n = window.__addCount;
+    document.getElementById('st-save').addEventListener('click', function(){});
+    return { before: n, after: window.__addCount };
+  })()`);
+  check("监听器计数器是活的（正对照：手工挂一个必须被数到）",
+    ctrlAdd.after === ctrlAdd.before + 1, JSON.stringify(ctrlAdd));
+
+  const rebind = await evalIn(`return (function(){
+    var before = window.__addCount;
+    window.__ts.rebind();
+    return { before: before, after: window.__addCount };
+  })()`);
+  // 这条断言**同时**覆盖五个绑定函数：任何一个漏了 bindOnce 包装都会多出监听器。
+  // （「rebind 真的调到了绑定函数」由变异检验证：去掉任一处的包装，这条立刻红。）
+  check("再绑一遍不会重复挂监听器（五个绑定函数都幂等）",
+    rebind.after === rebind.before, JSON.stringify(rebind));
 
   // ── 1) 启动 ──────────────────────────────────────────────
   const boot = await evalIn(`return {

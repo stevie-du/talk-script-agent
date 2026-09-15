@@ -5,7 +5,7 @@
 // 顺序是「打开设置 → 改 URL → Ctrl+, 关掉 → Ctrl+, 再开 → 输入没了」。
 // 现在按字段记 dirty，只有没被改过的输入框才回填。
 
-import { $, el, esc, toast } from "./util.js";
+import { $, el, esc, toast, bindOnce } from "./util.js";
 import { api } from "./api.js";
 import { state, emit } from "./store.js";
 import { closeOverlays, appConfirm } from "./overlays.js";
@@ -126,7 +126,7 @@ function fill(id, value) {
   if (n) n.value = value;
 }
 
-export function bindSettings() {
+export const bindSettings = bindOnce(function bindSettings() {
   applyNumericBounds();          // 区间由 JS 统一写入输入框的 min/max
   ["st-baseurl", "st-model", "st-apikey", "st-temperature",
    "st-retries", "st-timeout", "st-maxtokens"].forEach(id => {
@@ -164,7 +164,7 @@ export function bindSettings() {
   $("st-test").onclick = testConnection;
   $("pi-export").onclick = exportSkill;
   $("pi-undraft").onclick = undraftPack;
-}
+});
 
 async function saveSettings() {
   const body = {

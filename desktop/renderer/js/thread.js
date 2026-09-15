@@ -10,7 +10,7 @@
 // 点「换一版」看起来像结果被覆盖；且 renderResult 每次都无条件 scrollBottom()，
 // 用户上滚查看前文时会被强行拽回底部。
 
-import { $, el, esc, toast } from "./util.js";
+import { $, el, esc, toast, bindOnce } from "./util.js";
 import { state } from "./store.js";
 
 export const streamEl = () => $("chat-stream");
@@ -29,14 +29,14 @@ export function scrollBottom(smooth = true) {
   s.scrollTo({ top: s.scrollHeight, behavior: smooth ? "smooth" : "auto" });
 }
 
-export function bindScrollPin() {
+export const bindScrollPin = bindOnce(function bindScrollPin() {
   const s = streamEl();
   const btn = $("scroll-bottom");
   const sync = () => btn?.classList.toggle("hidden", nearBottom());
   s.addEventListener("scroll", sync, { passive: true });
   btn.onclick = () => scrollBottom();
   sync();
-}
+});
 
 /** 跟随到底部——仅当用户没在往回翻。 */
 export function follow(force = false) {
