@@ -135,6 +135,7 @@
   --w-side: 276px;
   --w-content: 720px;   /* 内容区限宽 */
   --w-stream: 780px;    /* 消息流 / 输入区限宽 */
+  --w-stg-3col: 1160px; /* 设置页三列（菜单/条目/详情）限宽，比单列宽 */
 }
 
 /* ══════════════ 基础 ══════════════ */
@@ -1117,6 +1118,67 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
   padding: var(--s6) var(--s6) var(--s8);
 }
 .stg-pane.hidden { display: none; }
+
+/* ══════════ 设置页三列骨架（菜单 / 条目 / 详情）══════════
+   统一结构：`[.stg-nav 菜单] [.pane-list 条目] [.pane-detail 详情]`。
+   左栏菜单由 .stg-nav 承担，这里只管 pane 内部的「条目 + 详情」两列。
+
+   ⚠ 采用**渐进式**引入：只有包了 `.stg-cols` 的面板才变两列，
+   未改造的面板（.stg-pane 仍是 block、内容上下堆叠）完全不受影响。
+   这样改造可以一个面板一个面板来，不必一次全改完。
+
+   ⚠ 滚动容器仍然是 .stg-main（**不要**改成每列各自滚）：
+   verify.js 有条断言守着「滚动容器是 .stg-main 而不是限宽居中的 .stg-pane」——
+   原本是为了不让滚动条出现在居中盒子右边。中列用 sticky + 自身 max-height
+   达到「条目列表独立滚动」的效果，同时不破坏那条断言。 */
+.stg-cols {
+  display: flex; gap: var(--s5); align-items: flex-start;
+}
+/* 中列：条目列表。固定宽、sticky 吸顶、超出自身滚动。 */
+.pane-list {
+  flex: 0 0 258px;
+  position: sticky; top: var(--s6);
+  max-height: calc(100vh - 2 * var(--s6) - 56px);
+  overflow-y: auto; overscroll-behavior: contain;
+  display: flex; flex-direction: column; gap: var(--s2);
+}
+/* 右列：详情。占剩余宽度，跟随 .stg-main 一起滚。 */
+.pane-detail { flex: 1; min-width: 0; }
+/* 三列面板需要更宽的限宽，否则中+右两列挤在 720px 里太窄。 */
+.stg-pane.has-cols { max-width: var(--w-stg-3col); }
+
+/* 中列条目（通用）：图标 + 标题 + 副标题，选中态靠 .on */
+.pl-item {
+  display: grid; grid-template-columns: 30px 1fr; align-items: center; gap: var(--s3);
+  width: 100%; padding: 9px 10px;
+  /* 与 .kb-item 同源的坑：全局 button{height:var(--h-btn)}（30px）会把它钉死。 */
+  height: auto;
+  border: 0.5px solid transparent; border-radius: var(--r-md);
+  background: transparent; color: var(--text-1);
+  font-size: var(--f-sm); text-align: left; cursor: pointer;
+  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+.pl-item:hover { background: var(--fill); }
+.pl-item.on { background: var(--surface); border-color: var(--line-strong); box-shadow: var(--shadow-raised); }
+.pl-item .pl-ic {
+  width: 30px; height: 30px; border-radius: var(--r-sm);
+  display: grid; place-items: center; background: var(--fill); color: var(--text-2);
+}
+.pl-item.on .pl-ic { background: var(--ring-focus); color: var(--ink); }
+.pl-item .pl-txt { min-width: 0; }
+.pl-item .pl-t {
+  font-size: var(--f-sm); font-weight: 500; color: var(--text-1);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.pl-item .pl-s {
+  font-size: var(--f-xs); color: var(--text-3);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* 中列分组标题 */
+.pl-sec-t {
+  font-size: var(--f-xs); font-weight: 600; color: var(--text-3);
+  padding: var(--s2) 10px var(--s1); letter-spacing: .2px;
+}
 
 /* 占位内容（知识库 / 技能待接入）：居中留白 + 图标 + 说明 */
 .placeholder {

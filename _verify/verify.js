@@ -1295,39 +1295,84 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   // 容差 0.6，与左栏那组几何断言一致。
   const genWidths = await evalIn(`window.__ts.setPane('gen');
     const pane = document.getElementById('pane-gen');
-    const cs = getComputedStyle(pane);
-    const inner = +(pane.getBoundingClientRect().width
-      - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)).toFixed(2);
-    const packRow = pane.querySelector('.pack-row');
-    const W = e => +e.getBoundingClientRect().width.toFixed(2);
-    // ⚠ 直接量 #param-front 的子元素，不要量 .select-btn。
-    // 这条断言第一版量的是 .select-btn，结果漏掉了「结尾引导」——
-    // 它在被测状态里没有被 beautifySelects 换成自绘按钮，于是整条断言空转，
-    // 把两列栅格加回去也照样全绿（假绿）。栅格/弹性项就是这些子元素本身，
-    // 量它们不依赖下拉被换成了什么形态。
-    // （注：这段是 evalIn 的模板字符串，注释里不能出现反引号 —— 会把字符串截断。）
-    const front = document.getElementById('param-front');
-    const frontKids = [...front.children]
-      .map(e => ({ t: (e.textContent || '').trim().slice(0, 6), w: W(e) }));
-    const ctrls = [...pane.querySelectorAll('.select-btn, select, textarea')]
-      .filter(e => !packRow || !packRow.contains(e))
-      .filter(e => !e.classList.contains('native-hidden'))
-      .map(e => ({ t: (e.textContent || e.id || e.tagName).trim().slice(0, 5), w: W(e) }));
-    const seg = pane.querySelector('.segmented');
-    const groups = [...pane.querySelectorAll('.fg, .block-inner')].map(W);
-    return { 内容宽: inner, 参数组子项: frontKids, 控件: ctrls,
-             分段: seg ? W(seg) : null, 字段组: groups,
-             行业包行: packRow ? W(packRow) : null,
-             paramFront布局: getComputedStyle(front).display };`);
-  check("「生成偏好」字段一律占满内容宽（不留半宽孤儿，如曾经 328px 的「结尾引导」）",
+    // 三列化后「内容宽」不再是 pane 整体内宽，而是 **pane-detail 的内宽**
+    // （pane-list + gap + pane-detail 才是真正的列）。page-card 的 padding
+    // 是 var(--s5) 0（只有上下），左右不缩，所以 pane-detail 的 width 即字段容器宽。
+    const detail = pane.querySelector('.pane-detail');
+    const inner = +(detail.getBoundingClientRect().width).toFixed(2);
+    // 生成偏好三列化后，「生成参数」「进阶」「行业包」三个分组各自藏在独立
+    // .page-card 里，默认只显示一个。原来的断言靠默认可见的字段测全，
+    // 现在要**逐个切换分组、把每个分组的字段都量一遍**，否则 hidden 卡片里的字段
+    // 都是 0，断言就会假绿。
+    const secBtns = [...document.querySelectorAll('#gen-sec-list .pl-item')];
+    const allFrontKids = [];
+    const allCtrls = [];
+    let segW = null;
+    let packRowW = null;
+    secBtns.forEach(b => {
+      b.click();
+      const sec = b.dataset.sec;
+      // ⚠ 同一个 click 在同一个脚本里不会同步触发 reflow 之外的副作用，
+      // 但 .hidden class 切换是同步的 —— 这里读 getBoundingClientRect 已经反映。
+      if (sec === 'param') {
+        const front = document.getElementById('param-front');
+        [...front.children].forEach(e => allFrontKids.push(
+          { t: (e.textContent || '').trim().slice(0, 6), w: +e.getBoundingClientRect().width.toFixed(2) }));
+      }
+      if (sec === 'pack') {
+        const packRow = pane.querySelector('.pack-row');
+        packRowW = packRow ? +packRow.getBoundingClientRect().width.toFixed(2) : null;
+      }
+      if (sec === 'adv') {
+        const seg = pane.querySelector('.segmented');
+        segW = seg ? +seg.getBoundingClientRect().width.toFixed(2) : null;
+      }
+      // 控件：所有 select / textarea / 自绘 .select-btn
+      // ⚠ 排除 .pack-row 里的控件：那个 select 与「详情/新建」按钮并排共享整行，
+      // select 本身不占满整行是有意为之（与按钮平分），不是「半宽孤儿」bug。
+      // 排除隐藏的（hidden 父级、.native-hidden）。
+      const packRow = pane.querySelector('.pack-row');
+      [...pane.querySelectorAll('.select-btn, select, textarea')]
+        .filter(e => e.offsetParent !== null)               // 排除 display:none 父级里的
+        .filter(e => !e.classList.contains('native-hidden'))
+        .filter(e => !packRow || !packRow.contains(e))      // pack-row 内的不算
+        .forEach(e => allCtrls.push(
+          { t: (e.textContent || e.id || e.tagName).trim().slice(0, 5),
+            w: +e.getBoundingClientRect().width.toFixed(2) }));
+    });
+    // 测完切回默认（行业包），与 UI 一致
+    secBtns.find(b => b.dataset.sec === 'pack').click();
+    return { 内容宽: inner, 参数组子项: allFrontKids, 控件: allCtrls,
+             分段: segW, 行业包行: packRowW };`);
+  check("「生成偏好」各分组的字段都占满内容宽（不留半宽孤儿，如曾经 328px 的「结尾引导」）",
     genWidths.参数组子项.length >= 1                                  // 非空：防假绿
     && genWidths.参数组子项.some(c => /结尾引导/.test(c.t))            // 确实测到了那个字段
     && genWidths.参数组子项.every(c => Math.abs(c.w - genWidths.内容宽) <= 0.6)
     && genWidths.控件.every(c => Math.abs(c.w - genWidths.内容宽) <= 0.6)
-    && Math.abs(genWidths.分段 - genWidths.内容宽) <= 0.6
-    && genWidths.字段组.every(w => Math.abs(w - genWidths.内容宽) <= 0.6)
-    && Math.abs(genWidths.行业包行 - genWidths.内容宽) <= 0.6,
+    && (genWidths.分段 === null || Math.abs(genWidths.分段 - genWidths.内容宽) <= 0.6)
+    && (genWidths.行业包行 === null || Math.abs(genWidths.行业包行 - genWidths.内容宽) <= 0.6),
     JSON.stringify(genWidths));
+
+  // 「生成偏好」是三列（菜单 / 分组 / 详情）：中列列出 pack / param / adv 三块，
+  // 点哪个右列就显示哪个。判据：中列 ≥3 个条目 + 中列选中态 ↔ 右列可见卡片
+  // 一一对应（**两态都读**——只读一种会漏掉「切了分组但右列没动」那种静默 bug）。
+  const gen3 = await evalIn(`var btns = [...document.querySelectorAll('#gen-sec-list .pl-item')];
+    var cards = [...document.querySelectorAll('#gen-sec-detail .page-card[data-sec]')];
+    var on = btns.filter(function(b){ return b.classList.contains('on'); }).map(function(b){ return b.dataset.sec; });
+    var vis = cards.filter(function(c){ return !c.classList.contains('hidden'); }).map(function(c){ return c.dataset.sec; });
+    var list = document.querySelector('#gen-sec-list');
+    var detail = document.querySelector('#gen-sec-detail');
+    var lr = list.getBoundingClientRect();
+    var dr = detail.getBoundingClientRect();
+    return { btnCount: btns.length, cardCount: cards.length,
+             on: on, visible: vis,
+             listW: Math.round(lr.width), detailW: Math.round(dr.width),
+             sideBySide: Math.round(dr.left - lr.right) };`);
+  check("生成偏好是中列分组 + 右列详情（三列骨架生效，且选中态与可见卡片一致）",
+    gen3.btnCount === 3 && gen3.cardCount === 3
+      && gen3.listW === 258 && gen3.detailW > 600 && gen3.sideBySide >= 0 && gen3.sideBySide < 50
+      && gen3.on.length === 1 && gen3.visible.length === 1 && gen3.on[0] === gen3.visible[0],
+    JSON.stringify(gen3));
 
   // 换行业包必须重渲染它带来的那批参数。
   // #param-front 与快捷条胶囊都是**按包**生成的，而 fillPackSelect() 只在

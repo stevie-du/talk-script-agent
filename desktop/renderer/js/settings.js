@@ -444,6 +444,20 @@ export const bindSettings = bindOnce(function bindSettings() {
   document.querySelectorAll(".stg-nav-item").forEach(n => {
     n.onclick = () => setPane(n.dataset.pane);
   });
+
+  // 生成偏好：中列「分组条目」→ 右列显示对应分组的表单。
+  // 生成偏好是纯表单（没有天然列表），所以按 pack / param / adv 三块拆开，
+  // 中列点哪块右列显示哪块，跟知识库/技能「点文件看内容」是同一套骨架。
+  // 默认停在第一块（行业包）—— 它是「生成什么」的前提，也是新用户第一个要选的。
+  const genSecBtns = document.querySelectorAll("#gen-sec-list .pl-item");
+  const genSecCards = document.querySelectorAll("#gen-sec-detail .page-card[data-sec]");
+  const showGenSec = (sec) => {
+    genSecBtns.forEach(b => b.classList.toggle("on", b.dataset.sec === sec));
+    genSecCards.forEach(c => c.classList.toggle("hidden", c.dataset.sec !== sec));
+  };
+  genSecBtns.forEach(b => { b.onclick = () => showGenSec(b.dataset.sec); });
+  showGenSec("pack");
+
   $("btn-close-settings").onclick = closeSettings;
   $("btn-packinfo").onclick = () => setPane("packinfo");
   $("pi-close").onclick = () => setPane("gen");

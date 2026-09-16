@@ -182,54 +182,98 @@
 
   <section class="stg-main">
     <div class="stg-panes">
-      <section class="stg-pane" id="pane-gen" data-pane="gen">
+      <section class="stg-pane has-cols" id="pane-gen" data-pane="gen">
         <header class="page-head">
           <h2>生成偏好</h2>
           <p class="hint">配置默认风格、人设与输出形式，改动即时生效</p>
         </header>
-        <div class="page-card">
-          <div class="fg pack-row">
-            <label class="lbl">行业包</label>
-            <div class="row">
-              <select id="pack"></select>
-              <button id="btn-packinfo" class="ghost bordered" title="查看当前包的文件与配置">详情</button>
-              <button id="btn-newpack" class="ghost bordered" title="用模型生成新行业包">
-                <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-                新建
-              </button>
-            </div>
+        <h2>生成偏好</h2>
+          <p class="hint">配置默认风格、人设与输出形式，改动即时生效</p>
+        </header>
+        <!-- 三列骨架：中列「分组条目」+ 右列「该分组的表单」。
+             生成偏好本身是纯表单没有天然列表，所以按**分组**拆成三块，
+             中列点哪个分组、右列就显示哪个。 -->
+        <div class="stg-cols">
+          <div class="pane-list" id="gen-sec-list">
+            <p class="pl-sec-t">分组</p>
+            <button class="pl-item on" data-sec="pack" type="button">
+              <span class="pl-ic">
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></svg>
+              </span>
+              <span class="pl-txt">
+                <span class="pl-t">行业包</span>
+                <span class="pl-s">选择当前生效的行业</span>
+              </span>
+            </button>
+            <button class="pl-item" data-sec="param" type="button">
+              <span class="pl-ic">
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/><circle cx="18" cy="18" r="2.2"/><circle cx="12" cy="6" r="2.2"/><circle cx="7" cy="12" r="2.2"/></svg>
+              </span>
+              <span class="pl-txt">
+                <span class="pl-t">生成参数</span>
+                <span class="pl-s">时长、风格、人设</span>
+              </span>
+            </button>
+            <button class="pl-item" data-sec="adv" type="button">
+              <span class="pl-ic">
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>
+              </span>
+              <span class="pl-txt">
+                <span class="pl-t">进阶</span>
+                <span class="pl-s">生成方式、输出形式</span>
+              </span>
+            </button>
           </div>
-          <p class="hint cfg-err hidden" id="pack-err"></p>
-          <div id="param-front" class="fg"></div>
-        </div>
-        <div class="page-card">
-          <h3 class="card-title">进阶</h3>
-          <div class="fg">
-            <div class="block-inner">
-              <label class="lbl">生成方式</label>
-              <div class="row segmented">
-                <label class="radio"><input type="radio" name="mode" value="auto" checked> 一键直通</label>
-                <label class="radio"><input type="radio" name="mode" value="step"> 分步确认</label>
+
+          <div class="pane-detail" id="gen-sec-detail">
+            <div class="page-card" data-sec="pack">
+              <div class="fg pack-row">
+                <label class="lbl">行业包</label>
+                <div class="row">
+                  <select id="pack"></select>
+                  <button id="btn-packinfo" class="ghost bordered" title="查看当前包的文件与配置">详情</button>
+                  <button id="btn-newpack" class="ghost bordered" title="用模型生成新行业包">
+                    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                    新建
+                  </button>
+                </div>
               </div>
+              <p class="hint cfg-err hidden" id="pack-err"></p>
             </div>
-            <div class="block-inner">
-              <label class="lbl">输出内容</label>
-              <select id="format">
-                <option value="both" selected>口播 + 分镜</option>
-                <option value="voice">仅口播</option>
-              </select>
+            <div class="page-card" data-sec="param">
+              <h3 class="card-title">生成参数</h3>
+              <div id="param-front" class="fg"></div>
             </div>
-            <div class="block-inner">
-              <label class="lbl">文案人味</label>
-              <select id="voice">
-                <option value="strong" selected>加强（口语 + 具体细节）</option>
-                <option value="standard">标准（只去 AI 腔）</option>
-                <option value="off">关闭（原始文风）</option>
-              </select>
-            </div>
-            <div class="block-inner">
-              <label class="lbl">补充资料</label>
-              <textarea id="facts" rows="3" placeholder="产品手册 / 数据 / 案例，选填。例：主力机型载重 1050kg，市区 2 小时内到场"></textarea>
+            <div class="page-card" data-sec="adv">
+              <h3 class="card-title">进阶</h3>
+              <div class="fg">
+                <div class="block-inner">
+                  <label class="lbl">生成方式</label>
+                  <div class="row segmented">
+                    <label class="radio"><input type="radio" name="mode" value="auto" checked> 一键直通</label>
+                    <label class="radio"><input type="radio" name="mode" value="step"> 分步确认</label>
+                  </div>
+                </div>
+                <div class="block-inner">
+                  <label class="lbl">输出内容</label>
+                  <select id="format">
+                    <option value="both" selected>口播 + 分镜</option>
+                    <option value="voice">仅口播</option>
+                  </select>
+                </div>
+                <div class="block-inner">
+                  <label class="lbl">文案人味</label>
+                  <select id="voice">
+                    <option value="strong" selected>加强（口语 + 具体细节）</option>
+                    <option value="standard">标准（只去 AI 腔）</option>
+                    <option value="off">关闭（原始文风）</option>
+                  </select>
+                </div>
+                <div class="block-inner">
+                  <label class="lbl">补充资料</label>
+                  <textarea id="facts" rows="3" placeholder="产品手册 / 数据 / 案例，选填。例：主力机型载重 1050kg，市区 2 小时内到场"></textarea>
+                </div>
+              </div>
             </div>
           </div>
         </div>
