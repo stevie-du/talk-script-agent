@@ -1147,9 +1147,11 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 /* 三列面板需要更宽的限宽，否则中+右两列挤在 720px 里太窄。 */
 .stg-pane.has-cols { max-width: var(--w-stg-3col); }
 
-/* 中列条目（通用）：图标 + 标题 + 副标题，选中态靠 .on */
+/* 中列条目（通用）：图标 + 标题/副标题 + 右侧操作区，选中态靠 .on。
+   ⚠ 第三列 `auto` 是给条目自带的操作件留的（模型列表的启用开关就放这里）——
+   有它才不用把「哪个启用」挤到右列去，一眼就能看见。 */
 .pl-item {
-  display: grid; grid-template-columns: 30px 1fr; align-items: center; gap: var(--s3);
+  display: grid; grid-template-columns: 30px 1fr auto; align-items: center; gap: var(--s3);
   width: 100%; padding: 9px 10px;
   /* 与 .kb-item 同源的坑：全局 button{height:var(--h-btn)}（30px）会把它钉死。 */
   height: auto;
@@ -1159,7 +1161,14 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
   transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease);
 }
 .pl-item:hover { background: var(--fill); }
+/* `.on` = 业务上的「当前启用」；`.sel` = UI 上的「当前在右列编辑」。
+   两者是**不同的状态**，混在一个 class 上会出现「启用的那条永远高亮、
+   切到别的条目看不出选中了谁」。 */
 .pl-item.on { background: var(--surface); border-color: var(--line-strong); box-shadow: var(--shadow-raised); }
+.pl-item.sel {
+  background: var(--sel-bg); border-color: var(--line-strong);
+}
+.pl-item.sel .pl-t { font-weight: 600; }
 .pl-item .pl-ic {
   width: 30px; height: 30px; border-radius: var(--r-sm);
   display: grid; place-items: center; background: var(--fill); color: var(--text-2);
@@ -1174,6 +1183,17 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
   font-size: var(--f-xs); color: var(--text-3);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+/* 条目右侧操作区（如启用开关）：不参与条目点击选中，要自己 stopPropagation。 */
+.pl-act { display: flex; align-items: center; gap: var(--s1); flex: 0 0 auto; }
+/* 条目里的「内置默认 / 未配置 Key」小标：副标题是 block，inline 元素的
+   margin-top 会被忽略 —— 与 .mdl-table .tag-default 同一个坑。 */
+.pl-item .tag-default, .pl-item .tag-warn {
+  display: inline-block; margin-top: 4px;
+  font-size: var(--f-min); padding: 1px 5px; border-radius: var(--r-xs);
+}
+.pl-item .tag-default { background: var(--fill); color: var(--text-2); }
+.pl-item .tag-warn { background: var(--bad-soft); color: var(--bad); }
+
 /* 中列分组标题 */
 .pl-sec-t {
   font-size: var(--f-xs); font-weight: 600; color: var(--text-3);

@@ -102,6 +102,13 @@ export function setPane(pane) {
     openPackInfo().catch(e => toast("读取失败：" + e.message, 3500));
   } else if (pane === "kb" || pane === "skills") {
     openPackFiles(pane);
+  } else if (pane === "llm") {
+    // 进入模型面板：右列默认停在「当前启用」那条 —— 空着的话第一眼看到的是
+    // 一张空表单，会以为还没配模型。
+    if (!editingId) {
+      const act = ((lastCfg || {}).models || []).find(x => x.active);
+      selectModel(act ? act.id : "");
+    }
   }
   return pane;
 }
@@ -178,77 +185,81 @@ export function providerOf(baseUrl) {
 
 const FIELD_LABEL = { base_url: "请求地址", model: "模型 ID" };
 
+/**
+ * 渲染中列的模型条目列表（三列骨架的「第二层级」）。
+ * 原来这里渲染的是 `<table class="mdl-table">` 的行；改成 `.pl-item` 条目后
+ * 每条仍是「名称 + 模型ID·服务商 + 标记 + 启用开关」，只是从表格列变成条目行。
+ * ⚠ 保留了 mdl-label / mdl-sub / mdl-switch / tag-default / tag-warn 这些类名，
+ * 断言口径得以延续（只把 `#st-model-rows tr` 换成 `#llm-list .pl-item`）。
+ */
 function renderModelList(c) {
-  const tb = $("st-model-rows");
-  if (!tb) return;
+  const list = $("llm-list");
+  if (!list) return;
   const models = c.models || [];
-  tb.innerHTML = "";
-  const empty = $("st-model-empty");
-  if (empty) {
-    empty.textContent = models.length ? "" : "还没有模型 —— 点右上角「添加模型」。";
-    empty.classList.toggle("hidden", !!models.length);
+  list.innerHTML = "";
+  if (!models.length) {
+    list.appendChild(el("p", "hint", "还没有模型 —— 点右上角「添加模型」。"));
+    return;
   }
-  for (const m of models) {
-    const tr = el("tr");
-    tr.dataset.id = m.id;
-    // 当前启用的那一行要有视觉落点：不然「启用」列的开关看着都一样
-    if (m.active) tr.classList.add("on");
-
-    const tdN = el("td", "col-mdl");
-    tdN.appendChild(el("span", "mdl-label", esc(m.label || m.model || m.id)));
-    const sub = el("span", "mdl-sub", esc(`${m.model || "—"} · ${providerOf(m.base_url)}`));
-    sub.title = m.base_url || "";
-    tdN.appendChild(sub);
-    const dfl = m.defaulted || [];
-    if (dfl.length) {
-      const t = el("span", "tag-default", "内置默认");
-      // data-field 让「标了哪些字段」可以被机器核对 —— 界面上标出的集合
-      // 必须与后端 llm_defaulted 说的完全一致，多一个少一个都是错的。
-      t.dataset.field = dfl.join(",");
-      t.title = `这条的${dfl.map(f => FIELD_LABEL[f] || f).join("、")}`
-        + "还是内置默认，不是你保存过的配置";
-      tdN.appendChild(t);
-    }
-    // 没 Key 要说出来：启用它生成必被拒，而列表上一切正常。
-    // 环境变量给了 Key 时不说 —— 那时它其实能用，报「未配置」就是误报。
-    if (!m.api_key_set && !c.env_override) {
-      const t = el("span", "tag-warn", "未配置 Key");
-      t.title = "这条模型没有 Key，启用它生成会被拒绝";
-      tdN.appendChild(t);
-    }
-    tr.appendChild(tdN);
-
-    tr.appendChild(el("td", "col-prov", esc(providerOf(m.base_url))));
-
-    const tdOn = el("td", "col-on");
-    const sw = el("button", "mdl-switch" + (m.active ? " on" : ""));
-    sw.type = "button";
-    sw.setAttribute("role", "switch");
-    sw.setAttribute("aria-checked", m.active ? "true" : "false");
-    sw.title = m.active ? "当前启用的模型（同一时间只有一个）"
-      : "启用这个模型（同一时间只有一个）";
-    sw.onclick = () => activateModel(m.id);
-    tdOn.appendChild(sw);
-    tr.appendChild(tdOn);
-
-    const tdO = el("td", "col-ops");
-    const op = (cls, text, fn, title, disabled) => {
-      const b = el("button", "mdl-op" + (cls ? " " + cls : ""), text);
-      b.type = "button";
-      if (title) b.title = title;
-      if (disabled) b.disabled = true;
-      else b.onclick = fn;
-      return b;
-    };
-    tdO.appendChild(op("", "测试", () => testModel(m),
-      "用这条模型的配置发一个最小请求，验证是否连通"));
-    tdO.appendChild(op("", "编辑", () => openModelDialog(m.id)));
-    tdO.appendChild(op("danger", "删除", () => removeModel(m),
-      models.length > 1 ? "删掉这条模型（它的地址与 Key 一起删）"
-        : "至少要保留一个模型", models.length <= 1));
-    tr.appendChild(tdO);
-    tb.appendChild(tr);
+  for (const m of models) list.appendChild(modelItem(m, models.length, c));
+  // 列表是整块重建的，重建后要把「右列正在编辑那条」的 .sel 补回去 ——
+  // 否则一保存/一刷新，中列就再也看不出选中了谁。
+  if (editingId) {
+    const cur = list.querySelector(`.pl-item[data-id="${CSS.escape(editingId)}"]`);
+    if (cur) cur.classList.add("sel");
   }
+}
+
+function modelItem(m, total, c) {
+  const prov = providerOf(m.base_url);
+  const item = el("button", "pl-item");
+  item.type = "button";
+  item.dataset.id = m.id;
+  // 当前启用的那条要有视觉落点：不然开关看着都一样
+  if (m.active) item.classList.add("on");
+
+  // 图标：服务商首字（条目窄，放不下完整名字）
+  item.appendChild(el("span", "pl-ic", prov.slice(0, 1)));
+
+  const txt = el("span", "pl-txt");
+  txt.appendChild(el("span", "pl-t mdl-label", esc(m.label || m.model || m.id)));
+  const sub = el("span", "pl-s mdl-sub", esc(`${m.model || "—"} · ${prov}`));
+  sub.title = m.base_url || "";
+  txt.appendChild(sub);
+  const dfl = m.defaulted || [];
+  if (dfl.length) {
+    const t = el("span", "tag-default", "内置默认");
+    // data-field 让「标了哪些字段」可以被机器核对 —— 界面上标出的集合
+    // 必须与后端 llm_defaulted 说的完全一致，多一个少一个都是错的。
+    t.dataset.field = dfl.join(",");
+    t.title = `这条的${dfl.map(f => FIELD_LABEL[f] || f).join("、")}`
+      + "还是内置默认，不是你保存过的配置";
+    txt.appendChild(t);
+  }
+  // 没 Key 要说出来：启用它生成必被拒，而列表上一切正常。
+  // 环境变量给了 Key 时不说 —— 那时它其实能用，报「未配置」就是误报。
+  if (!m.api_key_set && !c.env_override) {
+    const t = el("span", "tag-warn", "未配置 Key");
+    t.title = "这条模型没有 Key，启用它生成会被拒绝";
+    txt.appendChild(t);
+  }
+  item.appendChild(txt);
+
+  // 右侧操作区：启用开关（点它不该顺带切换右列选中，所以要 stopPropagation）
+  const act = el("span", "pl-act");
+  const sw = el("button", "mdl-switch" + (m.active ? " on" : ""));
+  sw.type = "button";
+  sw.setAttribute("role", "switch");
+  sw.setAttribute("aria-checked", m.active ? "true" : "false");
+  sw.title = m.active ? "当前启用的模型（同一时间只有一个）"
+    : "启用这个模型（同一时间只有一个）";
+  sw.onclick = (e) => { e.stopPropagation(); activateModel(m.id); };
+  act.appendChild(sw);
+  item.appendChild(act);
+
+// 点条目 = 选中，右列加载它的编辑表单（原来是「编辑」按钮开弹窗）
+  item.onclick = () => selectModel(m.id);
+  return item;
 }
 
 async function activateModel(id) {
@@ -292,15 +303,25 @@ async function testModel(m) {
 
 let editingId = "";
 
-function openModelDialog(id) {
+/**
+ * 选中一个模型：右列加载它的编辑表单（**不再开弹窗**）。
+ * 原来是 openModelDialog(id) + openOverlay("model-dialog")；三列化之后
+ * 编辑就在右列进行，弹窗已从 DOM 移除（留着会有两套编辑 UI）。
+ *
+ * ⚠ 条目上 `.on` 表示「当前启用」（业务状态，沿用原表格 tr.on 的口径），
+ *   而「当前在右列编辑」是另一回事，用 `.sel` —— 两个状态混在一个 class 上
+ *   会出现「启用的那条永远高亮、切到别的条目看不出选中了谁」。
+ */
+function selectModel(id) {
   editingId = id || "";
-  const m = ((lastCfg || {}).models || []).find(x => x.id === id) || null;
+  const models = (lastCfg || {}).models || [];
+  const m = models.find(x => x.id === id) || null;
   const dfl = new Set(m ? (m.defaulted || []) : []);
   $("md-id").value = editingId;
   $("md-title").textContent = m ? "编辑模型" : "添加模型";
   $("md-sub").textContent = m
     ? "改完点保存即生效；API Key 留空表示不改动已存的那把。"
-    : "填好保存后，可以在列表里随时启用它。";
+    : "填好保存后，可以在左列随时启用它。";
   // ⚠ 回填的是**文件里存着的值**，不是生效值。
   // 一条没配过地址的模型，生效值里那个地址是内置默认兜出来的 —— 填进框里
   // 就变成了「你填的」，用户没动过手却看到一串地址，而且保存一次它就真的成了
@@ -315,12 +336,19 @@ function openModelDialog(id) {
   markDefault("md-model", dfl.has("model"), "model");
   markDefault("md-baseurl", dfl.has("base_url"), "base_url");
   $("md-status").textContent = "";
-  openOverlay("model-dialog");
+  // 「删除」只在编辑既有模型、且不止一条时可用 —— 至少要保留一个模型。
+  const del = $("md-delete");
+  if (del) del.classList.toggle("hidden", !m || models.length <= 1);
+  // 中列选中态（.sel，与「启用」的 .on 分开）
+  document.querySelectorAll("#llm-list .pl-item").forEach(n => {
+    n.classList.toggle("sel", n.dataset.id === id);
+  });
 }
 
+/** 取消编辑：回到「选中当前启用那条」的状态（不再有弹窗可关）。 */
 function closeModelDialog() {
-  $("model-dialog").classList.add("hidden");
-  editingId = "";
+  const act = ((lastCfg || {}).models || []).find(x => x.active);
+  selectModel(act ? act.id : "");
 }
 
 async function saveModelDialog() {
@@ -336,8 +364,11 @@ async function saveModelDialog() {
   if (key) body.api_key = key;
   try {
     const out = await api.saveModel(body);
-    closeModelDialog();
+    // 保存后要**停在刚保存的那条**上，而不是跳回「当前启用」那条 ——
+    // 编辑一条非启用模型时跳走，用户会以为没保存上。
+    const savedId = (out && out.id) || editingId;
     await refreshAll();
+    selectModel(savedId);
     toast(`已保存模型「${model}」`);
     return out;
   } catch (e) {
@@ -495,12 +526,18 @@ export const bindSettings = bindOnce(function bindSettings() {
   // 不再是直接改服务端（那会绕过「这条模型到底存了什么」）。
   $("st-reset-adv").onclick = () => resetField(
     ["retries", "timeout", "max_tokens"], ["st-retries", "st-timeout", "st-maxtokens"]);
-  $("st-add-model").onclick = () => openModelDialog("");
+  // 「添加模型」：右列切到空表单（editingId=""），不再是开弹窗。
+  $("st-add-model").onclick = () => selectModel("");
   $("md-cancel").onclick = closeModelDialog;
   $("md-save").onclick = saveModelDialog;
   $("md-test").onclick = testModelDialog;
   $("md-reset-model").onclick = () => fillDefault("md-model", "model");
   $("md-reset-baseurl").onclick = () => fillDefault("md-baseurl", "base_url");
+  // 「删除」移到右列（原来在表格的操作列）：删完回到当前启用那条。
+  $("md-delete").onclick = async () => {
+    const m = ((lastCfg || {}).models || []).find(x => x.id === editingId);
+    if (m) { await removeModel(m); closeModelDialog(); }
+  };
   $("kb-pack").onchange = () => openPackFiles(state.settingsPane);
   $("skills-pack").onchange = () => openPackFiles(state.settingsPane);
   $("pi-export").onclick = exportSkill;

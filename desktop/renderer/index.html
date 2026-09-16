@@ -431,7 +431,7 @@
         </div>
       </section>
 
-      <section class="stg-pane hidden" id="pane-llm" data-pane="llm">
+      <section class="stg-pane hidden has-cols" id="pane-llm" data-pane="llm">
         <header class="page-head">
           <div class="page-head-titles">
             <h2>模型接口</h2>
@@ -445,29 +445,61 @@
             </button>
           </div>
         </header>
-        <div class="page-card">
-          <div class="block-inner">
-            <label class="lbl">模型</label>
-            <div class="mdl-wrap">
-              <table class="mdl-table">
-                <thead>
-                  <tr>
-                    <th class="col-mdl">模型</th>
-                    <th class="col-prov">服务商</th>
-                    <th class="col-on">启用</th>
-                    <th class="col-ops">操作</th>
-                  </tr>
-                </thead>
-                <tbody id="st-model-rows"></tbody>
-              </table>
-              <p class="hint" id="st-model-empty"></p>
-            </div>
-            <p class="hint">「启用」同时只能有一个 —— 生成时用它。切换立刻生效，
-              正在跑的作业不受影响。每条模型各存各的 Key，换一家不用重填。</p>
+        <!-- 三列骨架：中列「模型条目」+ 右列「选中模型的编辑表单」。
+               原来编辑走弹层（model-dialog），现在改成点条目 → 右栏直接编辑，
+               与知识库/技能「点文件看内容」同一套骨架。 -->
+        <div class="stg-cols">
+          <div class="pane-list" id="llm-list">
+            <!-- 模型条目由 renderModelList() 渲染到这里 -->
           </div>
 
-          <!-- 高级配置：与「连到哪家」无关的生成参数，收起来不占主区。
-               原来它们和连接信息平铺在一起，用户以为「模型」这一页要填七个框。 -->
+          <div class="pane-detail">
+            <!-- 编辑 / 添加模型的表单（原「模型弹窗」内容搬进右列） -->
+            <div class="page-card" id="md-form-card">
+              <h3 class="card-title" id="md-title">添加模型</h3>
+              <p class="hint" id="md-sub"></p>
+              <input type="hidden" id="md-id">
+              <div class="fg">
+                <div class="block-inner">
+                  <label class="lbl">模型 ID
+                    <button class="linkbtn" id="md-reset-model" type="button"
+                            title="恢复为内置默认模型名">恢复默认</button>
+                  </label>
+                  <input id="md-model" placeholder="glm-4.7 / deepseek-chat">
+                  <p class="hint">发给服务端的模型名，要和服务商文档里写的一致。</p>
+                </div>
+                <div class="block-inner">
+                  <label class="lbl">展示名称</label>
+                  <input id="md-name" placeholder="留空则直接显示模型 ID">
+                </div>
+                <div class="block-inner">
+                  <label class="lbl">请求地址
+                    <button class="linkbtn" id="md-reset-baseurl" type="button"
+                            title="恢复为内置默认地址">恢复默认</button>
+                  </label>
+                  <input id="md-baseurl" placeholder="https://open.bigmodel.cn/api/paas/v4">
+                  <p class="hint">OpenAI 兼容接口的根地址，<b>不要</b>带 /chat/completions。</p>
+                </div>
+                <div class="block-inner">
+                  <label class="lbl">API Key</label>
+                  <input id="md-apikey" type="password" placeholder="已配置时留空即保持不变"
+                         data-ph-empty="粘贴你的 API Key">
+                </div>
+              </div>
+              <p class="hint" id="md-status"></p>
+              <div class="page-actions">
+                <button class="ghost" id="md-test"
+                        title="用上面填的值发一个最小请求，验证是否连通">测试连接</button>
+                <button class="ghost danger-text" id="md-delete"
+                        title="删掉这条模型（它的地址与 Key 一起删）">删除</button>
+                <span class="spacer"></span>
+                <button class="ghost" id="md-cancel">取消</button>
+                <button class="primary slim" id="md-save">保存</button>
+              </div>
+            </div>
+
+            <!-- 高级配置：与「连到哪家」无关的生成参数，收起来不占主区。
+                 原来它们和连接信息平铺在一起，用户以为「模型」这一页要填七个框。 -->
           <details class="st-adv" id="st-adv">
             <summary>
               <span class="st-adv-t">高级配置</span>
@@ -509,7 +541,8 @@
           <div class="page-actions">
             <span class="spacer"></span>
             <button class="primary slim" id="st-save"
-                    title="保存高级配置（连接信息在「添加 / 编辑模型」里保存）">保存</button>
+                    title="保存高级配置（连接信息在右列的模型表单里保存）">保存</button>
+          </div>
           </div>
         </div>
       </section>
@@ -559,45 +592,10 @@
      请求地址 / API Key 四栏，加上「测试连接」。
      刻意**不做成设置页里的一行行输入框**：那是修复前的样子，加第二个模型时
      用户没有任何位置可填，只能把第一个覆盖掉。 -->
-<div id="model-dialog" class="overlay hidden">
-  <div class="dialog">
-    <h3 id="md-title">添加模型</h3>
-    <p class="hint" id="md-sub"></p>
-    <input type="hidden" id="md-id">
-    <div class="block-inner">
-      <label class="lbl">模型 ID
-        <button class="linkbtn" id="md-reset-model" type="button"
-                title="恢复为内置默认模型名">恢复默认</button>
-      </label>
-      <input id="md-model" placeholder="glm-4.7 / deepseek-chat">
-      <p class="hint">发给服务端的模型名，要和服务商文档里写的一致。</p>
-    </div>
-    <div class="block-inner">
-      <label class="lbl">展示名称</label>
-      <input id="md-name" placeholder="留空则直接显示模型 ID">
-    </div>
-    <div class="block-inner">
-      <label class="lbl">请求地址
-        <button class="linkbtn" id="md-reset-baseurl" type="button"
-                title="恢复为内置默认地址">恢复默认</button>
-      </label>
-      <input id="md-baseurl" placeholder="https://open.bigmodel.cn/api/paas/v4">
-      <p class="hint">OpenAI 兼容接口的根地址，<b>不要</b>带 /chat/completions。</p>
-    </div>
-    <div class="block-inner">
-      <label class="lbl">API Key</label>
-      <input id="md-apikey" type="password" placeholder="已配置时留空即保持不变"
-             data-ph-empty="粘贴你的 API Key">
-    </div>
-    <p class="hint" id="md-status"></p>
-    <div class="dialog-actions">
-      <button class="ghost" id="md-test" title="用上面填的值发一个最小请求，验证是否连通">测试连接</button>
-      <span class="spacer"></span>
-      <button class="ghost" id="md-cancel">取消</button>
-      <button class="primary slim" id="md-save">保存</button>
-    </div>
-  </div>
-</div>
+<!-- 「模型弹窗」已于 2026-09-17 移除：添加/编辑模型改为**右栏内编辑**
+     （三列骨架），原弹窗那张表单搬进了 #pane-llm 的 .pane-detail 里的
+     #md-form-card。删掉 overlay 是**有意的** —— 留着就有两套编辑 UI，
+     「到底该改哪套」的问题迟早出现（同一信息两份表示）。 -->
 
 <div id="toast" class="toast hidden"></div>
 <script type="module" src="/static/js/main.js"></script>

@@ -861,26 +861,30 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await sleep(300);
   const llm = await evalIn(`return {
     temp: document.getElementById('st-temperature')?.value,
-    rows: document.querySelectorAll('#st-model-rows tr').length,
-    label: document.querySelector('#st-model-rows .mdl-label')?.textContent,
-    sub: document.querySelector('#st-model-rows .mdl-sub')?.textContent,
-    prov: document.querySelector('#st-model-rows .col-prov')?.textContent,
-    activeRows: document.querySelectorAll('#st-model-rows tr.on').length,
-    switchOn: document.querySelectorAll('#st-model-rows .mdl-switch.on').length,
-    ops: document.querySelectorAll('#st-model-rows .mdl-op').length,
+    // 三列化后模型列表从 <table> 行改成中列的 .pl-item 条目
+    // （保留 mdl-label / mdl-sub / mdl-switch 类名，断言口径得以延续）
+    rows: document.querySelectorAll('#llm-list .pl-item').length,
+    label: document.querySelector('#llm-list .pl-item .mdl-label')?.textContent,
+    sub: document.querySelector('#llm-list .pl-item .mdl-sub')?.textContent,
+    // 服务商不再有独立的 .col-prov 列，合并进 mdl-sub（「模型ID · 服务商」）
+    activeRows: document.querySelectorAll('#llm-list .pl-item.on').length,
+    switchOn: document.querySelectorAll('#llm-list .pl-item .mdl-switch.on').length,
+    // 操作按钮从表格的 .mdl-op 移到右列的 #md-form-card
+    ops: ['md-test', 'md-save', 'md-cancel'].filter(function (id) {
+      return !!document.getElementById(id); }).length,
     status: document.getElementById('st-status').textContent,
     cfgErrHidden: document.getElementById('st-cfg-err')?.classList.contains('hidden'),
     cfgErrText: document.getElementById('st-cfg-err')?.textContent || '' };`);
-  // 模型从「三个平铺输入框」变成了**一份列表**：一行一条，带服务商与操作。
+  // 模型从「三个平铺输入框」变成了**一份列表**：一条一个，带服务商与操作。
   // 平铺那版加第二个模型没有位置可填，只能把第一个覆盖掉。
-  check("模型接口列出模型（一行一条，含服务商与操作）",
-    llm.rows === 1 && llm.ops === 3 && !!llm.prov,
+  check("模型接口列出模型（中列条目一条一条，右列有操作按钮）",
+    llm.rows === 1 && llm.ops === 3 && /·/.test(llm.sub || ""),
     JSON.stringify(llm));
-  check("模型行显示模型名与「模型 ID · 主机名」小字",
+  check("模型条目显示模型名与「模型 ID · 服务商」小字",
     llm.label === "glm-4.7" && /glm-4\.7/.test(llm.sub || ""),
     JSON.stringify({ label: llm.label, sub: llm.sub }));
-  // 当前启用的那一行要有落点：否则三行长得一样，只能靠开关的明暗去猜
-  check("当前启用的模型行有唯一落点（行高亮 + 开关亮着）",
+  // 当前启用的那一条要有落点：否则几条长得一样，只能靠开关的明暗去猜
+  check("当前启用的模型条目有唯一落点（条高亮 + 开关亮着）",
     llm.activeRows === 1 && llm.switchOn === 1,
     JSON.stringify({ activeRows: llm.activeRows, switchOn: llm.switchOn }));
   // 表头与「当前启用」那一行**不能同色相邻**。
@@ -889,11 +893,16 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   // 看不出哪一行才是数据；行自带 --r-sm 圆角，还在表头下沿留了两个白缺口。
   // 表头现在只用一条发丝线（与全站其他表格一致），灰底归那一行独占。
   //
-  // 判据取「有效底色」的**亮度差**，不取颜色字符串：
-  //   - 表头背景是透明的，往上找到的底是白页 —— 字符串比会把「透明 vs 灰」判成不同，
-  //     而真正要守的是「两者读起来不是一块」；
-  //   - 逐层把 rgba 叠到白底上再比亮度，改回 --fill 时差值会归 0，报红。
-  const tblHead = await evalIn(`return (function(){
+  // 三列化后表格没了（没有 thead），但**同类风险换了个地方**：
+  // 「当前启用」的那条 `.pl-item.on` 若底色与列表容器同色、又没有描边，
+  // 就是**隐形**—— 与上一轮修的「内容查看器 4% 底隐形」是同一个坑。
+  // 所以判据从「表头 vs 启用行」改成「启用条目 vs 它所在的列表」。
+  //
+  // 仍取「有效底色」的**亮度差**，不取颜色字符串：
+  //   - 背景可能是透明的，往上找到的底才是白页 —— 字符串比会把「透明 vs 白」
+  //     判成不同，而真正要守的是「两者读起来不是一块」；
+  //   - 逐层把 rgba 叠到白底上再比亮度；差值不足时还允许靠**描边**兜住。
+  const mdlOn = await evalIn(`return (function(){
     function bgOf(n){
       var stack = [];
       for (var e = n; e; e = e.parentElement) {
@@ -911,17 +920,33 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       }
       return (out.r + out.g + out.b) / 3;
     }
-    var th = document.querySelector('.mdl-table thead th');
-    var tr = document.querySelector('.mdl-table tbody tr.on');
-    var cs = getComputedStyle(th);
-    return { headLum: bgOf(th), rowLum: bgOf(tr),
-             headBg: getComputedStyle(th).backgroundColor,
-             headBottom: cs.borderBottomWidth };
+    var on = document.querySelector('#llm-list .pl-item.on');
+    var list = document.querySelector('#llm-list');
+    if (!on || !list) return { none: true };
+    var cs = getComputedStyle(on);
+    return { onLum: bgOf(on), listLum: bgOf(list),
+             onBg: cs.backgroundColor,
+             hasBorder: cs.boxShadow !== 'none' || parseFloat(cs.borderTopWidth) > 0 };
   })()`);
-  check("表头与「当前启用」行不是同一种底色（不再连成一整块灰）",
-    Math.abs(tblHead.headLum - tblHead.rowLum) >= 6
-      && parseFloat(tblHead.headBottom) > 0,
-    JSON.stringify(tblHead));
+  check("「当前启用」的条目在列表里看得出来（底色拉得开或有描边，不隐形）",
+    !mdlOn.none
+      && (Math.abs(mdlOn.onLum - mdlOn.listLum) >= 6 || mdlOn.hasBorder),
+    JSON.stringify(mdlOn));
+
+  // 模型接口的三列形态：中列条目 + 右列编辑表单，且**弹窗已从 DOM 移除**。
+  // 留着弹窗就会有「两套编辑 UI」，改哪套的问题迟早出现（同一信息两份表示）。
+  const llm3 = await evalIn(`var list = document.querySelector('#llm-list');
+    var detail = document.querySelector('#pane-llm .pane-detail');
+    var lr = list.getBoundingClientRect(), dr = detail.getBoundingClientRect();
+    return { listW: Math.round(lr.width), detailW: Math.round(dr.width),
+             sideBySide: Math.round(dr.left - lr.right),
+             dialogGone: !document.getElementById('model-dialog'),
+             formInDetail: !!document.querySelector('#pane-llm .pane-detail #md-form-card') };`);
+  check("模型接口是中列条目 + 右列编辑（三列骨架，且模型弹窗已移除）",
+    llm3.listW === 258 && llm3.detailW > 600
+      && llm3.sideBySide >= 0 && llm3.sideBySide < 50
+      && llm3.dialogGone && llm3.formInDetail,
+    JSON.stringify(llm3));
   check("接口状态显示重试/超时等实际生效值", /重试/.test(llm.status), llm.status);
   // 前端**不许**比后端更严：1.8 是后端接受的合法值（区间 0 ~ 2）。
   // 修复前前端单独一个 if 卡 1.5 → 点保存弹 toast 并 return，
@@ -970,7 +995,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     document.getElementById('st-add-model').click(); return true;`);
   await sleep(400);
   const dlg = await evalIn(`return {
-    open: !document.getElementById('model-dialog').classList.contains('hidden'),
+    open: !document.getElementById('md-form-card').classList.contains('hidden'),
     title: document.getElementById('md-title').textContent,
     id: document.getElementById('md-id').value,
     url: document.getElementById('md-baseurl').value,
@@ -982,14 +1007,22 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await sleep(200);
   const dreset = await evalIn(`return {
     url: document.getElementById('md-baseurl').value,
-    tag: document.querySelector('#model-dialog .tag-default')?.dataset.field || '' };`);
+    tag: document.querySelector('#md-form-card .tag-default')?.dataset.field || '' };`);
   check("弹窗「恢复默认」把内置默认地址填进框里",
     dreset.url === "https://x/v4", JSON.stringify(dreset));
   await evalIn(`document.getElementById('md-cancel').click(); return true;`);
   await sleep(200);
-  const dclosed = await evalIn(
-    `return document.getElementById('model-dialog').classList.contains('hidden');`);
-  check("弹窗可以取消，不留残余浮层", dclosed === true, String(dclosed));
+  // 原来是「弹窗可以取消，不留残余浮层」；三列化后表单常驻右列、不再有浮层，
+// 所以「取消」的语义变成**回到当前启用的那条**、把刚才填的东西丢掉。
+// 守的是状态被重置（不留残余），不是 hidden。
+const dclosed = await evalIn(`var on = document.querySelector('#llm-list .pl-item.on');
+  return { id: document.getElementById('md-id').value,
+           onId: on ? on.dataset.id : null,
+           title: document.getElementById('md-title').textContent,
+           url: document.getElementById('md-baseurl').value };`);
+check("取消编辑后回到当前启用的那条，且不留残余输入",
+  !!dclosed.onId && dclosed.id === dclosed.onId && dclosed.title === "编辑模型",
+  JSON.stringify(dclosed));
 
   // 重试 / 超时 / 输出预算：原来只在状态行里展示、无法修改
   const adv = await evalIn(`window.__ts.setPane('llm');
@@ -1868,7 +1901,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       return [].concat.apply([], Array.from(root.querySelectorAll('.tag-default'))
         .map(function(t){ return (t.dataset.field || '').split(',').filter(Boolean); }));
     }
-    var row = document.querySelector('#st-model-rows tr.on');
+    var row = document.querySelector('#llm-list .pl-item.on');
     var tags = Array.from(row.querySelectorAll('.tag-default'));
     var sub = row.querySelector('.mdl-sub');
     var s = document.getElementById('p-model');
@@ -1911,22 +1944,24 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     notCfg.pickerText === "glm-4.7（默认）" && notCfg.pickerValue === "m-default",
     JSON.stringify(notCfg));
 
-  // 编辑弹窗里，**没配过的字段必须留空**，不能把生效值（兜出来的默认地址）
+  // 右列编辑表单里，**没配过的字段必须留空**，不能把生效值（兜出来的默认地址）
   // 填进框里 —— 那等于程序写的值冒充用户输入，用户没动过手却看到一串地址，
   // 而且保存一次它就真的成了他的配置。
-  await evalIn(`document.querySelectorAll('#st-model-rows tr.on .mdl-op')[1].click();
+  // （原来是点表格里的「编辑」按钮开弹窗；三列化后**点条目本身**即选中编辑。）
+  await evalIn(`document.querySelector('#llm-list .pl-item.on').click();
     return true;`);
   await sleep(300);
   const editDlg = await evalIn(`return {
-    open: !document.getElementById('model-dialog').classList.contains('hidden'),
+    open: !document.getElementById('md-form-card').classList.contains('hidden'),
     title: document.getElementById('md-title').textContent,
     url: document.getElementById('md-baseurl').value,
     model: document.getElementById('md-model').value,
     ph: document.getElementById('md-baseurl').placeholder,
-    tags: Array.from(document.querySelectorAll('#model-dialog .tag-default'))
+    // 「内置默认」小标现在挂在中列条目上（不再是弹窗里的字段旁）
+    tags: Array.from(document.querySelectorAll('#llm-list .pl-item.on .tag-default'))
             .map(t => t.dataset.field).sort().join(),
     akPh: document.getElementById('md-apikey').placeholder };`);
-  check("编辑一条没配过的模型：弹窗标题是「编辑」，字段留空并逐项标出内置默认",
+  check("编辑一条没配过的模型：右列标题是「编辑」，字段留空并逐项标出内置默认",
     editDlg.open && editDlg.title === "编辑模型"
     && editDlg.url === "" && editDlg.model === ""
     && editDlg.tags === "base_url,model", JSON.stringify(editDlg));
@@ -1955,7 +1990,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       return [].concat.apply([], Array.from(root.querySelectorAll('.tag-default'))
         .map(function(t){ return (t.dataset.field || '').split(',').filter(Boolean); }));
     }
-    var row = document.querySelector('#st-model-rows tr.on');
+    var row = document.querySelector('#llm-list .pl-item.on');
     var h3 = document.querySelector('#empty h3');
     return { fields: fields(row).concat(fields(document.getElementById('st-adv'))).sort().join(),
              heroTitle: window.__shown(h3),
@@ -1964,7 +1999,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   // 走**用户真实的路径**：打开这条模型的编辑弹窗 → 填地址与模型名 → 保存。
   // 不能绕过界面直接调接口 —— 那样测的是后端，不是「界面会不会把标记摘掉」。
   // 填 Key 是必须的：不填的话「已配置」这个状态根本不会到来。
-  await evalIn(`document.querySelectorAll('#st-model-rows tr.on .mdl-op')[1].click(); return true;`);
+  await evalIn(`document.querySelector('#llm-list .pl-item.on').click(); return true;`);
   await sleep(300);
   await evalIn(`document.getElementById('md-reset-baseurl').click();
     var m = document.getElementById('md-model'); m.value = 'glm-4.7';
@@ -1978,13 +2013,16 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       return [].concat.apply([], Array.from(root.querySelectorAll('.tag-default'))
         .map(function(t){ return (t.dataset.field || '').split(',').filter(Boolean); }));
     }
-    var row = document.querySelector('#st-model-rows tr.on');
+    var row = document.querySelector('#llm-list .pl-item.on');
     var s = document.getElementById('p-model');
     var b = s && s.parentNode.querySelector('.select-btn');
     var h3 = document.querySelector('#empty h3');
     return { fields: fields(row).concat(fields(document.getElementById('st-adv'))).sort().join(),
              rowTags: row.querySelectorAll('.tag-default').length,
-             dlgHidden: document.getElementById('model-dialog').classList.contains('hidden'),
+             // 三列化后编辑表单**常驻右列、不再隐藏** —— 所以不再查 dlgHidden。
+             // 要守的是「保存后停在刚保存的那条」，而不是「弹窗关了」。
+             mdId: document.getElementById('md-id').value,
+             rowId: row ? row.dataset.id : null,
              pickerText: b ? b.querySelector('.sel-text').textContent : '',
              heroTitle: window.__shown(h3),
              heroBtn: !document.querySelector('#empty .empty-cta').classList.contains('hidden') };
@@ -1995,7 +2033,11 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     beforeSave.fields === "base_url,max_tokens,model,retries,temperature,timeout"
     && afterSave.fields === "max_tokens,retries,temperature,timeout",
     `${beforeSave.fields} → ${afterSave.fields}`);
-  check("保存后弹窗自动关闭", afterSave.dlgHidden === true, String(afterSave.dlgHidden));
+  // 原来是「保存后弹窗自动关闭」；三列化后没有弹窗了，改成守更有意义的那件事：
+  // **保存后要停在刚保存的那条** —— 若跳回「当前启用」那条，用户会以为没保存上。
+  check("保存后右列停在刚保存的那条（不是跳回当前启用那条）",
+    !!afterSave.rowId && afterSave.mdId === afterSave.rowId,
+    JSON.stringify({ mdId: afterSave.mdId, rowId: afterSave.rowId }));
   check("保存后模型选择器同步摘掉「（默认）」",
     afterSave.pickerText === "glm-4.7", afterSave.pickerText);
 
@@ -2013,7 +2055,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       return [].concat.apply([], Array.from(root.querySelectorAll('.tag-default'))
         .map(function(t){ return (t.dataset.field || '').split(',').filter(Boolean); }));
     }
-    var row = document.querySelector('#st-model-rows tr.on');
+    var row = document.querySelector('#llm-list .pl-item.on');
     return { fields: fields(row).concat(fields(document.getElementById('st-adv'))).join(),
              advSub: document.getElementById('st-adv-sub').textContent };
   })()`);
@@ -2049,7 +2091,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     var n = document.getElementById('st-cfg-err');
     if (!n) return { missing: true };
     var cs = getComputedStyle(n);
-    var row = document.querySelector('#st-model-rows tr.on');
+    var row = document.querySelector('#llm-list .pl-item.on');
     return { hidden: n.classList.contains('hidden'), display: cs.display,
              text: n.textContent, color: cs.color,
              fields: fields(row).concat(fields(document.getElementById('st-adv')))
@@ -2089,7 +2131,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       return [].concat.apply([], Array.from(root.querySelectorAll('.tag-default'))
         .map(function(t){ return (t.dataset.field || '').split(',').filter(Boolean); }));
     }
-    var row = document.querySelector('#st-model-rows tr.on');
+    var row = document.querySelector('#llm-list .pl-item.on');
     var s = document.getElementById('p-model');
     var b = s && s.parentNode.querySelector('.select-btn');
     var h3 = document.querySelector('#empty h3');
@@ -2110,7 +2152,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   // Key 输入框的 placeholder 也在弹窗里：已配置时回到「留空即保持不变」。
   // 从没配过时写这句等于在暗示「你已经配过了」—— 两个状态的文案各只有一份，
   // 已配置那句就是 HTML 里的 placeholder（首次打开时存进 data-ph-set）。
-  await evalIn(`document.querySelectorAll('#st-model-rows tr.on .mdl-op')[1].click(); return true;`);
+  await evalIn(`document.querySelector('#llm-list .pl-item.on').click(); return true;`);
   await sleep(300);
   const cfgdAk = await evalIn(`return document.getElementById('md-apikey').placeholder;`);
   check("已配置时 Key 输入框回到「留空即保持不变」",
@@ -2126,10 +2168,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     window.__ts.setPane('llm'); return true;`);
   await sleep(500);
   const mdlBefore = await evalIn(`return {
-    rows: document.querySelectorAll('#st-model-rows tr').length,
-    delDisabled: document.querySelectorAll('#st-model-rows .mdl-op')[2].disabled };`);
+    rows: document.querySelectorAll('#llm-list .pl-item').length,
+    delHidden: document.getElementById('md-delete').classList.contains('hidden') };`);
   check("只有一条模型时「删除」是禁用的（把「至少留一条」这条规则摆到界面上）",
-    mdlBefore.rows === 1 && mdlBefore.delDisabled === true, JSON.stringify(mdlBefore));
+    mdlBefore.rows === 1 && mdlBefore.delHidden === true, JSON.stringify(mdlBefore));
 
   await evalIn(`document.getElementById('st-add-model').click(); return true;`);
   await sleep(250);
@@ -2140,14 +2182,17 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     document.getElementById('md-save').click(); return true;`);
   await sleep(800);
   const added = await evalIn(`return {
-    hidden: document.getElementById('model-dialog').classList.contains('hidden'),
-    rows: document.querySelectorAll('#st-model-rows tr').length,
-    ids: Array.from(document.querySelectorAll('#st-model-rows tr')).map(t => t.dataset.id),
-    label2: document.querySelectorAll('#st-model-rows .mdl-label')[1]?.textContent,
-    prov2: document.querySelectorAll('#st-model-rows .col-prov')[1]?.textContent,
+    hidden: document.getElementById('md-form-card').classList.contains('hidden'),
+    rows: document.querySelectorAll('#llm-list .pl-item').length,
+    ids: Array.from(document.querySelectorAll('#llm-list .pl-item')).map(t => t.dataset.id),
+    label2: document.querySelectorAll('#llm-list .pl-item .mdl-label')[1]?.textContent,
+    // 服务商不再有独立的 .col-prov 列，合并进 mdl-sub（「模型ID · 服务商」）
+    sub2: document.querySelectorAll('#llm-list .pl-item .mdl-sub')[1]?.textContent,
+    // 表单常驻右列，所以不再查 hidden；要查的是「停在刚添加的那条上」
+    mdId: document.getElementById('md-id').value,
     body: window.__lastModelBody || null };`);
-  check("弹窗保存后列表多出一条（不再是「填一个名字就跳回设置页」）",
-    added.hidden && added.rows === 2 && added.ids[1] === "m1"
+  check("右列保存后列表多出一条，并停在新加的那条上",
+    added.rows === 2 && added.ids[1] === "m1" && added.mdId === "m1"
     && added.label2 === "DeepSeek", JSON.stringify(added));
   // 请求体必须只带这一条模型的信息，不能顺手把当前模型的地址也写进去 ——
   // 「同一件事两份表示」正是要避免的。
@@ -2157,19 +2202,19 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     JSON.stringify(added.body));
   // 服务商名是从请求地址**推**出来的（参考图里那一列），推不出来就原样显示主机名 ——
   // 硬套一个名字会把「这家」说成「那家」。
-  check("服务商列按请求地址推断（未命中已知表就显示主机名）",
-    added.prov2 === "DeepSeek", added.prov2);
+  check("服务商按请求地址推断（未命中已知表就显示主机名，写在条目的小字里）",
+    /DeepSeek/.test(added.sub2 || ""), added.sub2);
 
   // 启用：必须真的调切换接口，而不是只把开关点亮
-  await evalIn(`document.querySelectorAll('#st-model-rows tr')[1]
+  await evalIn(`document.querySelectorAll('#llm-list .pl-item')[1]
     .querySelector('.mdl-switch').click(); return true;`);
   await sleep(800);
   const act = await evalIn(`return {
     called: window.__lastActivate || '',
-    onRows: document.querySelectorAll('#st-model-rows tr.on').length,
-    onId: document.querySelector('#st-model-rows tr.on')?.dataset.id,
-    onSwitches: document.querySelectorAll('#st-model-rows .mdl-switch.on').length,
-    checked: Array.from(document.querySelectorAll('#st-model-rows .mdl-switch'))
+    onRows: document.querySelectorAll('#llm-list .pl-item.on').length,
+    onId: document.querySelector('#llm-list .pl-item.on')?.dataset.id,
+    onSwitches: document.querySelectorAll('#llm-list .pl-item .mdl-switch.on').length,
+    checked: Array.from(document.querySelectorAll('#llm-list .pl-item .mdl-switch'))
                .map(b => b.getAttribute('aria-checked')).join() };`);
   // 开关是**单选**语义（同时只有一个生效），所以点一个必须关掉另一个 ——
   // 两个都亮着就是在骗人：用户以为能同时启用两个模型。
@@ -2200,21 +2245,25 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await evalIn(`document.getElementById('btn-open-settings').click();
     window.__ts.setPane('llm'); return true;`);
   await sleep(500);
-  await evalIn(`document.querySelectorAll('#st-model-rows .mdl-op')[2].click(); return true;`);
+  await evalIn(`document.querySelector('#llm-list .pl-item.on').click(); return true;`);
+  await sleep(200);
+  await evalIn(`document.getElementById('md-delete').click(); return true;`);
   await sleep(300);
   await evalIn(`document.getElementById('cd-yes').click(); return true;`);
   await sleep(800);
   const mdlAfter = await evalIn(`return {
-    rows: document.querySelectorAll('#st-model-rows tr').length,
-    ids: Array.from(document.querySelectorAll('#st-model-rows tr')).map(t => t.dataset.id),
-    delDisabled: document.querySelectorAll('#st-model-rows .mdl-op')[2].disabled,
-    onId: document.querySelector('#st-model-rows tr.on')?.dataset.id };`);
+    rows: document.querySelectorAll('#llm-list .pl-item').length,
+    ids: Array.from(document.querySelectorAll('#llm-list .pl-item')).map(t => t.dataset.id),
+    delHidden: document.getElementById('md-delete').classList.contains('hidden'),
+    onId: document.querySelector('#llm-list .pl-item.on')?.dataset.id };`);
   // 删掉的正是当前启用的那条 → 必须自动换到剩下的一条，不留悬空引用。
   // 悬空的后果是「当前模型」指向一条不存在的记录，生成时取不到任何连接信息。
-  check("删除当前启用的模型后自动落到剩下那条，且「删除」重新变灰",
-    mdlAfter.rows === 1 && mdlAfter.ids[0] === "m1"
-    && mdlAfter.onId === "m1" && mdlAfter.delDisabled === true,
-    JSON.stringify(mdlAfter));
+  // 删完只剩一条 → 「删除」必须重新不可用（至少留一条），这里是 hidden
+// （原来是 disabled；三列化后删除键是右列按钮，用 hidden 表达不可用）。
+check("删除当前启用的模型后自动落到剩下那条，且「删除」重新不可用",
+  mdlAfter.rows === 1 && mdlAfter.ids[0] === "m1"
+    && mdlAfter.onId === "m1" && mdlAfter.delHidden === true,
+  JSON.stringify(mdlAfter));
   await evalIn(`document.getElementById('btn-close-settings').click(); return true;`);
   await sleep(200);
   // 冷启动就配好的情形（老用户）：hero 不该停在配置引导上
@@ -2546,7 +2595,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
      document.getElementById('st-adv').open = true; return true;`);
   // 模型弹窗：添加 / 编辑共用的那张表单，是这一版新增的主要界面
   await shot("settings-llm-dialog.png",
-    `document.querySelectorAll('#st-model-rows tr.on .mdl-op')[1].click(); return true;`);
+    `document.querySelector('#llm-list .pl-item.on').click(); return true;`);
   await evalIn(`document.getElementById('md-cancel').click(); return true;`);
   await sleep(200);
   await shot("settings-kb.png", "window.__ts.setPane('kb'); return true;");
