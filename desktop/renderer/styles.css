@@ -535,31 +535,24 @@ select {
 #left.folded #btn-toggle-left:hover { box-shadow: var(--shadow-input-hover); }
 /* 底部：与顶部同一套 16px 节奏 —— 列表底 → 设置区分隔线 16、分隔线 → 设置按钮 16。
    padding-bottom 保持 10：那是到窗口下边缘的距离，不属于块间距。
-   这条线是 border-top（不是 .left-sep 那样的独立元素）：CSS 写 0.5px，
+   这条线是 border-top（贴在容器一边，不是独立元素）：CSS 写 0.5px，
    但 Windows / dpr=1 下 Chrome 会把它**向上取整成 1px 渲染**（getComputedStyle
    也返回 1px）。所以量「线底 → 设置按钮顶」时，线底 = border box 顶边 + borderTopWidth，
    拿 .left-foot 的 border box 顶边当线会凭空多出 1px。 */
 .left-foot { flex: 0 0 auto; padding: var(--s4) var(--s3) 10px;
   border-top: 0.5px solid var(--line); }
 /* 顶部固定区：搜索 + 新建对话，flex: 0 0 auto 防止被滚动区挤压 */
-/* 左栏竖向节奏**统一 16px**（= --s4）：品牌线→按钮→分隔线→搜索框→列表，四段都是 16。
+/* 左栏竖向节奏**统一 16px**（= --s4）：品牌线→按钮→搜索框→列表，三段都是 16。
    原来上三段的 padding-top / gap 是 --s3(12)，只有最下面那段是 --s4(16) ——
    同一列里出现 12 和 16 两种节奏，读起来像"上面挤、下面松"，是没对齐而不是设计。
-   分隔线是 0.5px 发丝线，不占节奏：按钮底→分隔线 16、分隔线→搜索框 16，
-   实测按钮底到搜索框顶 = 32.5px（两段 16 + 0.5 的线）。
+   按钮底到搜索框顶 = 16px（flex gap = --s4）。原本还夹了一条 0.5px 分隔线（再加 16 + 16），
+   现在去掉那条线，节奏仍然成立 —— 动作区和内容区只用距离区分，不再用线。
    padding-bottom 16：搜索框到下方内容的间距**必须只有一个来源**，
    这里定义的 16px 就是滚动区容器的上边界，滚动后内容被裁在它下面 ——
    滚动态看到的间距就是这 16px。非滚动态要读到同一个 16px，第一个分组标签
    就不能再叠加自己的 padding-top（见 .group-lbl:first-child）。 */
 .left-top { flex: 0 0 auto; padding: var(--s4) var(--s3) var(--s4);
   display: flex; flex-direction: column; gap: var(--s4); }
-/* 「新建对话」动作区 与 「搜索 + 列表」内容区 之间的发丝分隔线。
-   负 margin 抵消 .left-top 的左右内边距，让它横贯整个侧栏宽度 ——
-   否则线会缩在内容宽度里，看起来像一根断掉的短线，也接不上左右两侧的竖线。 */
-.left-sep {
-  flex: 0 0 auto; height: 0.5px; background: var(--line);
-  margin: 0 calc(-1 * var(--s3));
-}
 /* 会话列表：从顶部开始排，多了由容器滚动。
    历史上这里用过 justify-content: flex-end（贴底）—— 那会让溢出发生在顶部，
    且不计入 scrollHeight（实测 scrollHeight == clientHeight、maxScrollTop == 0），

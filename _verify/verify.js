@@ -1053,9 +1053,13 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("会话少时列表贴搜索框、不沉到侧栏底部",
     headOrder.listTop === headOrder.scrollTop,
     `listTop=${headOrder.listTop} scrollTop=${headOrder.scrollTop}`);
-  // 间距要落在搜索框**上方**，这样它读起来是「贴着列表」而不是「贴着按钮」。
-  check("搜索框与列表更近、与按钮更远（间距落在上方）",
-    headOrder.gapToLbl >= 0 && headOrder.gapToLbl < headOrder.gapUp,
+  // 「动作区（新建对话）↔ 内容区（搜索+列表）」原本靠一条 0.5px 分隔线区分，
+  // 线两侧各留 16 —— 那时搜索框距按钮 32、距列表 16，「更近列表」是有层次的。
+  // 2026-09-16 删掉 .left-sep 后只靠一个 16px gap 区分，两段变成**等距**（都 16）。
+  // 断言随之从「更近/更远」改为「等距且都是 16」：守住的是统一节奏，不是层次。
+  check("按钮→搜索→列表 等距 16（靠距离区分，不再靠分隔线）",
+    headOrder.gapToLbl >= 0 && headOrder.gapUp === headOrder.gapToLbl
+    && headOrder.gapUp === 16,
     `距按钮=${headOrder.gapUp} 距首条记录=${headOrder.gapToLbl}`);
   // 搜索框到下方内容的间距必须**只有一个来源**，两态读同一个数：
   //   滚动态 = 滚动区容器上边界 - 搜索框底边（.left-top 的 padding-bottom）
@@ -1167,16 +1171,19 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const leftRhythm = await evalIn(`const r = s => {
       const b = document.querySelector(s).getBoundingClientRect();
       return { t: +b.top.toFixed(2), b: +b.bottom.toFixed(2) }; };
-    const head = r('.left-head'), btn = r('#btn-new-chat'), sep = r('.left-sep'),
+    // ⚠ .left-sep 已于 2026-09-16 移除（动作区与内容区改为只用 16px 等距区分）。
+    // 这里**不能**再 querySelector('.left-sep') —— 元素不存在会拿到 null，
+    // 下面的 .getBoundingClientRect() 抛 TypeError，会把后续所有断言一起带走
+    // （实测：脚本 34s 崩溃退出，后面几十条根本没跑）。改为直接量「按钮 → 搜索」。
+    const head = r('.left-head'), btn = r('#btn-new-chat'),
           sea = r('.sess-search'), sc = r('.left-scroll');
     const footEl = document.querySelector('.left-foot');
     const foot = footEl.getBoundingClientRect();
     const footBorder = parseFloat(getComputedStyle(footEl).borderTopWidth) || 0;
     return { 线到按钮: +(btn.t - head.b).toFixed(2),
-             按钮到分隔线: +(sep.t - btn.b).toFixed(2),
-             分隔线到搜索: +(sea.t - sep.b).toFixed(2),
+             按钮到搜索: +(sea.t - btn.b).toFixed(2),
              搜索到列表: +(sc.t - sea.b).toFixed(2),
-             分隔线到设置: +(r('#btn-open-settings').t - (foot.top + footBorder)).toFixed(2),
+             底线到设置: +(r('#btn-open-settings').t - (foot.top + footBorder)).toFixed(2),
              列表底内边距: getComputedStyle(document.querySelector('.left-scroll')).paddingBottom };`);
   check("左栏竖向节奏统一 16px（含底部设置区）",
     Object.entries(leftRhythm).every(([k, v]) =>
@@ -1218,19 +1225,15 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     headLine.lBottom === headLine.rBottom && headLine.lb > 0 && headLine.rb > 0,
     JSON.stringify(headLine));
 
-  // 动作区（新建对话）与内容区（搜索 + 列表）之间的分隔线，必须横贯侧栏全宽。
-  // 若把线画在 .left-top 的内容宽度里，它会缩成一根断掉的短线，接不上两侧竖线。
-  // 容差 1px：#left 自己有一条 0.5px 的 border-right，border-box 宽 276，
-  // 内容宽 275.5 —— 分隔线铺到 275 就已经是"铺满"了，不能用 276 去比。
-  const sepGeo = await evalIn(`const s = document.querySelector('.left-sep');
-    const b = s.getBoundingClientRect();
-    const side = document.querySelector('#left');
-    return { h: +b.height.toFixed(2), left: Math.round(b.left), right: Math.round(b.right),
-             sideContentW: Math.round(side.clientWidth) };`);
-  check("动作区与内容区之间有分隔线，且横贯侧栏全宽",
-    sepGeo.h > 0 && sepGeo.h <= 1 && sepGeo.left === 0
-    && sepGeo.right >= sepGeo.sideContentW - 1,
-    JSON.stringify(sepGeo));
+  // 「动作区与内容区之间有分隔线，且横贯侧栏全宽」这条断言**已随 .left-sep 一起移除**
+  // （2026-09-16）：那条 0.5px 发丝线在 dpr=1 下会被 Chrome 向上取整成 1px 渲染，
+  // 且要靠负 margin 才能横贯全宽，做法脆弱；改为只用一个 16px 的 gap 区分两个区域。
+  //
+  // ⚠ 别把这条断言加回来 —— 它守的元素已不存在，`querySelector` 返回 null 后
+  // `.getBoundingClientRect()` 会抛 TypeError，把后续所有断言一起带走
+  // （实测脚本 34s 崩溃退出，后面几十条根本没跑）。
+  // 守卫职责已转交给上面两条：「左栏竖向节奏统一 16px（含底部设置区）」
+  // 与「按钮→搜索→列表 等距 16」—— 它们守的是同一个「统一节奏」的意图。
 
   // 两个通栏控件必须同高同圆角。
   // 回归的 bug：.sess-search 硬编码 30px + --r-sm，而新建对话是 --h-btn-lg(32px) + --r-ctl(9px)，
