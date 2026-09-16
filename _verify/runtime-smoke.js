@@ -254,8 +254,17 @@ function killTree(pid) {
     }
   } finally {
     killTree(proc.pid);
-    for (const d of staged) fs.rmSync(d, { recursive: true, force: true });
-    fs.rmSync(dataDir, { recursive: true, force: true });
+    // 清理失败**不能**掩盖断言结果：本机的 safe-delete 护栏会拦批量删除（阈值 50），
+    // 一旦 rmSync 抛出，原来会直接跳到底下的 catch 打印「冒烟失败」，
+    // 而此时断言其实全绿、连「N/N 通过」那行都打不出来 —— 看着像冒烟挂了。
+    // 清理只是收尾，失败要说出来，但不该决定退出码。
+    for (const d of [...staged, dataDir]) {
+      try {
+        fs.rmSync(d, { recursive: true, force: true });
+      } catch (e) {
+        console.log(`⚠ 临时目录没删掉（不影响断言，需手动清）：${d}\n  ${e.message}`);
+      }
+    }
   }
 
   const bad = results.filter((r) => !r[1]).length;
