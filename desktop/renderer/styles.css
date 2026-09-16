@@ -1554,23 +1554,15 @@ pre#pg-checklist {
 /* 等宽元素统一走 --mono（原来散落着 Consolas 硬编码） */
 pre, code, .code, .why-body, kbd { font-family: var(--mono); }
 
-/* 首启引导卡：安装包不带任何配置，没 Key 时必须说清楚「下一步做什么」 */
-.setup-card {
-  max-width: 460px; margin: 0 auto var(--s5); padding: var(--s5);
-  background: var(--surface); border: 1px solid var(--line);
-  border-radius: var(--r-lg); box-shadow: var(--shadow-raised);
-  text-align: center;
-}
-.setup-card .setup-ic {
-  width: 44px; height: 44px; margin: 0 auto var(--s3);
-  display: grid; place-items: center; border-radius: var(--r-md);
-  background: var(--grad-ink); color: var(--text-inv); box-shadow: var(--shadow-ink);
-}
-.setup-card h3 { font-size: var(--f-lg); margin-bottom: 6px; }
-.setup-card p { color: var(--text-2); font-size: var(--f-sm); line-height: 1.7; }
-.setup-card .setup-actions { margin: var(--s4) 0 var(--s3); }
-.setup-card .hint { margin-top: 0; }
-.setup-card code {
+/* 空态主区里的「去配置」按钮（[data-when="setup"]，未配置时才显形）。
+   它替代了原来的 .setup-card —— 那张卡是**另一个居中块**，与 hero 叠在一起
+   各带一个大图标，没有主次（用户原话「太丑了」）。现在引导直接落在 hero 上，
+   页面上只剩一个居中块，所以这里只需要处理按钮与示例卡之间的间距。 */
+.empty .empty-cta { margin-top: var(--s4); }
+/* 示例卡自带 margin-top: var(--s4)，不压一下的话按钮到卡片会有 32px 的空档 */
+.empty .empty-cta + .samples { margin-top: var(--s3); }
+/* hero 底注里有两处行内代码（环境变量名 / 文件名）。只靠等宽字体在白底上太弱，
+   给一层浅底把它们和正文分开。字号**不缩**（跟 .hint 一致），否则会比正文还小。 */
+.empty .hint code {
   background: var(--fill); padding: 1px 5px; border-radius: var(--r-xs);
-  font-size: var(--f-min);
 }

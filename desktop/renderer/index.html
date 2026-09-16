@@ -79,14 +79,33 @@
       <div id="stale-banner" class="banner warn hidden"></div>
 
       <div id="chat-stream">
+        <!-- 空态主区。**两种态共用这一块**：未配置时图标/标题/副标题/按钮/底注
+             整体换成配置引导（由 [data-when] 切换），示例卡保留 ——
+             先挑好主题、配完 Key 直接生成，这条路径不该被挡掉。
+             修复前这里额外插了一张 .setup-card，于是页面上叠着**两个居中块、
+             各带一个大图标**，没有主次（用户原话「太丑了」）。
+             ⚠ 两种态的文案**都在这里**，不写进 JS —— 否则同一句话有两个副本。 -->
         <div id="empty" class="empty">
           <span class="mono">
-            <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="9" width="3" height="6" rx="1.4"/><rect x="8" y="5" width="3" height="14" rx="1.4"/><rect x="13" y="2" width="3" height="20" rx="1.4"/><rect x="18" y="7" width="3" height="10" rx="1.4"/></svg>
+            <svg data-when="ready" viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="9" width="3" height="6" rx="1.4"/><rect x="8" y="5" width="3" height="14" rx="1.4"/><rect x="13" y="2" width="3" height="20" rx="1.4"/><rect x="18" y="7" width="3" height="10" rx="1.4"/></svg>
+            <svg data-when="setup" class="hidden" viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 7H7a5 5 0 0 0 0 10h2"/><path d="M15 7h2a5 5 0 0 1 0 10h-2"/><path d="M8 12h8"/></svg>
           </span>
-          <h3>想聊点什么？</h3>
-          <p class="empty-sub">给个主题就能生成口播脚本，参数可在上方随时调整</p>
+          <h3>
+            <span data-when="ready">想聊点什么？</span>
+            <span data-when="setup" class="hidden">先配置模型接口</span>
+          </h3>
+          <p class="empty-sub">
+            <span data-when="ready">给个主题就能生成口播脚本，参数可在上方随时调整</span>
+            <span data-when="setup" class="hidden">生成脚本需要调用一个 OpenAI 兼容的对话模型。填上接口地址、Key 和模型名就能开始。</span>
+          </p>
+          <div class="empty-cta hidden" data-when="setup">
+            <button class="primary slim" id="btn-empty-setup">去配置</button>
+          </div>
           <div class="samples" id="empty-samples"></div>
-          <p class="hint">左侧为会话记录，点开即回看</p>
+          <p class="hint">
+            <span data-when="ready">左侧为会话记录，点开即回看</span>
+            <span data-when="setup" class="hidden">Key 只保存在本机，不会上传。也可以用环境变量 <code>TALKSCRIPT_API_KEY</code>（不落盘），或直接改数据目录下的 <code>config.yaml</code>。</span>
+          </p>
         </div>
       </div>
 

@@ -17,7 +17,7 @@ import { setHead, resultSrt, resultMarkdown, voicePlainText,
   errorText } from "./result.js";
 import {
   bindShell, renderSamples, refreshGate, gotoView, fillPackSelect, setCfgHint,
-  renderSetupNeeded, renderModelPicker,
+  applyEmptyHero, renderModelPicker,
 } from "./ui.js";
 
 async function boot() {
@@ -48,12 +48,12 @@ async function boot() {
   autoGrowTopic();
 
   // 首启引导：安装包不带任何配置，没 Key 就什么都生成不了。
+  // 空态主区换成配置引导（**无条件调**：没配过就切到引导，配过就切回「想聊点什么？」
+  // —— 只在 noKey 时切一次的话，用户配好 Key 后 hero 会一直写着「先配置模型接口」）。
+  applyEmptyHero();
   // 只在「确实没配过」（无 Key 且无历史记录）时自动弹设置，避免打扰老用户。
   const noKey = !state.meta.has_api_key && !state.meta.mock;
-  if (noKey) {
-    renderSetupNeeded();
-    if (!(sessions || []).length) openSettings("llm");
-  }
+  if (noKey && !(sessions || []).length) openSettings("llm");
 }
 
 function newChat() {

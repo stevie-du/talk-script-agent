@@ -176,9 +176,11 @@ window.__addCount = 0;
   var LLM_DEFAULTED = (NOKEY || CFGERR)
     ? ["base_url", "model", "temperature", "retries", "timeout", "max_tokens"] : [];
   // 保存过一次之后这些字段就不再是内置默认了（真实后端：save_config 把它们写进了
-  // config.yaml）。桩必须**有状态**，否则「标记只增不减」这类实现永远测不出来 ——
-  // 页面一刷新，它本来就没挂过标，看起来和正确实现一模一样。
-  var cfgSaved = false;
+  // config.yaml）。桩必须**有状态**，否则「标记只增不减」「引导只切一次」这类实现
+  // 永远测不出来 —— 页面一刷新，它本来就没挂过标，看起来和正确实现一模一样。
+  // apiKeySet 同理：只有在保存时**真的带了 Key** 才会变 true，
+  // 与真实后端一致（saveSettings 只在 Key 非空时才发 api_key）。
+  var cfgSaved = false, apiKeySet = !NOKEY;
   function llmDefaulted(){ return cfgSaved ? [] : LLM_DEFAULTED; }
   var CONFIG = { base_url:"https://x/v4", model:"glm-4.7", api_key_set:!NOKEY,
                  mock:false, retries:2, timeout:180, max_tokens:16000,
@@ -189,6 +191,16 @@ window.__addCount = 0;
   var calls = { gen:0, job:0, cancel:0, rewrite:0 };
   var ELEVATOR_DRAFT = true;   // 有状态：转正后变 false，才能验证按钮消失
   window.__calls = calls;
+  // 空态 hero 的两套文案**都在 DOM 里**（由 [data-when] 切换），
+  // 直接读 h3.textContent 会把两态拼在一起（「想聊点什么？先配置模型接口」）——
+  // 那样不管哪种状态，两个正则都能匹配上，断言等于没写。
+  // 所以要取**当前可见的那一份**。
+  window.__shown = function(root){
+    if (!root) return '';
+    var n = Array.prototype.find.call(root.children,
+      function(c){ return c.nodeType === 1 && !c.classList.contains('hidden'); });
+    return n ? n.textContent.trim() : '';
+  };
   function mk(o){ return Promise.resolve(new Response(JSON.stringify(o),
     { status:200, headers:{'Content-Type':'application/json'} })); }
   window.fetch = function(u, o){
@@ -199,7 +211,7 @@ window.__addCount = 0;
     window.__sawToken = !!(hdrs['X-TalkScript-Token'] || hdrs['x-talkscript-token']);
     if (s.indexOf('/api/meta') >= 0) {
       return mk(Object.assign({}, META,
-        { has_api_key: !NOKEY, mock: false, llm_defaulted: llmDefaulted() }));
+        { has_api_key: apiKeySet, mock: false, llm_defaulted: llmDefaulted() }));
     }
     if (s.indexOf('/api/generate') >= 0) {
       calls.gen++; calls.job = 0;
@@ -267,8 +279,11 @@ window.__addCount = 0;
         // 表单会把 base_url / model 一起发上来（saveSettings 里写死的两项），
         // 所以「发过 model」就等于「保存过一次」。
         if (window.__lastConfigBody && window.__lastConfigBody.model) cfgSaved = true;
+        // Key 则要看它有没有真被带上 —— 空 Key 是不发的（留空 = 保持不变）
+        if (window.__lastConfigBody && window.__lastConfigBody.api_key) apiKeySet = true;
       }
-      return mk(Object.assign({}, CONFIG, { llm_defaulted: llmDefaulted() }));
+      return mk(Object.assign({}, CONFIG,
+        { api_key_set: apiKeySet, llm_defaulted: llmDefaulted() }));
     }
     if (s.indexOf('/api/packs/') >= 0) return mk({ display_name:'电梯行业包', description:'电梯行业口播脚本包',
       draft:ELEVATOR_DRAFT, checklist:'1. 核对参数 / 2. 核对禁用词',
@@ -1508,22 +1523,36 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     kept.pack === "fitment" && kept.options === 2, JSON.stringify(kept));
 
   // ── 12c) 未配置模型时的首启引导 ──────────────────────────
+  // 引导**长在空态主区上**（hero 整块换文案），不再另起一张卡片。
+  // 曾经是「引导卡 + hero」两个居中块叠着、各带一个大图标，没有主次。
   await cdp.send("Page.navigate",
     { url: `http://127.0.0.1:${PORT}/?token=stubtoken&nokey=1` });
   await sleep(1800);
-  const firstRun = await evalIn(`return {
-    setup: !!document.querySelector('.setup-card'),
-    setupBtn: !!document.querySelector('.setup-card [data-act="go"]'),
-    settingsOpen: !document.getElementById('settings-screen').classList.contains('hidden'),
-    paneLlm: !document.getElementById('pane-llm').classList.contains('hidden'),
-    samples: document.querySelectorAll('#empty-samples .sample-card').length,
-  };`);
-  check("未配置 Key 时显示首启引导卡（含「去配置」）",
-    firstRun.setup && firstRun.setupBtn, JSON.stringify(firstRun));
+  const firstRun = await evalIn(`return (function(){
+    var h3 = document.querySelector('#empty h3');
+    var sub = document.querySelector('#empty .empty-sub');
+    // ⚠ 状态挂在 .empty-cta 这个**外层**上（[data-when] 是它的属性），
+    // 按钮自己永远不会带 .hidden —— 查按钮本身的话这条断言恒为真。
+    var cta = document.querySelector('#empty .empty-cta');
+    return {
+      setupTitle: window.__shown(h3),
+      setupSub: window.__shown(sub),
+      setupBtn: !!cta && !cta.classList.contains('hidden')
+        && !!document.getElementById('btn-empty-setup'),
+      cards: document.querySelectorAll('#empty .setup-card').length,
+      settingsOpen: !document.getElementById('settings-screen').classList.contains('hidden'),
+      paneLlm: !document.getElementById('pane-llm').classList.contains('hidden'),
+      samples: document.querySelectorAll('#empty-samples .sample-card').length,
+    }; })()`);
+  check("未配置 Key 时空态主区换成配置引导（含「去配置」）",
+    /先配置模型接口/.test(firstRun.setupTitle) && firstRun.setupBtn
+    && /OpenAI 兼容/.test(firstRun.setupSub), JSON.stringify(firstRun));
+  check("引导与「想聊点什么？」是同一块 hero 的两态（不是两块叠着）",
+    firstRun.cards === 0, JSON.stringify(firstRun));
   check("首启自动打开设置并落在「模型接口」分区",
     firstRun.settingsOpen && firstRun.paneLlm, JSON.stringify(firstRun));
-  check("引导卡与示例卡共存（不互相顶掉）",
-    firstRun.setup && firstRun.samples === 4, JSON.stringify(firstRun));
+  check("引导态仍保留示例卡（先挑主题再配 Key 这条路不能被挡掉）",
+    firstRun.samples === 4, JSON.stringify(firstRun));
   // 「没配过」必须看得出来。后端会把没写的字段静默兜底成内置默认值
   // （config.py: model = llm.get("model") or DEFAULT），界面若不标，
   // 未配置状态和已配置状态长得一模一样：设置页模型名写着 glm-4.7、
@@ -1557,31 +1586,49 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("未配置时 Key 输入框不再暗示「已经配过了」",
     /粘贴/.test(notCfg.akPh), notCfg.akPh);
   // 「没有配置」这个状态留两张图：用户开机第一眼看到的是**自动弹开的设置页**，
-  // 关掉之后才看到主界面上的引导卡 —— 两张都要有人看过。
+  // 关掉之后才看到主界面上那块配置引导 —— 两张都要有人看过。
   await shot("setup-settings.png", `${closeMenus} return true;`);
   await shot("setup-main.png",
     `document.getElementById('btn-close-settings').click(); ${closeMenus} return true;`);
 
   // 从「没配过」走到「配好了」——**同一个页面、不刷新**。
-  // 这一条专门防「标记只增不减」：只在新页面里比对是测不出来的，
-  // 一个「挂上就不摘」的实现在新页面里本来就没挂过标，与正确实现长得一样。
+  // 这一条专门防「只增不减 / 只切一次」：只在新页面里比对是测不出来的，
+  // 一个「挂上就不摘」「只在 noKey 时改一次」的实现在新页面里
+  // 与正确实现长得一模一样。
   await evalIn(`document.getElementById('btn-open-settings').click();
     window.__ts.setPane('llm'); return true;`);
   await sleep(600);
-  const beforeSave = await evalIn(
-    `return document.querySelectorAll('#pane-llm .tag-default').length;`);
-  await evalIn(`document.getElementById('st-save').click(); return true;`);
-  await sleep(800);
+  const beforeSave = await evalIn(`return (function(){
+    var h3 = document.querySelector('#empty h3');
+    return { tags: document.querySelectorAll('#pane-llm .tag-default').length,
+             heroTitle: window.__shown(h3),
+             heroBtn: !document.querySelector('#empty .empty-cta').classList.contains('hidden') };
+  })()`);
+  // 真填一个 Key 再保存 —— 不填的话「已配置」这个状态根本不会到来
+  // （saveSettings 只在 Key 非空时才带上 api_key）。
+  await evalIn(`const k = document.getElementById('st-apikey');
+    k.value = 'sk-test'; k.dispatchEvent(new Event('input', {bubbles:true}));
+    document.getElementById('st-save').click(); return true;`);
+  await sleep(900);
   const afterSave = await evalIn(`return (function(){
     var s = document.getElementById('p-model');
     var b = s && s.parentNode.querySelector('.select-btn');
+    var h3 = document.querySelector('#empty h3');
     return { tags: document.querySelectorAll('#pane-llm .tag-default').length,
-             pickerText: b ? b.querySelector('.sel-text').textContent : '' };
+             pickerText: b ? b.querySelector('.sel-text').textContent : '',
+             heroTitle: window.__shown(h3),
+             heroBtn: !document.querySelector('#empty .empty-cta').classList.contains('hidden') };
   })()`);
   check("保存后同一页面里「内置默认」小标立刻消失（不是只增不减）",
-    beforeSave === 6 && afterSave.tags === 0, `${beforeSave} → ${afterSave.tags}`);
+    beforeSave.tags === 6 && afterSave.tags === 0, `${beforeSave.tags} → ${afterSave.tags}`);
   check("保存后模型选择器同步摘掉「（默认）」",
     afterSave.pickerText === "glm-4.7", afterSave.pickerText);
+  // hero 也必须跟着切回来。只在 noKey 时改一次的实现在这里会露馅：
+  // 引导是「一次性的」，用户配好 Key 之后空态还写着「先配置模型接口」。
+  check("保存后空态主区切回「想聊点什么？」（引导不是一次性的）",
+    beforeSave.heroBtn === true && /先配置模型接口/.test(beforeSave.heroTitle)
+    && afterSave.heroBtn === false && /想聊点什么/.test(afterSave.heroTitle),
+    JSON.stringify({ before: beforeSave.heroTitle, after: afterSave.heroTitle }));
   await evalIn(`document.getElementById('btn-close-settings').click(); return true;`);
   await sleep(200);
 
@@ -1636,8 +1683,11 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     var ak = document.getElementById('st-apikey');
     var s = document.getElementById('p-model');
     var b = s && s.parentNode.querySelector('.select-btn');
+    var h3 = document.querySelector('#empty h3');
     return { tags: document.querySelectorAll('#pane-llm .tag-default').length,
              akPh: ak.placeholder,
+             heroTitle: window.__shown(h3),
+             heroBtn: !document.querySelector('#empty .empty-cta').classList.contains('hidden'),
              pickerText: b ? b.querySelector('.sel-text').textContent : '' };
   })()`);
   check("已配置时「内置默认」小标全部消失（不误报）",
@@ -1646,6 +1696,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     cfgd.pickerText === "glm-4.7", cfgd.pickerText);
   check("已配置时 Key 输入框回到「留空即保持不变」",
     /留空即保持不变/.test(cfgd.akPh), cfgd.akPh);
+  // 冷启动就配好的情形（老用户）：hero 不该停在配置引导上
+  check("已配置时冷启动空态就是「想聊点什么？」（不误报）",
+    /想聊点什么/.test(cfgd.heroTitle) && cfgd.heroBtn === false,
+    JSON.stringify({ t: cfgd.heroTitle, btn: cfgd.heroBtn }));
   await evalIn(`document.getElementById('settings-screen').classList.add('hidden'); return true;`);
 
   // ── 12e) 行业包读坏时的警示 ──────────────────────────────

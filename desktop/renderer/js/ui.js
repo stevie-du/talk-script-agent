@@ -435,31 +435,28 @@ export function renderSamples() {
   }
 }
 
-/** 未配置模型时的引导卡。
+/** 空态主区：未配置时整块换成配置引导。
  *
  *  安装包**不携带任何配置**（连模板都不带），所以「第一次打开该干什么」
- *  必须由界面说清楚，否则用户输入主题点发送只会拿到一句 400。 */
-export function renderSetupNeeded() {
+ *  必须由界面说清楚，否则用户输入主题点发送只会拿到一句 400。
+ *
+ *  修复前这里额外插了一张 `.setup-card`，于是页面上叠着**两个居中块、各带一个
+ *  大图标**，没有主次（用户原话「太丑了」）。现在引导直接落在 hero 上：
+ *  图标 / 标题 / 副标题 / 按钮 / 底注都换成配置版，示例卡保留 ——
+ *  先挑好主题、配完 Key 直接生成，这条路径不该被挡掉。
+ *
+ *  ⚠ 文案**全部在 index.html 里**，由 `[data-when]` 切换。不写进 JS：
+ *  同一句话两个副本，改一处忘一处（本项目治理过的那类问题）。
+ *  ⚠ 必须**两种态都能切**，不能只在 noKey 时改一次 —— 否则用户配好 Key 之后
+ *  hero 会一直写着「先配置模型接口」。所以 boot 与 `meta` 事件都要调它。 */
+export function applyEmptyHero() {
   const empty = $("empty");
-  if (!empty || empty.querySelector(".setup-card")) return;
-  const card = el("div", "setup-card");
-  card.innerHTML = `
-    <span class="setup-ic">
-      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor"
-           stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M9 7H7a5 5 0 0 0 0 10h2"/><path d="M15 7h2a5 5 0 0 1 0 10h-2"/><path d="M8 12h8"/>
-      </svg>
-    </span>
-    <h3>先配置模型接口</h3>
-    <p>生成脚本需要调用一个 OpenAI 兼容的对话模型。填上接口地址、Key 和模型名就能开始。</p>
-    <div class="setup-actions">
-      <button class="primary slim" data-act="go">去配置</button>
-    </div>
-    <p class="hint">Key 只保存在本机，不会上传。
-      也可以用环境变量 <code>TALKSCRIPT_API_KEY</code>（不落盘），
-      或直接改数据目录下的 <code>config.yaml</code>。</p>`;
-  card.querySelector('[data-act="go"]').onclick = () => openSettings("llm");
-  empty.insertBefore(card, empty.firstChild);
+  if (!empty) return;
+  const setup = !state.meta?.has_api_key && !state.meta?.mock;
+  const want = setup ? "setup" : "ready";
+  empty.querySelectorAll("[data-when]").forEach(n => {
+    n.classList.toggle("hidden", n.dataset.when !== want);
+  });
 }
 
 // ── 门控 ────────────────────────────────────────────────────
@@ -522,6 +519,9 @@ export const bindShell = bindOnce(function bindShell() {
   if (localStorage.getItem("ts.left.folded") === "1") setLeftFolded(true);
   $("btn-toggle-left").onclick = () => setLeftFolded(!$("left").classList.contains("folded"));
   $("btn-open-settings").onclick = () => openSettings();
+  // 空态引导里的「去配置」。按钮是 index.html 里的静态节点（两种态共用一块 hero，
+  // 不动态生成），所以在这里一次性绑上即可。
+  $("btn-empty-setup").onclick = () => openSettings("llm");
   $("btn-packinfo").onclick = () => setPane("packinfo");
 
   // busy / job 任一变化都刷新门控与参数锁。
@@ -538,7 +538,9 @@ export const bindShell = bindOnce(function bindShell() {
   };
   on("busy", syncGate);
   on("job", syncGate);
-  on("meta", () => { fillPackSelect(); setCfgHint(); renderModelPicker(); });
+  // meta 变了（保存设置 / 换包）时 hero 也要跟着切：用户刚把 Key 填好，
+  // 空态那块必须从「先配置模型接口」回到「想聊点什么？」。
+  on("meta", () => { fillPackSelect(); setCfgHint(); renderModelPicker(); applyEmptyHero(); });
 
   $("topic").addEventListener("input", () => { refreshGate(); autoGrowTopic(); });
 
