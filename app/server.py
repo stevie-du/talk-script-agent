@@ -35,7 +35,8 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .config import ensure_config_template, load_config, save_config
+from .config import (DEFAULT_MODEL, ensure_config_template, load_config,
+                     load_raw_models, public_models, save_config, save_models)
 from .fileio import write_atomic
 from .jobs import StateConflict
 from .knowledge import Pack, PackBrokenError, PackError, list_packs
@@ -105,6 +106,10 @@ class ConfigIn(BaseModel):
     base_url: str = ""
     api_key: str = ""
     model: str = ""
+    # 「测试连接」要测哪一条模型（不传 = 当前生效的那条）。
+    # 编辑一条**非当前**模型时，密钥留空意味着「沿用那条模型存着的 Key」——
+    # 不指明 id 就会错拿当前模型的 Key 去测，测出来的结果与用户以为的不是一回事。
+    model_id: str = ""
     temperature: float | None = None
     # 三项为 None 表示「不改」：界面留空时不能把超时写成 0
     retries: int | None = None
@@ -114,6 +119,25 @@ class ConfigIn(BaseModel):
 
 class ConfigResetIn(BaseModel):
     fields: list[str]
+
+
+class ModelIn(BaseModel):
+    """添加 / 编辑一个模型。
+
+    `id` 空 = 新增；非空 = 改那一条。
+    ⚠ `api_key` 空串是「保持不变」（与 `/api/config` 同一个语义）——
+    界面上那个框在编辑时是空的，用户没重填就说明密钥不该动。
+    """
+
+    id: str = ""
+    name: str = ""
+    base_url: str = ""
+    model: str = ""
+    api_key: str = ""
+
+
+class ModelIdIn(BaseModel):
+    id: str
 
 
 # 知识库面板可读的文件类型与体积上限（详见 /api/packs/{name}/file 的说明）
@@ -299,6 +323,10 @@ def create_app(root: Path, token: str | None = None,
             # 把「glm-4.7」标成「glm-4.7（默认）」—— 不标的话，未配置状态下
             # 界面看起来像是已经配好了模型。
             "llm_defaulted": cfg.llm_defaulted,
+            # 模型列表（**已剥掉 api_key 明文**）与当前生效的那条。
+            # 输入区右侧的选择器直接列它，不再依赖 localStorage 里的历史。
+            "models": public_models(cfg),
+            "active_model": cfg.active_model,
             "base_url": cfg.llm.base_url,
             "has_api_key": bool(cfg.llm.api_key),
             "mock": cfg.mock,
@@ -527,6 +555,9 @@ def create_app(root: Path, token: str | None = None,
                 "api_key_set": bool(cfg.llm.api_key), "temperature": cfg.llm.temperature,
                 "retries": cfg.llm.retries, "timeout": cfg.llm.timeout,
                 "max_tokens": cfg.llm.max_tokens, "mock": cfg.mock,
+                # 模型列表（**已剥掉 api_key 明文**）与当前生效的那条。
+                "models": public_models(cfg),
+                "active_model": cfg.active_model,
                 # 读坏 config.yaml 时非空：上面这些字段全是**内置默认值**，
                 # 不是用户存过的那份。不下发这个，界面就会把默认值当用户配置
                 # 显示出来（「已配置 Key · 模型 glm-4.7」），用户完全看不出
@@ -536,12 +567,15 @@ def create_app(root: Path, token: str | None = None,
                 # 是同一类信号的两个来源：一个是「你的配置读坏了」，一个是「你还没配」。
                 # 少了它，界面会把内置默认当用户配置显示（模型名写着 glm-4.7）。
                 "llm_defaulted": cfg.llm_defaulted,
+                # 内置默认的连接信息。渲染层「恢复默认」按钮要用它把默认值**显式**
+                # 填进输入框 —— 不在这里下发，前端就只能自己抄一份默认地址，
+                # 于是改后端默认值时界面还按老值填（同一信息两份表示的经典后果）。
+                "defaults": {"base_url": DEFAULT_MODEL["base_url"],
+                             "model": DEFAULT_MODEL["model"]},
                 "env_override": bool(os.environ.get("TALKSCRIPT_API_KEY"))}
 
     @app.post("/api/config")
     def set_config(body: ConfigIn):
-        # 空 base_url / model 不覆盖（防清空）；api_key 空串=保持不变（合并语义）
-        updates = {k: v for k, v in body.model_dump().items() if v not in ("", None)}
         # 数值项必须在这里卡边界：越界的 0 / 负数一旦写进 config.yaml，
         # `load_config` 是**照单全收**的（P0-2 之后 `_num` 只在键缺失或值为空时
         # 才取默认，不再把 0 当「没填」），于是界面显示保存成功、实际值就是那个
@@ -551,6 +585,8 @@ def create_app(root: Path, token: str | None = None,
         # 之后**每一次生成**都带着这个越界值去请求模型，上游多半回 400，
         # 用户看到的是「模型接口返回 400」，而根因是几天前存下的一个错数字。
         # 界面上那个 input 的 min/max 是纯客户端约束，绕开它只要一条 curl。
+        updates = {k: v for k, v in body.model_dump().items()
+                   if k in NUMERIC_BOUNDS and v not in ("", None)}
         for k, (lo, hi) in NUMERIC_BOUNDS.items():
             v = updates.get(k)
             if v is None:
@@ -558,6 +594,23 @@ def create_app(root: Path, token: str | None = None,
             if not (lo <= float(v) <= hi):
                 raise HTTPException(400, f"{k} 需在 {lo} ~ {hi} 之间，当前为 {v}")
         save_config(root, updates, config_dir=data_dir)
+
+        # 连接信息（base_url / api_key / model）现在住在**当前模型条目**里。
+        # 这个单模型时代的写入口保留下来（curl、老渲染层还在用），但它改的是
+        # **同一份数据**，不是第二份 —— 两处各存一份必然有一天只改到一处。
+        # 空串 = 不覆盖（防手滑清空），api_key 同理（合并语义）。
+        link = {k: v for k, v in (("base_url", body.base_url), ("api_key", body.api_key),
+                                  ("model", body.model)) if v not in ("", None)}
+        if link:
+            raw, active = load_raw_models(root, data_dir)
+            it = next(x for x in raw if x["id"] == active)
+            if "base_url" in link:
+                it["base_url"] = str(link["base_url"]).rstrip("/")
+            if "model" in link:
+                it["model"] = str(link["model"])
+            if "api_key" in link:
+                it["api_key"] = str(link["api_key"])
+            save_models(root, raw, active, config_dir=data_dir)
         return {"ok": True}
 
     @app.post("/api/config/reset")
@@ -568,15 +621,96 @@ def create_app(root: Path, token: str | None = None,
         base_url / model 一旦填错就再也改不回去 —— 用户只能去手工改 config.yaml。
         所以「回到默认」必须是**显式**动作，而不是靠留空输入框。
 
-        实现上只是把字段写成空串：`load_config` 里 base_url / model 走
-        `llm.get(x) or DEFAULT`，数值项走 `_num()`（它对空串同样取默认），
+        实现上只是把字段写成空串：空的 base_url / model 走
+        `DEFAULT_MODEL` 兜底，数值项走 `_num()`（它对空串同样取默认），
         空串自然落回默认值。api_key 不在可重置名单里 —— 清空密钥不该这么顺手。
+
+        ⚠ 两类字段住在**两个地方**（连接信息在模型条目、数值项在 llm 段），
+        所以必须按字段分派。一个循环写完会漏掉一类，而漏掉的那类会表现为
+        「点了恢复默认没反应」—— 静默无效。
         """
         bad = [f for f in body.fields if f not in RESETTABLE_FIELDS]
         if bad:
             raise HTTPException(400, f"不支持重置的字段：{'、'.join(bad)}")
-        save_config(root, {f: "" for f in body.fields}, config_dir=data_dir)
+        num_fields = [f for f in body.fields if f in NUMERIC_BOUNDS]
+        link_fields = [f for f in body.fields if f in ("base_url", "model")]
+        if num_fields:
+            save_config(root, {f: "" for f in num_fields}, config_dir=data_dir)
+        if link_fields:
+            raw, active = load_raw_models(root, data_dir)
+            it = next(x for x in raw if x["id"] == active)
+            for f in link_fields:
+                it[f] = ""
+            save_models(root, raw, active, config_dir=data_dir)
         return {"ok": True, "fields": body.fields}
+
+    # ── 模型列表（增删改 + 切换当前）────────────────────────
+    @app.post("/api/models")
+    def upsert_model(body: ModelIn):
+        """添加（`id` 为空）或编辑（`id` 非空）一条模型。"""
+        raw, active = load_raw_models(root, data_dir)
+        mid = body.id.strip()
+        model = body.model.strip()
+        base_url = body.base_url.strip().rstrip("/")
+        if not model:
+            raise HTTPException(400, "模型 ID 不能为空")
+        if base_url and not base_url.startswith(("http://", "https://")):
+            # 用户最常见的漏填是「api.openai.com/v1」少了协议头 ——
+            # 不拦的话，这个值会一路存到生成时才在 urllib 里炸，报错完全指不到根因。
+            # ⚠ 只拦「填了但不对」的：**留空**是另一回事，见下面。
+            raise HTTPException(400, "请求地址要以 http:// 或 https:// 开头")
+
+        if mid:
+            it = next((x for x in raw if x["id"] == mid), None)
+            if it is None:
+                raise HTTPException(404, f"没有这个模型：{mid}")
+        else:
+            used = {x["id"] for x in raw}
+            n = 1
+            while f"m{n}" in used:
+                n += 1
+            mid = f"m{n}"
+            it = {"id": mid, "name": "", "base_url": "", "api_key": "", "model": ""}
+            raw.append(it)
+        it["name"] = body.name.strip()
+        it["model"] = model
+        # 请求地址**留空 = 保持不变**（与 api_key 同一个语义），新增时留空则沿用
+        # 内置默认地址。不能要求必填：编辑一条还没配过地址的模型时那个框本来就是
+        # 空的，用户只改了展示名，却会因为「地址不能为空」被拒 —— 而他压根没动过地址。
+        # 「显式回到默认」由弹窗里的「恢复默认」承担（它把默认值填进框里）。
+        if base_url:
+            it["base_url"] = base_url
+        # 空 = 保持不变：编辑时那个框是空的，用户没重填就说明密钥不该动
+        if body.api_key.strip():
+            it["api_key"] = body.api_key.strip()
+        save_models(root, raw, active, config_dir=data_dir)
+        return {"ok": True, "id": mid, "models": public_models(_cfg())}
+
+    @app.post("/api/models/delete")
+    def delete_model(body: ModelIdIn):
+        raw, active = load_raw_models(root, data_dir)
+        if len(raw) <= 1:
+            # 删到一条不剩 = 生成时没有任何连接信息可用，而界面还会显示
+            # 「已配置 Key」—— 留一条兜底比事后报错好。
+            raise HTTPException(400, "至少要保留一个模型")
+        left = [x for x in raw if x["id"] != body.id]
+        if len(left) == len(raw):
+            raise HTTPException(404, f"没有这个模型：{body.id}")
+        if active == body.id:
+            # 删掉的正是当前模型 → 换成剩下的第一条。
+            # 不留悬空引用：那会让「当前模型」指向一条不存在的记录。
+            active = left[0]["id"]
+        save_models(root, left, active, config_dir=data_dir)
+        return {"ok": True, "active_model": active, "models": public_models(_cfg())}
+
+    @app.post("/api/models/activate")
+    def activate_model(body: ModelIdIn):
+        """切换当前生效的模型（输入区那个选择器调它）。"""
+        raw, _ = load_raw_models(root, data_dir)
+        if body.id not in {x["id"] for x in raw}:
+            raise HTTPException(404, f"没有这个模型：{body.id}")
+        save_models(root, raw, body.id, config_dir=data_dir)
+        return {"ok": True, "active_model": body.id, "models": public_models(_cfg())}
 
     @app.post("/api/config/test")
     def test_config(body: ConfigIn | None = Body(default=None)):
@@ -587,6 +721,15 @@ def create_app(root: Path, token: str | None = None,
         """
         fresh = _cfg()
         if body:
+            # 先落到「要测的那条模型」上：编辑一条**非当前**模型时，密钥框是空的，
+            # 不指明 id 就会错拿当前模型的 Key 去测 —— 测出来的结果与用户以为的
+            # 不是一回事，而界面会照常显示「连接正常」。
+            if body.model_id:
+                m = next((x for x in fresh.models if x.id == body.model_id), None)
+                if m:
+                    fresh.llm.base_url = m.base_url
+                    fresh.llm.api_key = m.api_key
+                    fresh.llm.model = m.model
             if body.base_url:
                 fresh.llm.base_url = str(body.base_url).rstrip("/")
             if body.api_key:

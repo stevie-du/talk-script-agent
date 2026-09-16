@@ -169,25 +169,58 @@ window.__addCount = 0;
   // 这里只取形态：原因 + 中文行列号，且**不含**配置正文）
   var CFGERR = /(^|[?&])cfgerr=1/.test(location.search);
   // 哪些 LLM 字段还是内置默认（config.yaml 里没写、环境变量也没有）。
-  // 真实后端在「从没保存过设置页」与「config.yaml 读坏」两种情形下都会点名全部六项
-  // （读坏 = llm 段整个读不到 → 六项全取默认），所以这里跟 NOKEY / CFGERR 同源切换。
-  // 这不是为了省事：没配 Key ⟺ 从没保存过 ⟺ 六项全是默认，本来就是同一件事 ——
-  // 保存一次会把 base_url / model 都写进文件。
-  var LLM_DEFAULTED = (NOKEY || CFGERR)
-    ? ["base_url", "model", "temperature", "retries", "timeout", "max_tokens"] : [];
-  // 保存过一次之后这些字段就不再是内置默认了（真实后端：save_config 把它们写进了
-  // config.yaml）。桩必须**有状态**，否则「标记只增不减」「引导只切一次」这类实现
-  // 永远测不出来 —— 页面一刷新，它本来就没挂过标，看起来和正确实现一模一样。
-  // apiKeySet 同理：只有在保存时**真的带了 Key** 才会变 true，
-  // 与真实后端一致（saveSettings 只在 Key 非空时才发 api_key）。
-  var cfgSaved = false, apiKeySet = !NOKEY;
-  function llmDefaulted(){ return cfgSaved ? [] : LLM_DEFAULTED; }
-  var CONFIG = { base_url:"https://x/v4", model:"glm-4.7", api_key_set:!NOKEY,
-                 mock:false, retries:2, timeout:180, max_tokens:16000,
-                 temperature:0.7, env_override:false, llm_defaulted: LLM_DEFAULTED,
-                 config_error: CFGERR
-                   ? "config.yaml 语法有误（mapping values are not allowed here，第 2 行第 44 列）"
-                   : "" };
+  //
+  // ⚠ 桩必须**有状态**，且状态要按「文件里存了什么」来算 —— 不能写成
+  // 「保存过一次就清空」。模型从一条变成一份列表之后，「没配过」是**逐字段**
+  // 的判断：用户只填了 Key、没动请求地址时，地址仍然是内置默认。
+  // 按「保存过就全清」写的话，「保存后小标消失」这类断言会**假绿** ——
+  // 它测的是一个与真实后端不同的口径。
+  var CONFIGURED = !NOKEY && !CFGERR;
+  var DEFAULT_URL = "https://x/v4", DEFAULT_NAME = "glm-4.7";
+  // 原始条目：**空字段保持空**（与真实后端一致 —— 只有空 base_url 才报「内置默认」）
+  var MODELS = [{ id: "m-default", name: "",
+                  base_url: CONFIGURED ? DEFAULT_URL : "",
+                  api_key: CONFIGURED ? "sk-stub" : "",
+                  model: CONFIGURED ? DEFAULT_NAME : "" }];
+  var ACTIVE = "m-default";
+  var savedNum = CONFIGURED ? { temperature:1, retries:1, timeout:1, max_tokens:1 } : {};
+  function activeRaw() {
+    return MODELS.filter(function(x){ return x.id === ACTIVE; })[0] || MODELS[0];
+  }
+  function publicModels() {
+    return MODELS.map(function(r){
+      var d = [];
+      if (!r.base_url) d.push("base_url");
+      if (!r.model) d.push("model");
+      return { id: r.id, name: r.name, label: (r.name || r.model || DEFAULT_NAME),
+               base_url: (r.base_url || DEFAULT_URL), model: (r.model || DEFAULT_NAME),
+               api_key_set: !!r.api_key, active: r.id === ACTIVE, defaulted: d };
+    });
+  }
+  function llmDefaulted() {
+    var d = ["temperature","retries","timeout","max_tokens"].filter(function(k){ return !savedNum[k]; });
+    var r = activeRaw();
+    if (!r.base_url) d.push("base_url");
+    if (!r.model) d.push("model");
+    return d;
+  }
+  function hasKey(){ return !!activeRaw().api_key; }
+  function err(code, detail) {
+    return Promise.resolve(new Response(JSON.stringify({ detail: detail }),
+      { status: code, headers: { 'Content-Type': 'application/json' } }));
+  }
+  function configBody() {
+    var r = activeRaw();
+    return { base_url: (r.base_url || DEFAULT_URL), model: (r.model || DEFAULT_NAME),
+             api_key_set: hasKey(), mock: false, retries: 2, timeout: 180,
+             max_tokens: 16000, temperature: 0.7, env_override: false,
+             defaults: { base_url: DEFAULT_URL, model: DEFAULT_NAME },
+             llm_defaulted: llmDefaulted(),
+             models: publicModels(), active_model: ACTIVE,
+             config_error: CFGERR
+               ? "config.yaml 语法有误（mapping values are not allowed here，第 2 行第 44 列）"
+               : "" };
+  }
   var calls = { gen:0, job:0, cancel:0, rewrite:0 };
   var ELEVATOR_DRAFT = true;   // 有状态：转正后变 false，才能验证按钮消失
   window.__calls = calls;
@@ -211,7 +244,62 @@ window.__addCount = 0;
     window.__sawToken = !!(hdrs['X-TalkScript-Token'] || hdrs['x-talkscript-token']);
     if (s.indexOf('/api/meta') >= 0) {
       return mk(Object.assign({}, META,
-        { has_api_key: apiKeySet, mock: false, llm_defaulted: llmDefaulted() }));
+        { has_api_key: hasKey(), mock: false, llm_defaulted: llmDefaulted(),
+          models: publicModels(), active_model: ACTIVE }));
+    }
+    // ── 模型列表接口 ──
+    // 三个具体路径必须排在「/api/models」的通用匹配**之前** ——
+    // indexOf('/api/models') 会一并命中 activate / delete，
+    // 顺序反了会让「切换当前模型」走进 upsert 分支（凭空多出一条模型）。
+    if (s.indexOf('/api/models/activate') >= 0) {
+      var ab = {};
+      try { ab = JSON.parse(o && o.body || '{}'); } catch (_) {}
+      if (!MODELS.some(function(x){ return x.id === ab.id; })) {
+        return err(404, '没有这个模型：' + ab.id);
+      }
+      ACTIVE = ab.id;
+      window.__lastActivate = ab.id;
+      return mk({ ok:true, active_model:ACTIVE, models:publicModels() });
+    }
+    if (s.indexOf('/api/models/delete') >= 0) {
+      var db = {};
+      try { db = JSON.parse(o && o.body || '{}'); } catch (_) {}
+      if (MODELS.length <= 1) return err(400, '至少要保留一个模型');
+      var before = MODELS.length;
+      MODELS = MODELS.filter(function(x){ return x.id !== db.id; });
+      if (MODELS.length === before) return err(404, '没有这个模型：' + db.id);
+      if (ACTIVE === db.id) ACTIVE = MODELS[0].id;
+      return mk({ ok:true, active_model:ACTIVE, models:publicModels() });
+    }
+    if (s.indexOf('/api/models') >= 0) {
+      var mb = {};
+      try { mb = JSON.parse(o && o.body || '{}'); } catch (_) {}
+      window.__lastModelBody = mb;
+      var mid = String(mb.id || '');
+      var target = null;
+      if (mid) {
+        target = MODELS.filter(function(x){ return x.id === mid; })[0];
+        if (!target) return err(404, '没有这个模型：' + mid);
+      } else {
+        var n = 1;
+        while (MODELS.some(function(x){ return x.id === 'm' + n; })) n++;
+        mid = 'm' + n;
+        target = { id:mid, name:'', base_url:'', api_key:'', model:'' };
+        MODELS.push(target);
+      }
+      if (!String(mb.model || '').trim()) return err(400, '模型 ID 不能为空');
+      var burl = String(mb.base_url || '').trim().replace(/[/]+$/, '');
+      // ⚠ 这里刻意用 indexOf 而不是正则：桩整体是一个模板串，
+      // 正则里的 \/ 会被模板串吃掉，剩下的 // 会把后面整行变成注释。
+      if (burl && burl.indexOf('http://') !== 0 && burl.indexOf('https://') !== 0) {
+        return err(400, '请求地址要以 http:// 或 https:// 开头');
+      }
+      target.name = String(mb.name || '').trim();
+      target.model = String(mb.model || '').trim();
+      // 留空 = 保持不变（编辑）/ 用内置默认（新增）—— 与真实后端同一语义
+      if (burl) target.base_url = burl;
+      if (String(mb.api_key || '').trim()) target.api_key = String(mb.api_key).trim();
+      return mk({ ok:true, id:mid, models:publicModels() });
     }
     if (s.indexOf('/api/generate') >= 0) {
       calls.gen++; calls.job = 0;
@@ -276,14 +364,18 @@ window.__addCount = 0;
       var raw = (o && o.body) || '';
       if (raw) {
         try { window.__lastConfigBody = JSON.parse(raw); } catch (_) {}
-        // 表单会把 base_url / model 一起发上来（saveSettings 里写死的两项），
-        // 所以「发过 model」就等于「保存过一次」。
-        if (window.__lastConfigBody && window.__lastConfigBody.model) cfgSaved = true;
-        // Key 则要看它有没有真被带上 —— 空 Key 是不发的（留空 = 保持不变）
-        if (window.__lastConfigBody && window.__lastConfigBody.api_key) apiKeySet = true;
+        var cb = window.__lastConfigBody || {};
+        // 数值项存过之后就不再是「内置默认」—— 逐项记，不整体清空。
+        ["temperature","retries","timeout","max_tokens"].forEach(function(k){
+          if (cb[k] !== undefined && cb[k] !== null && cb[k] !== "") savedNum[k] = 1;
+        });
+        // 老的连接信息入口（curl / 旧渲染层）：改的是**当前模型条目**，
+        // 不是第二份数据 —— 与真实后端一致。
+        if (cb.base_url) activeRaw().base_url = String(cb.base_url).replace(/[/]+$/, '');
+        if (cb.model) activeRaw().model = cb.model;
+        if (cb.api_key) activeRaw().api_key = cb.api_key;
       }
-      return mk(Object.assign({}, CONFIG,
-        { api_key_set: apiKeySet, llm_defaulted: llmDefaulted() }));
+      return mk(configBody());
     }
     if (s.indexOf('/api/packs/') >= 0) return mk({ display_name:'电梯行业包', description:'电梯行业口播脚本包',
       draft:ELEVATOR_DRAFT, checklist:'1. 核对参数 / 2. 核对禁用词',
@@ -379,6 +471,22 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   //   `createElement('style')` → `style-src-elem`；`createElement('script')` → `script-src-elem`。
   //   **CSSOM（`el.style.setProperty`）不被拦** —— 界面里那些动态样式全靠它，
   //   这也正是「收紧 style-src 之后界面照常工作」的原因。
+  // ⚠ 桩脚本必须先证明自己**跑起来了**。
+  //
+  // 它一旦有语法错误，页面就是一个**没有桩**的环境：后面几十条断言会以各种
+  // 莫名其妙的形式失败（`window.__csp` 是 undefined、fetch 打到不存在的接口…），
+  // 而根因只有一个，报错位置离原因极远。
+  //
+  // 真出过一次：`stubScript()` 返回的整段是**模板串**，正则里的 `\/` 会被模板串
+  // 吃掉，`/^https?:\/\//` 于是变成 `//` 开头的注释 —— 语法错误，桩静默失效。
+  // 所以这里显式验一次，不通过就直接退出，不去跑那些注定失真的断言。
+  if (!(await evalIn(`return window.__INJECTED__ === 1;`))) {
+    console.error("\n❌ 桩脚本没跑起来（window.__INJECTED__ 不是 1）。\n"
+      + "   先检查 stubScript() 返回的代码有没有语法错误 ——\n"
+      + "   它整体是一个模板串，正则里的 \\/ 会被吃掉（写成 [/] 或 indexOf）。\n");
+    cleanupAll();
+    process.exit(1);
+  }
   const cspBefore = await evalIn(`return window.__csp.length;`);
   await evalIn(`const d = document.createElement('div');
     d.setAttribute('style', 'color:red');
@@ -752,13 +860,28 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await sleep(300);
   const llm = await evalIn(`return {
     temp: document.getElementById('st-temperature')?.value,
-    base: document.getElementById('st-baseurl')?.value,
+    rows: document.querySelectorAll('#st-model-rows tr').length,
+    label: document.querySelector('#st-model-rows .mdl-label')?.textContent,
+    sub: document.querySelector('#st-model-rows .mdl-sub')?.textContent,
+    prov: document.querySelector('#st-model-rows .col-prov')?.textContent,
+    activeRows: document.querySelectorAll('#st-model-rows tr.on').length,
+    switchOn: document.querySelectorAll('#st-model-rows .mdl-switch.on').length,
+    ops: document.querySelectorAll('#st-model-rows .mdl-op').length,
     status: document.getElementById('st-status').textContent,
     cfgErrHidden: document.getElementById('st-cfg-err')?.classList.contains('hidden'),
     cfgErrText: document.getElementById('st-cfg-err')?.textContent || '' };`);
-  check("模型接口分区回填 base_url 与温度",
-    llm.base === "https://x/v4" && llm.temp !== undefined && llm.temp !== "",
+  // 模型从「三个平铺输入框」变成了**一份列表**：一行一条，带服务商与操作。
+  // 平铺那版加第二个模型没有位置可填，只能把第一个覆盖掉。
+  check("模型接口列出模型（一行一条，含服务商与操作）",
+    llm.rows === 1 && llm.ops === 3 && !!llm.prov,
     JSON.stringify(llm));
+  check("模型行显示模型名与「模型 ID · 主机名」小字",
+    llm.label === "glm-4.7" && /glm-4\.7/.test(llm.sub || ""),
+    JSON.stringify({ label: llm.label, sub: llm.sub }));
+  // 当前启用的那一行要有落点：否则三行长得一样，只能靠开关的明暗去猜
+  check("当前启用的模型行有唯一落点（行高亮 + 开关亮着）",
+    llm.activeRows === 1 && llm.switchOn === 1,
+    JSON.stringify({ activeRows: llm.activeRows, switchOn: llm.switchOn }));
   check("接口状态显示重试/超时等实际生效值", /重试/.test(llm.status), llm.status);
   // 前端**不许**比后端更严：1.8 是后端接受的合法值（区间 0 ~ 2）。
   // 修复前前端单独一个 if 卡 1.5 → 点保存弹 toast 并 return，
@@ -771,10 +894,12 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await evalIn(`document.getElementById('st-save').click(); return true;`);
   await sleep(800);
   const t18 = await evalIn(`return window.__lastConfigBody || null;`);
-  check("保存请求真的发出去了（未被前端区间拦下）",
-    !!(t18 && 'base_url' in t18), JSON.stringify(t18));
   check("前端接受 1.8 采样温度（与后端区间一致，不再比后端更严）",
     !!t18 && t18.temperature === 1.8, JSON.stringify(t18));
+  // 这一页的保存只管高级配置。连接信息（base_url / model）住在模型条目里，
+  // 由弹窗保存 —— 这里再带一遍就等于同一件事有两处写入口。
+  check("高级配置的保存不再连带写连接信息（那归模型条目管）",
+    !!t18 && !('base_url' in t18) && !('model' in t18), JSON.stringify(t18));
   // 还原成默认值，免得影响后面的保存相关用例
   await evalIn(`var n = document.getElementById('st-temperature');
     n.value = '0.7'; n.dispatchEvent(new Event('input', {bubbles:true})); return true;`);
@@ -784,24 +909,47 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   // 未保存的输入不被覆盖（修复点：每次打开设置都 preloadSettings 会冲掉编辑）
   await evalIn(`window.__ts.setPane('llm');
-    const b = document.getElementById('st-baseurl');
-    b.value = 'https://typed-by-user/v1';
+    const b = document.getElementById('st-timeout');
+    b.value = '60';
     b.dispatchEvent(new Event('input', {bubbles:true})); return true;`);
   await sleep(200);
   await evalIn(`document.getElementById('btn-close-settings').click();
     document.getElementById('btn-open-settings').click(); return true;`);
   await sleep(600);
-  const keep = await evalIn("return document.getElementById('st-baseurl').value;");
-  check("重开设置不覆盖未保存的输入", keep === "https://typed-by-user/v1", keep);
-
-  // 「恢复默认」：留空保存是无效操作（后端会过滤空串防手滑），
-  // 所以回到默认必须是显式动作 —— 承接上面那个被改脏的输入框。
+  const keep = await evalIn("return document.getElementById('st-timeout').value;");
+  check("重开设置不覆盖未保存的输入", keep === "60", keep);
+  // 收尾：把刚才改脏的输入还原回服务端值，否则后面「回填值」那条断言会读到 60
   await evalIn(`window.__ts.setPane('llm');
-    document.getElementById('st-reset-baseurl').click(); return true;`);
+    document.getElementById('st-reset-adv').click(); return true;`);
   await sleep(500);
-  const restored = await evalIn("return document.getElementById('st-baseurl').value;");
-  check("恢复默认把 base_url 还原为服务端默认值",
-    restored === "https://x/v4", restored);
+
+  // 连接信息（请求地址 / 模型 ID）现在住在**模型弹窗**里，所以「恢复默认」
+  // 也跟着搬过去。它的做法是把内置默认值**显式填进框里**，由用户点保存落盘 ——
+  // 直接改服务端会绕过「这条模型到底存了什么」，而且对非当前模型根本没法用。
+  await evalIn(`window.__ts.setPane('llm');
+    document.getElementById('st-add-model').click(); return true;`);
+  await sleep(400);
+  const dlg = await evalIn(`return {
+    open: !document.getElementById('model-dialog').classList.contains('hidden'),
+    title: document.getElementById('md-title').textContent,
+    id: document.getElementById('md-id').value,
+    url: document.getElementById('md-baseurl').value,
+    model: document.getElementById('md-model').value };`);
+  check("「添加模型」打开的是表单弹窗（不再是跳回设置页填一个名字）",
+    dlg.open && dlg.title === "添加模型" && dlg.id === ""
+    && dlg.url === "" && dlg.model === "", JSON.stringify(dlg));
+  await evalIn(`document.getElementById('md-reset-baseurl').click(); return true;`);
+  await sleep(200);
+  const dreset = await evalIn(`return {
+    url: document.getElementById('md-baseurl').value,
+    tag: document.querySelector('#model-dialog .tag-default')?.dataset.field || '' };`);
+  check("弹窗「恢复默认」把内置默认地址填进框里",
+    dreset.url === "https://x/v4", JSON.stringify(dreset));
+  await evalIn(`document.getElementById('md-cancel').click(); return true;`);
+  await sleep(200);
+  const dclosed = await evalIn(
+    `return document.getElementById('model-dialog').classList.contains('hidden');`);
+  check("弹窗可以取消，不留残余浮层", dclosed === true, String(dclosed));
 
   // 重试 / 超时 / 输出预算：原来只在状态行里展示、无法修改
   const adv = await evalIn(`window.__ts.setPane('llm');
@@ -1121,23 +1269,14 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
                  title: btn.title,
                  texts: Array.from(s.options).map(o => o.textContent) } : null;`);
   check("输入区显示当前模型（不再只有设置页能看到）",
-    picker && picker.value === "glm-4.7" && picker.text === "glm-4.7"
+    picker && picker.value === "m-default" && picker.text === "glm-4.7"
     && /模型/.test(picker.title), JSON.stringify(picker));
-  check("模型下拉留了去设置页的出口（不是封闭集合）",
-    picker && picker.texts.some(t => /自定义/.test(t)),
+  // 候选来自**设置里那份模型列表**，不再是 localStorage 里攒的历史：
+  // 历史与配置是同一件事的两份表示，而历史那份还是隐形的 —— 在设置里删掉
+  // 一个模型，输入区的下拉里它还在；换台机器打开，历史全没了。
+  check("模型下拉来自配置里的模型列表（不是本地攒的历史）",
+    picker && picker.texts.length === 2 && picker.texts.some(t => /添加模型/.test(t)),
     JSON.stringify(picker && picker.texts));
-  // 切换模型必须**真的落到配置接口**上，而不是只改了个显示 ——
-  // 「信号算了但没人接」是这个项目最容易犯的错（param_audit 那一类），
-  // 所以一个能改显示的下拉框不算数，得看它有没有写出去。
-  await evalIn(`const s = document.getElementById('p-model');
-    const n = document.createElement('option');
-    n.value = 'deepseek-chat'; n.textContent = 'deepseek-chat';
-    s.appendChild(n); s.value = 'deepseek-chat';
-    s.dispatchEvent(new Event('change', { bubbles: true })); return true;`);
-  await sleep(400);
-  const modelSaved = await evalIn(`return window.__lastConfigBody || null;`);
-  check("切换模型会写进配置（不只是改了显示）",
-    !!modelSaved && modelSaved.model === 'deepseek-chat', JSON.stringify(modelSaved));
 
   // 会话搜索（成熟 agent 的标配；历史一多就找不到）
   await evalIn(`const b = document.getElementById('sess-search');
@@ -1554,37 +1693,70 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("引导态仍保留示例卡（先挑主题再配 Key 这条路不能被挡掉）",
     firstRun.samples === 4, JSON.stringify(firstRun));
   // 「没配过」必须看得出来。后端会把没写的字段静默兜底成内置默认值
-  // （config.py: model = llm.get("model") or DEFAULT），界面若不标，
-  // 未配置状态和已配置状态长得一模一样：设置页模型名写着 glm-4.7、
+  // （config.py 的 _effective：空 base_url → DEFAULT_MODEL），界面若不标，
+  // 未配置状态和已配置状态长得一模一样：列表里那行写着 glm-4.7、
   // 输入区右侧也写着 glm-4.7，用户第一眼就以为配好了。
+  //
+  // ⚠ 断言按 **data-field 的集合**比，不按标签个数比：个数对不上可能只是布局
+  // 变了，而集合对不上才是「该标的没标 / 不该标的标了」。行内那个标把两个字段
+  // 合成一个（一行里挂两个一模一样的「内置默认」是噪音），所以按逗号拆开。
   const notCfg = await evalIn(`return (function(){
-    var tag = document.querySelector('#st-model').closest('.block-inner')
-                .querySelector('.tag-default');
-    var ak = document.getElementById('st-apikey');
+    function fields(root){
+      return [].concat.apply([], Array.from(root.querySelectorAll('.tag-default'))
+        .map(function(t){ return (t.dataset.field || '').split(',').filter(Boolean); }));
+    }
+    var row = document.querySelector('#st-model-rows tr.on');
+    var tags = Array.from(row.querySelectorAll('.tag-default'));
     var s = document.getElementById('p-model');
     var b = s && s.parentNode.querySelector('.select-btn');
-    return { tags: document.querySelectorAll('#pane-llm .tag-default').length,
-             modelTag: tag ? tag.textContent : '',
-             modelTagColor: tag ? getComputedStyle(tag).color : '',
-             akPh: ak.placeholder,
+    return { rowFields: fields(row).sort(),
+             advFields: fields(document.getElementById('st-adv')).sort(),
+             modelTag: tags.length ? tags[0].textContent : '',
+             modelTagColor: tags.length ? getComputedStyle(tags[0]).color : '',
              pickerText: b ? b.querySelector('.sel-text').textContent : '',
              pickerValue: s ? s.value : '' };
   })()`);
-  check("未配置时逐项标出「内置默认」（六项一个不漏）",
-    notCfg.tags === 6 && notCfg.modelTag === "内置默认", JSON.stringify(notCfg));
+  check("未配置时逐项标出「内置默认」（六项一个不漏，按字段集合核对）",
+    notCfg.rowFields.concat(notCfg.advFields).sort().join()
+      === "base_url,max_tokens,model,retries,temperature,timeout"
+    && notCfg.modelTag === "内置默认", JSON.stringify(notCfg));
   // 中性灰而不是 warn 橙：没配过不是故障，染橙会让橙色贬值
   // （真正会失败的「未配置 API Key」那条就没人看了）。
   check("「内置默认」用中性灰而不是警示色",
     notCfg.modelTagColor !== 'rgb(178, 94, 0)' && /^rgb/.test(notCfg.modelTagColor),
     notCfg.modelTagColor);
-  // 显示名带「（默认）」，但 value 必须还是原始模型名 ——
-  // 否则 pickModel 里 `val === m.model` 永远不成立，切模型会把
-  // 「glm-4.7（默认）」这个假模型名写进 config.yaml。
-  check("未配置时模型选择器标明「（默认）」且 value 仍是原始模型名",
-    notCfg.pickerText === "glm-4.7（默认）" && notCfg.pickerValue === "glm-4.7",
+  // 显示名带「（默认）」，但 option.value 必须还是模型 **id** ——
+  // 混在一起的话激活时会把「glm-4.7（默认）」这个假 id 发出去。
+  check("未配置时模型选择器标明「（默认）」且 value 仍是模型 id",
+    notCfg.pickerText === "glm-4.7（默认）" && notCfg.pickerValue === "m-default",
     JSON.stringify(notCfg));
+
+  // 编辑弹窗里，**没配过的字段必须留空**，不能把生效值（兜出来的默认地址）
+  // 填进框里 —— 那等于程序写的值冒充用户输入，用户没动过手却看到一串地址，
+  // 而且保存一次它就真的成了他的配置。
+  await evalIn(`document.querySelectorAll('#st-model-rows tr.on .mdl-op')[1].click();
+    return true;`);
+  await sleep(300);
+  const editDlg = await evalIn(`return {
+    open: !document.getElementById('model-dialog').classList.contains('hidden'),
+    title: document.getElementById('md-title').textContent,
+    url: document.getElementById('md-baseurl').value,
+    model: document.getElementById('md-model').value,
+    ph: document.getElementById('md-baseurl').placeholder,
+    tags: Array.from(document.querySelectorAll('#model-dialog .tag-default'))
+            .map(t => t.dataset.field).sort().join(),
+    akPh: document.getElementById('md-apikey').placeholder };`);
+  check("编辑一条没配过的模型：弹窗标题是「编辑」，字段留空并逐项标出内置默认",
+    editDlg.open && editDlg.title === "编辑模型"
+    && editDlg.url === "" && editDlg.model === ""
+    && editDlg.tags === "base_url,model", JSON.stringify(editDlg));
+  // 留空但不能让人不知道填什么：placeholder 里给出默认地址
+  check("留空的字段用 placeholder 说明默认值（不是一片空白）",
+    /^https:\/\//.test(editDlg.ph || ""), editDlg.ph);
   check("未配置时 Key 输入框不再暗示「已经配过了」",
-    /粘贴/.test(notCfg.akPh), notCfg.akPh);
+    /粘贴/.test(editDlg.akPh), editDlg.akPh);
+  await evalIn(`document.getElementById('md-cancel').click(); return true;`);
+  await sleep(200);
   // 「没有配置」这个状态留两张图：用户开机第一眼看到的是**自动弹开的设置页**，
   // 关掉之后才看到主界面上那块配置引导 —— 两张都要有人看过。
   await shot("setup-settings.png", `${closeMenus} return true;`);
@@ -1599,30 +1771,75 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     window.__ts.setPane('llm'); return true;`);
   await sleep(600);
   const beforeSave = await evalIn(`return (function(){
+    function fields(root){
+      return [].concat.apply([], Array.from(root.querySelectorAll('.tag-default'))
+        .map(function(t){ return (t.dataset.field || '').split(',').filter(Boolean); }));
+    }
+    var row = document.querySelector('#st-model-rows tr.on');
     var h3 = document.querySelector('#empty h3');
-    return { tags: document.querySelectorAll('#pane-llm .tag-default').length,
+    return { fields: fields(row).concat(fields(document.getElementById('st-adv'))).sort().join(),
              heroTitle: window.__shown(h3),
              heroBtn: !document.querySelector('#empty .empty-cta').classList.contains('hidden') };
   })()`);
-  // 真填一个 Key 再保存 —— 不填的话「已配置」这个状态根本不会到来
-  // （saveSettings 只在 Key 非空时才带上 api_key）。
-  await evalIn(`const k = document.getElementById('st-apikey');
-    k.value = 'sk-test'; k.dispatchEvent(new Event('input', {bubbles:true}));
-    document.getElementById('st-save').click(); return true;`);
-  await sleep(900);
+  // 走**用户真实的路径**：打开这条模型的编辑弹窗 → 填地址与模型名 → 保存。
+  // 不能绕过界面直接调接口 —— 那样测的是后端，不是「界面会不会把标记摘掉」。
+  // 填 Key 是必须的：不填的话「已配置」这个状态根本不会到来。
+  await evalIn(`document.querySelectorAll('#st-model-rows tr.on .mdl-op')[1].click(); return true;`);
+  await sleep(300);
+  await evalIn(`document.getElementById('md-reset-baseurl').click();
+    var m = document.getElementById('md-model'); m.value = 'glm-4.7';
+    m.dispatchEvent(new Event('input', {bubbles:true}));
+    var k = document.getElementById('md-apikey'); k.value = 'sk-test';
+    k.dispatchEvent(new Event('input', {bubbles:true}));
+    document.getElementById('md-save').click(); return true;`);
+  await sleep(1000);
   const afterSave = await evalIn(`return (function(){
+    function fields(root){
+      return [].concat.apply([], Array.from(root.querySelectorAll('.tag-default'))
+        .map(function(t){ return (t.dataset.field || '').split(',').filter(Boolean); }));
+    }
+    var row = document.querySelector('#st-model-rows tr.on');
     var s = document.getElementById('p-model');
     var b = s && s.parentNode.querySelector('.select-btn');
     var h3 = document.querySelector('#empty h3');
-    return { tags: document.querySelectorAll('#pane-llm .tag-default').length,
+    return { fields: fields(row).concat(fields(document.getElementById('st-adv'))).sort().join(),
+             rowTags: row.querySelectorAll('.tag-default').length,
+             dlgHidden: document.getElementById('model-dialog').classList.contains('hidden'),
              pickerText: b ? b.querySelector('.sel-text').textContent : '',
              heroTitle: window.__shown(h3),
              heroBtn: !document.querySelector('#empty .empty-cta').classList.contains('hidden') };
   })()`);
-  check("保存后同一页面里「内置默认」小标立刻消失（不是只增不减）",
-    beforeSave.tags === 6 && afterSave.tags === 0, `${beforeSave.tags} → ${afterSave.tags}`);
+  // 连接信息配好之后，那两项的小标必须立刻消失；高级配置那四项没动过，仍在。
+  // 「只增不减」的实现在这里给的是 6 → 6，直接报红。
+  check("配好模型之后同一页面里那两项「内置默认」小标立刻消失（不是只增不减）",
+    beforeSave.fields === "base_url,max_tokens,model,retries,temperature,timeout"
+    && afterSave.fields === "max_tokens,retries,temperature,timeout",
+    `${beforeSave.fields} → ${afterSave.fields}`);
+  check("保存后弹窗自动关闭", afterSave.dlgHidden === true, String(afterSave.dlgHidden));
   check("保存后模型选择器同步摘掉「（默认）」",
     afterSave.pickerText === "glm-4.7", afterSave.pickerText);
+
+  // 再把「高级配置」也存一次。**这一步不能省**：数值项的小标走的是
+  // markDefault（就地增删），与列表行（整行 innerHTML 重建）不是同一套机制，
+  // 必须各自验一次「会消失」。
+  //
+  // 实测漏过一次：把 markDefault 改成「只加不摘」之后，整套断言**全绿** ——
+  // 因为「已配置」的页面里它本来就没挂过标，看不出区别。只有在同一个页面里
+  // 走一遍「没配 → 配好」，那个「摘」的动作才有东西可摘。
+  await evalIn(`document.getElementById('st-save').click(); return true;`);
+  await sleep(900);
+  const afterAdv = await evalIn(`return (function(){
+    function fields(root){
+      return [].concat.apply([], Array.from(root.querySelectorAll('.tag-default'))
+        .map(function(t){ return (t.dataset.field || '').split(',').filter(Boolean); }));
+    }
+    var row = document.querySelector('#st-model-rows tr.on');
+    return { fields: fields(row).concat(fields(document.getElementById('st-adv'))).join(),
+             advSub: document.getElementById('st-adv-sub').textContent };
+  })()`);
+  check("保存高级配置后那四项的小标也消失（markDefault 不是只增不减）",
+    afterAdv.fields === "" && afterAdv.advSub === "",
+    JSON.stringify(afterAdv));
   // hero 也必须跟着切回来。只在 noKey 时改一次的实现在这里会露馅：
   // 引导是「一次性的」，用户配好 Key 之后空态还写着「先配置模型接口」。
   check("保存后空态主区切回「想聊点什么？」（引导不是一次性的）",
@@ -1645,12 +1862,18 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     window.__ts.setPane('llm'); return true;`);
   await sleep(700);
   const cfgErr = await evalIn(`return (function(){
+    function fields(root){
+      return [].concat.apply([], Array.from(root.querySelectorAll('.tag-default'))
+        .map(function(t){ return (t.dataset.field || '').split(',').filter(Boolean); }));
+    }
     var n = document.getElementById('st-cfg-err');
     if (!n) return { missing: true };
     var cs = getComputedStyle(n);
+    var row = document.querySelector('#st-model-rows tr.on');
     return { hidden: n.classList.contains('hidden'), display: cs.display,
              text: n.textContent, color: cs.color,
-             tags: document.querySelectorAll('#pane-llm .tag-default').length,
+             fields: fields(row).concat(fields(document.getElementById('st-adv')))
+                       .sort().join(),
              status: document.getElementById('st-status').textContent };
   })()`);
   check("config.yaml 读坏时设置页给出警示（不是静默用默认值）",
@@ -1658,15 +1881,17 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       && /默认值/.test(cfgErr.text) && /保存/.test(cfgErr.text),
     JSON.stringify(cfgErr));
   // 两个条件各自吃劲：颜色证明用的是 --warn 而不是普通 hint 灰；
-  // status 证明警示是**追加**的，没有把原来的状态行顶掉。
+  // status 证明警示是**追加**的，没有把状态行整行换掉 ——
+  // 换掉的话用户就看不到「当前用的是哪条模型」了。
   check("警示用 warn 色且不顶掉原状态行",
-    cfgErr.color === 'rgb(178, 94, 0)' && /已配置 Key/.test(cfgErr.status),
+    cfgErr.color === 'rgb(178, 94, 0)' && /模型/.test(cfgErr.status),
     JSON.stringify(cfgErr));
-  // 读坏与没配过是**同一件事的两个来源**（读坏 = llm 段整个读不到 → 六项全取默认），
-  // 所以两个信号必须同时出现：只有橙色警示、框上却不标默认，说明前端只消费了
+  // 读坏与没配过是**同一件事的两个来源**（读坏 = 整个文件读不到 → 六项全取默认），
+  // 所以两个信号必须同时出现：只有橙色警示、界面却不标默认，说明前端只消费了
   // 其中一个字段 —— 那正是「信号算对了但没人接」的老毛病。
   check("读坏时「内置默认」小标与橙色警示同时出现",
-    cfgErr.tags === 6, JSON.stringify(cfgErr));
+    cfgErr.fields === "base_url,max_tokens,model,retries,temperature,timeout",
+    JSON.stringify(cfgErr));
 
   // 回到正常模式，继续后面的布局检查
   await cdp.send("Page.navigate", { url: `http://127.0.0.1:${PORT}/?token=stubtoken` });
@@ -1680,22 +1905,138 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     window.__ts.setPane('llm'); return true;`);
   await sleep(600);
   const cfgd = await evalIn(`return (function(){
-    var ak = document.getElementById('st-apikey');
+    function fields(root){
+      return [].concat.apply([], Array.from(root.querySelectorAll('.tag-default'))
+        .map(function(t){ return (t.dataset.field || '').split(',').filter(Boolean); }));
+    }
+    var row = document.querySelector('#st-model-rows tr.on');
     var s = document.getElementById('p-model');
     var b = s && s.parentNode.querySelector('.select-btn');
     var h3 = document.querySelector('#empty h3');
-    return { tags: document.querySelectorAll('#pane-llm .tag-default').length,
-             akPh: ak.placeholder,
+    return { fields: fields(row).concat(fields(document.getElementById('st-adv'))).join(),
+             rowTags: row.querySelectorAll('.tag-default').length,
+             warnTags: row.querySelectorAll('.tag-warn').length,
              heroTitle: window.__shown(h3),
              heroBtn: !document.querySelector('#empty .empty-cta').classList.contains('hidden'),
              pickerText: b ? b.querySelector('.sel-text').textContent : '' };
   })()`);
   check("已配置时「内置默认」小标全部消失（不误报）",
-    cfgd.tags === 0, JSON.stringify(cfgd));
+    cfgd.fields === "" && cfgd.rowTags === 0, JSON.stringify(cfgd));
+  // 「未配置 Key」同理不能误报：配好了还挂着它，会让这个警示彻底失去可信度。
+  check("已配置时不再报「未配置 Key」（不误报）",
+    cfgd.warnTags === 0, JSON.stringify(cfgd));
   check("已配置时模型名不带「（默认）」后缀（不误报）",
     cfgd.pickerText === "glm-4.7", cfgd.pickerText);
+  // Key 输入框的 placeholder 也在弹窗里：已配置时回到「留空即保持不变」。
+  // 从没配过时写这句等于在暗示「你已经配过了」—— 两个状态的文案各只有一份，
+  // 已配置那句就是 HTML 里的 placeholder（首次打开时存进 data-ph-set）。
+  await evalIn(`document.querySelectorAll('#st-model-rows tr.on .mdl-op')[1].click(); return true;`);
+  await sleep(300);
+  const cfgdAk = await evalIn(`return document.getElementById('md-apikey').placeholder;`);
   check("已配置时 Key 输入框回到「留空即保持不变」",
-    /留空即保持不变/.test(cfgd.akPh), cfgd.akPh);
+    /留空即保持不变/.test(cfgdAk), cfgdAk);
+  await evalIn(`document.getElementById('md-cancel').click(); return true;`);
+  await sleep(150);
+
+  // ── 12f) 模型列表：添加 / 启用 / 编辑 / 删除 ──────────────
+  // 全部走**界面路径**（点按钮 → 填弹窗 → 保存），不绕过界面直接调接口 ——
+  // 直接调接口测的是后端，而这里要守的是「界面有没有把动作接上」。
+  // 「信号算了但没人接」是本项目最容易犯的错（param_audit 那一类）。
+  await evalIn(`document.getElementById('btn-open-settings').click();
+    window.__ts.setPane('llm'); return true;`);
+  await sleep(500);
+  const mdlBefore = await evalIn(`return {
+    rows: document.querySelectorAll('#st-model-rows tr').length,
+    delDisabled: document.querySelectorAll('#st-model-rows .mdl-op')[2].disabled };`);
+  check("只有一条模型时「删除」是禁用的（把「至少留一条」这条规则摆到界面上）",
+    mdlBefore.rows === 1 && mdlBefore.delDisabled === true, JSON.stringify(mdlBefore));
+
+  await evalIn(`document.getElementById('st-add-model').click(); return true;`);
+  await sleep(250);
+  await evalIn(`document.getElementById('md-model').value = 'deepseek-chat';
+    document.getElementById('md-name').value = 'DeepSeek';
+    document.getElementById('md-baseurl').value = 'https://api.deepseek.com/v1';
+    document.getElementById('md-apikey').value = 'sk-dialog';
+    document.getElementById('md-save').click(); return true;`);
+  await sleep(800);
+  const added = await evalIn(`return {
+    hidden: document.getElementById('model-dialog').classList.contains('hidden'),
+    rows: document.querySelectorAll('#st-model-rows tr').length,
+    ids: Array.from(document.querySelectorAll('#st-model-rows tr')).map(t => t.dataset.id),
+    label2: document.querySelectorAll('#st-model-rows .mdl-label')[1]?.textContent,
+    prov2: document.querySelectorAll('#st-model-rows .col-prov')[1]?.textContent,
+    body: window.__lastModelBody || null };`);
+  check("弹窗保存后列表多出一条（不再是「填一个名字就跳回设置页」）",
+    added.hidden && added.rows === 2 && added.ids[1] === "m1"
+    && added.label2 === "DeepSeek", JSON.stringify(added));
+  // 请求体必须只带这一条模型的信息，不能顺手把当前模型的地址也写进去 ——
+  // 「同一件事两份表示」正是要避免的。
+  check("保存的是**这条**模型（请求体里是它的地址与 Key）",
+    !!added.body && added.body.base_url === "https://api.deepseek.com/v1"
+    && added.body.model === "deepseek-chat" && added.body.api_key === "sk-dialog",
+    JSON.stringify(added.body));
+  // 服务商名是从请求地址**推**出来的（参考图里那一列），推不出来就原样显示主机名 ——
+  // 硬套一个名字会把「这家」说成「那家」。
+  check("服务商列按请求地址推断（未命中已知表就显示主机名）",
+    added.prov2 === "DeepSeek", added.prov2);
+
+  // 启用：必须真的调切换接口，而不是只把开关点亮
+  await evalIn(`document.querySelectorAll('#st-model-rows tr')[1]
+    .querySelector('.mdl-switch').click(); return true;`);
+  await sleep(800);
+  const act = await evalIn(`return {
+    called: window.__lastActivate || '',
+    onRows: document.querySelectorAll('#st-model-rows tr.on').length,
+    onId: document.querySelector('#st-model-rows tr.on')?.dataset.id,
+    onSwitches: document.querySelectorAll('#st-model-rows .mdl-switch.on').length,
+    checked: Array.from(document.querySelectorAll('#st-model-rows .mdl-switch'))
+               .map(b => b.getAttribute('aria-checked')).join() };`);
+  // 开关是**单选**语义（同时只有一个生效），所以点一个必须关掉另一个 ——
+  // 两个都亮着就是在骗人：用户以为能同时启用两个模型。
+  check("点「启用」真的调了切换接口，且同时只有一个亮着",
+    act.called === "m1" && act.onRows === 1 && act.onId === "m1"
+    && act.onSwitches === 1 && act.checked === "false,true", JSON.stringify(act));
+
+  // 输入区那个选择器要跟着变 —— 它读的是 /api/meta，不是设置页的局部状态
+  await evalIn(`document.getElementById('btn-close-settings').click(); return true;`);
+  await sleep(300);
+  const pick2 = await evalIn(`const s = document.getElementById('p-model');
+    const b = s && s.parentNode.querySelector('.select-btn');
+    return { value: s.value, text: b.querySelector('.sel-text').textContent,
+             n: s.options.length };`);
+  check("设置里启用另一个模型后，输入区的选择器同步跟上",
+    pick2.value === "m1" && pick2.text === "DeepSeek" && pick2.n === 3,
+    JSON.stringify(pick2));
+  // 在下拉里切换必须真的写出去（不只是改了显示）
+  await evalIn(`const s = document.getElementById('p-model');
+    s.value = 'm-default'; s.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;`);
+  await sleep(600);
+  const pickAct = await evalIn(`return window.__lastActivate || '';`);
+  check("在输入区切换模型会调切换接口（不只是改了显示）",
+    pickAct === "m-default", pickAct);
+
+  // 删除：确认后真的从列表里消失
+  await evalIn(`document.getElementById('btn-open-settings').click();
+    window.__ts.setPane('llm'); return true;`);
+  await sleep(500);
+  await evalIn(`document.querySelectorAll('#st-model-rows .mdl-op')[2].click(); return true;`);
+  await sleep(300);
+  await evalIn(`document.getElementById('cd-yes').click(); return true;`);
+  await sleep(800);
+  const mdlAfter = await evalIn(`return {
+    rows: document.querySelectorAll('#st-model-rows tr').length,
+    ids: Array.from(document.querySelectorAll('#st-model-rows tr')).map(t => t.dataset.id),
+    delDisabled: document.querySelectorAll('#st-model-rows .mdl-op')[2].disabled,
+    onId: document.querySelector('#st-model-rows tr.on')?.dataset.id };`);
+  // 删掉的正是当前启用的那条 → 必须自动换到剩下的一条，不留悬空引用。
+  // 悬空的后果是「当前模型」指向一条不存在的记录，生成时取不到任何连接信息。
+  check("删除当前启用的模型后自动落到剩下那条，且「删除」重新变灰",
+    mdlAfter.rows === 1 && mdlAfter.ids[0] === "m1"
+    && mdlAfter.onId === "m1" && mdlAfter.delDisabled === true,
+    JSON.stringify(mdlAfter));
+  await evalIn(`document.getElementById('btn-close-settings').click(); return true;`);
+  await sleep(200);
   // 冷启动就配好的情形（老用户）：hero 不该停在配置引导上
   check("已配置时冷启动空态就是「想聊点什么？」（不误报）",
     /想聊点什么/.test(cfgd.heroTitle) && cfgd.heroBtn === false,
@@ -2018,6 +2359,16 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     sel.value = 'fitment'; sel.dispatchEvent(new Event('change', {bubbles:true}));
     window.__ts.setPane('packinfo'); return true;`);
   await shot("settings-llm.png", "window.__ts.setPane('llm'); return true;");
+  // 高级配置收起来是默认态（上面那张），展开态也要留一张 ——
+  // 只截收起态的话，里面四项的「内置默认」小标在审查时根本看不到。
+  await shot("settings-llm-adv.png",
+    `window.__ts.setPane('llm');
+     document.getElementById('st-adv').open = true; return true;`);
+  // 模型弹窗：添加 / 编辑共用的那张表单，是这一版新增的主要界面
+  await shot("settings-llm-dialog.png",
+    `document.querySelectorAll('#st-model-rows tr.on .mdl-op')[1].click(); return true;`);
+  await evalIn(`document.getElementById('md-cancel').click(); return true;`);
+  await sleep(200);
   await shot("settings-kb.png", "window.__ts.setPane('kb'); return true;");
   await shot("settings-skills.png", "window.__ts.setPane('skills'); return true;");
   // 结果页此前**从未截过图** —— 审查时看不到它，才把已实现的重跑/换一版/

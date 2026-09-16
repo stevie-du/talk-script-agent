@@ -8,7 +8,7 @@
 import { $, el, esc, toast, bindOnce } from "./util.js";
 import { api } from "./api.js";
 import { state, emit } from "./store.js";
-import { closeOverlays, appConfirm } from "./overlays.js";
+import { closeOverlays, openOverlay, appConfirm } from "./overlays.js";
 // ui.js 与 settings.js 互相引用，但引用的都是**函数声明**（会被提升），
 // 所以循环依赖在调用时已解析完毕，安全。
 import { fillPackSelect } from "./ui.js";
@@ -24,6 +24,9 @@ const NAV_OF_PANE = { packgen: "packinfo" };
 // 可能从两个入口先后进，记录最后一次的来源。
 let packgenFrom = "gen";
 const dirty = new Set();
+// 最近一次 /api/config 的结果。模型列表、弹窗回填、「恢复默认」都读它 ——
+// 每次要一个字段就现发一次请求的话，弹窗里的默认值可能与列表不是同一时刻的。
+let lastCfg = null;
 
 // 数值项的合法区间。**必须与后端 `app/server.py` 的 `NUMERIC_BOUNDS` 逐项相等** ——
 // 前后端没法共享代码，一致性由 `tests/test_numeric_bounds_consistency.py`
@@ -105,53 +108,301 @@ export function setPane(pane) {
 
 async function preloadSettings() {
   const c = await api.config();
+  lastCfg = c;
   const dflt = new Set(c.llm_defaulted || []);
-  fill("st-baseurl", c.base_url || "");
-  fill("st-model", c.model || "");
   fill("st-temperature", c.temperature ?? "");
   fill("st-retries", c.retries ?? "");
   fill("st-timeout", c.timeout ?? "");
   fill("st-maxtokens", c.max_tokens ?? "");
-  if (!dirty.has("st-apikey")) $("st-apikey").value = "";
   // 「这一项还是内置默认」必须**逐项**标在框上，不能只在底部写一句总提示：
-  // 用户的视线落在「模型名 = glm-4.7」这个框上，结论就是「已经配好了」，
-  // 底部那行浅灰小字他根本不会看。读坏（config_error）时还有一行橙色提示兜底，
-  // 而**从没配过**这条路径上原本什么都没有 —— glm-4.7 / 0.7 / 180 / 16000
-  // 每一个都长得像用户自己填的。
-  markDefault("st-baseurl", dflt.has("base_url"));
-  markDefault("st-model", dflt.has("model"));
-  markDefault("st-temperature", dflt.has("temperature"));
-  markDefault("st-retries", dflt.has("retries"));
-  markDefault("st-timeout", dflt.has("timeout"));
-  markDefault("st-maxtokens", dflt.has("max_tokens"));
-  // Key 的 placeholder 同理：从没配过时写「已配置时留空即保持不变」，
-  // 等于在暗示「你已经配过了」。两个状态的文案各只有一份 —— 已配置那句就是
-  // HTML 里的 placeholder（首次运行时存进 data-ph-set），未配置那句在
-  // data-ph-empty；不在 JS 里再抄一遍。
-  const ak = $("st-apikey");
-  if (ak) {
-    if (!ak.dataset.phSet) ak.dataset.phSet = ak.placeholder;
-    ak.placeholder = c.api_key_set ? ak.dataset.phSet : ak.dataset.phEmpty;
-  }
+  // 用户的视线落在「采样温度 = 0.7」这个框上，结论就是「已经配好了」，
+  // 底部那行浅灰小字他根本不会看。
+  markDefault("st-temperature", dflt.has("temperature"), "temperature");
+  markDefault("st-retries", dflt.has("retries"), "retries");
+  markDefault("st-timeout", dflt.has("timeout"), "timeout");
+  markDefault("st-maxtokens", dflt.has("max_tokens"), "max_tokens");
+  renderAdvSub(dflt);
+  renderModelList(c);
   renderConfigError(c.config_error);
+  renderStatus(c);
+}
+
+/** 高级配置收起来时，摘要行上要能看出「里面还有几项是内置默认」。
+ *  否则收起来就什么都看不见了 —— 而「没配过」正是最需要被看见的那个状态。 */
+function renderAdvSub(dflt) {
+  const n = $("st-adv-sub");
+  if (!n) return;
+  const hit = NUM_FIELDS.filter(([key]) => dflt.has(key)).length;
+  n.textContent = hit ? `温度 / 重试 / 超时 / 输出预算 · ${hit} 项还是内置默认` : "";
+}
+
+function renderStatus(c) {
   const env = c.env_override ? "（当前由环境变量 TALKSCRIPT_API_KEY 覆盖）" : "";
+  const n = (c.models || []).length;
   $("st-status").textContent = c.mock
     ? `当前为 mock 模式（返回夹具，不调模型）${env}`
     : c.api_key_set
-      ? `已配置 Key · 模型 ${c.model} · 重试 ${c.retries} 次 / 超时 ${c.timeout}s${env}`
-      : `未配置 API Key${env}`;
+      ? `已配置 Key · 当前启用 ${c.model}（共 ${n} 个模型）· 重试 ${c.retries} 次`
+        + ` / 超时 ${c.timeout}s${env}`
+      : `当前启用的模型还没配 API Key${env}`;
+}
+
+// ── 模型列表 ────────────────────────────────────────────────
+//
+// 改造前这里是三个平铺字段（Base URL / API Key / 模型名）：想同时配智谱和
+// DeepSeek 是做不到的 —— 加第二个必须把第一个覆盖掉，而且切换要重填一遍 Key。
+// 现在每条模型自带连接信息，列表里增删改切换；生成参数（温度/重试/超时/预算）
+// 与「连到哪家」无关，仍是全局一份，收进「高级配置」。
+
+/** 服务商名**从请求地址推**。这是一次猜测 —— 猜错会把「这家」说成「那家」，
+ *  所以未命中已知表时原样显示主机名，不硬套一个名字；完整地址写在 title 上，
+ *  用户一眼能核对。表只做「常见几家的别名归一」，不做穷举。 */
+const PROVIDERS = [
+  [/bigmodel\.cn|zhipu/i, "智谱"],
+  [/deepseek/i, "DeepSeek"],
+  [/dashscope|aliyuncs/i, "阿里云百炼"],
+  [/volces|volcengine/i, "火山方舟"],
+  [/moonshot/i, "月之暗面"],
+  [/siliconflow/i, "硅基流动"],
+  [/minimax/i, "MiniMax"],
+  [/hunyuan|tencent/i, "腾讯混元"],
+  [/openai\.com/i, "OpenAI"],
+];
+
+export function providerOf(baseUrl) {
+  const host = (String(baseUrl || "").match(/^https?:\/\/([^/]+)/i) || [])[1] || "";
+  if (!host) return "—";
+  for (const [re, name] of PROVIDERS) if (re.test(host)) return name;
+  return host;
+}
+
+const FIELD_LABEL = { base_url: "请求地址", model: "模型 ID" };
+
+function renderModelList(c) {
+  const tb = $("st-model-rows");
+  if (!tb) return;
+  const models = c.models || [];
+  tb.innerHTML = "";
+  const empty = $("st-model-empty");
+  if (empty) {
+    empty.textContent = models.length ? "" : "还没有模型 —— 点右上角「添加模型」。";
+    empty.classList.toggle("hidden", !!models.length);
+  }
+  for (const m of models) {
+    const tr = el("tr");
+    tr.dataset.id = m.id;
+    // 当前启用的那一行要有视觉落点：不然「启用」列的开关看着都一样
+    if (m.active) tr.classList.add("on");
+
+    const tdN = el("td", "col-mdl");
+    tdN.appendChild(el("span", "mdl-label", esc(m.label || m.model || m.id)));
+    const sub = el("span", "mdl-sub", esc(`${m.model || "—"} · ${providerOf(m.base_url)}`));
+    sub.title = m.base_url || "";
+    tdN.appendChild(sub);
+    const dfl = m.defaulted || [];
+    if (dfl.length) {
+      const t = el("span", "tag-default", "内置默认");
+      // data-field 让「标了哪些字段」可以被机器核对 —— 界面上标出的集合
+      // 必须与后端 llm_defaulted 说的完全一致，多一个少一个都是错的。
+      t.dataset.field = dfl.join(",");
+      t.title = `这条的${dfl.map(f => FIELD_LABEL[f] || f).join("、")}`
+        + "还是内置默认，不是你保存过的配置";
+      tdN.appendChild(t);
+    }
+    // 没 Key 要说出来：启用它生成必被拒，而列表上一切正常。
+    // 环境变量给了 Key 时不说 —— 那时它其实能用，报「未配置」就是误报。
+    if (!m.api_key_set && !c.env_override) {
+      const t = el("span", "tag-warn", "未配置 Key");
+      t.title = "这条模型没有 Key，启用它生成会被拒绝";
+      tdN.appendChild(t);
+    }
+    tr.appendChild(tdN);
+
+    tr.appendChild(el("td", "col-prov", esc(providerOf(m.base_url))));
+
+    const tdOn = el("td", "col-on");
+    const sw = el("button", "mdl-switch" + (m.active ? " on" : ""));
+    sw.type = "button";
+    sw.setAttribute("role", "switch");
+    sw.setAttribute("aria-checked", m.active ? "true" : "false");
+    sw.title = m.active ? "当前启用的模型（同一时间只有一个）"
+      : "启用这个模型（同一时间只有一个）";
+    sw.onclick = () => activateModel(m.id);
+    tdOn.appendChild(sw);
+    tr.appendChild(tdOn);
+
+    const tdO = el("td", "col-ops");
+    const op = (cls, text, fn, title, disabled) => {
+      const b = el("button", "mdl-op" + (cls ? " " + cls : ""), text);
+      b.type = "button";
+      if (title) b.title = title;
+      if (disabled) b.disabled = true;
+      else b.onclick = fn;
+      return b;
+    };
+    tdO.appendChild(op("", "测试", () => testModel(m),
+      "用这条模型的配置发一个最小请求，验证是否连通"));
+    tdO.appendChild(op("", "编辑", () => openModelDialog(m.id)));
+    tdO.appendChild(op("danger", "删除", () => removeModel(m),
+      models.length > 1 ? "删掉这条模型（它的地址与 Key 一起删）"
+        : "至少要保留一个模型", models.length <= 1));
+    tr.appendChild(tdO);
+    tb.appendChild(tr);
+  }
+}
+
+async function activateModel(id) {
+  if (lastCfg && lastCfg.active_model === id) return;   // 已经是当前，别白写一次文件
+  try {
+    await api.activateModel(id);
+    await refreshAll();
+    toast("已切换模型");
+  } catch (e) { toast("切换失败：" + e.message, 3500); }
+}
+
+async function removeModel(m) {
+  const ok = await appConfirm("删除模型",
+    `确认删除「${m.label || m.model}」？\n它的请求地址与 Key 会一起删掉，不可恢复。`);
+  if (!ok) return;
+  try {
+    await api.deleteModel(m.id);
+    await refreshAll();
+    toast("已删除");
+  } catch (e) { toast("删除失败：" + e.message, 3500); }
+}
+
+async function testModel(m) {
+  const name = m.label || m.model;
+  $("st-status").textContent = `正在测试「${name}」…`;
+  try {
+    // 带 model_id：编辑一条**非当前**模型时，不带 id 会错拿当前那条的 Key 去测 ——
+    // 测出来的结果与用户以为的不是一回事，而界面会照常显示「连接正常」。
+    const r = await api.testConfig({ model_id: m.id });
+    $("st-status").textContent = r.ok
+      ? `「${name}」连接正常 · ${r.model}${r.detail ? " · " + r.detail : ""}`
+      : `「${name}」连接失败：${r.detail}`;
+    toast(r.ok ? "连接正常" : "连接失败，请看下方提示", r.ok ? 2000 : 4000);
+  } catch (e) {
+    $("st-status").textContent = "测试失败：" + e.message;
+    toast("测试失败：" + e.message, 4000);
+  }
+}
+
+// ── 添加 / 编辑模型弹窗 ─────────────────────────────────────
+
+let editingId = "";
+
+function openModelDialog(id) {
+  editingId = id || "";
+  const m = ((lastCfg || {}).models || []).find(x => x.id === id) || null;
+  const dfl = new Set(m ? (m.defaulted || []) : []);
+  $("md-id").value = editingId;
+  $("md-title").textContent = m ? "编辑模型" : "添加模型";
+  $("md-sub").textContent = m
+    ? "改完点保存即生效；API Key 留空表示不改动已存的那把。"
+    : "填好保存后，可以在列表里随时启用它。";
+  // ⚠ 回填的是**文件里存着的值**，不是生效值。
+  // 一条没配过地址的模型，生效值里那个地址是内置默认兜出来的 —— 填进框里
+  // 就变成了「你填的」，用户没动过手却看到一串地址，而且保存一次它就真的成了
+  // 他的配置。所以 defaulted 里的字段一律留空，靠 placeholder + 小标说明。
+  $("md-model").value = m && !dfl.has("model") ? m.model : "";
+  $("md-baseurl").value = m && !dfl.has("base_url") ? m.base_url : "";
+  $("md-name").value = m ? m.name || "" : "";
+  const ak = $("md-apikey");
+  ak.value = "";
+  if (!ak.dataset.phSet) ak.dataset.phSet = ak.placeholder;
+  ak.placeholder = (m && m.api_key_set) ? ak.dataset.phSet : ak.dataset.phEmpty;
+  markDefault("md-model", dfl.has("model"), "model");
+  markDefault("md-baseurl", dfl.has("base_url"), "base_url");
+  $("md-status").textContent = "";
+  openOverlay("model-dialog");
+}
+
+function closeModelDialog() {
+  $("model-dialog").classList.add("hidden");
+  editingId = "";
+}
+
+async function saveModelDialog() {
+  const model = $("md-model").value.trim();
+  if (!model) { toast("模型 ID 不能为空"); return; }
+  const body = {
+    id: editingId,
+    name: $("md-name").value.trim(),
+    model,
+    base_url: $("md-baseurl").value.trim(),
+  };
+  const key = $("md-apikey").value.trim();
+  if (key) body.api_key = key;
+  try {
+    const out = await api.saveModel(body);
+    closeModelDialog();
+    await refreshAll();
+    toast(`已保存模型「${model}」`);
+    return out;
+  } catch (e) {
+    toast("保存失败：" + e.message, 4000);
+  }
+}
+
+async function testModelDialog() {
+  const btn = $("md-test");
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "测试中…";
+  $("md-status").textContent = "正在连接…";
+  try {
+    // 带上界面当前值（Key 留空时后端沿用那条模型已存的），未保存也能测。
+    // model_id 指明测的是**哪一条** —— 编辑非当前模型时不然会错拿当前那条的 Key。
+    const r = await api.testConfig({
+      model_id: editingId,
+      base_url: $("md-baseurl").value.trim(),
+      api_key: $("md-apikey").value,
+      model: $("md-model").value.trim(),
+    });
+    $("md-status").textContent = r.ok
+      ? `连接正常 · ${r.model}${r.detail ? " · " + r.detail : ""}`
+      : `连接失败：${r.detail}`;
+    toast(r.ok ? "连接正常" : "连接失败，请看提示", r.ok ? 2000 : 4000);
+  } catch (e) {
+    $("md-status").textContent = e.message;
+    toast("测试失败：" + e.message, 4000);
+  }
+  btn.disabled = false;
+  btn.textContent = label;
+}
+
+/** 「恢复默认」：把内置默认值**显式**填进框里。
+ *  默认值从 /api/config 的 defaults 拿 —— 前端不另抄一份，否则改后端默认值时
+ *  界面还按老值填。填进去之后保存，这个值就成了用户显式选定的配置。 */
+function fillDefault(inputId, field) {
+  const d = (lastCfg || {}).defaults || {};
+  const n = $(inputId);
+  if (!n || !d[field]) return;
+  n.value = d[field];
+  dirty.add(inputId);
+  toast("已填入内置默认值，点保存生效");
+}
+
+async function refreshAll() {
+  await preloadSettings().catch(() => {});
+  try {
+    state.meta = await api.meta();
+    emit("meta", state.meta);
+  } catch (_) { /* 忽略：设置本身已经保存成功 */ }
 }
 
 /** 在字段标签上打一个「内置默认」小标。幂等 —— preloadSettings 每次打开都会跑，
- *  不能叠出第二个。 */
-function markDefault(inputId, on) {
+ *  不能叠出第二个。`field` 写进 data-field，让「标了哪些字段」可被断言核对。 */
+function markDefault(inputId, on, field) {
   const input = $(inputId);
   const lbl = input && input.closest(".block-inner")?.querySelector(".lbl");
   if (!lbl) return;
   const old = lbl.querySelector(".tag-default");
   if (!on) { old?.remove(); return; }
-  if (old) return;
+  if (old) { if (field) old.dataset.field = field; return; }
   const tag = el("span", "tag-default", "内置默认");
+  if (field) tag.dataset.field = field;
   tag.title = "这个值来自内置默认，不是你保存过的配置";
   // 插在「恢复默认」按钮前面：标签 → 状态 → 操作，读起来是一条线
   const btn = lbl.querySelector(".linkbtn");
@@ -182,8 +433,12 @@ function fill(id, value) {
 
 export const bindSettings = bindOnce(function bindSettings() {
   applyNumericBounds();          // 区间由 JS 统一写入输入框的 min/max
-  ["st-baseurl", "st-model", "st-apikey", "st-temperature",
-   "st-retries", "st-timeout", "st-maxtokens"].forEach(id => {
+  ["st-temperature", "st-retries", "st-timeout", "st-maxtokens"].forEach(id => {
+    $(id).addEventListener("input", () => dirty.add(id));
+  });
+  // 模型弹窗里的四个框也算「用户改过」—— 弹窗是每次打开重建内容的，
+  // 不记 dirty 的话 preloadSettings 的 fill() 会把它冲掉。
+  ["md-model", "md-name", "md-baseurl", "md-apikey"].forEach(id => {
     $(id).addEventListener("input", () => dirty.add(id));
   });
   document.querySelectorAll(".stg-nav-item").forEach(n => {
@@ -219,32 +474,32 @@ export const bindSettings = bindOnce(function bindSettings() {
       dirty.clear();
     } catch (e) { toast("保存失败：" + e.message, 3500); }
   };
-  // 「恢复默认」：base_url / model 填错之后，留空保存是无效的空操作
-  // （后端会过滤空串防手滑），所以回到默认必须是一个显式动作。
-  $("st-reset-baseurl").onclick = () => resetField("base_url", "st-baseurl");
-  $("st-reset-model").onclick = () => resetField("model", "st-model");
-  $("kb-pack").onchange = () => openPackFiles(state.settingsPane);
-  $("skills-pack").onchange = () => openPackFiles(state.settingsPane);
+  // 「恢复默认」：数值项留空保存是无效的空操作（后端会过滤空串防手滑），
+  // 所以回到默认必须是一个显式动作。
+  // base_url / model 的「恢复默认」搬进了模型弹窗（那里才有这两个框）——
+  // 它的做法是把内置默认值**填进框里**，由用户点保存落盘，
+  // 不再是直接改服务端（那会绕过「这条模型到底存了什么」）。
   $("st-reset-adv").onclick = () => resetField(
     ["retries", "timeout", "max_tokens"], ["st-retries", "st-timeout", "st-maxtokens"]);
-  $("st-test").onclick = testConnection;
+  $("st-add-model").onclick = () => openModelDialog("");
+  $("md-cancel").onclick = closeModelDialog;
+  $("md-save").onclick = saveModelDialog;
+  $("md-test").onclick = testModelDialog;
+  $("md-reset-model").onclick = () => fillDefault("md-model", "model");
+  $("md-reset-baseurl").onclick = () => fillDefault("md-baseurl", "base_url");
+  $("kb-pack").onchange = () => openPackFiles(state.settingsPane);
+  $("skills-pack").onchange = () => openPackFiles(state.settingsPane);
   $("pi-export").onclick = exportSkill;
   $("pi-undraft").onclick = undraftPack;
 });
 
 async function saveSettings() {
-  const body = {
-    base_url: $("st-baseurl").value.trim(),
-    model: $("st-model").value.trim(),
-  };
-  const key = $("st-apikey").value.trim();
-  if (key) body.api_key = key;
+  // 这一页只剩高级配置（生成参数）—— 连接信息住在模型条目里，由弹窗保存。
+  // 原来这里无条件带上 base_url / model，那是在「模型只有一条」时才对的做法。
+  const body = {};
   // 数值项（含采样温度）：留空表示不改，填了就在前端先卡一遍范围。
   // 后端也会卡，这里只是让错误当场可见，不必等一次往返；
   // 区间与输入框 min/max 共用 NUMERIC_BOUNDS 这一张表。
-  //
-  // 温度修复前是单独一个 if、区间写死 1.5（与后端的 2.0 不一致），
-  // 现在并入同一张表 —— 少一处「凭想象设限」的机会。
   for (const [key, id, label] of NUM_FIELDS) {
     const raw = $(id).value.trim();
     if (raw === "") continue;
@@ -257,14 +512,9 @@ async function saveSettings() {
     body[key] = n;
   }
   await api.saveConfig(body);
-  $("st-apikey").value = "";
   toast("已保存，下次生成即生效");
   // 顶栏的模型名/Key 状态要跟着变，否则用户以为没保存成功
-  try {
-    state.meta = await api.meta();
-    emit("meta", state.meta);
-  } catch (_) { /* 忽略：保存本身已成功 */ }
-  await preloadSettings().catch(() => {});
+  await refreshAll();
 }
 
 async function resetField(field, inputId) {
@@ -274,10 +524,8 @@ async function resetField(field, inputId) {
     await api.resetConfig(fields);
     // 清掉 dirty 标记，否则 preloadSettings 会拒绝回填输入框
     ids.forEach(id => dirty.delete(id));
-    await preloadSettings();
+    await refreshAll();
     toast("已恢复默认值");
-    state.meta = await api.meta();
-    emit("meta", state.meta);
   } catch (e) {
     toast("恢复失败：" + e.message, 3500);
   }
@@ -448,31 +696,6 @@ async function showPackFile(name, rel, row, pfx) {
   } catch (e) {
     $(pfx + "-body").textContent = "读取失败：" + e.message;
   }
-}
-
-async function testConnection() {
-  const btn = $("st-test");
-  const label = btn.textContent;
-  btn.disabled = true;
-  btn.textContent = "测试中…";
-  $("st-status").textContent = "正在连接…";
-  try {
-    // 带上界面当前值（Key 留空时后端沿用已保存的），未保存也能测
-    const r = await api.testConfig({
-      base_url: $("st-baseurl").value.trim(),
-      api_key: $("st-apikey").value,
-      model: $("st-model").value.trim(),
-    });
-    $("st-status").textContent = r.ok
-      ? `连接正常 · ${r.model}${r.detail ? " · " + r.detail : ""}`
-      : `连接失败：${r.detail}`;
-    toast(r.ok ? "连接正常" : "连接失败，请看下方提示", r.ok ? 2000 : 4000);
-  } catch (e) {
-    $("st-status").textContent = e.message;
-    toast("测试失败：" + e.message, 4000);
-  }
-  btn.disabled = false;
-  btn.textContent = label;
 }
 
 async function runPackgen() {

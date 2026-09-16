@@ -391,61 +391,81 @@
         <header class="page-head">
           <div class="page-head-titles">
             <h2>模型接口</h2>
-            <p class="hint">配置对话模型的服务地址与密钥，保存后下次生成即生效</p>
+            <p class="hint">可以配多个模型（每个自带请求地址与 Key），启用的那个用于生成</p>
+          </div>
+          <div class="page-head-actions">
+            <button class="primary slim" id="st-add-model"
+                    title="添加一个模型（可以是另一家服务商，Key 各存各的）">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+              添加模型
+            </button>
           </div>
         </header>
         <div class="page-card">
           <div class="block-inner">
-            <label class="lbl">Base URL
-              <button class="linkbtn" id="st-reset-baseurl" type="button"
-                      title="恢复为默认值 https://open.bigmodel.cn/api/paas/v4">恢复默认</button>
-            </label>
-            <input id="st-baseurl" placeholder="https://open.bigmodel.cn/api/paas/v4">
+            <label class="lbl">模型</label>
+            <div class="mdl-wrap">
+              <table class="mdl-table">
+                <thead>
+                  <tr>
+                    <th class="col-mdl">模型</th>
+                    <th class="col-prov">服务商</th>
+                    <th class="col-on">启用</th>
+                    <th class="col-ops">操作</th>
+                  </tr>
+                </thead>
+                <tbody id="st-model-rows"></tbody>
+              </table>
+              <p class="hint" id="st-model-empty"></p>
+            </div>
+            <p class="hint">「启用」同时只能有一个 —— 生成时用它。切换立刻生效，
+              正在跑的作业不受影响。每条模型各存各的 Key，换一家不用重填。</p>
           </div>
-          <div class="block-inner">
-            <label class="lbl">API Key</label>
-            <input id="st-apikey" type="password" placeholder="已配置时留空即保持不变"
-                   data-ph-empty="粘贴你的 API Key">
-          </div>
-          <div class="block-inner">
-            <label class="lbl">模型名
-              <button class="linkbtn" id="st-reset-model" type="button"
-                      title="恢复为默认模型">恢复默认</button>
-            </label>
-            <input id="st-model" placeholder="glm-4.7 / deepseek-chat">
-          </div>
-          <div class="block-inner">
-            <label class="lbl">采样温度</label>
-            <input id="st-temperature" type="number" min="0" max="2" step="0.1"
-                   placeholder="0.7（默认）">
-            <p class="hint">越低越稳、越高越发散。文案类建议 0.7~0.9；0 表示尽量确定性输出；
-              改完保存即生效。（min/max 由 <code>NUMERIC_BOUNDS</code> 统一写入）</p>
-          </div>
-          <div class="block-inner">
-            <label class="lbl">重试次数
-              <button class="linkbtn" id="st-reset-adv" type="button"
-                      title="恢复为默认：重试 2 次 / 超时 180 秒 / 输出预算 16000">恢复默认</button>
-            </label>
-            <input id="st-retries" type="number" min="0" max="10" step="1" placeholder="2（默认）">
-            <p class="hint">请求失败（网络 / 超时 / 429 / 5xx）时自动重试的次数。</p>
-          </div>
-          <div class="block-inner">
-            <label class="lbl">单次超时（秒）</label>
-            <input id="st-timeout" type="number" min="5" max="1800" step="5"
-                   placeholder="180（默认）">
-          </div>
-          <div class="block-inner">
-            <label class="lbl">输出预算（tokens）</label>
-            <input id="st-maxtokens" type="number" min="256" max="200000" step="500"
-                   placeholder="16000（默认）">
-            <p class="hint">推理型模型的「思考」也计入这个预算，给得太小会拿到空内容
-              （接口仍返回 200），表现为「模型输出无法解析」。</p>
-          </div>
+
+          <!-- 高级配置：与「连到哪家」无关的生成参数，收起来不占主区。
+               原来它们和连接信息平铺在一起，用户以为「模型」这一页要填七个框。 -->
+          <details class="st-adv" id="st-adv">
+            <summary>
+              <span class="st-adv-t">高级配置</span>
+              <span class="st-adv-sub" id="st-adv-sub"></span>
+            </summary>
+            <div class="st-adv-body">
+              <div class="block-inner">
+                <label class="lbl">采样温度</label>
+                <input id="st-temperature" type="number" min="0" max="2" step="0.1"
+                       placeholder="0.7（默认）">
+                <p class="hint">越低越稳、越高越发散。文案类建议 0.7~0.9；0 表示尽量确定性输出；
+                  改完保存即生效。（min/max 由 <code>NUMERIC_BOUNDS</code> 统一写入）</p>
+              </div>
+              <div class="block-inner">
+                <label class="lbl">重试次数
+                  <button class="linkbtn" id="st-reset-adv" type="button"
+                          title="恢复为默认：重试 2 次 / 超时 180 秒 / 输出预算 16000">恢复默认</button>
+                </label>
+                <input id="st-retries" type="number" min="0" max="10" step="1" placeholder="2（默认）">
+                <p class="hint">请求失败（网络 / 超时 / 429 / 5xx）时自动重试的次数。</p>
+              </div>
+              <div class="block-inner">
+                <label class="lbl">单次超时（秒）</label>
+                <input id="st-timeout" type="number" min="5" max="1800" step="5"
+                       placeholder="180（默认）">
+              </div>
+              <div class="block-inner">
+                <label class="lbl">输出预算（tokens）</label>
+                <input id="st-maxtokens" type="number" min="256" max="200000" step="500"
+                       placeholder="16000（默认）">
+                <p class="hint">推理型模型的「思考」也计入这个预算，给得太小会拿到空内容
+                  （接口仍返回 200），表现为「模型输出无法解析」。</p>
+              </div>
+            </div>
+          </details>
+
           <p class="hint cfg-err hidden" id="st-cfg-err"></p>
           <p class="hint" id="st-status"></p>
           <div class="page-actions">
-            <button class="ghost" id="st-test" title="用上面的配置发一个最小请求，验证是否连通">测试连接</button>
-            <button class="primary slim" id="st-save">保存</button>
+            <span class="spacer"></span>
+            <button class="primary slim" id="st-save"
+                    title="保存高级配置（连接信息在「添加 / 编辑模型」里保存）">保存</button>
           </div>
         </div>
       </section>
@@ -486,6 +506,51 @@
       <span class="spacer"></span>
       <button class="ghost" id="cd-no">取消</button>
       <button class="primary slim danger" id="cd-yes">确认</button>
+    </div>
+  </div>
+</div>
+
+<!-- 模型弹窗：添加 / 编辑共用一张表单。
+     参考的是各家 Agent 工具「添加模型」的样子 —— 模型 ID / 展示名称 /
+     请求地址 / API Key 四栏，加上「测试连接」。
+     刻意**不做成设置页里的一行行输入框**：那是修复前的样子，加第二个模型时
+     用户没有任何位置可填，只能把第一个覆盖掉。 -->
+<div id="model-dialog" class="overlay hidden">
+  <div class="dialog">
+    <h3 id="md-title">添加模型</h3>
+    <p class="hint" id="md-sub"></p>
+    <input type="hidden" id="md-id">
+    <div class="block-inner">
+      <label class="lbl">模型 ID
+        <button class="linkbtn" id="md-reset-model" type="button"
+                title="恢复为内置默认模型名">恢复默认</button>
+      </label>
+      <input id="md-model" placeholder="glm-4.7 / deepseek-chat">
+      <p class="hint">发给服务端的模型名，要和服务商文档里写的一致。</p>
+    </div>
+    <div class="block-inner">
+      <label class="lbl">展示名称</label>
+      <input id="md-name" placeholder="留空则直接显示模型 ID">
+    </div>
+    <div class="block-inner">
+      <label class="lbl">请求地址
+        <button class="linkbtn" id="md-reset-baseurl" type="button"
+                title="恢复为内置默认地址">恢复默认</button>
+      </label>
+      <input id="md-baseurl" placeholder="https://open.bigmodel.cn/api/paas/v4">
+      <p class="hint">OpenAI 兼容接口的根地址，<b>不要</b>带 /chat/completions。</p>
+    </div>
+    <div class="block-inner">
+      <label class="lbl">API Key</label>
+      <input id="md-apikey" type="password" placeholder="已配置时留空即保持不变"
+             data-ph-empty="粘贴你的 API Key">
+    </div>
+    <p class="hint" id="md-status"></p>
+    <div class="dialog-actions">
+      <button class="ghost" id="md-test" title="用上面填的值发一个最小请求，验证是否连通">测试连接</button>
+      <span class="spacer"></span>
+      <button class="ghost" id="md-cancel">取消</button>
+      <button class="primary slim" id="md-save">保存</button>
     </div>
   </div>
 </div>

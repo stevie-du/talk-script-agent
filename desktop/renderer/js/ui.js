@@ -78,21 +78,17 @@ export function fillPackSelect({ selectLast = false, prefer = null } = {}) {
 // 用户自己的 OpenAI 兼容端点，清单里有没有、能不能调通完全取决于那个端点。
 // 硬编码等于给用户一个假承诺 —— 选中一个根本调不通的模型，报错还发生在生成时，
 // 那时用户早已忘了自己是从哪选的。
-const CUSTOM_MODEL = "__custom__";
-
-function modelHistory() {
-  try {
-    const a = JSON.parse(localStorage.getItem("ts.models") || "[]");
-    return Array.isArray(a) ? a.filter(x => typeof x === "string" && x) : [];
-  } catch (_) { return []; }
-}
-
-function rememberModel(name) {
-  try {
-    localStorage.setItem("ts.models",
-      JSON.stringify([name, ...modelHistory().filter(x => x !== name)].slice(0, 6)));
-  } catch (_) { /* 存不下就只是没有历史，不影响切换本身 */ }
-}
+// 候选来自**设置里那份模型列表**（`/api/meta` 的 `models`）。
+//
+// 修复前这里是「当前配置 + localStorage 里用过的名字」：清单是本地攒的，
+// 与设置页那份配置**没有任何关系** —— 在设置里删掉一个模型，输入区的下拉里
+// 它还在；换台机器打开，历史全没了。同一件事两份表示，其中一份还是隐形的。
+// 现在只有一个来源，选中的那个直接调 `/api/models/activate`。
+//
+// 也不硬编码一份模型清单：本项目走的是用户自己的 OpenAI 兼容端点，
+// 清单里有没有、能不能调通完全取决于那个端点。硬编码等于给用户一个假承诺 ——
+// 选中一个根本调不通的模型，报错还发生在生成时，那时用户早已忘了自己是从哪选的。
+const ADD_MODEL = "__add__";
 
 export function renderModelPicker() {
   const m = state.meta;
@@ -103,32 +99,40 @@ export function renderModelPicker() {
   box.innerHTML = "";
   if (!m) return;
 
-  const cur = m.mock ? "mock 模式" : (m.model || "未配置模型");
-  // 这个模型名是不是内置默认（用户从没配过）。
+  const models = m.models || [];
+  const active = models.find(x => x.id === m.active_model) || models[0] || null;
+  const cur = m.mock ? "mock 模式" : (active ? (active.label || active.model) : "未配置模型");
+  // 这个模型是不是内置默认（用户从没配过）。
   //
   // 为什么必须标出来：后端在没配 model 时会静默兜底成 DEFAULT_CONFIG 里那个
   // （glm-4.7），界面于是把一个**用户没选过的值**当「当前模型」显示 ——
   // 未配置状态与已配置状态长得一模一样。
   //
-  // ⚠ 显示名与 option.value 必须分开：一旦把 value 也写成带「（默认）」的串，
-  // pickModel 里那句 `val === m.model` 就永远不成立，切模型会把
-  // 「glm-4.7（默认）」这个假模型名写进 config.yaml。
+  // ⚠ 显示名与 option.value 必须分开：option.value 是模型 **id**（激活时要用它），
+  // 而显示名带「（默认）」后缀。混在一起的话激活会把「glm-4.7（默认）」
+  // 这个假 id 发出去。
   const isDefault = !m.mock && (m.llm_defaulted || []).includes("model");
-  const tag = (name) => (isDefault && name === cur) ? `${name}（默认）` : name;
+  const tag = (name, isCur) => (isDefault && isCur) ? `${name}（默认）` : name;
 
   const sel = el("select");
   sel.id = "p-model";
   sel.dataset.pill = "1";
-  for (const name of [cur, ...modelHistory().filter(n => n !== cur)]) {
-    const o = el("option", "", esc(tag(name)));
-    o.value = name;              // ← 原始名，不带「（默认）」后缀
+  for (const x of models) {
+    const o = el("option", "", esc(tag(x.label || x.model, x.id === m.active_model)));
+    o.value = x.id;                       // ← 模型 id，不是显示名
     sel.appendChild(o);
   }
-  // 「自定义」不是装饰项：没有它，换新模型就无处可去，这个下拉会变成封闭集合。
-  const custom = el("option", "", "＋ 自定义模型…");
-  custom.value = CUSTOM_MODEL;
-  sel.appendChild(custom);
-  sel.value = cur;
+  if (!models.length && !m.mock) {
+    const o = el("option", "", "未配置模型");
+    o.value = "";
+    sel.appendChild(o);
+  }
+  // 「添加模型」不是装饰项：没有它，换新模型就无处可去，这个下拉会变成封闭集合。
+  // 它现在直接开弹窗，不再只是「跳到设置页让你自己找」。
+  const add = el("option", "", "＋ 添加模型…");
+  add.value = ADD_MODEL;
+  sel.appendChild(add);
+  sel.value = active ? active.id : (m.mock ? "" : "");
   sel._mock = !!m.mock;
   // 橙色只留给「真的会失败」的情形（没 Key → 生成必被拒）。
   // 「用的是内置默认模型」不加橙色：默认值本身是可用的（配上 Key 就能跑），
@@ -146,25 +150,26 @@ export function renderModelPicker() {
 async function pickModel(sel) {
   const val = sel.value;
   const m = state.meta;
-  if (val === CUSTOM_MODEL) {
-    // 它不是一个真实模型，只是「去设置页填」的入口 —— 立刻退回原值，
-    // 否则按钮上会一直显示「＋ 自定义模型…」，看着像真的选中了。
-    sel.value = m?.model || (m?.mock ? "mock 模式" : "");
+  if (val === ADD_MODEL) {
+    // 它不是一个真实模型，只是「去加一个」的入口 —— 立刻退回原值，
+    // 否则按钮上会一直显示「＋ 添加模型…」，看着像真的选中了。
+    sel.value = m?.active_model || "";
     sel._sync?.();
-    openSettings("llm");
+    await openSettings("llm");
+    $("st-add-model")?.click();
     return;
   }
-  if (!m || val === (m.mock ? "mock 模式" : m.model)) return;
+  if (!m || !val || val === m.active_model) return;
   try {
-    await api.saveConfig({ model: val });
-    rememberModel(val);
+    await api.activateModel(val);
     // 工具条与头部状态都要跟着变，否则用户以为没切成功
     state.meta = await api.meta();
     emit("meta", state.meta);
-    toast(`已切换模型：${val}`);
+    const picked = (state.meta.models || []).find(x => x.id === val);
+    toast(`已切换模型：${picked ? picked.label : val}`);
   } catch (e) {
     toast("切换模型失败：" + e.message, 4000);
-    sel.value = m.model || "";
+    sel.value = m.active_model || "";
     sel._sync?.();
   }
 }

@@ -84,6 +84,11 @@ export const api = {
   config: () => request("/api/config"),
   saveConfig: (body) => request("/api/config", { method: "POST", body }),
   resetConfig: (fields) => request("/api/config/reset", { method: "POST", body: { fields } }),
+  // 模型列表：增删改 + 切换当前。`id` 空 = 新增，非空 = 改那一条；
+  // `api_key` 空串 = 保持不变（与 /api/config 同一个语义）。
+  saveModel: (body) => request("/api/models", { method: "POST", body }),
+  deleteModel: (id) => request("/api/models/delete", { method: "POST", body: { id } }),
+  activateModel: (id) => request("/api/models/activate", { method: "POST", body: { id } }),
   packFile: (name, rel) =>
     request(`/api/packs/${encodeURIComponent(name)}/file?rel=${encodeURIComponent(rel)}`),
   testConfig: (body) => request("/api/config/test", { method: "POST", body }),

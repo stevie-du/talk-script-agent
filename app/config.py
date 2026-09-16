@@ -40,6 +40,34 @@ DEFAULT_CONFIG = {
     "default_pack": "elevator",
 }
 
+# 一个「模型条目」的默认值：连到某个服务商所需的**全部信息**。
+#
+# 每个条目**自带 base_url 与 api_key** —— 这正是「多模型」的价值所在：
+# 可以同时配智谱和 DeepSeek 两把 Key，切换即生效，不用把 Key 重填一遍。
+# 生成参数（temperature / retries / timeout / max_tokens）**不在这里** ——
+# 那些是「怎么调模型」，跟连到哪家无关，仍然是全局一份（见 `llm` 段）。
+DEFAULT_MODEL = {
+    "id": "m-default",
+    "name": "",              # 展示名；留空则显示 model 名
+    "base_url": DEFAULT_CONFIG["llm"]["base_url"],
+    "api_key": "",
+    "model": DEFAULT_CONFIG["llm"]["model"],
+}
+
+
+@dataclass
+class LLMModel:
+    id: str
+    name: str = ""
+    base_url: str = DEFAULT_MODEL["base_url"]
+    api_key: str = ""
+    model: str = DEFAULT_MODEL["model"]
+
+    @property
+    def label(self) -> str:
+        """界面上显示什么。展示名留空时退回模型名 —— 不能让一行显示成空白。"""
+        return self.name or self.model
+
 
 @dataclass
 class LLMConfig:
@@ -57,7 +85,19 @@ class LLMConfig:
 
 @dataclass
 class AppConfig:
+    # ⚠ 这是**当前生效的那一份完整配置**：连接信息取自 `active_model` 指的那条
+    # 模型，生成参数取自全局 `llm` 段。之所以这么组装，是为了让 LLMClient、
+    # server 里所有 `cfg.llm.xxx` 的消费方**一行都不用改** ——
+    # 否则「模型从一条变多条」会波及全项目每一处发请求的地方。
     llm: LLMConfig = field(default_factory=LLMConfig)
+    # 全部模型条目（至少一条）。`llm` 是其中 active 那条的展开。
+    models: list["LLMModel"] = field(default_factory=list)
+    active_model: str = ""
+    # 每条模型**各自**的「哪些字段还是内置默认」，按 id 索引。
+    # 只报当前那条是不够的：列表里其他行也要能标出来 —— 否则用户看到几条
+    # 长得一模一样的条目（base_url 都显示着默认地址），分不清哪条是他配的、
+    # 哪条是空壳。逐字段判，口径与下面的 `llm_defaulted` 完全一致。
+    models_defaulted: dict[str, list[str]] = field(default_factory=dict)
     default_pack: str = "elevator"
     root: Path = Path(".")
     mock: bool = False
@@ -120,13 +160,23 @@ CONFIG_TEMPLATE = """# TalkScript 配置
 #   TALKSCRIPT_MOCK=1        跑夹具、不调模型（无 Key 时可用）
 #
 # 也可以在应用内「设置 → 模型接口」里填写，效果相同。
+#
+# 模型是**一份列表**，每条自带请求地址与 Key —— 可以同时配智谱和 DeepSeek，
+# 切换当前模型即生效，不用把 Key 重填一遍。生成参数（温度/重试/超时/预算）
+# 是全局一份，跟连到哪家无关，留在下面的 `llm` 段里。
+
+# models:
+#   - id: m1
+#     # 展示名；留空则显示下面的 model 名
+#     name: 智谱 GLM-4.7
+#     # 任意 OpenAI 兼容接口的根地址（不含 /chat/completions）
+#     base_url: https://open.bigmodel.cn/api/paas/v4
+#     # 在这里填你的 Key；留空则必须用环境变量 TALKSCRIPT_API_KEY
+#     api_key: ""
+#     model: glm-4.7
+# active_model: m1
 
 # llm:
-#   # 任意 OpenAI 兼容接口的根地址（不含 /chat/completions）
-#   base_url: https://open.bigmodel.cn/api/paas/v4
-#   # 在这里填你的 Key；留空则必须用环境变量 TALKSCRIPT_API_KEY
-#   api_key: ""
-#   model: glm-4.7
 #   temperature: 0.7
 #   # 请求失败（网络/超时/429/5xx）自动重试次数；0 = 不重试
 #   retries: 2
@@ -236,6 +286,81 @@ def read_config_file(p: Path) -> tuple[dict, str]:
     return data, err
 
 
+def _parse_models(data: dict, llm: dict) -> tuple[list[dict], str, bool]:
+    """把文件解析成 `(原始条目列表, 当前模型 id, 是否由旧格式迁移而来)`。
+
+    ⚠ **原始条目 = 文件里写的样子，空字段保持空**，不在这里落回默认值。
+    写路径（增删改模型）必须基于这一份 —— 拿生效值（已经落回默认的）写回去，
+    等于把「用户没配过 base_url」这个事实抹掉，界面上的「内置默认」小标会凭空消失。
+
+    **迁移**：config.yaml 里没有 `models` 段时（老版本写的文件），用 `llm` 段里的
+    连接信息造一条 —— 否则老用户一升级就看到「一个模型都没有」，
+    而他们的 base_url / api_key 明明还在文件里，这是最典型的静默降级。
+    迁移**只在读的时候发生、不写回文件**：读一次和读十次结果必须一样。
+    """
+    raw = data.get("models")
+    items: list[dict] = []
+    if isinstance(raw, list) and raw:
+        for i, it in enumerate(raw):
+            if not isinstance(it, dict):
+                continue          # 坏条目直接跳过，不让它把整份配置带崩
+            items.append({
+                "id": str(it.get("id") or f"m{i + 1}"),
+                "name": str(it.get("name") or ""),
+                "base_url": str(it.get("base_url") or ""),
+                "api_key": str(it.get("api_key") or ""),
+                "model": str(it.get("model") or ""),
+            })
+    migrated = not items
+    if migrated:
+        items = [{
+            "id": DEFAULT_MODEL["id"],
+            "name": "",
+            "base_url": str(llm.get("base_url") or ""),
+            "api_key": str(llm.get("api_key") or ""),
+            "model": str(llm.get("model") or ""),
+        }]
+
+    # id 去重：重复的 id 会让「当前模型」指向哪一条变得不确定
+    seen: set[str] = set()
+    for it in items:
+        while it["id"] in seen:
+            it["id"] += "-2"
+        seen.add(it["id"])
+
+    active = str(data.get("active_model") or "")
+    if active not in seen:
+        # 指向了一条不存在的模型（手改文件 / 删掉了当前模型）→ 退回第一条。
+        # 不能留一个悬空的 active：那会让生成时取不到任何连接信息。
+        active = items[0]["id"]
+    return items, active, migrated
+
+
+def _effective(raw: dict) -> LLMModel:
+    """原始条目 → 生效条目（空字段落回内置默认）。"""
+    return LLMModel(
+        id=raw["id"],
+        name=raw.get("name") or "",
+        base_url=str(raw.get("base_url") or DEFAULT_MODEL["base_url"]).rstrip("/"),
+        api_key=raw.get("api_key") or "",
+        model=str(raw.get("model") or DEFAULT_MODEL["model"]),
+    )
+
+
+def load_raw_models(root: Path, config_dir: Path | None = None) -> tuple[list[dict], str]:
+    """文件里的模型条目（**原样，空字段保持空**）+ 当前 id。写路径专用。
+
+    单独开一个入口而不是从 `AppConfig` 里取，就是因为后者是「生效值」——
+    两者混用会把空字段填实（见 `_parse_models` 的说明）。
+    """
+    data, _ = read_config_file(config_path(root, config_dir))
+    llm = data.get("llm", {}) or {}
+    if not isinstance(llm, dict):
+        llm = {}
+    raw, active, _ = _parse_models(data, llm)
+    return raw, active
+
+
 def load_config(root: Path, config_dir: Path | None = None) -> AppConfig:
     p = config_path(root, config_dir)
     data, config_error = read_config_file(p)
@@ -244,10 +369,22 @@ def load_config(root: Path, config_dir: Path | None = None) -> AppConfig:
     if not isinstance(llm, dict):
         llm = {}
 
+    raw_models, active, _ = _parse_models(data, llm)
+    models = [_effective(r) for r in raw_models]
+    cur = next(m for m in models if m.id == active)
+
+    # 「这条模型里哪些字段还是内置默认」——**逐字段**看原始条目里写没写。
+    # 先算全量（每条模型各一份），当前那条直接取用，不另算一遍：
+    # 两处各判一次的话，改一处忘一处就会出现「列表里标着、状态行里没标」。
+    models_defaulted = {
+        r["id"]: [k for k in ("base_url", "model") if not str(r.get(k) or "").strip()]
+        for r in raw_models
+    }
+
     cfg = LLMConfig(
-        base_url=str(llm.get("base_url") or DEFAULT_CONFIG["llm"]["base_url"]).rstrip("/"),
-        api_key=str(llm.get("api_key") or ""),
-        model=str(llm.get("model") or DEFAULT_CONFIG["llm"]["model"]),
+        base_url=cur.base_url,
+        api_key=cur.api_key,
+        model=cur.model,
         temperature=_num(llm, "temperature", 0.7, float),
         retries=_num(llm, "retries", 2, int),
         timeout=_num(llm, "timeout", 180.0, float),
@@ -257,25 +394,36 @@ def load_config(root: Path, config_dir: Path | None = None) -> AppConfig:
     # 环境变量覆盖（避免密钥落盘）。
     # 顺序很重要：**先记「文件里没写」的字段，再让环境变量把它们从名单里划掉**。
     # 反过来的话就分不清「用户配的」和「内置默认」了 —— 覆盖之后两者长得一样。
-    defaulted = [k for k in _LLM_ENV if llm.get(k) in (None, "")]
+    #
+    # 生成参数住在 `llm` 段：文件里没写就算没配。
+    defaulted = [k for k in _LLM_ENV
+                 if k not in ("base_url", "model") and llm.get(k) in (None, "")]
+    # base_url / model 住在**模型条目**里，逐字段看它是不是空的 ——
+    # 不能按「有没有 models 段」一刀切：用户只改了模型名、没动请求地址时，
+    # 请求地址仍然是内置默认，一刀切会把默认值说成「你配的」。
+    defaulted += models_defaulted[active]
     cfg.api_key = _env("TALKSCRIPT_API_KEY", cfg.api_key)
     for key, env_name in _LLM_ENV.items():
-        cur = getattr(cfg, key)
+        cur_v = getattr(cfg, key)
         raw = os.environ.get(env_name)
         if key in _LLM_CAST:
-            setattr(cfg, key, _env_num(env_name, cur, _LLM_CAST[key]))
+            setattr(cfg, key, _env_num(env_name, cur_v, _LLM_CAST[key]))
         else:
-            setattr(cfg, key, _env(env_name, cur).rstrip("/"))
+            setattr(cfg, key, _env(env_name, cur_v).rstrip("/"))
         # 「真的被覆盖了吗」必须看**值有没有被接受**，不能只看变量存不存在：
         # `TALKSCRIPT_RETRIES=abc` 会让 _env_num 静默退回内置默认，那还是「没配」——
         # 按「设过就划掉」处理，等于把这次静默兜底藏起来（本项目最忌讳的那种）。
         # 已知的轻微不精确：环境变量给的值**恰好等于**内置默认时，也算「没配」。
         # 那种情况下值与默认完全一致，说「这不是你配的」并不误导。
-        if raw not in (None, "") and (key not in _LLM_CAST or getattr(cfg, key) != cur):
-            defaulted.remove(key)
+        if raw not in (None, "") and (key not in _LLM_CAST or getattr(cfg, key) != cur_v):
+            if key in defaulted:
+                defaulted.remove(key)
 
     app = AppConfig(
         llm=cfg,
+        models=models,
+        active_model=active,
+        models_defaulted=models_defaulted,
         default_pack=_env("TALKSCRIPT_DEFAULT_PACK", str(data.get("default_pack", "elevator"))),
         root=root,
         config_error=config_error,
@@ -285,6 +433,46 @@ def load_config(root: Path, config_dir: Path | None = None) -> AppConfig:
                 or _truthy(llm.get("mock"))
                 or cfg.api_key == "MOCK")
     return app
+
+
+def public_models(cfg: AppConfig) -> list[dict]:
+    """给渲染层的模型列表：**剥掉 api_key 明文**，只留一个 `api_key_set` 布尔。
+
+    ⚠ 剥离口径**只此一份**。两处各剥一次的话，漏掉一处就是把密钥送到渲染层
+    （渲染层是网页，密钥一旦进去就等于进了 DOM 与任何一段注入脚本）。
+    """
+    return [{
+        "id": m.id,
+        "name": m.name,
+        "label": m.label,
+        "base_url": m.base_url,
+        "model": m.model,
+        "api_key_set": bool(m.api_key),
+        "active": m.id == cfg.active_model,
+        # 这条模型里哪些字段还是内置默认（文件里没写）。逐条下发，界面才能
+        # 把「还没配过」标在**每一行**上，而不是只标当前那条。
+        "defaulted": list(cfg.models_defaulted.get(m.id, [])),
+    } for m in cfg.models]
+
+
+def save_models(root: Path, models: list[dict], active_model: str | None = None,
+                config_dir: Path | None = None) -> None:
+    """把模型条目（**原始形态，空字段保持空**）写进 config.yaml，其它键原样保留。
+
+    顺手**清掉 `llm` 段里的 base_url / api_key / model**：连接信息已经搬到
+    `models` 段，留着会让文件里出现「同一个 Key 两份」的假象，而且那份是**被忽略的**
+    —— 用户改了它却不生效，正是本项目一直在整治的那种看不见的失效。
+    """
+    p = config_path(root, config_dir)
+    data, _ = read_config_file(p)
+    data["models"] = models
+    if active_model:
+        data["active_model"] = active_model
+    llm = data.get("llm")
+    if isinstance(llm, dict):
+        for k in ("base_url", "api_key", "model"):
+            llm.pop(k, None)
+    write_atomic(p, yaml.safe_dump(data, allow_unicode=True, sort_keys=False))
 
 
 def save_config(root: Path, llm: dict, default_pack: str | None = None,

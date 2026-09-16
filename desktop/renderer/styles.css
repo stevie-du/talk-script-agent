@@ -867,6 +867,108 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 .block-inner { display: flex; flex-direction: column; }
 .page-actions { display: flex; gap: var(--s2); margin-top: var(--s2); align-items: center; }
 
+/* ── 模型接口：模型列表 ────────────────────────────────────
+   参考各家 Agent 工具的「模型」页：一行一条模型（模型 / 服务商 / 启用 / 操作），
+   每行自带启用开关与测试·编辑·删除。
+   改造前这里是三个平铺输入框（Base URL / API Key / 模型名）—— 加第二个模型
+   没有位置可填，只能把第一个覆盖掉。 */
+.mdl-wrap { width: 100%; }
+.mdl-table {
+  width: 100%; border-collapse: collapse; font-size: var(--f-sm);
+  table-layout: fixed;
+}
+.mdl-table thead th {
+  /* 表头用一层极淡的底把「这是表头」说清楚 —— 不用分隔线色块，
+     与全站「发丝线」的调子一致 */
+  background: var(--fill); color: var(--text-2);
+  font-size: var(--f-xs); font-weight: 600; text-align: left;
+  padding: 7px 10px; letter-spacing: .1px;
+}
+.mdl-table thead th:first-child { border-radius: var(--r-sm) 0 0 var(--r-sm); }
+.mdl-table thead th:last-child { border-radius: 0 var(--r-sm) var(--r-sm) 0; }
+.mdl-table .col-mdl { width: auto; }
+.mdl-table .col-prov { width: 108px; }
+.mdl-table .col-on { width: 62px; text-align: center; }
+.mdl-table .col-ops { width: 158px; text-align: right; }
+.mdl-table tbody td {
+  padding: 10px; border-bottom: 0.5px solid var(--line); vertical-align: middle;
+}
+.mdl-table tbody tr:last-child td { border-bottom: none; }
+/* 当前启用的那一行要有落点：不然「启用」列里那个亮着的开关是唯一的线索，
+   一眼扫过去三行长得一样 */
+.mdl-table tbody tr.on { background: var(--fill); }
+.mdl-table tbody tr.on td:first-child { border-radius: var(--r-sm) 0 0 var(--r-sm); }
+.mdl-table tbody tr.on td:last-child { border-radius: 0 var(--r-sm) var(--r-sm) 0; }
+.mdl-label { display: block; font-weight: 600; color: var(--text-1); letter-spacing: -.1px; }
+.mdl-sub {
+  display: block; margin-top: 1px; font-size: var(--f-2xs); color: var(--text-3);
+  font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mdl-table .tag-default, .mdl-table .tag-warn { margin-left: 0; margin-top: 4px; }
+.tag-warn {
+  display: inline-block; padding: 1px 6px; border-radius: var(--r-xs);
+  background: var(--warn-soft); color: var(--warn);
+  font-size: var(--f-2xs); font-weight: 500; letter-spacing: 0;
+}
+/* 启用开关：画成一个开关的样子（参考图里的 toggle），语义是**单选** ——
+   打开一个就关掉别的。所以 title 里写清「同一时间只有一个」，
+   免得被读成「可以同时启用多个」。 */
+.mdl-switch {
+  position: relative; width: 34px; height: 20px; padding: 0; border: 0;
+  border-radius: var(--r-pill); background: var(--fill-disabled);
+  cursor: pointer; transition: background var(--dur) var(--ease);
+}
+.mdl-switch::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px;
+  border-radius: 50%; background: var(--surface); box-shadow: var(--shadow-raised);
+  transition: transform var(--dur) var(--ease);
+}
+.mdl-switch.on { background: var(--ink); }
+.mdl-switch.on::after { transform: translateX(14px); }
+.mdl-switch:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.mdl-op {
+  border: 0; background: transparent; color: var(--text-2);
+  font-size: var(--f-xs); font-weight: 500; padding: 4px 6px;
+  border-radius: var(--r-sm); cursor: pointer;
+}
+.mdl-op:hover { background: var(--fill-strong); color: var(--text-1); }
+.mdl-op.danger:hover { background: var(--bad-soft); color: var(--bad); }
+.mdl-op:disabled { color: var(--text-3); cursor: not-allowed; background: transparent; }
+
+/* ── 模型接口：高级配置（折叠）────────────────────────────
+   温度 / 重试 / 超时 / 输出预算与「连到哪家」无关，是全局一份的生成参数。
+   原来它们和连接信息平铺在一张卡里，用户以为这一页要填七个框。 */
+.st-adv {
+  border-top: 0.5px solid var(--line); padding-top: var(--s3);
+}
+.st-adv > summary {
+  display: flex; align-items: baseline; gap: var(--s2);
+  cursor: pointer; list-style: none; user-select: none;
+}
+.st-adv > summary::-webkit-details-marker { display: none; }
+/* 自绘三角：默认的 marker 在不同引擎下尺寸/位置都不一样，
+   收起时它是唯一的「可以展开」线索，必须可控 */
+.st-adv > summary::before {
+  content: ""; flex: 0 0 auto; width: 0; height: 0; align-self: center;
+  border-left: 5px solid var(--text-3);
+  border-top: 4px solid transparent; border-bottom: 4px solid transparent;
+  transition: transform var(--dur) var(--ease);
+}
+.st-adv[open] > summary::before { transform: rotate(90deg); }
+.st-adv-t { font-size: var(--f-sm); font-weight: 600; color: var(--text-1); }
+.st-adv-sub { font-size: var(--f-xs); color: var(--text-3); }
+/* 收起时把「里面还有几项是内置默认」留在摘要上 —— 收起来就什么都看不见，
+   而「没配过」正是最需要被看见的那个状态 */
+.st-adv-sub:not(:empty) { color: var(--warn); }
+.st-adv-body {
+  display: flex; flex-direction: column; gap: var(--s4); padding-top: var(--s4);
+}
+/* 弹窗里的字段块：.dialog .lbl 已有上边距，这里只补块间距 */
+.dialog .block-inner + .block-inner { margin-top: var(--s4); }
+.dialog .block-inner .lbl { margin-top: 0; }
+.dialog .block-inner .hint { margin-top: 4px; }
+.dialog input { width: 100%; }
+
 /* 新建行业包：空状态引导式（参考 Zcode「尚去安装技能」的中部留白布局）。
    之前是表单铺满全宽，没有「这是创建动作」的仪式感；
    现在上方居中放图标+标题+描述，把表单压在中段，底部按钮组收尾。
