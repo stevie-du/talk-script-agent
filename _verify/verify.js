@@ -407,6 +407,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     thinkShown: !document.querySelector('#think-stream')?.classList.contains('hidden'),
     btnTitle: document.getElementById('btn-generate').title,
     topicCleared: document.getElementById('topic').value === '',
+    hint: (() => { const h = document.getElementById('composer-gen-hint');
+      return { text: h.textContent, display: getComputedStyle(h).display,
+               h: Math.round(h.getBoundingClientRect().height) }; })(),
   };`);
   check("发送后进入生成态（用户气泡 + 助手气泡）",
     running.busy && running.jobId === "job1" && running.userMsg, JSON.stringify(running));
@@ -414,6 +417,13 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("生成中展示流式思考过程", running.thinkShown, "");
   check("生成中发送键变为「停止」", /停止/.test(running.btnTitle), running.btnTitle);
   check("发送后清空输入框", running.topicCleared, "");
+  // 生成中参数胶囊会被 lockParams 锁住（变灰、点不动）。「为什么点不动」全靠
+  // 这一句解释 —— 它和 lockParams 是一对：锁了却不说原因，用户只会看到参数
+  // 莫名其妙失效。所以断言要同时覆盖「信号写进去了」和「它真的到得了眼睛」
+  // （display + 实际高度），只查 textContent 的话，被 CSS 藏起来也算通过。
+  check("生成中给出「参数已锁定」的解释，且真的可见",
+    /参数已锁定/.test(running.hint.text) && running.hint.display !== "none"
+    && running.hint.h > 0, JSON.stringify(running.hint));
 
   await sleep(2600);   // 等轮询落到 done
   const done = await evalIn(`return {
@@ -431,6 +441,15 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     verBar: document.querySelectorAll('.ver-bar').length,
   };`);
   check("完成后渲染出结果", done.hasResult && !done.busy, JSON.stringify(done));
+  // 非生成态：这一行必须留空**且不占高度**。它空着却占一条缝的话，
+  // 卡片下方会凭空多出一块、看着像没对齐 —— 键盘提示并进 placeholder 之后，
+  // 「空着不占位」就是这条规则的唯一可见后果，得有人守着。
+  const idleHint = await evalIn(`const h = document.getElementById('composer-gen-hint');
+    return { text: h.textContent, display: getComputedStyle(h).display,
+             footH: Math.round(h.parentNode.getBoundingClientRect().height) };`);
+  check("非生成态：状态行留空且不占高度",
+    idleHint.text === "" && idleHint.display === "none" && idleHint.footH === 0,
+    JSON.stringify(idleHint));
   check("分段卡片 4 张", done.cards === 4, `cards=${done.cards}`);
   check("指标速览 4 项", done.metrics === 4, `metrics=${done.metrics}`);
   check("每段字数用后端统计值（12/85 而非前端重算）",
