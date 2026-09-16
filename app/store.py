@@ -248,6 +248,10 @@ class ArtifactStore:
                     if s.get("id"):
                         out[s["id"]] = s
                 except Exception:               # noqa: BLE001
+                    # 单条记录读不出来＝这条历史**凭空消失**，而 index.json 损坏
+                    # 还有自愈重建兜着。不记下来就没人知道发生过：用户只看到
+                    # 「少了几条」，引擎这边一片安静 —— 正是静默降级。
+                    log.warning("历史记录读不出来，已从索引中跳过：%s", f, exc_info=True)
                     continue
             for f in sorted(self.gen.glob("*/*/result.json")):
                 try:
@@ -255,6 +259,7 @@ class ArtifactStore:
                     if s.get("id"):
                         out[s["id"]] = s
                 except Exception:               # noqa: BLE001
+                    log.warning("历史记录读不出来，已从索引中跳过：%s", f, exc_info=True)
                     continue
         self._write_index(out)
         return out
