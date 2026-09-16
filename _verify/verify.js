@@ -410,12 +410,23 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     hint: (() => { const h = document.getElementById('composer-gen-hint');
       return { text: h.textContent, display: getComputedStyle(h).display,
                h: Math.round(h.getBoundingClientRect().height) }; })(),
+    btn: (() => { const b = document.getElementById('btn-generate');
+      const bs = getComputedStyle(b);
+      return { stopping: b.classList.contains('stopping'),
+               img: bs.backgroundImage, bg: bs.backgroundColor }; })(),
   };`);
   check("发送后进入生成态（用户气泡 + 助手气泡）",
     running.busy && running.jobId === "job1" && running.userMsg, JSON.stringify(running));
   check("步骤时间线渲染出已完成步骤", running.steps >= 2, `steps=${running.steps}`);
   check("生成中展示流式思考过程", running.thinkShown, "");
   check("生成中发送键变为「停止」", /停止/.test(running.btnTitle), running.btnTitle);
+  // 停止键必须是**实心按钮**，不能是淡底。判据看 backgroundImage 而不是
+  // backgroundColor：--grad-btn 是 linear-gradient，它落在 background-image 上，
+  // 而 backgroundColor 恒为透明 —— 只查底色的话，实心键会被判成「没有背景」。
+  // 这条能抓住的回归是：把它改回 background: var(--fill)（浅底，卡面变浅灰后即隐形）。
+  check("生成中「停止」键仍是实心按钮（没被淡化成看不见的灰底）",
+    running.btn.stopping && running.btn.img !== "none",
+    JSON.stringify(running.btn));
   check("发送后清空输入框", running.topicCleared, "");
   // 生成中参数胶囊会被 lockParams 锁住（变灰、点不动）。「为什么点不动」全靠
   // 这一句解释 —— 它和 lockParams 是一对：锁了却不说原因，用户只会看到参数
@@ -1636,10 +1647,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   // ── 输入区：一体化卡片 ─────────────────────────────────────
   // 修复前是「参数条 / 输入框 / 提示行」三块垂直堆叠的独立块：参数（次要控件）
   // 占了输入框**上方**最贵的位置，三块各有各的边界。现在合并为一个卡片：
-  // textarea 在上、工具条在下、中间一条分隔线。
+  // textarea 在上、工具条在下，卡内不画分隔线（靠留白分区）。
   // 这一组断言取代了原来的「间距 12px / 左右对齐 / 描边一致」三条 —— 那三条
   // 都在描述**两个独立块之间**的关系，合并成一个容器后它们不再成立。
-  const compose = await evalIn(`return (() => {
+  const readComposer = () => evalIn(`return (() => {
     const qb = document.getElementById('quick-params');
     const cb = document.getElementById('composer-body');
     const topic = document.getElementById('topic');
@@ -1649,6 +1660,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     if (!qb || !cb || !topic || !tools || !send || !model) return { missing: true };
     const r = (n) => n.getBoundingClientRect();
     const cs = getComputedStyle(tools);
+    const cbs = getComputedStyle(cb);
+    const ss = getComputedStyle(send);
     return {
       inside: cb.contains(qb),
       topicInCard: cb.contains(topic),
@@ -1659,15 +1672,66 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       toolCount: qb.querySelectorAll('.select-wrap.pill').length,
       gear: !!qb.querySelector('.qp-more'),
       sep: cs.borderTopWidth,
-      sepStyle: cs.borderTopStyle,
+      composerTop: getComputedStyle(document.getElementById('composer')).borderTopWidth,
+      face: cbs.backgroundColor,
+      ring: cbs.boxShadow,
+      sendW: r(send).width,
+      sendRadius: parseFloat(ss.borderTopLeftRadius),
+      sendBg: ss.backgroundColor,
+      sendBgImg: ss.backgroundImage,
+      sendDisabled: send.disabled,
     }; })()`);
+  // 卡片面在**两种状态下都要立得住**，所以两态都读一次。
+  // 为什么不能只读一态：应用启动时是自动聚焦的（main.js 的 $("topic").focus()），
+  // 用户开机看到的就是「聚焦白面」那一态 —— 只测未聚焦态会漏掉他真正在看的东西。
+  // ⚠ 切换状态后必须等**过渡跑完**再读（CSS 里给背景与投影都挂了 transition）：
+  // getComputedStyle 在过渡进行中返回的是**插值中的当前值**，紧接着读会读到上一态的
+  // 残留，断言就成了「在测一个不存在的瞬间」。
+  // 这里踩过：blur 后立刻读是对的（首次无过渡），focus 后立刻读却拿到了未聚焦的值。
+  await evalIn(`document.getElementById('topic').blur(); return true;`);
+  await sleep(260);
+  const composeIdle = await readComposer();
+  await evalIn(`document.getElementById('topic').focus(); return true;`);
+  await sleep(260);
+  const compose = await readComposer();
+  // 把「白底上的等效灰度」算出来。--fill 是 rgba(0,0,0,.04)，直接读 RGB 通道会读到
+  // 0（黑），必须按 alpha 合成到白底上才是眼睛看到的颜色 —— 否则断言会把
+  // 「几乎纯黑」判成「浅灰」，等于没测。
+  const overWhiteLum = (s) => {
+    const m = /rgba?\(([\d.]+),\s*([\d.]+),\s*([\d.]+)(?:,\s*([\d.]+))?\)/.exec(s || "");
+    if (!m) return null;
+    const a = m[4] === undefined ? 1 : +m[4];
+    const sum = [+m[1], +m[2], +m[3]].reduce((acc, c) => acc + (c * a + 255 * (1 - a)), 0);
+    return Math.round(sum / 3);
+  };
   check("参数条已并入输入框卡片（不再是并列的兄弟块）",
     !compose.missing && compose.inside === true && compose.topicInCard === true,
     JSON.stringify(compose).slice(0, 160));
-  check("工具条位于输入框下方，且与输入区之间有分隔线",
-    compose.toolsBelowTopic === true
-    && parseFloat(compose.sep) > 0 && compose.sepStyle !== "none",
-    `below=${compose.toolsBelowTopic} sep=${compose.sep}/${compose.sepStyle}`);
+  // 卡内不画分隔线：输入区与工具条靠留白分区。参考图里的输入卡都是浑然一体的，
+  // 通栏的线等于把一个卡片切成两个「小卡片」。
+  check("工具条位于输入框下方，且卡内不再有分隔线",
+    compose.toolsBelowTopic === true && parseFloat(compose.sep) === 0,
+    `below=${compose.toolsBelowTopic} sep=${compose.sep}`);
+  // 输入区整体上方那条通栏线也去掉：卡片自己已有边界，再压一条线是两套边界语言。
+  check("输入区上方不再有通栏分割线",
+    parseFloat(compose.composerTop) === 0, `borderTop=${compose.composerTop}`);
+  // 卡片靠**面本身的深浅**跟页面分家。之前是白底（body #fff）上放白卡
+  // （--surface #fff）+ 一根 7% 黑的 0.5px 发丝线 —— 白配白，那根线又太弱，
+  // 读出来是「一个框」而不是「一张卡」，这是输入区显得平的主因。
+  check("未聚焦时输入卡是一块浅灰面（不是白底白卡）",
+    composeIdle.face !== "rgb(255, 255, 255)"
+      && overWhiteLum(composeIdle.face) <= 250 && overWhiteLum(composeIdle.face) >= 230,
+    `face=${composeIdle.face} lum=${overWhiteLum(composeIdle.face)}`);
+  // 聚焦（= 开机默认态）抬起成白面 + 描边投影。投影从两层 5% 提到
+  // 「1px/6% + 20px/10%」—— 5% 在纯白页面上等于没有，卡片立不住。
+  // 判据用「最大模糊半径 ≥ 16px」而不是比对整串：写死整串的话换个配色就红，
+  // 而这里真正要守的是「有一次真实的抬升，不是 5% 的装饰」。
+  const maxShadowBlur = (s) => Math.max(0, ...(String(s).match(/([\d.]+)px/g) || [])
+    .map((v) => parseFloat(v)));
+  check("聚焦时输入卡抬起成白面 + 描边投影（开机默认就是这一态）",
+    compose.face === "rgb(255, 255, 255)" && compose.ring !== "none"
+      && maxShadowBlur(compose.ring) >= 16,
+    `face=${compose.face} maxBlur=${maxShadowBlur(compose.ring)} ring=${String(compose.ring).slice(0, 70)}`);
   check("发送键仍在工具条右端（保持右下角）",
     compose.sendRight < 12, `rightOffset=${compose.sendRight}`);
   check("模型选择器紧邻发送键左侧、同一行",
@@ -1679,6 +1743,25 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     compose.toolCount >= 3 && compose.toolCount <= 4, `toolCount=${compose.toolCount}`);
   check("「更多设置」不再占一个文字按钮位（降级为参数组末尾的图标）",
     compose.gear === true, `gear=${compose.gear}`);
+  // 发送键是**圆角方块**（参考图里三个输入卡都是），不是正圆。
+  // 判据用「圆角明显小于半宽」而不是写死 10px —— 正圆时 radius == width/2，
+  // 写死数值的话换个尺寸就失去意义了。
+  check("发送键是圆角方块而非正圆",
+    compose.sendRadius > 0 && compose.sendRadius <= compose.sendW / 2 - 3,
+    `radius=${compose.sendRadius} width=${compose.sendW}`);
+  // 空输入时按钮不可点，但**不能隐形**。判据不是「有没有底色」—— --fill 也有底色，
+  // 那种问法测不出这个 bug。真正的契约是「底色跟它所在的卡面拉不拉得开」：
+  // 卡面改成浅灰之后，--fill 那种「跟卡面同色」的底就彻底消失了。
+  // 两种卡面都要拉得开：未聚焦的浅灰面、聚焦的白面。
+  const SEND_MIN_DELTA = 12;
+  const sendLum = overWhiteLum(compose.sendBg);
+  const idleFaceLum = overWhiteLum(composeIdle.face);
+  const focusFaceLum = overWhiteLum(compose.face);
+  check("空输入时发送键仍看得见（底色与两种卡面都拉得开）",
+    compose.sendDisabled
+      ? idleFaceLum - sendLum >= SEND_MIN_DELTA && focusFaceLum - sendLum >= SEND_MIN_DELTA
+      : compose.sendBgImg !== "none",
+    `disabled=${compose.sendDisabled} send=${sendLum} idleFace=${idleFaceLum} focusFace=${focusFaceLum}`);
 
   // ── 12c) 「无行业定制」的可见提示 ─────────────────────────
   // 这些值不报错，只会静默走通用默认（没配 topics_map 的细分领域、缺
@@ -1730,6 +1813,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     return { x: Math.max(0, r.left - 8), y: Math.max(0, r.top - 12),
              width: r.width + 16, height: r.height + 24, scale: 2 };`);
   await shot("main-composer.png", null, cbox);
+  // 未聚焦态单独来一张：卡片在两种状态下长得不一样（浅灰面 / 白面 + 投影），
+  // 而开机是自动聚焦的 —— 只看一张的话，「另一态」永远没人见过。
+  await shot("main-composer-idle.png", `document.getElementById('topic').blur(); return true;`, cbox);
+  await evalIn(`document.getElementById('topic').focus(); return true;`);
   await shot("main-sidebar.png", `${closeMenus} return true;`);
   // 折叠态截图：左栏收成 0 宽后只应剩左上角的展开按钮。
   // 回归的 bug 是漏隐藏 .left-top，「新建对话」被挤成竖排「建/对」小黑块。

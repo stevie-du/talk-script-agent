@@ -42,6 +42,10 @@
   --fill: rgba(0, 0, 0, .04);
   --fill-strong: rgba(0, 0, 0, .07);
   --fill-hover: #fafafa;                 /* 描边按钮 hover */
+  /* 不可点控件的底色。单独开一个而不是复用 --fill：--fill 是「卡面」的色，
+     不可点控件一旦跟它所在卡面同色就彻底消失（发送键在浅灰卡面上踩过这个坑）。
+     它的约束是「明显深于任何卡面」，不是「淡」。 */
+  --fill-disabled: rgba(0, 0, 0, .10);
   --bubble: #ededee;                     /* 用户消息气泡 */
   --scrim: rgba(29, 29, 31, .30);        /* 弹层遮罩 */
   --toast-bg: rgba(29, 29, 31, .88);
@@ -84,7 +88,10 @@
   --shadow-focus: 0 0 0 1px rgba(0, 0, 0, .22), 0 0 0 4px var(--ring-focus);
   /* 选中/打开态：与输入框同级的淡描边，避免"选中就变粗框" */
   --shadow-selected: 0 0 0 0.5px var(--line-strong);
-  --shadow-composer: 0 1px 3px rgba(0, 0, 0, .05), 0 4px 14px rgba(0, 0, 0, .05);
+  /* 输入卡聚焦时的投影。原来两层都是 5% —— 在纯白页面上等于没有，
+     卡片立不住（那正是「白底白卡」看起来平的第二个原因，第一个是缺描边）。
+     加一层更大更实的落影，让卡片真的「浮」起来。 */
+  --shadow-composer: 0 1px 2px rgba(0, 0, 0, .06), 0 6px 20px rgba(0, 0, 0, .10);
   /* 以下两个原本散落在具体规则里写死，收进变量以保证视觉语言统一 */
   --shadow-lift: 0 3px 10px rgba(0, 0, 0, .05);      /* 卡片 hover 抬升 */
   --shadow-flash: 0 0 0 3px rgba(0, 0, 0, .09);      /* 占位事实跳转后的闪烁高亮 */
@@ -454,6 +461,10 @@ input, select, textarea {
 }
 textarea { resize: vertical; line-height: 1.7; }
 input::placeholder, textarea::placeholder { color: var(--text-3); }
+/* 输入区的 placeholder 承载的是键盘提示（Enter / Shift+Enter / Esc），不是纯装饰，
+   而卡面现在是一块浅灰面 —— --text-3 在灰面上几乎读不出来。提到 --text-2。
+   跟真实输入（--text-1）仍有明显深浅差，不会被误当成「已经输入的内容」。 */
+#composer #topic::placeholder { color: var(--text-2); }
 input:hover, textarea:hover { box-shadow: var(--shadow-input-hover); }
 input:focus, select:focus, textarea:focus { outline: none; box-shadow: var(--shadow-focus); }
 
@@ -482,7 +493,7 @@ select {
    容器 padding 归零后，内边距由这里承担（工具条那边自己管自己的）。 */
 #composer #topic {
   flex: 0 0 auto; min-width: 0; width: 100%;
-  min-height: 40px; max-height: 140px; padding: 11px 12px 5px;
+  min-height: 46px; max-height: 140px; padding: 14px 16px 6px;
   border: none; border-radius: 0;
   background: transparent; color: var(--text-1);
   font-size: var(--f-md); line-height: 1.6;
@@ -520,18 +531,21 @@ select {
 .select-btn .chev { margin-left: auto; color: var(--text-3); flex: 0 0 auto; transition: transform .15s var(--ease); }
 .select-wrap.open .chev { transform: rotate(180deg); }
 
-/* 工具条内的控件（参数胶囊 / 模型选择器）：淡底 + 无描边。
-   卡片本身已有一圈发丝描边，内部再叠一层会读成「控件套控件」，挤且层级乱；
-   参考图底部那排控件也都是无描边的幽灵态。 */
+/* 工具条内的控件（参数胶囊 / 模型选择器）一律**幽灵态**：纯文字 + 箭头，无底色。
+   参考图里底部那排控件（分支 / 权限 / 模型）都是这样 —— 靠箭头表示可点，
+   而不是靠一个灰底胶囊。一排灰底胶囊会让工具条比输入区本身还重。 */
 .select-wrap.pill { flex: 0 0 auto; }
 .select-wrap.pill .select-btn {
-  width: auto; height: 24px; min-height: 24px;
-  padding: 0 9px; gap: 4px; font-size: var(--f-2xs);
+  width: auto; height: 26px; min-height: 26px;
+  padding: 0 7px; gap: 4px; font-size: var(--f-xs);
   border-radius: var(--r-sm);
-  background: var(--fill); box-shadow: none;
+  background: transparent; box-shadow: none;
+  color: var(--text-2);
 }
-.select-wrap.pill .select-btn:hover { background: var(--fill-strong); box-shadow: none; }
-.select-wrap.pill.open .select-btn { background: var(--fill-strong); box-shadow: none; }
+/* hover / 展开态用 --fill-strong 而不是 --fill：卡片本身就是 --fill 面，
+   同色叠同色等于没反馈（幽灵态控件挂在灰面上时最容易踩这个）。 */
+.select-wrap.pill .select-btn:hover { background: var(--fill-strong); color: var(--text-1); box-shadow: none; }
+.select-wrap.pill.open .select-btn { background: var(--fill-strong); color: var(--text-1); box-shadow: none; }
 .select-wrap.pill .chev { margin-left: 2px; }
 /* 菜单宽度与位置由 JS 量取后写入（贴按钮左沿、可按内容取宽）。
    z-index 必须高于整窗二级页 .screen(60)：菜单挂在 body 下，与 .screen 同处根层叠
@@ -563,11 +577,14 @@ select {
    数据来源：app/knowledge.py 的 param_audit —— 用户能选、但本包没给对应定制的值
    （没配 topics_map 的细分领域、缺 rate_by_style 的风格、平台词表里没有的平台…）。
    这些值不会报错，只会静默走通用默认；不标出来的话，用户以为在定制、实际没生效。
-   警示语言与模型选择器的 is-warn 保持一致（同色 + 同底色）。
-   特异性必须压过 .select-wrap.pill .select-btn 的通用淡底，否则警示色会被盖掉 ——
-   而那正是它要提示的东西。 */
+   表现方式是**橙色文字**（与参考图里那个橙色的「完全访问」同一套语言）：
+   工具条控件平时是幽灵态，警示靠颜色本身，不靠底色。
+   特异性显式压过 .select-wrap.pill .select-btn 的默认色 —— 不能只靠源码顺序赢，
+   那是「改一次顺序就静默失效」的写法。 */
 .select-wrap .select-btn.is-warn,
-.select-wrap .select-btn.is-warn:hover { color: var(--warn); background: var(--warn-soft); }
+.select-wrap.pill .select-btn.is-warn { color: var(--warn); background: transparent; }
+.select-wrap .select-btn.is-warn:hover,
+.select-wrap.pill .select-btn.is-warn:hover { color: var(--warn); background: var(--warn-soft); }
 .select-wrap .select-btn.is-warn .chev { color: var(--warn); }
 .select-wrap .select-btn.is-warn .sel-text::before {
   content: ""; display: inline-block; width: 5px; height: 5px; border-radius: 50%;
@@ -1250,37 +1267,42 @@ td.bad { color: var(--bad); font-weight: 500; }
 }
 
 /* ══════════════ 底部输入区 ══════════════ */
-/* 一体化卡片：输入区与工具条同属一个容器，中间一条通栏发丝分隔线。
-   修复前是「参数条 / 输入框 / 提示行」三块垂直堆叠的独立块 —— 参数（次要控件）
-   占了输入框上方最贵的位置，三块各有各的边界，读起来是三个互不相识的东西。 */
+/* 一体化卡片：输入区与工具条同属一个容器。修复前是「参数条 / 输入框 / 提示行」
+   三块垂直堆叠的独立块 —— 参数（次要控件）占了输入框上方最贵的位置。 */
 #composer {
   flex: 0 0 auto;
-  padding: var(--s2) var(--s6) var(--s3);
+  padding: var(--s3) var(--s6) var(--s4);
   background: var(--glass);
   backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);
-  border-top: 0.5px solid var(--line);
+  /* 不画 border-top：卡片自己已经是一块有边界的「面」，上面再压一条通栏线
+     就是两套边界语言。参考图里的输入卡都是「浮在背景上」的，
+     不靠一条线跟上方内容分家。 */
 }
 #composer-body {
   max-width: var(--w-stream); width: 100%; margin-inline: auto;
   display: flex; flex-direction: column;
-  background: var(--surface);
+  /* 默认是**浅灰面**，不画描边。参考图里的输入卡都是一块「比页面略深的面」，
+     靠面本身的深浅跟页面分家 —— 白底上放白卡再压一根 0.5px 发丝线，
+     读起来是「一个框」而不是「一张卡」，这正是之前显得平、显得灰的主因。 */
+  background: var(--fill);
   border-radius: var(--r-xl);
-  /* 描边交给 box-shadow 而非 border：border 在 2x 屏上会把 0.5px 渲染成 1px 实线 */
-  box-shadow: 0 0 0 0.5px var(--line), var(--shadow-composer);
-  transition: box-shadow .18s var(--ease);
-  /* 裁掉工具条那条通栏分隔线的两端，否则它会顶出圆角。
-     自绘下拉的菜单挂在 body 下，不受这里影响。 */
-  overflow: hidden;
+  box-shadow: none;
+  transition: background .18s var(--ease), box-shadow .18s var(--ease);
 }
-#composer-body:focus-within { box-shadow: 0 0 0 0.5px var(--line-strong), var(--shadow-composer); }
+/* 聚焦时才「抬起来」变成白面 + 描边 + 投影（参考图里正在输入的卡都是白的）。
+   顺带把「光标在不在这个输入框里」变成一眼可见的状态。
+   描边仍走 box-shadow 而非 border：border 在 2x 屏上会把 0.5px 渲染成 1px 实线。 */
+#composer-body:focus-within {
+  background: var(--surface);
+  box-shadow: 0 0 0 0.5px var(--line-strong), var(--shadow-composer);
+}
 
-/* 工具条：左参数、右操作。
-   容器不留 padding，左右内边距由两侧各自承担 —— 否则分隔线会缩在圆角以内，
-   看起来像「卡片里又套了一个卡片」。 */
+/* 工具条：左参数、右操作。卡内**不画分隔线** —— 输入区与工具条靠留白分区。
+   画线等于把一个卡片切成两个「小卡片」，参考图里都是浑然一体的；
+   而且通栏的线会切开卡片圆角，得再拿 overflow:hidden 去裁，越补越绕。 */
 .composer-tools {
   display: flex; align-items: center; gap: var(--s2);
-  padding: 7px var(--s2) var(--s2);
-  border-top: 0.5px solid var(--line);
+  padding: 2px 10px 10px;
 }
 .quick-bar {
   flex: 1 1 auto; min-width: 0;
@@ -1302,25 +1324,39 @@ td.bad { color: var(--bad); font-weight: 500; }
   background: transparent; color: var(--text-3);
   box-shadow: none;
 }
-.quick-bar .qp-more:hover { background: var(--fill); color: var(--text-1); box-shadow: none; }
+.quick-bar .qp-more:hover { background: var(--fill-strong); color: var(--text-1); box-shadow: none; }
+/* 模型名是这一排里唯一「深色大字」—— 它比其他参数重得多：参数只影响这一条脚本，
+   模型影响之后所有生成。参考图里也是这么处理的（分支/权限是灰的，模型是深的）。 */
+#model-pick .select-btn {
+  height: 30px; min-height: 30px; padding: 0 8px;
+  font-size: var(--f-sm); color: var(--text-1);
+}
+#model-pick .select-btn:hover { color: var(--text-1); }
+/* 发送键：**实心深色圆角方块**，不是圆形。
+   参考图里三个输入卡的发送键都是圆角方块（10~12px 圆角 / 34px 见方），
+   圆角方块比正圆更像「按钮」、也更贴这套界面的圆角语言。 */
 #btn-generate.send {
   width: 34px; height: 34px; flex: 0 0 auto; padding: 0;
   background: var(--grad-btn); color: var(--text-inv);
-  border-radius: 50%; min-width: 34px;
+  border-radius: var(--r-md); min-width: 34px;
   box-shadow: var(--shadow-ink);
 }
 #btn-generate.send:hover { background: var(--grad-btn-hover); }
-#btn-generate.send:disabled { background: var(--fill); color: var(--text-3); box-shadow: none; }
+/* 空输入时按钮不可点，但必须**仍然像一个按钮**：之前用 --fill 叠在浅色卡面上，
+   跟卡面同色，几乎是隐形的，看着像「这个控件坏了」。改 --fill-disabled
+   （明显深于任何卡面），读作「在，只是不能按」。 */
+#btn-generate.send:disabled { background: var(--fill-disabled); color: var(--text-3); box-shadow: none; }
 #btn-generate.send .spinner {
   width: 14px; height: 14px;
   border-color: var(--on-ink-dim); border-top-color: var(--text-inv);
 }
-/* 生成中：发送键化作「停止」，图标切换 + 保持可点 */
+/* 生成中：发送键化作「停止」，**只换图标，不换底色**。
+   参考图里生成中的那个键就是「实心深色方块 + 白色停止图标」—— 它此刻是界面上
+   唯一还能做的动作，淡化成灰底反而读成「禁用控件」，正好读反。
+   这里曾经显式写过 background: var(--fill)，卡面改成浅灰之后它会跟卡面同色、
+   整个消失（白面 + 发丝线也压不住：生成中输入框被禁用会失焦，卡面退回浅灰，
+   两者只差 10 的等效灰度）。所以现在不留任何底色覆盖，直接沿用 .send 的实心底。 */
 #btn-generate.send .ic-stop { display: none; }
-#btn-generate.send.stopping {
-  background: var(--fill); color: var(--text-2); box-shadow: none;
-}
-#btn-generate.send.stopping:hover { background: var(--fill-strong); color: var(--text-1); }
 #btn-generate.send.stopping .ic-send { display: none; }
 #btn-generate.send.stopping .ic-stop { display: block; }
 
