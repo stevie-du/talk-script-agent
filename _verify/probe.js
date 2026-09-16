@@ -24,9 +24,10 @@
 //   --size/--dpr  视口尺寸与缩放倍率。**照用户截图复现时这两个必须对上**：
 //               先 `png-tools.js scan` 反推出他的倍率与窗口宽度，再在这里填。
 //
-// `--overflow` 的判据：拿每个**非绝对定位**子元素的底边与父元素的内容盒底边比，
-// 超出 ≥ 2px 就算漏。⚠ 不要用 `scrollHeight > clientHeight` —— 视觉隐藏的
-// 绝对定位元素（如 `.segmented .radio` 里的 `<input>`）也会把它撑大，是假阳性。
+// `--overflow` 的口径**不在这里写**，在 `_verify/lib/overflow.js` ——
+// `verify.js` 里那条「卡片容得下内容」的断言用的是同一个。
+// 判据与三个口径上的坑（scrollHeight 假阳性 / 要比外边距盒 /
+// 折叠的 `<details>` 要跳过）都在那个文件的注释里，改之前先读它。
 //
 // 表达式里**不能出现反引号**（`evalIn` 用模板串拼的，会提前截断字符串）。
 "use strict";
@@ -35,6 +36,7 @@ const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 const { freePort, killTree, launchChrome, waitTarget, connect } = require("./lib/cdp");
+const { probeSource } = require("./lib/overflow");
 
 const ROOT = path.resolve(__dirname, "..");
 const PY = path.join(ROOT, ".venv", "Scripts", "python.exe");
@@ -54,27 +56,7 @@ const CLIP = opt("clip", "");
 const [VW, VH] = (opt("size", "1305x823")).split("x").map(Number);
 const DPR = Number(opt("dpr", "1.25"));
 
-const OVERFLOW = `
-  var bad = [];
-  document.querySelectorAll('.stg-pane, #right, #left').forEach(function (root) {
-    root.querySelectorAll('*').forEach(function (n) {
-      var cs = getComputedStyle(n);
-      if (cs.display === 'none' || cs.overflow === 'auto' || cs.overflow === 'scroll') return;
-      if (n.classList.contains('kb-body')) return;          // 这个本来就该滚
-      var box = n.getBoundingClientRect();
-      if (!box.height) return;
-      var bottom = box.bottom - parseFloat(cs.paddingBottom) - parseFloat(cs.borderBottomWidth);
-      var over = 0;
-      Array.prototype.forEach.call(n.children, function (c) {
-        var ccs = getComputedStyle(c);
-        if (ccs.position === 'absolute' || ccs.display === 'none') return;
-        over = Math.max(over, c.getBoundingClientRect().bottom - bottom);
-      });
-      if (over >= 2) bad.push({ sel: n.tagName + '.' + (n.className || '').split(' ')[0],
-                                over: Math.round(over * 10) / 10, h: Math.round(box.height) });
-    });
-  });
-  return bad;`;
+const OVERFLOW = probeSource({ skipClasses: ["kb-body"] });
 
 (async function main() {
   const port = await freePort(6187);

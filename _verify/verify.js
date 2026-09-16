@@ -13,6 +13,7 @@ const fs = require("fs");
 const os = require("os");
 const { freePort, killTree, launchChrome, waitTarget, connect, serve } =
   require("./lib/cdp");
+const { probeSource } = require("./lib/overflow");
 
 const RENDERER = path.resolve(__dirname, "..", "desktop", "renderer");
 const REPO_ROOT = path.resolve(__dirname, "..");
@@ -1044,28 +1045,17 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   // 看到的是「文件名下面漂着一行小字、还压在下一张卡上」，只有每组的最后一张
   // 整行露在组外。用户 2026-09-16 贴的截图就是这个。
   //
-  // 判据是**内容真的漏出盒子**：拿每个非绝对定位子元素的底边与卡的内容盒底边
-  // 比。不用 `scrollHeight > clientHeight` 是因为那个口径有假阳性 ——
-  // `.segmented .radio` 里视觉隐藏的 `<input>` 是绝对定位的，照样会把
-  // scrollHeight 撑大 4px（实测），那是探针的问题、不是界面的问题。
+  // ⚠ 口径**不在这里写**，在 `_verify/lib/overflow.js` —— 探针脚本 `probe.js`
+  // 用的是同一个。判据、以及三个口径上的坑（scrollHeight 假阳性 / 要比外边距盒 /
+  // 折叠的 `<details>` 要跳过）都写在那个文件的注释里，改之前先读它。
+  //
   // ⚠ 量到 `HIDDEN` 要当**失败**：面板此刻是 display:none 时高度全是 0，
   // 差值算出来是无意义的数 —— 不显式报出来的话，这条断言就变成空转（假绿）。
-  const overflowProbe = (sel) => `
-    var bad = [];
-    document.querySelectorAll(${JSON.stringify(sel)}).forEach(function (n) {
-      var box = n.getBoundingClientRect();
-      var name = n.querySelector('.kb-name') ? n.querySelector('.kb-name').textContent : '?';
-      if (!box.height) { bad.push({ name: name, hidden: true }); return; }
-      var cs = getComputedStyle(n);
-      var bottom = box.bottom - parseFloat(cs.paddingBottom) - parseFloat(cs.borderBottomWidth);
-      var over = 0;
-      Array.prototype.forEach.call(n.children, function (c) {
-        if (getComputedStyle(c).position === 'absolute') return;
-        over = Math.max(over, c.getBoundingClientRect().bottom - bottom);
-      });
-      if (over >= 2) bad.push({ name: name, h: box.height, over: Math.round(over * 10) / 10 });
-    });
-    return bad;`;
+  const overflowProbe = (sel) => probeSource({
+    selector: sel,
+    nameFn: `function(n){ var e = n.querySelector('.kb-name');
+      return e ? e.textContent : n.tagName + '.' + String(n.className || '').split(' ')[0]; }`,
+  });
 
   await evalIn(`window.__ts.setPane('kb'); return true;`);
   await sleep(400);
