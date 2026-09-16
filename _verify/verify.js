@@ -427,6 +427,16 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("生成中「停止」键仍是实心按钮（没被淡化成看不见的灰底）",
     running.btn.stopping && running.btn.img !== "none",
     JSON.stringify(running.btn));
+  // 生成中的输入区留一张特写：这一态改过配色（停止键从 --fill 淡底改回实心），
+  // 只断言不够 —— 断言守的是「有没有渐变」，看不出「跟卡面拉不拉得开」。
+  // 必须在这里拍、不能挪到末尾的截图区：那边生成早结束了，这一态就没了。
+  // 也不能用 shot()：它定义在截图区（本行之后几百行）。
+  const stopBox = await evalIn(`const r = document.getElementById('composer').getBoundingClientRect();
+    return { x: Math.max(0, r.left - 8), y: Math.max(0, r.top - 12),
+             width: r.width + 16, height: r.height + 24, scale: 2 };`);
+  const stopShot = await cdp.send("Page.captureScreenshot", { format: "png", clip: stopBox });
+  fs.writeFileSync(path.join(SHOT_DIR, "composer-stopping.png"),
+    Buffer.from(stopShot.data, "base64"));
   check("发送后清空输入框", running.topicCleared, "");
   // 生成中参数胶囊会被 lockParams 锁住（变灰、点不动）。「为什么点不动」全靠
   // 这一句解释 —— 它和 lockParams 是一对：锁了却不说原因，用户只会看到参数
