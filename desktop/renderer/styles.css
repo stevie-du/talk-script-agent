@@ -464,9 +464,10 @@ input, select, textarea {
 }
 textarea { resize: vertical; line-height: 1.7; }
 input::placeholder, textarea::placeholder { color: var(--text-3); }
-/* 输入区的 placeholder 承载的是键盘提示（Enter / Shift+Enter / Esc），不是纯装饰，
-   而卡面现在是一块浅灰面 —— --text-3 在灰面上几乎读不出来。提到 --text-2。
-   跟真实输入（--text-1）仍有明显深浅差，不会被误当成「已经输入的内容」。 */
+/* 输入区的 placeholder 比全局那档（--text-3）深一级。两个理由：
+   ① 它是空白输入区里的**主指令**，不是搜索框那种装饰性提示；
+   ② 参考图实测的字墨核心亮度约 143，比 --text-3（161）更深、更接近 --text-2（110）。
+   与真实输入（--text-1）仍有明显深浅差，不会被误当成「已经输入的内容」。 */
 #composer #topic::placeholder { color: var(--text-2); }
 input:hover, textarea:hover { box-shadow: var(--shadow-input-hover); }
 input:focus, select:focus, textarea:focus { outline: none; box-shadow: var(--shadow-focus); }
@@ -1284,20 +1285,20 @@ td.bad { color: var(--bad); font-weight: 500; }
 #composer-body {
   max-width: var(--w-stream); width: 100%; margin-inline: auto;
   display: flex; flex-direction: column;
-  /* 默认是**浅灰面**，不画描边。参考图里的输入卡都是一块「比页面略深的面」，
-     靠面本身的深浅跟页面分家 —— 白底上放白卡再压一根 0.5px 发丝线，
-     读起来是「一个框」而不是「一张卡」，这正是之前显得平、显得灰的主因。 */
-  background: var(--fill);
-  border-radius: var(--r-xl);
-  box-shadow: none;
-  transition: background .18s var(--ease), box-shadow .18s var(--ease);
-}
-/* 聚焦时才「抬起来」变成白面 + 描边 + 投影（参考图里正在输入的卡都是白的）。
-   顺带把「光标在不在这个输入框里」变成一眼可见的状态。
-   描边仍走 box-shadow 而非 border：border 在 2x 屏上会把 0.5px 渲染成 1px 实线。 */
-#composer-body:focus-within {
+  /* 白底 + **一根看得见的描边**。三张参考图逐像素量过：卡片填充都是白（255），
+     边界都是「1px × 亮度 230」（≈10% 黑），且没有投影。没有一张用灰底。
+     原来那版是 0.5px × 7%（`--line`），有效墨量只有参考图的约三分之一 ——
+     白底上放白卡、描边又太弱，读出来是「一个框」而不是「一张卡」。
+     所以这里守的是「描边够深」，不是「面色跟页面不一样」。 */
   background: var(--surface);
-  box-shadow: 0 0 0 0.5px var(--line-strong), var(--shadow-composer);
+  border-radius: var(--r-xl);
+  box-shadow: 0 0 0 1px var(--line-strong);
+  transition: box-shadow .18s var(--ease);
+}
+/* 聚焦时只加一层抬升（投影），面色与描边不变 —— 参考图里聚焦与未聚焦的卡片
+   填充与边界几乎一样（图2 的边界 219 略深一点），差异主要来自页面那一侧的明暗。 */
+#composer-body:focus-within {
+  box-shadow: 0 0 0 1px var(--line-strong), var(--shadow-composer);
 }
 
 /* 工具条：左参数、右操作。卡内**不画分隔线** —— 输入区与工具条靠留白分区。

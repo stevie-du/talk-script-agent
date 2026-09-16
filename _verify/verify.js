@@ -306,6 +306,22 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     return r.result.value;
   };
 
+  // ── 截图辅助（**定义在最前面**，任何一步都能用）───────────
+  // 原来它定义在脚本末尾的「截图区」，于是流程中段想拍一张图只能用裸 cdp 重写一遍
+  // （生成中那一态就这么绕过两次）。它只依赖 evalIn / sleep / cdp / fs / SHOT_DIR，
+  // 全部在脚本开头就绪，没有任何理由放在后面。
+  // clip 可选：给局部特写用（整屏图上工具条只有几十像素高，看不清细节）。
+  const shot = async (name, expr, clip) => {
+    if (expr) { await evalIn(expr); await sleep(500); }
+    const s = await cdp.send("Page.captureScreenshot",
+      clip ? { format: "png", clip } : { format: "png" });
+    fs.writeFileSync(path.join(SHOT_DIR, name), Buffer.from(s.data, "base64"));
+  };
+  // 自绘下拉的菜单挂在 body 下，截图时会盖住底下的控件（它不受任何容器裁剪）。
+  // 整屏截图前统一收掉，否则「首屏长什么样」这张图永远带着一个展开的菜单。
+  const closeMenus = `document.querySelectorAll('.select-wrap.open').forEach(w => w.classList.remove('open'));
+    document.querySelectorAll('.select-menu:not(.hidden)').forEach(m => m.classList.add('hidden'));`;
+
   // ── CSP（P2-5）：先证明测试环境没有比生产宽松 ─────────────
   // 桩服务必须原样下发**生产那份** CSP。如果它不发头，页面就在「没有 CSP」
   // 的环境里跑完全部断言 —— 全绿，但什么也没验证（典型的断言空转）。
@@ -1490,6 +1506,11 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     firstRun.settingsOpen && firstRun.paneLlm, JSON.stringify(firstRun));
   check("引导卡与示例卡共存（不互相顶掉）",
     firstRun.setup && firstRun.samples === 4, JSON.stringify(firstRun));
+  // 「没有配置」这个状态留两张图：用户开机第一眼看到的是**自动弹开的设置页**，
+  // 关掉之后才看到主界面上的引导卡 —— 两张都要有人看过。
+  await shot("setup-settings.png", `${closeMenus} return true;`);
+  await shot("setup-main.png",
+    `document.getElementById('btn-close-settings').click(); ${closeMenus} return true;`);
 
   // ── 12d) config.yaml 读坏时的警示 ────────────────────────
   // 读坏之后设置页里填的全是**内置默认值**，而状态行会照常说
@@ -1643,17 +1664,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     JSON.stringify(cspAll.slice(cspAfterCtrl).slice(0, 3)));
 
   // ── 截图 ─────────────────────────────────────────────────
-  // clip 可选：给局部特写用（整屏图上工具条只有几十像素高，看不清细节）
-  const shot = async (name, expr, clip) => {
-    if (expr) { await evalIn(expr); await sleep(500); }
-    const s = await cdp.send("Page.captureScreenshot",
-      clip ? { format: "png", clip } : { format: "png" });
-    fs.writeFileSync(path.join(SHOT_DIR, name), Buffer.from(s.data, "base64"));
-  };
-  // 自绘下拉的菜单挂在 body 下，截图时会盖住底下的控件（它不受任何容器裁剪）。
-  // 整屏截图前统一收掉，否则「首屏长什么样」这张图永远带着一个展开的菜单。
-  const closeMenus = `document.querySelectorAll('.select-wrap.open').forEach(w => w.classList.remove('open'));
-    document.querySelectorAll('.select-menu:not(.hidden)').forEach(m => m.classList.add('hidden'));`;
+  // shot() / closeMenus 定义在脚本开头（任何一步都能用）。
   // ── 输入区：一体化卡片 ─────────────────────────────────────
   // 修复前是「参数条 / 输入框 / 提示行」三块垂直堆叠的独立块：参数（次要控件）
   // 占了输入框**上方**最贵的位置，三块各有各的边界。现在合并为一个卡片：
@@ -1725,23 +1736,32 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   // 输入区整体上方那条通栏线也去掉：卡片自己已有边界，再压一条线是两套边界语言。
   check("输入区上方不再有通栏分割线",
     parseFloat(compose.composerTop) === 0, `borderTop=${compose.composerTop}`);
-  // 卡片靠**面本身的深浅**跟页面分家。之前是白底（body #fff）上放白卡
-  // （--surface #fff）+ 一根 7% 黑的 0.5px 发丝线 —— 白配白，那根线又太弱，
-  // 读出来是「一个框」而不是「一张卡」，这是输入区显得平的主因。
-  check("未聚焦时输入卡是一块浅灰面（不是白底白卡）",
-    composeIdle.face !== "rgb(255, 255, 255)"
-      && overWhiteLum(composeIdle.face) <= 250 && overWhiteLum(composeIdle.face) >= 230,
-    `face=${composeIdle.face} lum=${overWhiteLum(composeIdle.face)}`);
-  // 聚焦（= 开机默认态）抬起成白面 + 描边投影。投影从两层 5% 提到
-  // 「1px/6% + 20px/10%」—— 5% 在纯白页面上等于没有，卡片立不住。
-  // 判据用「最大模糊半径 ≥ 16px」而不是比对整串：写死整串的话换个配色就红，
-  // 而这里真正要守的是「有一次真实的抬升，不是 5% 的装饰」。
+  // 卡片靠**一根看得见的描边**跟页面分家，不靠面色。
+  // 三张参考图逐像素量过：填充都是白（255），边界都是「1px × 亮度 230」（≈10% 黑），
+  // 且没有投影 —— 没有一张用灰底。所以这里守的是「有效墨量够深」。
+  // 判据取 alpha × 宽度，而不是只看颜色或只看宽度：修复前是 0.5px × 7%
+  // （有效墨量 0.035），参考图是 1px × 10%（0.10）—— 差 3 倍，只查一个维度会漏。
+  // 阈值 0.09 = 参考图的九成：0.12（现状）过，0.07（1px 但颜色太浅）也红 ——
+  // 「宽度够了颜色不够」这种半修法同样要被拦住。
+  const ringInk = (s) => {
+    const seg = String(s).split(/,(?![^(]*\))/)[0] || "";
+    const m = /rgba?\(\s*[\d.]+\s*,\s*[\d.]+\s*,\s*[\d.]+\s*(?:,\s*([\d.]+))?\s*\)\s*[-\d.]+px\s+[-\d.]+px\s+[-\d.]+px\s+([-\d.]+)px/.exec(seg);
+    return m ? (m[1] === undefined ? 1 : parseFloat(m[1])) * parseFloat(m[2]) : 0;
+  };
+  check("输入卡未聚焦时靠描边分家（白底 + 有效墨量够深）",
+    composeIdle.face === "rgb(255, 255, 255)" && ringInk(composeIdle.ring) >= 0.09,
+    `face=${composeIdle.face} ink=${ringInk(composeIdle.ring)} ring=${String(composeIdle.ring).slice(0, 56)}`);
+  check("输入卡聚焦时仍是白底 + 同样的描边（只多一层抬升）",
+    compose.face === "rgb(255, 255, 255)" && ringInk(compose.ring) >= 0.09,
+    `face=${compose.face} ink=${ringInk(compose.ring)}`);
+  // 聚焦多出来的那层是**真实的抬升**，不是 5% 的装饰（原来两层都是 5%，
+  // 在纯白页面上等于没有）。判据用「最大模糊半径」而不是比对整串：
+  // 写死整串的话换个配色就红，而这里要守的是「有一次真实的抬升」。
   const maxShadowBlur = (s) => Math.max(0, ...(String(s).match(/([\d.]+)px/g) || [])
     .map((v) => parseFloat(v)));
-  check("聚焦时输入卡抬起成白面 + 描边投影（开机默认就是这一态）",
-    compose.face === "rgb(255, 255, 255)" && compose.ring !== "none"
-      && maxShadowBlur(compose.ring) >= 16,
-    `face=${compose.face} maxBlur=${maxShadowBlur(compose.ring)} ring=${String(compose.ring).slice(0, 70)}`);
+  check("聚焦比未聚焦多一层真实抬升（投影最大模糊 ≥ 16px）",
+    maxShadowBlur(compose.ring) >= 16 && maxShadowBlur(composeIdle.ring) < 16,
+    `focusBlur=${maxShadowBlur(compose.ring)} idleBlur=${maxShadowBlur(composeIdle.ring)}`);
   check("发送键仍在工具条右端（保持右下角）",
     compose.sendRight < 12, `rightOffset=${compose.sendRight}`);
   check("模型选择器紧邻发送键左侧、同一行",
@@ -1762,7 +1782,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   // 空输入时按钮不可点，但**不能隐形**。判据不是「有没有底色」—— --fill 也有底色，
   // 那种问法测不出这个 bug。真正的契约是「底色跟它所在的卡面拉不拉得开」：
   // 卡面改成浅灰之后，--fill 那种「跟卡面同色」的底就彻底消失了。
-  // 两种卡面都要拉得开：未聚焦的浅灰面、聚焦的白面。
+  // 两种卡面都要拉得开（现在两态都是白面，但仍照两态各查一次 ——
+  // 哪天某一态的面色改了，这条会立刻说话）。
   const SEND_MIN_DELTA = 12;
   const sendLum = overWhiteLum(compose.sendBg);
   const idleFaceLum = overWhiteLum(composeIdle.face);
@@ -1823,8 +1844,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     return { x: Math.max(0, r.left - 8), y: Math.max(0, r.top - 12),
              width: r.width + 16, height: r.height + 24, scale: 2 };`);
   await shot("main-composer.png", null, cbox);
-  // 未聚焦态单独来一张：卡片在两种状态下长得不一样（浅灰面 / 白面 + 投影），
-  // 而开机是自动聚焦的 —— 只看一张的话，「另一态」永远没人见过。
+  // 未聚焦态单独来一张：两态差别只在「有没有那层抬升」，而这个差别只有在
+  // 并排看两张图时才看得出来 —— 只看一张的话，「另一态」永远没人见过。
   await shot("main-composer-idle.png", `document.getElementById('topic').blur(); return true;`, cbox);
   await evalIn(`document.getElementById('topic').focus(); return true;`);
   await shot("main-sidebar.png", `${closeMenus} return true;`);
