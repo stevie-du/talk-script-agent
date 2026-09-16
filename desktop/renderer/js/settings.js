@@ -14,6 +14,15 @@ import { closeOverlays, appConfirm } from "./overlays.js";
 import { fillPackSelect } from "./ui.js";
 
 const PANES = ["gen", "packinfo", "packgen", "llm", "kb", "skills"];
+// 导航项 → 资源；面板 → 资源下可能有的「子页面」。
+// packgen 不在左导航里（动作不是资源），但它需要让「行业包」导航高亮，
+// 读作「你在行业包这个资源下，进了它的子动作」。
+// map: pane → 应高亮的 nav item data-pane（默认就是自身）
+const NAV_OF_PANE = { packgen: "packinfo" };
+// packgen 的来源面板：gen 的 [新建] 按钮 vs packinfo headbar 的 [新建]，
+// 决定了「返回」按钮回到哪里。设成模块状态是因为 packgen 同一会话内
+// 可能从两个入口先后进，记录最后一次的来源。
+let packgenFrom = "gen";
 const dirty = new Set();
 
 // 数值项的合法区间。**必须与后端 `app/server.py` 的 `NUMERIC_BOUNDS` 逐项相等** ——
@@ -70,8 +79,12 @@ export function closeSettings() {
 export function setPane(pane) {
   if (!PANES.includes(pane)) pane = state.settingsPane;
   PANES.forEach(p => $(("pane-" + p))?.classList.toggle("hidden", p !== pane));
+  // 导航高亮：packgen 这种子动作让「资源」项高亮（NAV_OF_PANE 映射）。
+  // 单一 `.on` 仍是断言守的「高亮唯一」，packgen 走到 packinfo，
+  // 不会出现「两个 .on」或「没有 .on」。
+  const navPane = NAV_OF_PANE[pane] || pane;
   document.querySelectorAll(".stg-nav-item").forEach(n => {
-    n.classList.toggle("on", n.dataset.pane === pane);
+    n.classList.toggle("on", n.dataset.pane === navPane);
   });
   // 切面板要归零的滚动容器是 .stg-main，不是 .stg-pane。
   // 后者在 styles.css 里已不设 overflow（限宽居中的内容盒子），
@@ -142,12 +155,24 @@ export const bindSettings = bindOnce(function bindSettings() {
   $("btn-close-settings").onclick = closeSettings;
   $("btn-packinfo").onclick = () => setPane("packinfo");
   $("pi-close").onclick = () => setPane("gen");
+  // packgen 的两个入口：gen 的 [新建]（btn-newpack）和 packinfo headbar 的 [新建]（pi-newpack）。
+  // 区别在于「取消」回哪里 —— 这就是 packgenFrom 的存在意义。
   $("btn-newpack").onclick = () => {
+    packgenFrom = "gen";
     $("pg-form").classList.remove("hidden");
     $("pg-result").classList.add("hidden");
     setPane("packgen");
   };
-  $("pg-close").onclick = () => setPane("gen");
+  $("pi-newpack").onclick = () => {
+    packgenFrom = "packinfo";
+    $("pg-form").classList.remove("hidden");
+    $("pg-result").classList.add("hidden");
+    setPane("packgen");
+  };
+  $("pi-refresh").onclick = () => openPackInfo().catch(e => toast("刷新失败：" + e.message, 3500));
+  $("kb-refresh").onclick = () => openPackFiles(state.settingsPane);
+  $("skills-refresh").onclick = () => openPackFiles(state.settingsPane);
+  $("pg-close").onclick = () => setPane(packgenFrom);
   $("pg-run").onclick = runPackgen;
   $("pg-done").onclick = onPackDone;
 
@@ -221,12 +246,18 @@ async function resetField(field, inputId) {
   }
 }
 
-// ── 知识库 / 技能：两个面板共用一套只读文件查看器 ──────────
+// ── 知识库 / 技能：两个面板共用一套只读查看器，但筛不同角色 ──────────
+// 之前的 kb: () => true 是设计漏洞——知识库与技能会显示**同一组文件**
+// （skill.yaml 在两边都出现），命名错位。改成按命名分组互不重叠：
+//   kb     = 包清单 + 知识库 + 私有资料  （"资料类"）
+//   skills = 技能主文件 + 规则/方法库/合规（"技能类"）
 // 做成只读而不是增删改，是刻意的：这些文件是行业包的「源码」，写坏了
 // 整个包都废，而浏览器里改文件既没有原子写也没有校验，风险与收益不成比例。
 const PANE_FILE_FILTER = {
-  kb: () => true,
-  skills: (rel) => rel === "skill.yaml" || /^(rules|patterns|compliance)\//.test(rel),
+  kb:     (rel) => rel === "pack.yaml"
+                 || rel.startsWith("knowledge/") || rel.startsWith("private/"),
+  skills: (rel) => rel === "skill.yaml"
+                 || /^(rules|patterns|compliance)\//.test(rel),
 };
 
 // ── 设置内搜索已移除 ──────────────────────────────────────
@@ -238,6 +269,60 @@ const PANE_FILE_FILTER = {
 // 像个 bug。现在导航恒定完整，所见即所得。
 // 连带清理：.stg-search 的 HTML / CSS，以及只为它服务的
 // `.stg-nav-item.hidden` / `.nav-sec.hidden` 两条规则。
+
+// 分组卡片网格渲染：按 FILE_ROLE 分组，每组一个 .kb-group，
+// 每张卡片 = 图标 + 文件名 + 角色描述 + 大小（点击切换右侧查看器）。
+// 之前的实现是单层 flat 列表（行 295 是 `row = el("button", "kb-item", ...)`），
+// 13 个文件一屏挤下来要找特定文件得在一堆路径里翻。
+// 「分组 → 卡片」是 Zcode 的范式，对应"已安装 / 浏览器插件 / 文档技能"那种结构。
+//
+// 兼容性：每张卡仍是 `.kb-item`（断言 kb.rows === 3 还过着），
+// 文件名放进 `.kb-name`（断言里 `n.firstChild.textContent` 改成 `.kb-name` 即可）。
+const ROLE_GROUP_ORDER = [
+  // 顺序就是分组从上到下出现的顺序；
+  // 与"重要性"对齐：技能 → 规则 → 方法库 → 合规 → 知识库 → 禁用词 → 草稿 → 私有 → 包清单
+  { key: "skill",      label: "技能（怎么写）" },
+  { key: "rules",      label: "规则" },
+  { key: "patterns",   label: "方法库" },
+  { key: "compliance", label: "合规" },
+  { key: "knowledge",  label: "知识库" },
+  { key: "banwords",   label: "禁用词表" },
+  { key: "checklist",  label: "草稿校对" },
+  { key: "private",    label: "私有资料" },
+  { key: "package",    label: "包清单" },
+];
+
+// FILE_ROLE 返回两类东西：CSS 用的 role key（稳定字符串）+ 用户看的中文标签。
+// 一个文件 → 一个 key；key 与 ROLE_GROUP_ORDER 对应。
+function fileRole(rel) {
+  if (rel === "pack.yaml")     return "package";
+  if (rel === "skill.yaml")    return "skill";
+  if (rel === "banwords.yaml") return "banwords";
+  if (rel === "校对清单.md")   return "checklist";
+  if (rel.startsWith("knowledge/"))  return "knowledge";
+  if (rel.startsWith("compliance/")) return "compliance";
+  if (rel.startsWith("patterns/"))   return "patterns";
+  if (rel.startsWith("rules/"))      return "rules";
+  if (rel.startsWith("private/"))    return "private";
+  return "package";  // 兜底：未识别的归"包清单"组，颜色中性
+}
+const ROLE_LABEL = Object.fromEntries(ROLE_GROUP_ORDER.map(g => [g.key, g.label]));
+
+// 每个 role 的图标 SVG。统一 24×24 viewBox，stroke 用 currentColor
+// （颜色由 CSS .kb-item[data-role=...] .kb-icon 的 color 接管，不写死）。
+// 必须放在 openPackFiles 之前：函数体里用到 ROLE_ICON[key]，
+// 但 async function 在模块顶层执行到时 ROLE_ICON 是 TDZ（const 不 hoist）。
+const ROLE_ICON = {
+  skill: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l2.2 4.5 5 .7-3.6 3.5.9 4.9L12 14.3 7.5 16.6l.9-4.9L4.8 8.2l5-.7z"/></svg>`,
+  rules: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>`,
+  patterns: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><path d="M6 8v3a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8"/></svg>`,
+  compliance: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4v6a8 8 0 0 1-8 8 8 8 0 0 1-8-8V7z"/><path d="M9 12l2 2 4-4"/></svg>`,
+  knowledge: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H10a2 2 0 0 1 2 2v13a1.5 1.5 0 0 0-1.5-1.5H4z"/><path d="M20 5.5A1.5 1.5 0 0 0 18.5 4H14a2 2 0 0 0-2 2v13a1.5 1.5 0 0 1 1.5-1.5H20z"/></svg>`,
+  banwords: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></svg>`,
+  checklist: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 11l3 3 8-8"/><path d="M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/></svg>`,
+  private: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>`,
+  package: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></svg>`,
+};
 
 async function openPackFiles(pane) {
   // 知识库与技能两个面板共用一套只读查看器，但 DOM 节点分开
@@ -266,14 +351,47 @@ async function openPackFiles(pane) {
       list.innerHTML = "<p class='hint'>这个包没有符合条件的文件。</p>";
       return;
     }
+    // 按 ROLE_GROUP_ORDER 顺序分组，未识别的归到"包清单"组（兜底）。
+    const buckets = new Map(ROLE_GROUP_ORDER.map(g => [g.key, []]));
     for (const f of files) {
-      const row = el("button", "kb-item", esc(f.rel));
-      row.type = "button";
-      const role = FILE_ROLE(f.rel);
-      if (role) row.appendChild(el("span", "kb-role", role));
-      row.onclick = () => showPackFile(name, f.rel, row, pfx);
-      list.appendChild(row);
+      const k = fileRole(f.rel);
+      if (!buckets.has(k)) buckets.set(k, []);
+      buckets.get(k).push(f);
     }
+    const groups = el("div", "kb-groups");
+    for (const { key, label } of ROLE_GROUP_ORDER) {
+      const items = buckets.get(key);
+      if (!items || !items.length) continue;        // 空组不显示（不浪费一行的分组标题）
+      const grp = el("div", "kb-group");
+      const h = el("h4", "kb-group-t");
+      h.appendChild(document.createTextNode(label));
+      h.appendChild(el("span", "kb-group-c", String(items.length)));
+      grp.appendChild(h);
+      const cards = el("div", "kb-cards");
+      for (const f of items) {
+        const row = el("button", "kb-item");
+        row.type = "button";
+        row.dataset.role = key;
+        // 顺序：图标 → 元信息（名称+描述）→ 大小。firstChild 是图标，
+        // 文件名放进 .kb-name —— 这是断言要查的元素（不是 firstChild 文本）。
+        const icon = el("span", "kb-icon");
+        icon.innerHTML = ROLE_ICON[key] || ROLE_ICON.package;
+        row.appendChild(icon);
+        const meta = el("div", "kb-meta");
+        meta.appendChild(el("span", "kb-name", f.rel));
+        meta.appendChild(el("span", "kb-desc", ROLE_LABEL[key] || ""));
+        row.appendChild(meta);
+        const sizeTxt = f.size > 1024
+          ? (f.size / 1024).toFixed(1) + " KB"
+          : f.size + " B";
+        row.appendChild(el("span", "kb-size", sizeTxt));
+        row.onclick = () => showPackFile(name, f.rel, row, pfx);
+        cards.appendChild(row);
+      }
+      grp.appendChild(cards);
+      groups.appendChild(grp);
+    }
+    list.appendChild(groups);
   } catch (e) {
     list.innerHTML = `<p class='hint'>载入失败：${esc(e.message)}</p>`;
   }
@@ -380,20 +498,11 @@ async function undraftPack() {
   } catch (e) { toast("操作失败：" + e.message, 3500); }
 }
 
-const FILE_ROLE = (rel) => {
-  if (rel === "pack.yaml") return "包清单";
-  if (rel === "skill.yaml") return "技能（怎么写）";
-  if (rel === "banwords.yaml") return "禁用词表";
-  if (rel === "校对清单.md") return "草稿校对";
-  if (rel.startsWith("knowledge/")) return "知识库";
-  if (rel.startsWith("compliance/")) return "合规";
-  if (rel.startsWith("patterns/")) return "方法库";
-  if (rel.startsWith("rules/")) return "规则";
-  if (rel.startsWith("private/")) return "私有资料";
-  return "";
-};
+// packinfo 表格的「说明」列要中文标签，调用方传入 fileRole() 拿到 key 再查 ROLE_LABEL。
+// 不要在这里另写一份中文映射：两份的话改一份忘一份就漂了。
+// 之前有一份返回中文标签的 FILE_ROLE()，现已统一到 fileRole + ROLE_LABEL。
 
-export async function openPackInfo() {
+async function openPackInfo() {
   const name = $("pack").value;
   const p = await api.pack(name);
   $("pi-title").textContent = `${p.display_name || name} · 包内容`;
@@ -417,7 +526,7 @@ export async function openPackInfo() {
     const tr = el("tr");
     const kb = f.size > 1024 ? (f.size / 1024).toFixed(1) + " KB" : f.size + " B";
     tr.innerHTML = `<td class="cell-mono">${esc(f.rel)}</td>
-      <td>${kb}</td><td>${FILE_ROLE(f.rel)}</td>`;
+      <td>${kb}</td><td>${esc(ROLE_LABEL[fileRole(f.rel)] || "")}</td>`;
     body.appendChild(tr);
   }
   tb.appendChild(body);
