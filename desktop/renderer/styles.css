@@ -49,7 +49,10 @@
   --bubble: #ededee;                     /* 用户消息气泡 */
   --scrim: rgba(29, 29, 31, .30);        /* 弹层遮罩 */
   --toast-bg: rgba(29, 29, 31, .88);
-  --on-ink-dim: rgba(255, 255, 255, .40);  /* 深色底上的次级线条 */
+  /* 深色底上的次级线条色。⚠ 当前**没有使用者**：唯一用它的是发送键里那条
+     不可达的 .spinner 规则（已删）。保留是作为配色语言的一部分 ——
+     以后往深色底上放转圈/次级描边时用它，别另挑一个值。 */
+  --on-ink-dim: rgba(255, 255, 255, .40);
   --scrollbar: rgba(0, 0, 0, .18);
   --scrollbar-hover: rgba(0, 0, 0, .32);
 
@@ -1346,10 +1349,13 @@ td.bad { color: var(--bad); font-weight: 500; }
    跟卡面同色，几乎是隐形的，看着像「这个控件坏了」。改 --fill-disabled
    （明显深于任何卡面），读作「在，只是不能按」。 */
 #btn-generate.send:disabled { background: var(--fill-disabled); color: var(--text-3); box-shadow: none; }
-#btn-generate.send .spinner {
-  width: 14px; height: 14px;
-  border-color: var(--on-ink-dim); border-top-color: var(--text-inv);
-}
+/* 这里原本有一条 `#btn-generate.send .spinner`（深色底上的转圈）。
+   它是**不可达的**：没有任何代码往这个按钮里塞 .spinner ——
+   全项目只有 progress.js 在消息区（.thinking）创建 .spinner，
+   而按钮的 innerHTML 从来只有那两个图标（index.html 里写死的）。
+   留着它会让下一个人读到「生成中按钮会转圈」这个不存在的结论，已删除。
+   若以后真要在按钮里加 spinner，样式要一并加回来（别忘了 --on-ink-dim 就是
+   为深色底准备的次级线条色）。 */
 /* 生成中：发送键化作「停止」，**只换图标，不换底色**。
    参考图里生成中的那个键就是「实心深色方块 + 白色停止图标」—— 它此刻是界面上
    唯一还能做的动作，淡化成灰底反而读成「禁用控件」，正好读反。
