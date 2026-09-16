@@ -594,6 +594,34 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("默认分区为生成偏好且高亮唯一",
     stg.genVisible && stg.on === 1, JSON.stringify(stg));
 
+  // 滚动容器上提到 .stg-main 后的两条守护。修复前滚动容器是 .stg-pane 自身，
+  // 它带 max-width + margin-inline:auto（限宽居中），于是滚动条出现在**居中盒子**
+  // 右边而不是页面右边（右侧那道空隙）；归零的对象也必须跟着上提一级。
+  const sc = await evalIn(`const s = document.getElementById('settings-screen');
+    const main = s.querySelector('.stg-main');
+    const pane = document.getElementById('pane-gen');
+    const mr = main.getBoundingClientRect(), pr = pane.getBoundingClientRect();
+    return { mainOv: getComputedStyle(main).overflowY,
+      paneOv: getComputedStyle(pane).overflowY,
+      mainW: Math.round(mr.width), paneW: Math.round(pr.width) };`);
+  check("设置页的滚动容器是 .stg-main（不是限宽居中的 .stg-pane）",
+    sc.mainOv === "auto" && sc.paneOv === "visible",
+    JSON.stringify(sc));
+
+  // 为什么**没有**断言守着 setPane() 里那句「滚动归零」：
+  // 在**桩环境**下测不出来（两分区都撑高 2400px 也分辨不出）——
+  // 手动改 class 切分区时 scrollTop 保留 600，但走 setPane() 立刻变 0：
+  // 切分区触发的重渲染让容器溢出消失、被浏览器夹回 0，归不归零看不出差别。
+  // 第一版只撑高当前分区时变异注入仍全绿（**假绿**），加上「中途必须仍可滚」
+  // 的防空转条件才暴露出来。不可证伪的断言不如不写，故此处只守看得见的那半（CSS）。
+  //
+  // ⚠ 但**不要**据此删掉 settings.js 里那句 `stgMain.scrollTop = 0` ——
+  // 「桩环境分辨不出」≠「那句没用」。**真引擎**下它是可观测的（2026-09-16 实测）：
+  //   切「行业包·包内容」滚到底(可滚 289) → 切到**同样可滚**的「模型接口」→ 切回，
+  //   有那句 = 0；写成 if(false) = **289**（切回长面板时浏览器会恢复旧滚动位置）。
+  // 桩里分辨不出，是因为桩的面板内容太短、切过去就被夹回 0，不是那句代码没用。
+  //   → 变异检验换场景的必要性：用不可滚的分区当目标会得到「两者都是 0」的假象。
+
   await evalIn(`window.__ts.setPane('packinfo'); return true;`);
   await sleep(500);
   const pi = await evalIn(`return { rows: document.querySelectorAll('#pi-files tbody tr').length,

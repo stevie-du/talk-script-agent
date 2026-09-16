@@ -73,8 +73,12 @@ export function setPane(pane) {
   document.querySelectorAll(".stg-nav-item").forEach(n => {
     n.classList.toggle("on", n.dataset.pane === pane);
   });
-  const cur = $("pane-" + pane);
-  if (cur) cur.scrollTop = 0;
+  // 切面板要归零的滚动容器是 .stg-main，不是 .stg-pane。
+  // 后者在 styles.css 里已不设 overflow（限宽居中的内容盒子），
+  // 滚动容器上提是为了让滚动条贴页面右边 —— 归零必须跟着上提一级，
+  // 否则从长面板切走再切回，会停在上次的位置。
+  const stgMain = $("settings-screen")?.querySelector(".stg-main");
+  if (stgMain) stgMain.scrollTop = 0;
   state.settingsPane = pane;
   emit("pane", pane);
   // 行业包详情每次进入都重拉：包可能被切换过，文件清单与草稿角标也可能变了
