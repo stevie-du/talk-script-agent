@@ -664,7 +664,10 @@ async function openPackFiles(pane) {
         row.appendChild(icon);
         const meta = el("div", "kb-meta");
         meta.appendChild(el("span", "kb-name", f.rel));
-        meta.appendChild(el("span", "kb-desc", ROLE_LABEL[key] || ""));
+        // 这里曾经还挂一行 `.kb-desc`（角色小字，内容就是组标题那几个字）。
+        // 删掉的理由：卡片已经按角色分在 `.kb-group` 里，组标题上写着同样的词，
+        // 卡里再写一遍是同一信息两份表示；而且它正是「漏出卡片外那行小字」的
+        // 来源（卡片高度被全局按钮高度钉死时，漏出去的就是它）。
         row.appendChild(meta);
         const sizeTxt = f.size > 1024
           ? (f.size / 1024).toFixed(1) + " KB"

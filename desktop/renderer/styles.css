@@ -211,13 +211,20 @@ body {
 /* 卡片堆栈：gap 用 --s1（4px）让卡片贴近读作"一组"，
    用 --s2 会散开读作"几张卡" */
 .kb-cards { display: flex; flex-direction: column; gap: var(--s1); }
-/* 卡片：图标 + 文件名 + 角色描述 + 大小
-   网格：图标(36) | 名称+描述(1fr) | 大小(auto)
-   第二个格子用 div 包两层文本，这样名称过长时单行截断、描述换行不会乱 */
+/* 卡片：图标 + 文件名 + 大小
+   网格：图标(36) | 名称(1fr) | 大小(auto) */
 .kb-item {
   display: grid; grid-template-columns: 36px 1fr auto;
   align-items: center; gap: var(--s3);
   width: 100%; padding: 10px 12px;
+  /* ⚠ 这一行不能删：全局 `button { height: var(--h-btn) }`（30px）会把这张卡钉死，
+     而卡里是「36px 图标 + 一行文件名」，需要 56px。少了它，内容从卡片底部漏出
+     18px —— 而**下一张卡的白底正好把漏出的那半行盖住**，界面上看到的是
+     「文件名下面漂着一行小字、还压在下一张卡上」，最后一张卡则整行露在组外。
+     （2026-09-16 用户贴图报的就是这个。）
+     判据见 `_verify/verify.js` 的「卡片容得下内容」断言：拿每个非绝对定位子元素
+     的底边与卡的内容盒底边比，**不能有溢出**。 */
+  height: auto;
   border: 0.5px solid var(--line); border-radius: var(--r-md);
   background: var(--surface); color: var(--text-1);
   font: 13px/1.4 var(--font); text-align: left;
@@ -242,14 +249,15 @@ body {
   border-radius: var(--r-sm);
 }
 .kb-icon svg { width: 18px; height: 18px; }
-/* 文件名（等宽）+ 角色描述（次级小字） */
+/* 文件名（等宽）。`.kb-desc`（卡内那行角色小字）已删：卡片已经被分在
+   「知识库 / 规则 / 方法库…」组里，组标题上就写着角色，卡里再写一遍是
+   同一信息两份表示 —— 上一版它还是「漏出卡片外的那行小字」的来源。 */
 .kb-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .kb-name {
   font-family: var(--mono); font-size: var(--f-sm); font-weight: 500;
   color: var(--text-1);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.kb-desc { font-size: var(--f-xs); color: var(--text-3); }
 /* 大小：右下角小字 */
 .kb-size { font-size: var(--f-2xs); color: var(--text-3); font-family: var(--mono); white-space: nowrap; }
 
@@ -878,14 +886,19 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
   table-layout: fixed;
 }
 .mdl-table thead th {
-  /* 表头用一层极淡的底把「这是表头」说清楚 —— 不用分隔线色块，
-     与全站「发丝线」的调子一致 */
-  background: var(--fill); color: var(--text-2);
+  /* 表头**只用一条发丝线**，不铺底色。
+     原来这里铺的是 --fill，而「当前启用」那一行（tr.on）也是 --fill —— 两者
+     上下相邻且同色，在界面上读成**一整块灰**：表头和模型行连成一片，看不出
+     哪一行才是数据行；行自带 --r-sm 圆角，还在表头下沿留下两个白色缺口。
+     全站其他表格（「产物」段的 `th, td { border-bottom: 0.5px solid var(--line) }`）
+     本来就是发丝线表头，这里跟它们对齐之后，灰底就只归「当前启用」那一行，
+     高亮也才真的在高亮。
+     判据见 `_verify/verify.js`：表头与 tr.on 的**有效底色必须不同**。 */
+  color: var(--text-2);
   font-size: var(--f-xs); font-weight: 600; text-align: left;
   padding: 7px 10px; letter-spacing: .1px;
+  border-bottom: 0.5px solid var(--line);
 }
-.mdl-table thead th:first-child { border-radius: var(--r-sm) 0 0 var(--r-sm); }
-.mdl-table thead th:last-child { border-radius: 0 var(--r-sm) var(--r-sm) 0; }
 .mdl-table .col-mdl { width: auto; }
 .mdl-table .col-prov { width: 108px; }
 .mdl-table .col-on { width: 62px; text-align: center; }
@@ -904,7 +917,15 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
   display: block; margin-top: 1px; font-size: var(--f-2xs); color: var(--text-3);
   font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.mdl-table .tag-default, .mdl-table .tag-warn { margin-left: 0; margin-top: 4px; }
+/* 表格单元格里的两个小标另起一行。
+   ⚠ 必须显式 `display: inline-block`：`.mdl-sub` 是 block，后面的 inline 元素
+   虽然会自动换行，但 **inline 元素的 margin-top 是被忽略的** —— 这里写的 4px
+   一直没生效，小标就死死贴在上一行文字下面（用户贴的截图里能看到它紧挨着
+   「glm-4.7 · 智谱」）。同一类坑：inline 元素的 padding 只是"画出格"，
+   不参与行盒高度。判据见 `_verify/verify.js`：小标顶边与上一行底边要有真间距。 */
+.mdl-table .tag-default, .mdl-table .tag-warn {
+  display: inline-block; margin-left: 0; margin-top: 4px;
+}
 .tag-warn {
   display: inline-block; padding: 1px 6px; border-radius: var(--r-xs);
   background: var(--warn-soft); color: var(--warn);

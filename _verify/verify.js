@@ -882,6 +882,45 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("当前启用的模型行有唯一落点（行高亮 + 开关亮着）",
     llm.activeRows === 1 && llm.switchOn === 1,
     JSON.stringify({ activeRows: llm.activeRows, switchOn: llm.switchOn }));
+  // 表头与「当前启用」那一行**不能同色相邻**。
+  // 修复前两者铺的都是 --fill，上下紧贴、颜色一模一样 —— 在界面上读成
+  // **一整块灰**：表头「模型/服务商/启用/操作」和下面那条数据行连成一片，
+  // 看不出哪一行才是数据；行自带 --r-sm 圆角，还在表头下沿留了两个白缺口。
+  // 表头现在只用一条发丝线（与全站其他表格一致），灰底归那一行独占。
+  //
+  // 判据取「有效底色」的**亮度差**，不取颜色字符串：
+  //   - 表头背景是透明的，往上找到的底是白页 —— 字符串比会把「透明 vs 灰」判成不同，
+  //     而真正要守的是「两者读起来不是一块」；
+  //   - 逐层把 rgba 叠到白底上再比亮度，改回 --fill 时差值会归 0，报红。
+  const tblHead = await evalIn(`return (function(){
+    function bgOf(n){
+      var stack = [];
+      for (var e = n; e; e = e.parentElement) {
+        var m = /rgba?\\(([^)]+)\\)/.exec(getComputedStyle(e).backgroundColor);
+        if (!m) continue;
+        var p = m[1].split(',').map(function(x){ return parseFloat(x); });
+        var a = p.length > 3 ? p[3] : 1;
+        if (a > 0) stack.push({ r:p[0], g:p[1], b:p[2], a:a });
+      }
+      var out = { r:255, g:255, b:255 };
+      for (var i = stack.length - 1; i >= 0; i--) {
+        var s = stack[i];
+        out = { r: s.r*s.a + out.r*(1-s.a), g: s.g*s.a + out.g*(1-s.a),
+                b: s.b*s.a + out.b*(1-s.a) };
+      }
+      return (out.r + out.g + out.b) / 3;
+    }
+    var th = document.querySelector('.mdl-table thead th');
+    var tr = document.querySelector('.mdl-table tbody tr.on');
+    var cs = getComputedStyle(th);
+    return { headLum: bgOf(th), rowLum: bgOf(tr),
+             headBg: getComputedStyle(th).backgroundColor,
+             headBottom: cs.borderBottomWidth };
+  })()`);
+  check("表头与「当前启用」行不是同一种底色（不再连成一整块灰）",
+    Math.abs(tblHead.headLum - tblHead.rowLum) >= 6
+      && parseFloat(tblHead.headBottom) > 0,
+    JSON.stringify(tblHead));
   check("接口状态显示重试/超时等实际生效值", /重试/.test(llm.status), llm.status);
   // 前端**不许**比后端更严：1.8 是后端接受的合法值（区间 0 ~ 2）。
   // 修复前前端单独一个 if 卡 1.5 → 点保存弹 toast 并 return，
@@ -978,6 +1017,37 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   // 修复前 kb: () => true 把 skill.yaml 也列入知识库，命名错位 —— 两个面板
   // 显示同一组文件，知识库的「资料」语义被偷换成了「全部」。
   // 规则断言：①互不重叠 ②各面板筛后文件数 ≥ 1（有内容） ③按角色分组。
+  //
+  // 「内容漏出卡片」探针（卡片高度必须容得下内容）。
+  // 修复前 `.kb-item` 是 `<button>`，全局 `button { height: var(--h-btn) }`（30px）
+  // 把它钉死，而卡里是「36px 图标 + 一行文件名」，需要 56px —— 内容从卡片底部
+  // 漏出 18px。更坏的是**下一张卡的白底正好把漏出的那半行盖住**，所以界面上
+  // 看到的是「文件名下面漂着一行小字、还压在下一张卡上」，只有每组的最后一张
+  // 整行露在组外。用户 2026-09-16 贴的截图就是这个。
+  //
+  // 判据是**内容真的漏出盒子**：拿每个非绝对定位子元素的底边与卡的内容盒底边
+  // 比。不用 `scrollHeight > clientHeight` 是因为那个口径有假阳性 ——
+  // `.segmented .radio` 里视觉隐藏的 `<input>` 是绝对定位的，照样会把
+  // scrollHeight 撑大 4px（实测），那是探针的问题、不是界面的问题。
+  // ⚠ 量到 `HIDDEN` 要当**失败**：面板此刻是 display:none 时高度全是 0，
+  // 差值算出来是无意义的数 —— 不显式报出来的话，这条断言就变成空转（假绿）。
+  const overflowProbe = (sel) => `
+    var bad = [];
+    document.querySelectorAll(${JSON.stringify(sel)}).forEach(function (n) {
+      var box = n.getBoundingClientRect();
+      var name = n.querySelector('.kb-name') ? n.querySelector('.kb-name').textContent : '?';
+      if (!box.height) { bad.push({ name: name, hidden: true }); return; }
+      var cs = getComputedStyle(n);
+      var bottom = box.bottom - parseFloat(cs.paddingBottom) - parseFloat(cs.borderBottomWidth);
+      var over = 0;
+      Array.prototype.forEach.call(n.children, function (c) {
+        if (getComputedStyle(c).position === 'absolute') return;
+        over = Math.max(over, c.getBoundingClientRect().bottom - bottom);
+      });
+      if (over >= 2) bad.push({ name: name, h: box.height, over: Math.round(over * 10) / 10 });
+    });
+    return bad;`;
+
   await evalIn(`window.__ts.setPane('kb'); return true;`);
   await sleep(400);
   const kb = await evalIn(`return {
@@ -989,6 +1059,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     kb.rows >= 1 && !kb.hasPlaceholder && kb.groups >= 1
       && !kb.names.some(n => n === "skill.yaml"),
     JSON.stringify(kb));
+  const kbOver = await evalIn(overflowProbe("#kb-list .kb-item"));
 
   await evalIn(`[...document.querySelectorAll('#kb-list .kb-item')]
     .find(n => n.querySelector('.kb-name').textContent.includes('knowledge')).click(); return true;`);
@@ -1007,6 +1078,11 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
             .map(n => n.querySelector('.kb-name').textContent) };`);
   check("技能面板只列技能类文件（skill.yaml / rules|patterns|compliance/）",
     sk.rows.length === 1 && sk.rows[0] === "skill.yaml", JSON.stringify(sk));
+  const skOver = await evalIn(overflowProbe("#skills-list .kb-item"));
+  check("知识库/技能卡片容得下内容（不再被按钮的固定高度压扁）",
+    kb.rows >= 1 && sk.rows.length >= 1
+      && kbOver.length === 0 && skOver.length === 0,
+    JSON.stringify({ kb: kbOver, skills: skOver }));
 
   // 复制口播：产出的是给提词器用的纯文本，`**` 必须去掉而 `／` 必须保留
   const voice = await evalIn(`return window.__ts.voicePlainText({ sections:[
@@ -1707,12 +1783,20 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     }
     var row = document.querySelector('#st-model-rows tr.on');
     var tags = Array.from(row.querySelectorAll('.tag-default'));
+    var sub = row.querySelector('.mdl-sub');
     var s = document.getElementById('p-model');
     var b = s && s.parentNode.querySelector('.select-btn');
     return { rowFields: fields(row).sort(),
              advFields: fields(document.getElementById('st-adv')).sort(),
              modelTag: tags.length ? tags[0].textContent : '',
              modelTagColor: tags.length ? getComputedStyle(tags[0]).color : '',
+             // 小标与上一行之间的**真实像素间距**：CSS 里那句 margin-top: 4px
+             // 在 inline 元素上是**被忽略**的，只看 CSS 文本会以为它生效了。
+             tagGap: (tags.length && sub)
+               ? Math.round((tags[0].getBoundingClientRect().top
+                   - sub.getBoundingClientRect().bottom) * 10) / 10
+               : null,
+             tagDisplay: tags.length ? getComputedStyle(tags[0]).display : '',
              pickerText: b ? b.querySelector('.sel-text').textContent : '',
              pickerValue: s ? s.value : '' };
   })()`);
@@ -1725,6 +1809,15 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("「内置默认」用中性灰而不是警示色",
     notCfg.modelTagColor !== 'rgb(178, 94, 0)' && /^rgb/.test(notCfg.modelTagColor),
     notCfg.modelTagColor);
+  // 小标要跟上一行**分开**，不能贴在「glm-4.7 · 智谱」下面。
+  // 修复前 `.tag-default` 是 inline：`.mdl-sub` 是 block，后面的 inline 元素
+  // 虽然会自动换行，但 **inline 的 margin-top 不生效** —— 样式表里写着的 4px
+  // 从来没算进布局，小标就紧贴着上一行（截图里它看起来像被行底边裁掉一截）。
+  // 判据取**真实像素间距**，不查 CSS 文本：查文本的话，写着一句不生效的
+  // margin-top 也会判绿，正是这条断言要防的事。
+  check("「内置默认」小标与上一行之间留出间距（margin-top 真的生效）",
+    notCfg.tagDisplay === 'inline-block' && notCfg.tagGap >= 3,
+    JSON.stringify({ display: notCfg.tagDisplay, gap: notCfg.tagGap }));
   // 显示名带「（默认）」，但 option.value 必须还是模型 **id** ——
   // 混在一起的话激活时会把「glm-4.7（默认）」这个假 id 发出去。
   check("未配置时模型选择器标明「（默认）」且 value 仍是模型 id",
