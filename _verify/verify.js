@@ -1087,6 +1087,22 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     kbLayout.gap >= 0 && kbLayout.gap < 50 && kbLayout.vertOverlap > 100,
     JSON.stringify(kbLayout));
 
+  // 内容查看器必须**自己成块**（不透明于白底），不能是 `--fill` (4%) 那种
+  // 几乎透明的底 —— 否则 3 列布局的右栏「看起来什么都没有」。
+  // 修法见 styles.css 的 `.kb-body` 注释：背景换 `--fill-strong` (7%) + `box-shadow` 发丝线。
+  // 判据：背景 alpha ≥ 5% **或** 有 box-shadow 描边。任一即可 —— 两条修法都立得住。
+  const kbVis = await evalIn(`return (function(){
+    var b = document.getElementById('kb-body');
+    var cs = getComputedStyle(b);
+    var m = cs.backgroundColor.match(/rgba?\(([^)]+)\)/);
+    var alpha = m ? parseFloat(m[1].split(',')[3]) : 0;
+    return { bg: cs.backgroundColor, alpha: alpha,
+             shadow: cs.boxShadow, hasShadow: cs.boxShadow !== 'none' };
+  })()`);
+  check("内容查看器自己成块（背景不透明于白底）",
+    kbVis.alpha >= 0.05 || kbVis.hasShadow,
+    JSON.stringify(kbVis));
+
   await evalIn(`[...document.querySelectorAll('#kb-list .kb-item')]
     .find(n => n.querySelector('.kb-name').textContent.includes('knowledge')).click(); return true;`);
   await sleep(300);

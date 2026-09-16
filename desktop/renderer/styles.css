@@ -301,9 +301,14 @@ body {
 .kb-view { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .kb-view-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: var(--s2); }
 .kb-view-head .lbl { margin-bottom: 0; }
+/* ⚠ 内容查看器在白页面上必须**自己成块**，否则 `--fill: rgba(0,0,0,.04)` 在白底上
+   几乎透明，3 列布局的右栏看起来「什么都没有」—— 用户 2026-09-16 贴图报的就是
+   这个。修法：背景换 `--fill-strong`（0.07）+ 加 `box-shadow` 发丝线描边，
+   与输入框、消息气泡用同一套「卡面语言」。判据见 verify.js「查看器可见」。 */
 .kb-body {
   flex: 1; margin: 0; overflow: auto;
-  background: var(--fill); border-radius: var(--r-md); padding: 12px;
+  background: var(--fill-strong); border-radius: var(--r-md); padding: 12px;
+  box-shadow: var(--shadow-input);
   font: 12px/1.7 var(--mono); white-space: pre-wrap; word-break: break-word;
 }
 
