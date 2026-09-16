@@ -72,8 +72,6 @@
       </div>
       <div class="rh-actions">
         <span class="rh-state" id="rh-state"></span>
-        <button class="rh-model hidden" id="rh-model"
-                title="当前模型（点击到「模型接口」查看/修改）"></button>
       </div>
     </div>
 
@@ -98,16 +96,20 @@
       </button>
 
       <div id="composer">
-        <div class="quick-bar" id="quick-params"></div>
         <div id="composer-body">
-          <textarea id="topic" rows="1" placeholder="输入主题，回车生成口播脚本…"></textarea>
-          <button id="btn-generate" class="primary send" title="生成（Ctrl + Enter）">
-            <svg class="ic-send" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
-            <svg class="ic-stop" viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="2.4"/></svg>
-          </button>
+          <textarea id="topic" rows="1" placeholder="输入主题，回车生成口播脚本…（Enter 发送 · Shift+Enter 换行 · Esc 停止生成）"></textarea>
+          <div class="composer-tools">
+            <div class="quick-bar" id="quick-params"></div>
+            <div class="composer-actions">
+              <div id="model-pick" class="model-pick"></div>
+              <button id="btn-generate" class="primary send" title="生成（Ctrl + Enter）">
+                <svg class="ic-send" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+                <svg class="ic-stop" viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="2.4"/></svg>
+              </button>
+            </div>
+          </div>
         </div>
         <div class="composer-foot">
-          <span class="hint">Enter 发送 · Shift+Enter 换行 · Esc 停止生成</span>
           <span class="hint gen-hint" id="composer-gen-hint"></span>
         </div>
       </div>
@@ -141,10 +143,9 @@
           <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></svg>
           <span class="nav-t">行业包</span>
         </button>
-        <button class="stg-nav-item" data-pane="packgen">
-          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-          <span class="nav-t">新建行业包</span>
-        </button>
+        <!-- 「新建行业包」曾经在这里 —— 它是动作不是资源，挪到 packinfo 面板 headbar。
+             层级修正：导航列资源（行业包），动作藏在资源下；点 packinfo 的 [新建] 进入。
+             保留 packgen 面板 DOM（验证 setPane("packgen") 仍可达），但不占导航位。 -->
       </div>
       <div class="nav-sec">
         <p class="nav-sec-t">Agent 能力</p>
@@ -217,8 +218,20 @@
 
       <section class="stg-pane hidden" id="pane-packinfo" data-pane="packinfo">
         <header class="page-head">
-          <h2 id="pi-title">包详情</h2>
-          <p class="hint" id="pi-desc"></p>
+          <div class="page-head-titles">
+            <h2 id="pi-title">包详情</h2>
+            <p class="hint" id="pi-desc"></p>
+          </div>
+          <div class="page-head-actions">
+            <button class="ghost bordered" id="pi-refresh" title="重新拉取文件清单与配置">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 15.5-6.3L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.5 6.3L3 16"/><path d="M3 21v-5h5"/></svg>
+              刷新
+            </button>
+            <button class="ghost bordered" id="pi-newpack" title="新建一个行业包（模型生成初稿，需人工校对）">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+              新建
+            </button>
+          </div>
         </header>
         <div class="page-card">
           <div id="pi-checklist-wrap" class="hidden">
@@ -242,30 +255,45 @@
 
       <section class="stg-pane hidden" id="pane-packgen" data-pane="packgen">
         <header class="page-head">
-          <h2>新建行业包</h2>
-          <p class="hint">模型生成初稿，生成后需人工校对</p>
+          <div class="page-head-titles">
+            <h2>新建行业包</h2>
+            <p class="hint">模型生成初稿，生成后需人工校对</p>
+          </div>
         </header>
+        <!-- packgen 不在左导航里，是「行业包」面板的子动作。
+             空状态式：居中大图标 + 引导 + 紧凑表单 + 底部按钮组（参考 Zcode）。 -->
         <div class="page-card">
-          <div id="pg-form">
-            <div class="block-inner">
-              <label class="lbl">行业名称</label>
-              <input id="pg-industry" placeholder="例：全屋定制/装修">
+          <div id="pg-form" class="pg-empty">
+            <div class="pg-empty-ic">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M21 8l-9-5-9 5 9 5 9-5z"/>
+                <path d="M3 8v8l9 5 9-5V8"/>
+                <path d="M12 13v8"/>
+              </svg>
             </div>
-            <div class="block-inner">
-              <label class="lbl">一句话业务描述</label>
-              <textarea id="pg-desc" rows="2" placeholder="例：全屋定制家居品牌，面向新房装修业主获客"></textarea>
+            <p class="pg-empty-t">用一句话创建一个新行业包</p>
+            <p class="pg-empty-d">输入行业名称与业务描述，模型会帮你生成细分领域、受众痛点、选题库、行业红线与待核实清单 —— 生成后请人工校对。</p>
+            <div class="pg-form">
+              <div class="block-inner">
+                <label class="lbl">行业名称</label>
+                <input id="pg-industry" placeholder="例：全屋定制/装修">
+              </div>
+              <div class="block-inner">
+                <label class="lbl">一句话业务描述</label>
+                <textarea id="pg-desc" rows="2" placeholder="例：全屋定制家居品牌，面向新房装修业主获客"></textarea>
+              </div>
             </div>
-            <p class="hint">将生成细分领域、受众痛点、选题库、行业红线与待核实清单。</p>
-            <div class="page-actions">
-              <span class="spacer"></span>
-              <button class="ghost" id="pg-close">返回生成偏好</button>
-              <button class="primary slim" id="pg-run">生成</button>
+            <div class="pg-empty-actions">
+              <button class="ghost" id="pg-close">取消</button>
+              <button class="primary slim" id="pg-run">
+                <svg class="ic-spark" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+                生成
+              </button>
             </div>
           </div>
-          <div id="pg-result" class="hidden">
+          <div id="pg-result" class="pg-result hidden">
             <pre id="pg-checklist"></pre>
-            <div class="page-actions">
-              <span class="spacer"></span>
+            <div class="pg-empty-actions">
               <button class="primary slim" id="pg-done">完成</button>
             </div>
           </div>
@@ -274,8 +302,17 @@
 
       <section class="stg-pane hidden" id="pane-kb" data-pane="kb">
         <header class="page-head">
-          <h2>知识库</h2>
-          <p class="hint">把产品手册、服务标准、常见问答等资料沉淀在此，生成时自动引用</p>
+          <div class="page-head-titles">
+            <h2>知识库</h2>
+            <p class="hint">把产品手册、服务标准、常见问答等资料沉淀在此，生成时自动引用</p>
+          </div>
+          <div class="page-head-actions">
+            <button class="ghost bordered" id="kb-refresh" title="重新拉取文件清单">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 15.5-6.3L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.5 6.3L3 16"/><path d="M3 21v-5h5"/></svg>
+              刷新
+            </button>
+            <button class="ghost bordered" id="kb-add" title="新增资料（暂未接入，请直接编辑包目录下的文件）" disabled>新增</button>
+          </div>
         </header>
         <div class="page-card">
           <div class="block-inner">
@@ -299,8 +336,17 @@
 
       <section class="stg-pane hidden" id="pane-skills" data-pane="skills">
         <header class="page-head">
-          <h2>技能</h2>
-          <p class="hint">挂载可复用的能力（如合规校验、禁用词表），决定哪些在生成时被引用</p>
+          <div class="page-head-titles">
+            <h2>技能</h2>
+            <p class="hint">挂载可复用的能力（如合规校验、禁用词表），决定哪些在生成时被引用</p>
+          </div>
+          <div class="page-head-actions">
+            <button class="ghost bordered" id="skills-refresh" title="重新拉取文件清单">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 15.5-6.3L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.5 6.3L3 16"/><path d="M3 21v-5h5"/></svg>
+              刷新
+            </button>
+            <button class="ghost bordered" id="skills-add" title="新增技能（暂未接入，请直接编辑包目录下的文件）" disabled>新增</button>
+          </div>
         </header>
         <div class="page-card">
           <div class="block-inner">
@@ -324,8 +370,10 @@
 
       <section class="stg-pane hidden" id="pane-llm" data-pane="llm">
         <header class="page-head">
-          <h2>模型接口</h2>
-          <p class="hint">配置对话模型的服务地址与密钥，保存后下次生成即生效</p>
+          <div class="page-head-titles">
+            <h2>模型接口</h2>
+            <p class="hint">配置对话模型的服务地址与密钥，保存后下次生成即生效</p>
+          </div>
         </header>
         <div class="page-card">
           <div class="block-inner">

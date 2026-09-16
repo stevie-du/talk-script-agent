@@ -17,7 +17,7 @@ import { setHead, resultSrt, resultMarkdown, voicePlainText,
   errorText } from "./result.js";
 import {
   bindShell, renderSamples, refreshGate, gotoView, fillPackSelect, setCfgHint,
-  renderSetupNeeded,
+  renderSetupNeeded, renderModelPicker,
 } from "./ui.js";
 
 async function boot() {
@@ -39,6 +39,10 @@ async function boot() {
   }
   fillPackSelect();
   setCfgHint();
+  // 模型选择器要在这里显式渲染一次：它平时挂在 meta 事件上，而 boot 里的
+  // `state.meta = await api.meta()` 是**直接赋值**、不发事件 —— 不补这一句，
+  // 首屏工具条上就没有模型名（原来头部的只读胶囊正是这么漏掉的）。
+  renderModelPicker();
   const sessions = await loadSessions();
   refreshGate();
   autoGrowTopic();

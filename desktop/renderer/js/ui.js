@@ -7,16 +7,23 @@
 //    boot()，导致 Ctrl+\ 连翻两次等于没翻）。
 
 import { $, $$, el, esc, toast, bindOnce } from "./util.js";
-import { state, setBusy, on } from "./store.js";
+import { state, setBusy, on, emit } from "./store.js";
+import { api } from "./api.js";
 import { collectParams, updateStale, autoGrowTopic, getParam } from "./jobs.js";
 import { stopTicker } from "./progress.js";
 import { focusSessionSearch } from "./sessions.js";
 import { closeSettings, openSettings, setPane, settingsOpen } from "./settings.js";
 import { anyOverlayOpen, closeOverlays } from "./overlays.js";
 
-// 快捷条常显的参数（豆包 / 千问式，不进设置页）
-const FRONT_KEYS = ["segment", "audience", "duration", "platform", "style", "persona"];
-const MORE_KEYS = ["cta"];
+// 输入区工具条常显的参数：只留「生成前必须确认」的硬约束 ——
+// 写什么（细分领域）、给谁（受众）、多长（时长）、发哪（平台）。
+// 其余的是「表达调性」（风格 / 人设 / 结尾引导）：包的默认值通常就够用、
+// 改动频率低，统一交给设置页的「生成偏好」承接（见 MORE_KEYS）。
+// 想让工具条展示别的参数，改这一个数组即可 —— 两侧会自动重新分层。
+const TOOLBAR_KEYS = ["segment", "audience", "duration", "platform"];
+// 移出工具条、由设置页「生成偏好」承接的参数。放在前面：它们是「用户主动
+// 移走」的，顺序上也更贴近生成偏好这个语义；其余自定义参数排在它们后面。
+const MORE_KEYS = ["style", "persona", "cta"];
 const KEY_FALLBACK_LABEL = {
   segment: "细分领域", audience: "受众", duration: "时长（秒）",
   style: "风格", platform: "平台", persona: "人设", cta: "结尾引导",
@@ -63,25 +70,86 @@ export function fillPackSelect({ selectLast = false, prefer = null } = {}) {
   renderPackParams();
 }
 
-/** 头部模型指示：主工作区此前完全看不出「现在在用哪个模型」，
-    只有进设置页才知道 —— 生成结果不对时用户连排查方向都没有。 */
-export function renderModelChip() {
+// ── 模型选择器（工具条右侧、发送键左边）──────────────────────
+// 原先模型只在头部有个只读胶囊，想换模型得进设置页 —— 而「换个模型重试」恰恰
+// 是结果不满意时最常见的动作，它应该离输入框最近。
+//
+// 候选来自「当前配置 + 本地用过的」，而不是硬编码一份模型清单：本项目走的是
+// 用户自己的 OpenAI 兼容端点，清单里有没有、能不能调通完全取决于那个端点。
+// 硬编码等于给用户一个假承诺 —— 选中一个根本调不通的模型，报错还发生在生成时，
+// 那时用户早已忘了自己是从哪选的。
+const CUSTOM_MODEL = "__custom__";
+
+function modelHistory() {
+  try {
+    const a = JSON.parse(localStorage.getItem("ts.models") || "[]");
+    return Array.isArray(a) ? a.filter(x => typeof x === "string" && x) : [];
+  } catch (_) { return []; }
+}
+
+function rememberModel(name) {
+  try {
+    localStorage.setItem("ts.models",
+      JSON.stringify([name, ...modelHistory().filter(x => x !== name)].slice(0, 6)));
+  } catch (_) { /* 存不下就只是没有历史，不影响切换本身 */ }
+}
+
+export function renderModelPicker() {
   const m = state.meta;
-  const chip = $("rh-model");
-  if (!chip) return;
-  if (!m) { chip.classList.add("hidden"); return; }
-  if (m.mock) {
-    chip.textContent = "mock 模式";
-    chip.className = "rh-model is-mock";
-    chip.title = "当前返回夹具数据，不调用模型（点击到「模型接口」配置）";
-  } else {
-    chip.textContent = m.model || "未配置模型";
-    chip.className = "rh-model" + (m.has_api_key ? "" : " is-warn");
-    chip.title = m.has_api_key
-      ? `当前模型：${m.model}（点击到「模型接口」修改）`
-      : "未配置 API Key（点击到「模型接口」配置）";
+  const box = $("model-pick");
+  if (!box) return;
+  // 菜单挂在 body 下，重建前先清掉旧的，避免残留浮层
+  box.querySelectorAll(".select-wrap").forEach(w => w._menu?.remove());
+  box.innerHTML = "";
+  if (!m) return;
+
+  const cur = m.mock ? "mock 模式" : (m.model || "未配置模型");
+  const sel = el("select");
+  sel.id = "p-model";
+  sel.dataset.pill = "1";
+  for (const name of [cur, ...modelHistory().filter(n => n !== cur)]) {
+    const o = el("option", "", esc(name));
+    o.value = name;
+    sel.appendChild(o);
   }
-  chip.onclick = () => openSettings("llm");
+  // 「自定义」不是装饰项：没有它，换新模型就无处可去，这个下拉会变成封闭集合。
+  const custom = el("option", "", "＋ 自定义模型…");
+  custom.value = CUSTOM_MODEL;
+  sel.appendChild(custom);
+  sel.value = cur;
+  sel._mock = !!m.mock;
+  sel._warnNote = m.has_api_key
+    ? "" : "未配置 API Key —— 生成会被拒绝，点击去「模型接口」填写";
+  sel.title = `当前模型：${cur}。切换后对后续生成生效（正在跑的作业不受影响）`;
+  sel.onchange = () => pickModel(sel);
+  box.appendChild(sel);
+  beautifySelects(box);
+}
+
+async function pickModel(sel) {
+  const val = sel.value;
+  const m = state.meta;
+  if (val === CUSTOM_MODEL) {
+    // 它不是一个真实模型，只是「去设置页填」的入口 —— 立刻退回原值，
+    // 否则按钮上会一直显示「＋ 自定义模型…」，看着像真的选中了。
+    sel.value = m?.model || (m?.mock ? "mock 模式" : "");
+    sel._sync?.();
+    openSettings("llm");
+    return;
+  }
+  if (!m || val === (m.mock ? "mock 模式" : m.model)) return;
+  try {
+    await api.saveConfig({ model: val });
+    rememberModel(val);
+    // 工具条与头部状态都要跟着变，否则用户以为没切成功
+    state.meta = await api.meta();
+    emit("meta", state.meta);
+    toast(`已切换模型：${val}`);
+  } catch (e) {
+    toast("切换模型失败：" + e.message, 4000);
+    sel.value = m.model || "";
+    sel._sync?.();
+  }
 }
 
 export function renderPackParams() {
@@ -114,9 +182,9 @@ export function renderPackParams() {
     front.appendChild(paramSelect(key, params[key]));
     placed.add(key);
   }
-  // 其余参数（自定义包可能新增）也放这里；FRONT_KEYS 已由快捷条渲染，不重复
+  // 其余参数（自定义包可能新增）也放这里；TOOLBAR_KEYS 已由工具条渲染，不重复
   for (const key of Object.keys(params)) {
-    if (placed.has(key) || FRONT_KEYS.includes(key)) continue;
+    if (placed.has(key) || TOOLBAR_KEYS.includes(key)) continue;
     if (!params[key]?.options?.length) continue;
     front.appendChild(paramSelect(key, params[key]));
   }
@@ -151,7 +219,7 @@ function renderQuickParams() {
   // 这些值不报错，只会静默走通用默认 —— 挂到 select 上，由 beautifySelects
   // 变成胶囊变色 + 菜单里的「!」标记，避免用户以为在定制、实际没生效。
   const audit = pack.param_audit || {};
-  for (const key of FRONT_KEYS) {
+  for (const key of TOOLBAR_KEYS) {
     const def = params[key];
     if (!def?.options?.length) continue;
     const s = el("select");
@@ -167,8 +235,19 @@ function renderQuickParams() {
     s._audit = audit[key] || {};
     box.appendChild(s);
   }
-  const more = el("button", "ghost qp-more", "更多设置");
-  more.title = "打开设置（结尾引导 / 输出内容 / 补充资料）";
+  // 「更多设置」由文字按钮降级为参数组末尾的图标：它原来靠 margin-left:auto
+  // 孤悬在整行最右端，与左侧那组参数没有任何视觉关系，描边还比主输入框更深
+  // （层级倒置）。图标与设置页导航的「生成偏好」同款，语义一致 ——
+  // 这里是常用参数，更多参数在设置里。
+  const more = el("button", "qp-more");
+  more.type = "button";
+  more.title = "更多参数与设置（风格 / 人设 / 结尾引导 / 输出内容 / 补充资料）";
+  more.setAttribute("aria-label", "更多参数与设置");
+  more.innerHTML = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none"
+    stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
+    aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/>
+    <circle cx="18" cy="18" r="2.2"/><circle cx="12" cy="6" r="2.2"/>
+    <circle cx="7" cy="12" r="2.2"/></svg>`;
   more.onclick = () => openSettings("gen");
   box.appendChild(more);
   beautifySelects(box);
@@ -200,13 +279,21 @@ export function beautifySelects(scope = document) {
       btn.querySelector(".sel-text").textContent = o ? o.textContent : "";
       // 缺行业定制的当前值：胶囊变警示色 + 悬停给出原因。
       // 依据是 sel._audit（由 renderQuickParams 从 pack.param_audit 挂上）。
-      const note = sel._audit && sel._audit[sel.value];
+      // sel._warnNote 是给「非参数类」选择器（模型）用的显式警示 —— 它不来自
+      // param_audit，而是调用方直接给出的原因（如未配 API Key）。
+      const note = (sel._audit && sel._audit[sel.value]) || sel._warnNote || "";
       btn.classList.toggle("is-warn", !!note);
+      // mock 态：当前返回夹具数据、根本没调模型。不说出来的话，用户会以为
+      // 结果来自真模型 —— 这与「未配 Key」是两件事，所以颜色也不同。
+      btn.classList.toggle("is-mock", !!sel._mock);
       const base = sel.title || "";
       btn.title = note ? (base ? base + "\n" : "") + note : base;
       menu.querySelectorAll(".select-opt").forEach(d =>
         d.classList.toggle("on", d.dataset.value === sel.value));
     };
+    // 暴露给调用方：select 的值被程序改动后（「自定义模型…」只是个入口，
+    // 选完要退回原值），外部需要主动重画按钮文字。
+    sel._sync = sync;
     const build = () => {
       menu.innerHTML = "";
       Array.from(sel.options).forEach(o => {
@@ -376,6 +463,14 @@ export function lockParams(lock) {
   bar.classList.toggle("locked", lock);
   bar.querySelectorAll("select").forEach(s => { s.disabled = lock; });
   bar.querySelectorAll(".select-btn").forEach(b => { b.disabled = lock; });
+  // 模型选择器一并锁上：生成中切模型对**正在跑的作业**没有任何影响
+  // （作业启动时就带上了当时的模型），留着可点只会让人以为能中途换。
+  const mp = $("model-pick");
+  if (mp) {
+    mp.classList.toggle("locked", lock);
+    mp.querySelectorAll("select").forEach(s => { s.disabled = lock; });
+    mp.querySelectorAll(".select-btn").forEach(b => { b.disabled = lock; });
+  }
 }
 
 export function setCfgHint() {
@@ -426,7 +521,7 @@ export const bindShell = bindOnce(function bindShell() {
   };
   on("busy", syncGate);
   on("job", syncGate);
-  on("meta", () => { fillPackSelect(); setCfgHint(); renderModelChip(); });
+  on("meta", () => { fillPackSelect(); setCfgHint(); renderModelPicker(); });
 
   $("topic").addEventListener("input", () => { refreshGate(); autoGrowTopic(); });
 

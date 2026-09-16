@@ -380,7 +380,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("桩已注入且页面脚本为模块化加载", boot.injected && boot.ts, JSON.stringify(boot));
   check("无 JS 运行错误", errs.length === 0, errs.join(" | "));
   check("meta 载入且行业包下拉已填充", boot.meta && boot.packs === 2, `packs=${boot.packs}`);
-  check("快捷条渲染出参数胶囊", boot.quickPills >= 5, `pills=${boot.quickPills}`);
+  check("工具条渲染出参数胶囊", boot.quickPills >= 3, `pills=${boot.quickPills}`);
   check("空状态示例卡渲染", boot.samples === 4, `samples=${boot.samples}`);
   check("会话列表渲染 2 条并分组", boot.sessions === 2 && boot.groups >= 1,
     `rows=${boot.sessions} groups=${boot.groups}`);
@@ -582,17 +582,47 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await sleep(250);
   const stg = await evalIn(`const s = document.getElementById('settings-screen');
     const r = s.getBoundingClientRect();
+    // 改用规则断言而不是硬数字 6：panes 仍是 6（packgen 面板 DOM 在），
+    // 但 navs 从 6 改 5 ——「新建行业包」下沉为「行业包」面板 headbar 的动作。
+    // 改硬数字会让「导航项数」被无意冻结：以后再加个 nav 就是 6 → 7，
+    // 这条断言会挂而报一个跟"实际坏了"无关的错。
+    // 现在断言：①panes=6 ②navs=5 ③数据一致（panes=navs+1）
     return { open: !s.classList.contains('hidden'),
       covers: Math.round(r.width) === innerWidth && Math.round(r.height) === innerHeight,
       panes: document.querySelectorAll('#settings-screen .stg-pane').length,
       navs: document.querySelectorAll('.stg-nav-item').length,
+      packgenNav: !!document.querySelector('.stg-nav-item[data-pane="packgen"]'),
+      packgenPane: !!document.getElementById('pane-packgen'),
       on: document.querySelectorAll('.stg-nav-item.on').length,
       genVisible: !document.getElementById('pane-gen').classList.contains('hidden') };`);
-  check("设置页铺满窗口且有 6 分区",
-    stg.open && stg.covers && stg.panes === 6 && stg.navs === 6,
+  check("设置页铺满窗口，panes=6 / navs=5（packgen 不占导航位）",
+    stg.open && stg.covers && stg.panes === 6 && stg.navs === 5
+      && !stg.packgenNav && stg.packgenPane,
     JSON.stringify(stg));
   check("默认分区为生成偏好且高亮唯一",
     stg.genVisible && stg.on === 1, JSON.stringify(stg));
+
+  // 层级断言：packgen 是「行业包」面板 headbar 的 [新建] 入口。
+  // 进 packgen 后，导航仍高亮「行业包」（NAV_OF_PANE 映射），
+  // 不出现两个高亮、也不出现没有高亮。
+  await evalIn(`window.__ts.setPane('packinfo'); return true;`);
+  await sleep(300);
+  await evalIn(`document.getElementById('pi-newpack').click(); return true;`);
+  await sleep(200);
+  const fromPackinfo = await evalIn(`return {
+    pane: [...document.getElementById('settings-screen').querySelectorAll('.stg-pane')]
+            .find(p => !p.classList.contains('hidden'))?.id,
+    onPane: document.querySelector('.stg-nav-item.on')?.dataset.pane };`);
+  check("从行业包 [新建] 进入 packgen，导航高亮仍停在「行业包」（面包屑感）",
+    fromPackinfo.pane === 'pane-packgen' && fromPackinfo.onPane === 'packinfo',
+    JSON.stringify(fromPackinfo));
+  // 「取消」回行业包（不是回生成偏好）—— packgenFrom 来源记录生效
+  await evalIn(`document.getElementById('pg-close').click(); return true;`);
+  await sleep(200);
+  const afterCancel = await evalIn(`return [...document.getElementById('settings-screen').querySelectorAll('.stg-pane')]
+    .find(p => !p.classList.contains('hidden'))?.id;`);
+  check("packgen 从行业包进入时，「取消」回到行业包（不绕回生成偏好）",
+    afterCancel === 'pane-packinfo', afterCancel);
 
   // 滚动容器上提到 .stg-main 后的两条守护。修复前滚动容器是 .stg-pane 自身，
   // 它带 max-width + margin-inline:auto（限宽居中），于是滚动条出现在**居中盒子**
@@ -704,22 +734,32 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("高级项「恢复默认」还原超时值", adv2 === "180", adv2);
 
   // 知识库 / 技能：不再是占位面板，而是包内文件的只读查看器。
-  // 技能面板只列技能相关文件（skill.yaml / rules|patterns|compliance 下的）。
+  // 桩里 api.pack('elevator') 返回 3 个文件：pack.yaml / skill.yaml / knowledge/topics.md。
+  // 改造后 kb 与 skills **按命名分组互不重叠**：
+  //   kb     = pack.yaml + knowledge/   （2 个）
+  //   skills = skill.yaml                  （1 个）
+  // 修复前 kb: () => true 把 skill.yaml 也列入知识库，命名错位 —— 两个面板
+  // 显示同一组文件，知识库的「资料」语义被偷换成了「全部」。
+  // 规则断言：①互不重叠 ②各面板筛后文件数 ≥ 1（有内容） ③按角色分组。
   await evalIn(`window.__ts.setPane('kb'); return true;`);
   await sleep(400);
   const kb = await evalIn(`return {
     rows: document.querySelectorAll('#kb-list .kb-item').length,
+    names: [...document.querySelectorAll('#kb-list .kb-item .kb-name')].map(n => n.textContent),
+    groups: document.querySelectorAll('#kb-list .kb-group').length,
     hasPlaceholder: !!document.querySelector('#pane-kb .placeholder') };`);
-  check("知识库面板列出包内文件（不再是占位）",
-    kb.rows === 3 && !kb.hasPlaceholder, JSON.stringify(kb));
+  check("知识库面板列出资料类文件（kb + skills 互不重叠），且按角色分组",
+    kb.rows >= 1 && !kb.hasPlaceholder && kb.groups >= 1
+      && !kb.names.some(n => n === "skill.yaml"),
+    JSON.stringify(kb));
 
   await evalIn(`[...document.querySelectorAll('#kb-list .kb-item')]
-    .find(n => n.firstChild.textContent.includes('knowledge')).click(); return true;`);
+    .find(n => n.querySelector('.kb-name').textContent.includes('knowledge')).click(); return true;`);
   await sleep(300);
   const kbBody = await evalIn(`return {
     title: document.getElementById('kb-title').textContent,
     body: document.getElementById('kb-body').textContent };`);
-  check("点击文件显示内容",
+  check("点击知识库文件显示内容",
     /选题库/.test(kbBody.body) && kbBody.title === "knowledge/topics.md",
     JSON.stringify(kbBody));
 
@@ -727,8 +767,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await sleep(400);
   const sk = await evalIn(`return {
     rows: [...document.querySelectorAll('#skills-list .kb-item')]
-            .map(n => n.firstChild.textContent) };`);
-  check("技能面板只列技能相关文件",
+            .map(n => n.querySelector('.kb-name').textContent) };`);
+  check("技能面板只列技能类文件（skill.yaml / rules|patterns|compliance/）",
     sk.rows.length === 1 && sk.rows[0] === "skill.yaml", JSON.stringify(sk));
 
   // 复制口播：产出的是给提词器用的纯文本，`**` 必须去掉而 `／` 必须保留
@@ -876,10 +916,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
              导航项数: items.length,
              被隐藏的项: items.filter(n => n.classList.contains('hidden')).length,
              首项文字: (items[0] || {}).textContent };`);
-  check("设置导航：返回项 → 列表恒定 16px，六项全在且无隐藏项（搜索框已删）",
+  check("设置导航：返回项 → 列表恒定 16px，五项全在且无隐藏项（搜索框已删；packgen 不占导航）",
     Math.abs(stgNavGeo.返回项到列表 - 16) <= 0.6
     && stgNavGeo.列表内上边距 === "0px"
-    && stgNavGeo.导航项数 === 6 && stgNavGeo.被隐藏的项 === 0,
+    && stgNavGeo.导航项数 === 5 && stgNavGeo.被隐藏的项 === 0,
     JSON.stringify(stgNavGeo));
 
   // 搜索框要连 DOM 一起删干净 —— 留一个隐藏的空壳，下一个人会以为它还在。
@@ -945,12 +985,15 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   // 期望值由桩里的 META 现算（不硬编码数字）：
   //   胶囊 = 该包 params 里属于 FRONT_KEYS 且有 options 的键数
   //   参数组 = 其余有 options 的键数（MORE_KEYS 只有 cta，所以等价）
-  const FRONT_KEYS = ["segment", "audience", "duration", "platform", "style", "persona"];
+  // 工具条参数清单的**规格副本**：这里有意不复用 ui.js 的常量 ——
+  // 复用就成了同义反复（实现改错、断言跟着一起错）。代价是调整分层时
+  // 要同步改这一行，所以它必须显式写着「这是规格」。
+  const TOOLBAR_KEYS = ["segment", "audience", "duration", "platform"];
   const expectFor = name => {
     const p = (META.packs.find(x => x.name === name) || {}).params || {};
     const keys = Object.keys(p).filter(k => p[k] && p[k].options && p[k].options.length);
-    return { 胶囊: keys.filter(k => FRONT_KEYS.includes(k)).length,
-             参数组: keys.filter(k => !FRONT_KEYS.includes(k)).length };
+    return { 胶囊: keys.filter(k => TOOLBAR_KEYS.includes(k)).length,
+             参数组: keys.filter(k => !TOOLBAR_KEYS.includes(k)).length };
   };
   // 下拉菜单挂在 body 下、与 .select-wrap 一一对应 —— 这条不变量顺手守住
   // 「重渲染时把旧菜单摘掉」：renderPackParams 曾经只清 innerHTML，不摘菜单。
@@ -981,12 +1024,31 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await evalIn(`document.getElementById('btn-close-settings').click(); return true;`);
   await sleep(200);
 
-  // 头部模型指示：此前只有进设置页才知道在用哪个模型
-  const chip = await evalIn(`const c = document.getElementById('rh-model');
-    return { hidden: c.classList.contains('hidden'), text: c.textContent,
-             title: c.title };`);
-  check("头部显示当前模型（不再只有设置页能看到）",
-    !chip.hidden && chip.text === "glm-4.7" && /模型/.test(chip.title), JSON.stringify(chip));
+  // 模型选择器：此前只有进设置页才知道在用哪个模型，且要改模型必须跳页。
+  // 现在它就在输入区工具条上、发送键左侧，可直接切换。
+  const picker = await evalIn(`const s = document.getElementById('p-model');
+    const btn = s?.parentNode?.querySelector('.select-btn');
+    return s ? { value: s.value, text: btn.querySelector('.sel-text').textContent,
+                 title: btn.title,
+                 texts: Array.from(s.options).map(o => o.textContent) } : null;`);
+  check("输入区显示当前模型（不再只有设置页能看到）",
+    picker && picker.value === "glm-4.7" && picker.text === "glm-4.7"
+    && /模型/.test(picker.title), JSON.stringify(picker));
+  check("模型下拉留了去设置页的出口（不是封闭集合）",
+    picker && picker.texts.some(t => /自定义/.test(t)),
+    JSON.stringify(picker && picker.texts));
+  // 切换模型必须**真的落到配置接口**上，而不是只改了个显示 ——
+  // 「信号算了但没人接」是这个项目最容易犯的错（param_audit 那一类），
+  // 所以一个能改显示的下拉框不算数，得看它有没有写出去。
+  await evalIn(`const s = document.getElementById('p-model');
+    const n = document.createElement('option');
+    n.value = 'deepseek-chat'; n.textContent = 'deepseek-chat';
+    s.appendChild(n); s.value = 'deepseek-chat';
+    s.dispatchEvent(new Event('change', { bubbles: true })); return true;`);
+  await sleep(400);
+  const modelSaved = await evalIn(`return window.__lastConfigBody || null;`);
+  check("切换模型会写进配置（不只是改了显示）",
+    !!modelSaved && modelSaved.model === 'deepseek-chat', JSON.stringify(modelSaved));
 
   // 会话搜索（成熟 agent 的标配；历史一多就找不到）
   await evalIn(`const b = document.getElementById('sess-search');
@@ -1541,54 +1603,63 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     JSON.stringify(cspAll.slice(cspAfterCtrl).slice(0, 3)));
 
   // ── 截图 ─────────────────────────────────────────────────
-  const shot = async (name, expr) => {
+  // clip 可选：给局部特写用（整屏图上工具条只有几十像素高，看不清细节）
+  const shot = async (name, expr, clip) => {
     if (expr) { await evalIn(expr); await sleep(500); }
-    const s = await cdp.send("Page.captureScreenshot", { format: "png" });
+    const s = await cdp.send("Page.captureScreenshot",
+      clip ? { format: "png", clip } : { format: "png" });
     fs.writeFileSync(path.join(SHOT_DIR, name), Buffer.from(s.data, "base64"));
   };
-  // 验证对齐：参数条左/右边缘 == 输入框左/右边缘
-  const align = await evalIn(`return (() => {
-    const qb = document.getElementById('quick-params').getBoundingClientRect();
-    const cb = document.getElementById('composer-body').getBoundingClientRect();
-    return { qbL: qb.left, cbL: cb.left, qbR: qb.right, cbR: cb.right }; })()`);
-  // 圆角语言统一：参数条胶囊不再是 pill（半圆头），与输入框同属圆角矩形
-  const radius = await evalIn(`return (() => {
-    const pill = document.querySelector('#quick-params .select-btn');
-    const more = document.querySelector('#quick-params .qp-more');
+  // 自绘下拉的菜单挂在 body 下，截图时会盖住底下的控件（它不受任何容器裁剪）。
+  // 整屏截图前统一收掉，否则「首屏长什么样」这张图永远带着一个展开的菜单。
+  const closeMenus = `document.querySelectorAll('.select-wrap.open').forEach(w => w.classList.remove('open'));
+    document.querySelectorAll('.select-menu:not(.hidden)').forEach(m => m.classList.add('hidden'));`;
+  // ── 输入区：一体化卡片 ─────────────────────────────────────
+  // 修复前是「参数条 / 输入框 / 提示行」三块垂直堆叠的独立块：参数（次要控件）
+  // 占了输入框**上方**最贵的位置，三块各有各的边界。现在合并为一个卡片：
+  // textarea 在上、工具条在下、中间一条分隔线。
+  // 这一组断言取代了原来的「间距 12px / 左右对齐 / 描边一致」三条 —— 那三条
+  // 都在描述**两个独立块之间**的关系，合并成一个容器后它们不再成立。
+  const compose = await evalIn(`return (() => {
+    const qb = document.getElementById('quick-params');
     const cb = document.getElementById('composer-body');
-    return { pill: getComputedStyle(pill).borderRadius,
-             more: getComputedStyle(more).borderRadius,
-             cb: getComputedStyle(cb).borderRadius }; })()`);
-  // 描边语言统一：三者都是 .07 发丝线；主输入框靠**阴影**突出，
-  // 而不是把描边加深（修复前「更多设置」用 .12，比主输入框还深，层级倒置）
-  const stroke = await evalIn(`return (() => {
-    const g = (sel) => { const n = document.querySelector(sel);
-      return n ? getComputedStyle(n).boxShadow : ""; };
-    return { pill: g('#quick-params .select-btn'),
-             more: g('#quick-params .qp-more'),
-             composer: g('#composer-body') }; })()`);
-  const hair = (s) => s.indexOf("rgba(0, 0, 0, 0.07) 0px 0px 0px 0.5px") === 0;
-  check("胶囊 / 更多设置 / 主输入框 描边一致（.07 发丝线）",
-    hair(stroke.pill) && hair(stroke.more) && hair(stroke.composer),
-    JSON.stringify(stroke).slice(0, 150));
-  check("主输入框靠阴影突出，而非描边加深",
-    stroke.composer.split("rgba").length > stroke.pill.split("rgba").length
-    && stroke.pill.split("rgba").length === 2,
-    `pill=${stroke.pill.split("rgba").length} composer=${stroke.composer.split("rgba").length}`);
-
-  check("参数条与输入框是同一套圆角语言（都不是 pill）",
-    !/999px/.test(radius.pill) && !/999px/.test(radius.more)
-    && /px/.test(radius.cb), JSON.stringify(radius));
-
-  // 间距：输入框 50px 比胶囊 28px 高不少，8px 太挤
-  const gap = await evalIn(`return Math.round(
-    document.getElementById('composer-body').getBoundingClientRect().top
-    - document.getElementById('quick-params').getBoundingClientRect().bottom);`);
-  check("参数条与输入框间距 12px（原 8px 偏挤）", gap === 12, `gap=${gap}`);
-
-  check("参数条与输入框左右对齐（修复前差 6px）",
-    Math.abs(align.qbL - align.cbL) < 1 && Math.abs(align.qbR - align.cbR) < 1,
-    JSON.stringify(align));
+    const topic = document.getElementById('topic');
+    const tools = document.querySelector('#composer-body .composer-tools');
+    const send = document.getElementById('btn-generate');
+    const model = document.getElementById('model-pick');
+    if (!qb || !cb || !topic || !tools || !send || !model) return { missing: true };
+    const r = (n) => n.getBoundingClientRect();
+    const cs = getComputedStyle(tools);
+    return {
+      inside: cb.contains(qb),
+      topicInCard: cb.contains(topic),
+      toolsBelowTopic: r(tools).top >= r(topic).bottom - 1,
+      sendRight: Math.abs(r(send).right - r(tools).right),
+      modelLeftOfSend: r(model).right <= r(send).left + 1,
+      sameRow: Math.abs(r(model).top - r(send).top) < 8,
+      toolCount: qb.querySelectorAll('.select-wrap.pill').length,
+      gear: !!qb.querySelector('.qp-more'),
+      sep: cs.borderTopWidth,
+      sepStyle: cs.borderTopStyle,
+    }; })()`);
+  check("参数条已并入输入框卡片（不再是并列的兄弟块）",
+    !compose.missing && compose.inside === true && compose.topicInCard === true,
+    JSON.stringify(compose).slice(0, 160));
+  check("工具条位于输入框下方，且与输入区之间有分隔线",
+    compose.toolsBelowTopic === true
+    && parseFloat(compose.sep) > 0 && compose.sepStyle !== "none",
+    `below=${compose.toolsBelowTopic} sep=${compose.sep}/${compose.sepStyle}`);
+  check("发送键仍在工具条右端（保持右下角）",
+    compose.sendRight < 12, `rightOffset=${compose.sendRight}`);
+  check("模型选择器紧邻发送键左侧、同一行",
+    compose.modelLeftOfSend === true && compose.sameRow === true,
+    `leftOfSend=${compose.modelLeftOfSend} sameRow=${compose.sameRow}`);
+  // 只展示重要参数：条数写死会随分层调整而漂，所以断言的是「明显少于全量」
+  // 且「至少还有 3 个」—— 前者防回归到「全塞进来」，后者防被清空。
+  check("工具条只展示重要参数（已从全量精简）",
+    compose.toolCount >= 3 && compose.toolCount <= 4, `toolCount=${compose.toolCount}`);
+  check("「更多设置」不再占一个文字按钮位（降级为参数组末尾的图标）",
+    compose.gear === true, `gear=${compose.gear}`);
 
   // ── 12c) 「无行业定制」的可见提示 ─────────────────────────
   // 这些值不报错，只会静默走通用默认（没配 topics_map 的细分领域、缺
@@ -1632,8 +1703,15 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     sel.value = '抖音'; sel._syncDropdown();
     return { warn: sel.parentNode.querySelector('.select-btn').classList.contains('is-warn') };`);
   check("换回有定制的值后警示消失", auditBack.warn === false, JSON.stringify(auditBack));
-  await shot("main-sidebar.png",
-    "window.__ts.newChat(); document.getElementById('btn-generate'); return true;");
+  // 输入区特写：一体化卡片是这轮改动的核心，而整屏图上它只有几十像素高、
+  // 细节全糊在一起。按 #composer 的实际矩形裁一张 2 倍图当证据。
+  await evalIn(`${closeMenus} window.__ts.newChat(); return true;`);
+  await sleep(300);
+  const cbox = await evalIn(`const r = document.getElementById('composer').getBoundingClientRect();
+    return { x: Math.max(0, r.left - 8), y: Math.max(0, r.top - 12),
+             width: r.width + 16, height: r.height + 24, scale: 2 };`);
+  await shot("main-composer.png", null, cbox);
+  await shot("main-sidebar.png", `${closeMenus} return true;`);
   // 折叠态截图：左栏收成 0 宽后只应剩左上角的展开按钮。
   // 回归的 bug 是漏隐藏 .left-top，「新建对话」被挤成竖排「建/对」小黑块。
   await shot("main-folded.png",
