@@ -64,6 +64,11 @@ class AppConfig:
     # config.yaml 读坏时的一句话说明（读坏才非空）。随 /api/config 下发，
     # 让设置页能提示「你的配置没生效」—— 否则退回全默认这件事完全不可见。
     config_error: str = ""
+    # 这些 LLM 字段在 config.yaml 里**没写**、也没有环境变量覆盖，值是内置默认
+    # （model 会变成 DEFAULT_CONFIG 里那个）。与 config_error 是**同一类静默降级，
+    # 只是没坏、只是没配**：不下发的话，界面会把内置默认值当用户配置显示出来
+    # （设置页模型名写着 glm-4.7、输入区右侧也写着 glm-4.7），用户以为已经配好了。
+    llm_defaulted: list[str] = field(default_factory=list)
 
 
 def config_path(root: Path, config_dir: Path | None = None) -> Path:
@@ -80,11 +85,23 @@ def config_path(root: Path, config_dir: Path | None = None) -> Path:
 # 安装包**不携带任何 config**（连模板都不带）—— 用户自己配置，可以走设置界面，
 # 也可以直接改这个文件。写一份带注释的模板在这里，是为了让「配置在哪、有哪些项」
 # 有据可查，而不是靠猜。
+#
+# ⚠ 模板里**所有配置项一律注释掉**（原来写的是真实值，如 `model: glm-4.7`）。
+# 为什么必须这样：写进去的真实值会让 `load_config` 认为「用户配过这个键」，
+# 于是 `llm_defaulted` 是空的、界面把这些值当用户配置显示 ——
+# 用户第一眼看到设置页写着 `model: glm-4.7`、输入区右侧也写着 `glm-4.7`，
+# 以为已经配好了。**模板是程序写的，不是用户配的，不能冒充用户配置。**
+# 注释掉之后取值完全不变（模板里的值与 DEFAULT_CONFIG 逐项相同，
+# 缺键时 `load_config` 本来就取它）。
 CONFIG_TEMPLATE = """# TalkScript 配置
 #
 # 这个文件由程序在首次运行时生成，位置：<数据目录>/config.yaml
 #   · Windows 打包版：%APPDATA%\\TalkScript\\
 #   · 开发态：项目根目录
+#
+# ⚠ 下面每一项**默认都是注释掉的**，注释状态等价于「没配」——
+#   此时引擎用的是内置默认值，设置页会标明「还是内置默认值，不是你配的」。
+#   想改哪一项，把该行的 `#` 去掉并填值，保存后重启（或点「保存」）即可。
 #
 # 三种配置方式，优先级从高到低：
 #   1. 环境变量（推荐，密钥不落盘）
@@ -104,22 +121,22 @@ CONFIG_TEMPLATE = """# TalkScript 配置
 #
 # 也可以在应用内「设置 → 模型接口」里填写，效果相同。
 
-llm:
-  # 任意 OpenAI 兼容接口的根地址（不含 /chat/completions）
-  base_url: https://open.bigmodel.cn/api/paas/v4
-  # 在这里填你的 Key；留空则必须用环境变量 TALKSCRIPT_API_KEY
-  api_key: ""
-  model: glm-4.7
-  temperature: 0.7
-  # 请求失败（网络/超时/429/5xx）自动重试次数；0 = 不重试
-  retries: 2
-  # 单次请求超时（秒）；长输出模型可调大
-  timeout: 180
-  # 单次输出预算。推理型模型的「思考」token 也计入这里，给太小会导致
-  # content 返回空串。遇到「模型返回了空内容」或 JSON 解析失败，优先调大这一项。
-  max_tokens: 16000
+# llm:
+#   # 任意 OpenAI 兼容接口的根地址（不含 /chat/completions）
+#   base_url: https://open.bigmodel.cn/api/paas/v4
+#   # 在这里填你的 Key；留空则必须用环境变量 TALKSCRIPT_API_KEY
+#   api_key: ""
+#   model: glm-4.7
+#   temperature: 0.7
+#   # 请求失败（网络/超时/429/5xx）自动重试次数；0 = 不重试
+#   retries: 2
+#   # 单次请求超时（秒）；长输出模型可调大
+#   timeout: 180
+#   # 单次输出预算。推理型模型的「思考」token 也计入这里，给太小会导致
+#   # content 返回空串。遇到「模型返回了空内容」或 JSON 解析失败，优先调大这一项。
+#   max_tokens: 16000
 
-default_pack: elevator
+# default_pack: elevator
 """
 
 
@@ -139,6 +156,21 @@ def ensure_config_template(root: Path, config_dir: Path | None = None) -> Path |
     except OSError:
         # 目录不可写不该让引擎起不来：配置本来就可以只走环境变量。
         return None
+
+
+# LLM 字段 ←→ 环境变量名。**只此一份**：`load_config` 既用它做覆盖，
+# 也用它判断「这个值到底是用户给的，还是内置默认」。
+# 抄成两份的话，加一个字段时很容易只改一处 —— 于是新字段的覆盖生效了、
+# 但「它没配过」这个判断漏掉了（或反过来）。
+_LLM_ENV = {
+    "base_url": "TALKSCRIPT_BASE_URL",
+    "model": "TALKSCRIPT_MODEL",
+    "temperature": "TALKSCRIPT_TEMPERATURE",
+    "retries": "TALKSCRIPT_RETRIES",
+    "timeout": "TALKSCRIPT_TIMEOUT",
+    "max_tokens": "TALKSCRIPT_MAX_TOKENS",
+}
+_LLM_CAST = {"temperature": float, "retries": int, "timeout": float, "max_tokens": int}
 
 
 def _env(name: str, fallback: str = "") -> str:
@@ -222,20 +254,32 @@ def load_config(root: Path, config_dir: Path | None = None) -> AppConfig:
         max_tokens=_num(llm, "max_tokens", DEFAULT_CONFIG["llm"]["max_tokens"], int),
     )
 
-    # 环境变量覆盖（避免密钥落盘）
+    # 环境变量覆盖（避免密钥落盘）。
+    # 顺序很重要：**先记「文件里没写」的字段，再让环境变量把它们从名单里划掉**。
+    # 反过来的话就分不清「用户配的」和「内置默认」了 —— 覆盖之后两者长得一样。
+    defaulted = [k for k in _LLM_ENV if llm.get(k) in (None, "")]
     cfg.api_key = _env("TALKSCRIPT_API_KEY", cfg.api_key)
-    cfg.base_url = _env("TALKSCRIPT_BASE_URL", cfg.base_url).rstrip("/")
-    cfg.model = _env("TALKSCRIPT_MODEL", cfg.model)
-    cfg.temperature = _env_num("TALKSCRIPT_TEMPERATURE", cfg.temperature, float)
-    cfg.retries = _env_num("TALKSCRIPT_RETRIES", cfg.retries, int)
-    cfg.timeout = _env_num("TALKSCRIPT_TIMEOUT", cfg.timeout, float)
-    cfg.max_tokens = _env_num("TALKSCRIPT_MAX_TOKENS", cfg.max_tokens, int)
+    for key, env_name in _LLM_ENV.items():
+        cur = getattr(cfg, key)
+        raw = os.environ.get(env_name)
+        if key in _LLM_CAST:
+            setattr(cfg, key, _env_num(env_name, cur, _LLM_CAST[key]))
+        else:
+            setattr(cfg, key, _env(env_name, cur).rstrip("/"))
+        # 「真的被覆盖了吗」必须看**值有没有被接受**，不能只看变量存不存在：
+        # `TALKSCRIPT_RETRIES=abc` 会让 _env_num 静默退回内置默认，那还是「没配」——
+        # 按「设过就划掉」处理，等于把这次静默兜底藏起来（本项目最忌讳的那种）。
+        # 已知的轻微不精确：环境变量给的值**恰好等于**内置默认时，也算「没配」。
+        # 那种情况下值与默认完全一致，说「这不是你配的」并不误导。
+        if raw not in (None, "") and (key not in _LLM_CAST or getattr(cfg, key) != cur):
+            defaulted.remove(key)
 
     app = AppConfig(
         llm=cfg,
         default_pack=_env("TALKSCRIPT_DEFAULT_PACK", str(data.get("default_pack", "elevator"))),
         root=root,
         config_error=config_error,
+        llm_defaulted=defaulted,
     )
     app.mock = (_truthy(os.environ.get("TALKSCRIPT_MOCK"))
                 or _truthy(llm.get("mock"))

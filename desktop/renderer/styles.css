@@ -166,6 +166,18 @@ body {
 /* 字段标签：小号 + 中等字重，作为"控件说明"存在，不与区块标题抢层级 */
 .lbl { display: block; font-size: var(--f-xs); font-weight: 600; color: var(--text-2); margin-bottom: 6px; letter-spacing: .1px; }
 
+/* 「这一项还是内置默认」的小标（设置 → 模型接口，由 markDefault() 挂上）。
+   存在的理由：**从没配过**时输入框里填的是内置默认值 —— glm-4.7 / 0.7 / 180 /
+   16000，每一个看起来都像用户自己填的；读坏时有橙色提示行兜底，没配过时原本
+   什么都没有，界面于是把「未配置」显示成了「已配置」。
+   中性灰而不是 --warn 橙：没配过不是故障，染成警示色会让橙色贬值
+   （真正会失败的「未配置 API Key」那条就没人看了）。 */
+.tag-default {
+  margin-left: 6px; padding: 1px 6px; border-radius: var(--r-xs);
+  background: var(--fill-strong); color: var(--text-2);
+  font-size: var(--f-2xs); font-weight: 500; letter-spacing: 0;
+}
+
 /* 标签行内的小文字按钮（「恢复默认」）：不能抢标签的视觉重量，
    但要有明确的可点区域与悬停反馈，否则会被当成一段说明文字。 */
 .linkbtn {

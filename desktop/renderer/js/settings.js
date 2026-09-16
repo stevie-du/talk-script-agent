@@ -105,6 +105,7 @@ export function setPane(pane) {
 
 async function preloadSettings() {
   const c = await api.config();
+  const dflt = new Set(c.llm_defaulted || []);
   fill("st-baseurl", c.base_url || "");
   fill("st-model", c.model || "");
   fill("st-temperature", c.temperature ?? "");
@@ -112,6 +113,26 @@ async function preloadSettings() {
   fill("st-timeout", c.timeout ?? "");
   fill("st-maxtokens", c.max_tokens ?? "");
   if (!dirty.has("st-apikey")) $("st-apikey").value = "";
+  // 「这一项还是内置默认」必须**逐项**标在框上，不能只在底部写一句总提示：
+  // 用户的视线落在「模型名 = glm-4.7」这个框上，结论就是「已经配好了」，
+  // 底部那行浅灰小字他根本不会看。读坏（config_error）时还有一行橙色提示兜底，
+  // 而**从没配过**这条路径上原本什么都没有 —— glm-4.7 / 0.7 / 180 / 16000
+  // 每一个都长得像用户自己填的。
+  markDefault("st-baseurl", dflt.has("base_url"));
+  markDefault("st-model", dflt.has("model"));
+  markDefault("st-temperature", dflt.has("temperature"));
+  markDefault("st-retries", dflt.has("retries"));
+  markDefault("st-timeout", dflt.has("timeout"));
+  markDefault("st-maxtokens", dflt.has("max_tokens"));
+  // Key 的 placeholder 同理：从没配过时写「已配置时留空即保持不变」，
+  // 等于在暗示「你已经配过了」。两个状态的文案各只有一份 —— 已配置那句就是
+  // HTML 里的 placeholder（首次运行时存进 data-ph-set），未配置那句在
+  // data-ph-empty；不在 JS 里再抄一遍。
+  const ak = $("st-apikey");
+  if (ak) {
+    if (!ak.dataset.phSet) ak.dataset.phSet = ak.placeholder;
+    ak.placeholder = c.api_key_set ? ak.dataset.phSet : ak.dataset.phEmpty;
+  }
   renderConfigError(c.config_error);
   const env = c.env_override ? "（当前由环境变量 TALKSCRIPT_API_KEY 覆盖）" : "";
   $("st-status").textContent = c.mock
@@ -119,6 +140,22 @@ async function preloadSettings() {
     : c.api_key_set
       ? `已配置 Key · 模型 ${c.model} · 重试 ${c.retries} 次 / 超时 ${c.timeout}s${env}`
       : `未配置 API Key${env}`;
+}
+
+/** 在字段标签上打一个「内置默认」小标。幂等 —— preloadSettings 每次打开都会跑，
+ *  不能叠出第二个。 */
+function markDefault(inputId, on) {
+  const input = $(inputId);
+  const lbl = input && input.closest(".block-inner")?.querySelector(".lbl");
+  if (!lbl) return;
+  const old = lbl.querySelector(".tag-default");
+  if (!on) { old?.remove(); return; }
+  if (old) return;
+  const tag = el("span", "tag-default", "内置默认");
+  tag.title = "这个值来自内置默认，不是你保存过的配置";
+  // 插在「恢复默认」按钮前面：标签 → 状态 → 操作，读起来是一条线
+  const btn = lbl.querySelector(".linkbtn");
+  if (btn) lbl.insertBefore(tag, btn); else lbl.appendChild(tag);
 }
 
 // config.yaml 读坏时的提示。

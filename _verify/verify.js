@@ -168,9 +168,21 @@ window.__addCount = 0;
   // config.yaml 读坏的情形：&cfgerr=1（文案由后端 _yaml_error_brief 生成，
   // 这里只取形态：原因 + 中文行列号，且**不含**配置正文）
   var CFGERR = /(^|[?&])cfgerr=1/.test(location.search);
+  // 哪些 LLM 字段还是内置默认（config.yaml 里没写、环境变量也没有）。
+  // 真实后端在「从没保存过设置页」与「config.yaml 读坏」两种情形下都会点名全部六项
+  // （读坏 = llm 段整个读不到 → 六项全取默认），所以这里跟 NOKEY / CFGERR 同源切换。
+  // 这不是为了省事：没配 Key ⟺ 从没保存过 ⟺ 六项全是默认，本来就是同一件事 ——
+  // 保存一次会把 base_url / model 都写进文件。
+  var LLM_DEFAULTED = (NOKEY || CFGERR)
+    ? ["base_url", "model", "temperature", "retries", "timeout", "max_tokens"] : [];
+  // 保存过一次之后这些字段就不再是内置默认了（真实后端：save_config 把它们写进了
+  // config.yaml）。桩必须**有状态**，否则「标记只增不减」这类实现永远测不出来 ——
+  // 页面一刷新，它本来就没挂过标，看起来和正确实现一模一样。
+  var cfgSaved = false;
+  function llmDefaulted(){ return cfgSaved ? [] : LLM_DEFAULTED; }
   var CONFIG = { base_url:"https://x/v4", model:"glm-4.7", api_key_set:!NOKEY,
                  mock:false, retries:2, timeout:180, max_tokens:16000,
-                 temperature:0.7, env_override:false,
+                 temperature:0.7, env_override:false, llm_defaulted: LLM_DEFAULTED,
                  config_error: CFGERR
                    ? "config.yaml 语法有误（mapping values are not allowed here，第 2 行第 44 列）"
                    : "" };
@@ -186,7 +198,8 @@ window.__addCount = 0;
     // 记录令牌是否真的带上了（回归「渲染层没带 token」这类问题）
     window.__sawToken = !!(hdrs['X-TalkScript-Token'] || hdrs['x-talkscript-token']);
     if (s.indexOf('/api/meta') >= 0) {
-      return mk(Object.assign({}, META, { has_api_key: !NOKEY, mock: false }));
+      return mk(Object.assign({}, META,
+        { has_api_key: !NOKEY, mock: false, llm_defaulted: llmDefaulted() }));
     }
     if (s.indexOf('/api/generate') >= 0) {
       calls.gen++; calls.job = 0;
@@ -249,8 +262,13 @@ window.__addCount = 0;
     // 而 saveSettings 在 POST 之后还会走一次 preloadSettings（内含 GET）。
     if (s.indexOf('/api/config') >= 0) {
       var raw = (o && o.body) || '';
-      if (raw) { try { window.__lastConfigBody = JSON.parse(raw); } catch (_) {} }
-      return mk(CONFIG);
+      if (raw) {
+        try { window.__lastConfigBody = JSON.parse(raw); } catch (_) {}
+        // 表单会把 base_url / model 一起发上来（saveSettings 里写死的两项），
+        // 所以「发过 model」就等于「保存过一次」。
+        if (window.__lastConfigBody && window.__lastConfigBody.model) cfgSaved = true;
+      }
+      return mk(Object.assign({}, CONFIG, { llm_defaulted: llmDefaulted() }));
     }
     if (s.indexOf('/api/packs/') >= 0) return mk({ display_name:'电梯行业包', description:'电梯行业口播脚本包',
       draft:ELEVATOR_DRAFT, checklist:'1. 核对参数 / 2. 核对禁用词',
@@ -1506,11 +1524,66 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     firstRun.settingsOpen && firstRun.paneLlm, JSON.stringify(firstRun));
   check("引导卡与示例卡共存（不互相顶掉）",
     firstRun.setup && firstRun.samples === 4, JSON.stringify(firstRun));
+  // 「没配过」必须看得出来。后端会把没写的字段静默兜底成内置默认值
+  // （config.py: model = llm.get("model") or DEFAULT），界面若不标，
+  // 未配置状态和已配置状态长得一模一样：设置页模型名写着 glm-4.7、
+  // 输入区右侧也写着 glm-4.7，用户第一眼就以为配好了。
+  const notCfg = await evalIn(`return (function(){
+    var tag = document.querySelector('#st-model').closest('.block-inner')
+                .querySelector('.tag-default');
+    var ak = document.getElementById('st-apikey');
+    var s = document.getElementById('p-model');
+    var b = s && s.parentNode.querySelector('.select-btn');
+    return { tags: document.querySelectorAll('#pane-llm .tag-default').length,
+             modelTag: tag ? tag.textContent : '',
+             modelTagColor: tag ? getComputedStyle(tag).color : '',
+             akPh: ak.placeholder,
+             pickerText: b ? b.querySelector('.sel-text').textContent : '',
+             pickerValue: s ? s.value : '' };
+  })()`);
+  check("未配置时逐项标出「内置默认」（六项一个不漏）",
+    notCfg.tags === 6 && notCfg.modelTag === "内置默认", JSON.stringify(notCfg));
+  // 中性灰而不是 warn 橙：没配过不是故障，染橙会让橙色贬值
+  // （真正会失败的「未配置 API Key」那条就没人看了）。
+  check("「内置默认」用中性灰而不是警示色",
+    notCfg.modelTagColor !== 'rgb(178, 94, 0)' && /^rgb/.test(notCfg.modelTagColor),
+    notCfg.modelTagColor);
+  // 显示名带「（默认）」，但 value 必须还是原始模型名 ——
+  // 否则 pickModel 里 `val === m.model` 永远不成立，切模型会把
+  // 「glm-4.7（默认）」这个假模型名写进 config.yaml。
+  check("未配置时模型选择器标明「（默认）」且 value 仍是原始模型名",
+    notCfg.pickerText === "glm-4.7（默认）" && notCfg.pickerValue === "glm-4.7",
+    JSON.stringify(notCfg));
+  check("未配置时 Key 输入框不再暗示「已经配过了」",
+    /粘贴/.test(notCfg.akPh), notCfg.akPh);
   // 「没有配置」这个状态留两张图：用户开机第一眼看到的是**自动弹开的设置页**，
   // 关掉之后才看到主界面上的引导卡 —— 两张都要有人看过。
   await shot("setup-settings.png", `${closeMenus} return true;`);
   await shot("setup-main.png",
     `document.getElementById('btn-close-settings').click(); ${closeMenus} return true;`);
+
+  // 从「没配过」走到「配好了」——**同一个页面、不刷新**。
+  // 这一条专门防「标记只增不减」：只在新页面里比对是测不出来的，
+  // 一个「挂上就不摘」的实现在新页面里本来就没挂过标，与正确实现长得一样。
+  await evalIn(`document.getElementById('btn-open-settings').click();
+    window.__ts.setPane('llm'); return true;`);
+  await sleep(600);
+  const beforeSave = await evalIn(
+    `return document.querySelectorAll('#pane-llm .tag-default').length;`);
+  await evalIn(`document.getElementById('st-save').click(); return true;`);
+  await sleep(800);
+  const afterSave = await evalIn(`return (function(){
+    var s = document.getElementById('p-model');
+    var b = s && s.parentNode.querySelector('.select-btn');
+    return { tags: document.querySelectorAll('#pane-llm .tag-default').length,
+             pickerText: b ? b.querySelector('.sel-text').textContent : '' };
+  })()`);
+  check("保存后同一页面里「内置默认」小标立刻消失（不是只增不减）",
+    beforeSave === 6 && afterSave.tags === 0, `${beforeSave} → ${afterSave.tags}`);
+  check("保存后模型选择器同步摘掉「（默认）」",
+    afterSave.pickerText === "glm-4.7", afterSave.pickerText);
+  await evalIn(`document.getElementById('btn-close-settings').click(); return true;`);
+  await sleep(200);
 
   // ── 12d) config.yaml 读坏时的警示 ────────────────────────
   // 读坏之后设置页里填的全是**内置默认值**，而状态行会照常说
@@ -1530,6 +1603,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     var cs = getComputedStyle(n);
     return { hidden: n.classList.contains('hidden'), display: cs.display,
              text: n.textContent, color: cs.color,
+             tags: document.querySelectorAll('#pane-llm .tag-default').length,
              status: document.getElementById('st-status').textContent };
   })()`);
   check("config.yaml 读坏时设置页给出警示（不是静默用默认值）",
@@ -1541,10 +1615,37 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("警示用 warn 色且不顶掉原状态行",
     cfgErr.color === 'rgb(178, 94, 0)' && /已配置 Key/.test(cfgErr.status),
     JSON.stringify(cfgErr));
+  // 读坏与没配过是**同一件事的两个来源**（读坏 = llm 段整个读不到 → 六项全取默认），
+  // 所以两个信号必须同时出现：只有橙色警示、框上却不标默认，说明前端只消费了
+  // 其中一个字段 —— 那正是「信号算对了但没人接」的老毛病。
+  check("读坏时「内置默认」小标与橙色警示同时出现",
+    cfgErr.tags === 6, JSON.stringify(cfgErr));
 
   // 回到正常模式，继续后面的布局检查
   await cdp.send("Page.navigate", { url: `http://127.0.0.1:${PORT}/?token=stubtoken` });
   await sleep(1600);
+  await evalIn(`document.getElementById('settings-screen').classList.add('hidden'); return true;`);
+
+  // 反向对照：配好之后这些标记必须**全部消失**。
+  // 没有这三条，一个「永远挂 6 个标 / 永远带（默认）后缀」的实现也能过上面那几条 ——
+  // 断言只证明「未配置时看得见」，证明不了「已配置时看不见」。
+  await evalIn(`document.getElementById('btn-open-settings').click();
+    window.__ts.setPane('llm'); return true;`);
+  await sleep(600);
+  const cfgd = await evalIn(`return (function(){
+    var ak = document.getElementById('st-apikey');
+    var s = document.getElementById('p-model');
+    var b = s && s.parentNode.querySelector('.select-btn');
+    return { tags: document.querySelectorAll('#pane-llm .tag-default').length,
+             akPh: ak.placeholder,
+             pickerText: b ? b.querySelector('.sel-text').textContent : '' };
+  })()`);
+  check("已配置时「内置默认」小标全部消失（不误报）",
+    cfgd.tags === 0, JSON.stringify(cfgd));
+  check("已配置时模型名不带「（默认）」后缀（不误报）",
+    cfgd.pickerText === "glm-4.7", cfgd.pickerText);
+  check("已配置时 Key 输入框回到「留空即保持不变」",
+    /留空即保持不变/.test(cfgd.akPh), cfgd.akPh);
   await evalIn(`document.getElementById('settings-screen').classList.add('hidden'); return true;`);
 
   // ── 12e) 行业包读坏时的警示 ──────────────────────────────

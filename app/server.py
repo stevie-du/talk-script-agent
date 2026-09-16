@@ -295,6 +295,10 @@ def create_app(root: Path, token: str | None = None,
             "packs": [p.model_dump() for p in packs],
             "default_pack": cfg.default_pack,
             "model": cfg.llm.model,
+            # 模型名是不是内置默认（用户没配过）。输入区右侧的模型选择器靠它
+            # 把「glm-4.7」标成「glm-4.7（默认）」—— 不标的话，未配置状态下
+            # 界面看起来像是已经配好了模型。
+            "llm_defaulted": cfg.llm_defaulted,
             "base_url": cfg.llm.base_url,
             "has_api_key": bool(cfg.llm.api_key),
             "mock": cfg.mock,
@@ -528,6 +532,10 @@ def create_app(root: Path, token: str | None = None,
                 # 显示出来（「已配置 Key · 模型 glm-4.7」），用户完全看不出
                 # 自己填的 base_url 其实没生效 —— 又一处静默降级。
                 "config_error": cfg.config_error,
+                # 哪些字段还是内置默认（文件里没写、环境里也没有）。与 config_error
+                # 是同一类信号的两个来源：一个是「你的配置读坏了」，一个是「你还没配」。
+                # 少了它，界面会把内置默认当用户配置显示（模型名写着 glm-4.7）。
+                "llm_defaulted": cfg.llm_defaulted,
                 "env_override": bool(os.environ.get("TALKSCRIPT_API_KEY"))}
 
     @app.post("/api/config")

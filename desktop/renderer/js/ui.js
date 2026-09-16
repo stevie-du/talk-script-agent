@@ -104,12 +104,24 @@ export function renderModelPicker() {
   if (!m) return;
 
   const cur = m.mock ? "mock 模式" : (m.model || "未配置模型");
+  // 这个模型名是不是内置默认（用户从没配过）。
+  //
+  // 为什么必须标出来：后端在没配 model 时会静默兜底成 DEFAULT_CONFIG 里那个
+  // （glm-4.7），界面于是把一个**用户没选过的值**当「当前模型」显示 ——
+  // 未配置状态与已配置状态长得一模一样。
+  //
+  // ⚠ 显示名与 option.value 必须分开：一旦把 value 也写成带「（默认）」的串，
+  // pickModel 里那句 `val === m.model` 就永远不成立，切模型会把
+  // 「glm-4.7（默认）」这个假模型名写进 config.yaml。
+  const isDefault = !m.mock && (m.llm_defaulted || []).includes("model");
+  const tag = (name) => (isDefault && name === cur) ? `${name}（默认）` : name;
+
   const sel = el("select");
   sel.id = "p-model";
   sel.dataset.pill = "1";
   for (const name of [cur, ...modelHistory().filter(n => n !== cur)]) {
-    const o = el("option", "", esc(name));
-    o.value = name;
+    const o = el("option", "", esc(tag(name)));
+    o.value = name;              // ← 原始名，不带「（默认）」后缀
     sel.appendChild(o);
   }
   // 「自定义」不是装饰项：没有它，换新模型就无处可去，这个下拉会变成封闭集合。
@@ -118,9 +130,14 @@ export function renderModelPicker() {
   sel.appendChild(custom);
   sel.value = cur;
   sel._mock = !!m.mock;
+  // 橙色只留给「真的会失败」的情形（没 Key → 生成必被拒）。
+  // 「用的是内置默认模型」不加橙色：默认值本身是可用的（配上 Key 就能跑），
+  // 把它也染橙会让警示贬值 —— 用户一旦习惯忽略橙色，真正会失败的那条也就被忽略了。
+  // 它要传达的「这不是你配的」由文字后缀（默认）+ 这里的 title 承担。
   sel._warnNote = m.has_api_key
     ? "" : "未配置 API Key —— 生成会被拒绝，点击去「模型接口」填写";
-  sel.title = `当前模型：${cur}。切换后对后续生成生效（正在跑的作业不受影响）`;
+  sel.title = `当前模型：${cur}${isDefault ? "（内置默认，还没配过自己的）" : ""}。`
+    + "切换后对后续生成生效（正在跑的作业不受影响）";
   sel.onchange = () => pickModel(sel);
   box.appendChild(sel);
   beautifySelects(box);
