@@ -199,9 +199,13 @@ body {
    现在按 FILE_ROLE 分组：每张卡片 = 图标 + 文件名 + 角色描述 + 大小，
    选中后下方查看器显示完整内容。点击同一卡再次切换查看器开关。
    「分组 → 卡片 → 查看器」三层结构，对应 Zcode 的 "已安装/浏览器插件/文档技能"。 */
-/* 外层：从 row 改为 column：上面分组卡片区，下面查看器。
-   列方向 + 无 border，让卡片自己有 border（hover/选中更好反馈） */
-.kb-wrap { display: flex; flex-direction: column; gap: var(--s5); align-items: stretch; }
+/* 外层：左右分栏 —— 左侧文件列表（固定宽度、可滚动），右侧内容查看器（占剩余）。
+   ⚠ 历史是 `flex-direction: column`，文件列表和查看器**上下堆叠**——
+   列表本身有 839px 高，查看器被挤到屏外只露出 68px 的头，看起来「右侧空」。
+   用户 2026-09-16 贴图报的就是这个。判据见 `_verify/verify.js`：列表与查看器
+   必须左右并排（`view.left > list.right`），不是上下（`view.top >= list.bottom`）。
+   「分组 → 卡片 → 查看器」三层结构保留，只是把它们放进左右两栏。 */
+.kb-wrap { display: flex; flex-direction: row; gap: var(--s5); align-items: stretch; }
 /* 分组容器：垂直堆叠（每组 6-8 个卡片，太宽反而要滚屏）*/
 .kb-groups { display: flex; flex-direction: column; gap: var(--s4); }
 /* 单个分组：组标题 + 卡片堆栈 */
@@ -288,17 +292,17 @@ body {
 .kb-item[data-role="compliance"] .kb-icon { background: var(--warn-soft); color: var(--warn); }
 .kb-item[data-role="knowledge"] .kb-icon { background: var(--ok-soft); color: var(--ok); }
 
-/* 列表区：从 250px 固定框改为卡片网格容器（无 border，由 .kb-item 自带描边）*/
+/* 列表区：固定 340px 宽，超出滚动；卡片网格本身已自带描边，列表无边框无背景。 */
 .kb-list {
-  flex: 0 0 auto; max-height: none; overflow: visible;
+  flex: 0 0 340px; max-height: 70vh; overflow: auto;
   border: none; padding: 0; background: transparent;
 }
-/* 查看器：紧跟卡片网格下方，独立一段 */
+/* 查看器：占剩余宽度，竖向排（head + body）。 */
 .kb-view { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .kb-view-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: var(--s2); }
 .kb-view-head .lbl { margin-bottom: 0; }
 .kb-body {
-  flex: 1; margin: 0; max-height: 50vh; overflow: auto;
+  flex: 1; margin: 0; overflow: auto;
   background: var(--fill); border-radius: var(--r-md); padding: 12px;
   font: 12px/1.7 var(--mono); white-space: pre-wrap; word-break: break-word;
 }

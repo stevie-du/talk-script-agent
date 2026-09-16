@@ -1070,6 +1070,23 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     JSON.stringify(kb));
   const kbOver = await evalIn(overflowProbe("#kb-list .kb-item"));
 
+  // 知识/技能面板的文件列表与内容查看器**必须左右并排**，不能上下堆叠。
+  // 历史 `.kb-wrap { flex-direction: column }` 让列表（h≈839px）把查看器挤到屏外，
+  // 只露出 68px 的头，看起来「右侧空」—— 用户 2026-09-16 贴图报的就是这个。
+  // 判据：水平重叠意味着并排（`view.left > list.right` 且垂直区间有重叠）。
+  // 不用「左右相邻」是因为中间隔了一个 `gap`，要承认那 20px。
+  const kbLayout = await evalIn(`return (function(){
+    var l = document.querySelector('#pane-kb .kb-list').getBoundingClientRect();
+    var v = document.querySelector('#pane-kb .kb-view').getBoundingClientRect();
+    return { list:{w:Math.round(l.width),h:Math.round(l.height)},
+             view:{w:Math.round(v.width),h:Math.round(v.height)},
+             gap:Math.round(v.left - l.right),
+             vertOverlap: Math.min(l.bottom, v.bottom) - Math.max(l.top, v.top) };
+  })()`);
+  check("知识面板是左右分栏（列表与查看器水平重叠，不是上下堆叠）",
+    kbLayout.gap >= 0 && kbLayout.gap < 50 && kbLayout.vertOverlap > 100,
+    JSON.stringify(kbLayout));
+
   await evalIn(`[...document.querySelectorAll('#kb-list .kb-item')]
     .find(n => n.querySelector('.kb-name').textContent.includes('knowledge')).click(); return true;`);
   await sleep(300);
