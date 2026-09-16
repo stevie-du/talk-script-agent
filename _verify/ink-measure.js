@@ -24,8 +24,11 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const zlib = require("zlib");
 const { freePort, killTree, launchChrome, waitTarget, connect } = require("./lib/cdp");
+// PNG 解码与亮度换算统一放在 `lib/png.js`（同一个口径只留一份）。
+// 原来这里自带一份解码器，`png-tools.js` 又抄了一份 —— 改一处忘一处的老路。
+// `lumAt(img, x, y)` 与原局部实现的签名一致，下面的调用处不用改。
+const { decodePNG, lumAt: lum } = require("./lib/png");
 
 const APP_CDP = 9333;
 const TARGET = process.argv[2] || ".group-lbl";
@@ -36,59 +39,6 @@ const DSF = 2;                    // Emulation 的 deviceScaleFactor 也会乘�
 const PX_PER_CSS = SCALE * DSF;   // 图 px / CSS px
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-/** 最小 PNG 解码：只支持 8bit / 非隔行 / colorType 0|2|6（CDP 截图就是这个） */
-function decodePNG(buf) {
-  if (buf.readUInt32BE(0) !== 0x89504e47) throw new Error("不是 PNG");
-  let pos = 8, width = 0, height = 0, bitDepth = 0, colorType = 0;
-  const idat = [];
-  while (pos < buf.length) {
-    const len = buf.readUInt32BE(pos);
-    const type = buf.toString("ascii", pos + 4, pos + 8);
-    if (type === "IHDR") {
-      width = buf.readUInt32BE(pos + 8);
-      height = buf.readUInt32BE(pos + 12);
-      bitDepth = buf[pos + 16];
-      colorType = buf[pos + 17];
-    } else if (type === "IDAT") {
-      idat.push(buf.slice(pos + 8, pos + 8 + len));
-    } else if (type === "IEND") break;
-    pos += 12 + len;
-  }
-  if (bitDepth !== 8) throw new Error("只支持 8bit，实际 " + bitDepth);
-  const ch = colorType === 6 ? 4 : colorType === 2 ? 3 : colorType === 0 ? 1 : 0;
-  if (!ch) throw new Error("不支持的 colorType " + colorType);
-  const raw = zlib.inflateSync(Buffer.concat(idat));
-  const stride = width * ch;
-  const out = Buffer.alloc(height * stride);
-  let rp = 0;
-  for (let y = 0; y < height; y++) {
-    const f = raw[rp++];
-    const line = raw.subarray(rp, rp + stride); rp += stride;
-    // 必须用 subarray（视图），slice 是拷贝、写不回去
-    const cur = out.subarray(y * stride, (y + 1) * stride);
-    const prev = y > 0 ? out.subarray((y - 1) * stride, y * stride) : null;
-    for (let x = 0; x < stride; x++) {
-      const a = x >= ch ? cur[x - ch] : 0;
-      const b = prev ? prev[x] : 0;
-      const c = (prev && x >= ch) ? prev[x - ch] : 0;
-      let v = line[x];
-      if (f === 1) v += a;
-      else if (f === 2) v += b;
-      else if (f === 3) v += (a + b) >> 1;
-      else if (f === 4) {
-        const p = a + b - c, pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
-        v += (pa <= pb && pa <= pc) ? a : (pb <= pc ? b : c);
-      }
-      cur[x] = v & 255;
-    }
-  }
-  return { width, height, ch, data: out };
-}
-
-const lum = (img, x, y) => {
-  const i = (y * img.width + x) * img.ch;
-  return (img.data[i] + img.data[i + 1] + img.data[i + 2]) / 3;
-};
 
 (async function main() {
   const targets = await (await fetch(`http://127.0.0.1:${APP_CDP}/json/list`)).json();
