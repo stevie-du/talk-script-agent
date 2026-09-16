@@ -1174,7 +1174,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     // ⚠ .left-sep 已于 2026-09-16 移除（动作区与内容区改为只用 16px 等距区分）。
     // 这里**不能**再 querySelector('.left-sep') —— 元素不存在会拿到 null，
     // 下面的 .getBoundingClientRect() 抛 TypeError，会把后续所有断言一起带走
-    // （实测：脚本 34s 崩溃退出，后面几十条根本没跑）。改为直接量「按钮 → 搜索」。
+    // （判据：**耗时明显短于正常**就说明中途崩了，后面的断言根本没跑 ——
+    //   具体耗时每次不同，别抄数字，跑一遍自己对；见 LESSONS「断言空转」）。
+    // 改为直接量「按钮 → 搜索」。
     const head = r('.left-head'), btn = r('#btn-new-chat'),
           sea = r('.sess-search'), sc = r('.left-scroll');
     const footEl = document.querySelector('.left-foot');
@@ -1231,7 +1233,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   //
   // ⚠ 别把这条断言加回来 —— 它守的元素已不存在，`querySelector` 返回 null 后
   // `.getBoundingClientRect()` 会抛 TypeError，把后续所有断言一起带走
-  // （实测脚本 34s 崩溃退出，后面几十条根本没跑）。
+  // （崩溃信号：**总耗时明显短于正常**，因为后面的断言压根没执行）。
   // 守卫职责已转交给上面两条：「左栏竖向节奏统一 16px（含底部设置区）」
   // 与「按钮→搜索→列表 等距 16」—— 它们守的是同一个「统一节奏」的意图。
 
