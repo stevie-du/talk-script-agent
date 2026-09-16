@@ -1001,6 +1001,25 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     adv.retries === "2" && adv.timeout === "180" && adv.max === "16000" && adv.editable,
     JSON.stringify(adv));
 
+  // 同一组字段的标签必须一样高。
+  // 「重试次数」标签里有个行内的 `.linkbtn`（「恢复默认」）—— 它同样是 `<button>`，
+  // 被全局 `button { height: var(--h-btn) }`（30px）接管；`label.lbl` 是块盒，
+  // 这个 inline-block 会把**行盒**顶到 30px，于是四个字段里只有它比别人高 14px，
+  // 那一个输入框跟着下沉，整组字段的节奏就断了（实测 16 / 30 / 16 / 16）。
+  // 判据是「彼此相等」而不是某个绝对值：把 30 改成 24 也一样是坏的。
+  const advLbl = await evalIn(`return (function(){
+    var rows = [].slice.call(document.querySelectorAll('#st-adv .block-inner'))
+      .map(function (b) {
+        var l = b.querySelector('.lbl');
+        return { t: l ? l.textContent.trim().slice(0, 4) : '',
+                 h: l ? Math.round(l.getBoundingClientRect().height * 10) / 10 : -1 };
+      });
+    var hs = rows.map(function (r) { return r.h; });
+    return { rows: rows, same: hs.length > 1 && hs.every(function (h) { return h === hs[0]; }) };
+  })()`);
+  check("高级配置里各字段的标签行高一致（行内按钮不再顶高行盒）",
+    advLbl.same, JSON.stringify(advLbl));
+
   await evalIn(`window.__ts.setPane('llm');
     const t = document.getElementById('st-timeout');
     t.value = '60'; t.dispatchEvent(new Event('input', {bubbles:true}));

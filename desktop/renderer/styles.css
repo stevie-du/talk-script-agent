@@ -179,9 +179,17 @@ body {
 }
 
 /* 标签行内的小文字按钮（「恢复默认」）：不能抢标签的视觉重量，
-   但要有明确的可点区域与悬停反馈，否则会被当成一段说明文字。 */
+   但要有明确的可点区域与悬停反馈，否则会被当成一段说明文字。
+   ⚠ 它同样是 `<button>`，会被全局 `button { height: var(--h-btn) }`（30px）接管 ——
+   而它是**行内的文字按钮**，写着的 `padding: 2px 6px` 意图是 20px 高。
+   被撑到 30px 的后果：`label.lbl` 是块盒，里面这个 inline-block 会把**行盒**顶到
+   30px —— 同一组四个字段里，只有带「恢复默认」的那个标签比别人高 14px，
+   那一个输入框跟着下沉，整组字段的节奏就断了（实测：16 / 30 / 16 / 16）。
+   这里 `height:auto` 拿回 20px 的真实高度，再用 -2px 的上下外边距把**外边距盒**
+   压回 16px（行盒看的是外边距盒），于是标签仍是 16px、可点区域仍是 20px。
+   判据见 `_verify/verify.js`：同一组字段的 `.lbl` 高度必须完全一致。 */
 .linkbtn {
-  margin-left: 8px; padding: 2px 6px; border: 0; border-radius: var(--r-sm);
+  height: auto; margin: -2px 0 -2px 8px; padding: 2px 6px; border: 0; border-radius: var(--r-sm);
   background: transparent; color: var(--text-2); font-size: var(--f-xs);
   font-weight: 500; cursor: pointer; text-decoration: underline;
   text-decoration-color: var(--line-strong); text-underline-offset: 2px;
@@ -222,6 +230,8 @@ body {
      18px —— 而**下一张卡的白底正好把漏出的那半行盖住**，界面上看到的是
      「文件名下面漂着一行小字、还压在下一张卡上」，最后一张卡则整行露在组外。
      （2026-09-16 用户贴图报的就是这个。）
+     同类先例：`.sample-card` 也是「按钮当卡片用」，它早就写了 `height: auto`
+     —— 这条规则就是照着它补的。
      判据见 `_verify/verify.js` 的「卡片容得下内容」断言：拿每个非绝对定位子元素
      的底边与卡的内容盒底边比，**不能有溢出**。 */
   height: auto;
