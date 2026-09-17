@@ -1144,6 +1144,17 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     kbLayout.gap >= 0 && kbLayout.gap < 50 && kbLayout.vertOverlap > 100,
     JSON.stringify(kbLayout));
 
+  // 知识 / 技能面板的「列表 + 查看器」两列形态，跟生成偏好 / 模型接口 /
+  // 行业包 这套三列骨架是**同一个家族** —— 「左栏 nav + 中列条目 +
+  // 右列详情」。这条断言是把这两条既有的几何口径**统一表达**。
+  // ⚠ 只看**宽度**（核心几何），不看高度 —— 高度取决于文件列表加载状态，
+  // 桩环境里 182~576 都有可能，加载完才算稳定。
+  check("知识 / 技能面板复用三列骨架的几何口径（list w=340 / view w=312 / gap=20）",
+    Math.abs(kbLayout.list.w - 340) < 1
+      && Math.abs(kbLayout.view.w - 312) < 1
+      && Math.abs(kbLayout.gap - 20) < 1,
+    JSON.stringify(kbLayout));
+
   // 内容查看器必须**自己成块**（不透明于白底），不能是 `--fill` (4%) 那种
   // 几乎透明的底 —— 否则 3 列布局的右栏「看起来什么都没有」。
   // 修法见 styles.css 的 `.kb-body` 注释：背景换 `--fill-strong` (7%) + `box-shadow` 发丝线。
