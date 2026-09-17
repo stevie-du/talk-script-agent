@@ -18,6 +18,14 @@ Electron:  主进程 spawn 本模块并轮询 /api/health
     PackError       → 404（行业包不存在）
     StateConflict   → 409（并发操作与当前状态冲突）
     ValueError      → 400（参数不合法）
+    LLMError        → 502（上游模型调用失败 —— 令牌过期/网络/解析失败，
+                          都让 toast 看到具体理由，而不是「HTTP 500」）
+
+为什么 P0-2 之后这块仍要单独加：原兜底只覆盖 PackError / StateConflict /
+ValueError，**任何没被显式 catch 的异常都跌成 FastAPI 默认 500、空 body** —
+`LLMError` 即属此类（HTTP 401 / 502、连接失败、JSON 解析失败等）。前端
+`toast(e.message)` 只拿到一句「HTTP 500」，连「令牌已过期」这种用户最该
+看见的信息都丢了，是项目核心取向「让不可见的失效变得可见」的典型漏网。
 """
 from __future__ import annotations
 
@@ -40,7 +48,7 @@ from .config import (DEFAULT_MODEL, ensure_config_template, load_config,
 from .fileio import write_atomic
 from .jobs import StateConflict
 from .knowledge import Pack, PackBrokenError, PackError, list_packs
-from .llm import LLMClient
+from .llm import LLMClient, LLMError
 from .packgen import create_pack
 from .pipeline import MAX_CONCURRENT_JOBS, Pipeline
 from .schemas import (ConfirmRequest, GenerateRequest, PackCreateRequest,
@@ -402,6 +410,13 @@ def create_app(root: Path, token: str | None = None,
             raise HTTPException(409, str(e))
         except ValueError as e:
             raise HTTPException(400, str(e))
+        except LLMError as e:
+            # 上游模型调用失败（令牌过期 / 网络 / 解析失败等）。
+            # 兜底会让它跌成 FastAPI 默认 500、空 body，toast 只拿到「HTTP 500」，
+            # 连「令牌已过期」这种最该给用户看的理由都丢了 —— 与本项目「让不可见的
+            # 失效变得可见」的核心取向直接违背。502 而不是 500：服务本身没坏，
+            # 坏的是依赖的上游。
+            raise HTTPException(502, str(e))
 
     @app.post("/api/packs/{name}/export-skill")
     def packs_export(name: str, include_private: bool = False):

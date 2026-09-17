@@ -111,6 +111,32 @@ def test_security_helpers():
     assert not origin_allowed("https://evil.example", "127.0.0.1:8765")
     assert not origin_allowed("http://127.0.0.1:8765", "")                # 无 Host 不放行
 
+# ── 错误映射：上游 LLM 失败必须显式 502，不是默认 500 ─────────
+def test_packs_create_returns_502_on_llm_error(tmp_path):
+    """POST /api/packs/create 上游 LLM 抛错时，必须得到 502 + 一句人话理由。
+
+    修复前兜底只 catch FileExistsError / ValueError —— `LLMError`（含令牌过期 /
+    连接失败 / 解析失败）一律跌成 FastAPI 默认 500、空 body。前端 toast 只看到
+    「HTTP 500」，连「令牌已过期或验证不正确」这种用户最该看到的理由都丢了。
+    修法：packs_create 显式 except LLMError → raise HTTPException(502, str(e))。
+    """
+    from unittest.mock import patch
+    from app.llm import LLMError
+
+    tmp = _tmp_root()
+    c = _client(tmp)
+
+    fake_msg = "模型接口返回 401: {\"code\":\"401\",\"message\":\"令牌已过期\"}"
+    with patch("app.server.create_pack",
+               side_effect=LLMError(fake_msg)):
+        r = c.post("/api/packs/create",
+                   json={"industry": "装修", "description": "装修从基装到软装的的全流程"})
+    assert r.status_code == 502, (r.status_code, r.text)
+    # 理由必须进 body —— 否则前端 toast 还是只能看到「HTTP 502」。
+    assert "令牌已过期" in r.text, r.text
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
 # ── B/C 错误映射与输入边界 ──────────────────────────────────
 def test_error_mapping_and_bounds(tmp_path):
     tmp = _tmp_root()
