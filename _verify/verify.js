@@ -1246,6 +1246,69 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       && Math.abs(kbLayout.gap - 20) < 1,
     JSON.stringify(kbLayout));
 
+  // 知识 / 技能列表条目（.kb-item）与模型 / 行业包列表条目（.pl-item）
+  // 共享同一套视觉语言 —— 用户 2026-09-17 反馈「知识 / 技能 跟其他面板
+  // 没有统一」。判据：padding / 圆角 / grid 布局 / 默认背景 这些**几何
+  // 字段**取一致；不写死数值、而是用 kb-item 实际拿到的 computedStyle
+  // 跟已经走过的 llm 面板上 .pl-item 比 —— 任意一边变了就让它们不一致，
+  // 就能抓到「谁飘了」。
+  // 为什么不同时取两者做绝对值断言：「写死的数值」是上一版的写法，
+  // 平移整个家族时要回填好几处；用「两者相等」就把这部分免了。
+  // ⚠ 1. 背景要看 alpha：「透明」三种写法 (`transparent` / `rgba(...,0)` /
+  //    `rgba(0,0,0,0)`) 在 computedStyle 里有不同字符串，但都该判成同色。
+  // ⚠ 2. 取 pl-item 时要避开 `.on` / `.sel`（业务高亮态）—— 那两个态有
+  //    自己的视觉落点（surface 背景 + 描边），跟默认态的「透明背景」不是一回事。
+  const kbVisMatch = await evalIn(`return (function(){
+    var kb = document.querySelector('#kb-list .kb-item');
+    if (!kb) return { ok: false, reason: 'no kb-item' };
+    // 找一条既未启用也未选中的 pl-item —— 默认态才是「视觉同族」的对照。
+    var pl = document.querySelector('.pl-item:not(.on):not(.sel)');
+    // 兜底：若所有 pl-item 都带状态（极端情况），fallback 到第一条
+    // —— 这样不会因为环境差异而报一个「没有 pl-item」的红，依然拿到对比数据。
+    var plUsed = pl || document.querySelector('.pl-item');
+    if (!plUsed) return { ok: false, reason: 'no pl-item', kb: !!kb };
+    var k = getComputedStyle(kb), p = getComputedStyle(plUsed);
+    var bg = function(s){
+      // 'transparent' / 'rgba(0, 0, 0, 0)' / 正常色 都解析出 alpha
+      var m = String(s || '').match(/^rgba?\(([^)]+)\)/);
+      if (!m) return s === 'transparent' ? 0 : null;
+      var parts = m[1].split(',').map(function(x){return parseFloat(x.trim());});
+      return parts.length >= 4 ? parts[3] : 1;
+    };
+    // grid-template-columns 是「30px 1fr auto」这种字符串，**实际像素**
+    // 取决于容器宽度（kb-list 340 vs llm-list 258，1fr 解出来不同）。
+    // 这里只比**第一列的图标宽度**（统一都该是 30px）—— 它是设计上的对齐点，
+    // 不会随容器宽度变。
+    var firstCol = function(g){
+      // ⚠ 不能在模板字符串里写包含反斜杠的正则 —— 一些写法会被外层
+      //   模板字符串吃掉反斜杠，再被吃掉模板里的反引号注释。
+      //   直接拆空格 + 用字符类 [0-9]，避开反斜杠与反引号。
+      var s = String(g || '').trim();
+      var first = s.split(/[ ]+/)[0] || '';
+      return /^[0-9]+(?:\.[0-9]+)?px$/.test(first) ? parseFloat(first) : null;
+    };
+    return {
+      ok: k.padding === p.padding
+        && k.borderRadius === p.borderRadius
+        && k.fontSize === p.fontSize
+        && firstCol(k.gridTemplateColumns) === firstCol(p.gridTemplateColumns)
+        && firstCol(k.gridTemplateColumns) === 30
+        && bg(k.backgroundColor) === 0
+        && bg(p.backgroundColor) === 0,
+      kb: { padding: k.padding, radius: k.borderRadius,
+            grid: k.gridTemplateColumns, fontSize: k.fontSize,
+            iconCol: firstCol(k.gridTemplateColumns),
+            bgAlpha: bg(k.backgroundColor) },
+      pl: { padding: p.padding, radius: p.borderRadius,
+            grid: p.gridTemplateColumns, fontSize: p.fontSize,
+            iconCol: firstCol(p.gridTemplateColumns),
+            bgAlpha: bg(p.backgroundColor),
+            classes: String(plUsed.className) }
+    };
+  })()`);
+  check("知识 / 技能列表条目与 .pl-item 视觉同族（透明默认 + 一致几何）",
+    kbVisMatch.ok, JSON.stringify(kbVisMatch));
+
   // 内容查看器必须**自己成块**（不透明于白底），不能是 `--fill` (4%) 那种
   // 几乎透明的底 —— 否则 3 列布局的右栏「看起来什么都没有」。
   // 修法见 styles.css 的 `.kb-body` 注释：背景换 `--fill-strong` (7%) + `box-shadow` 发丝线。
