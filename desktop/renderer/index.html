@@ -384,7 +384,7 @@
         </div>
       </section>
 
-      <section class="stg-pane hidden" id="pane-kb" data-pane="kb">
+      <section class="stg-pane hidden has-cols" id="pane-kb" data-pane="kb">
         <header class="page-head">
           <div class="page-head-titles">
             <h2>知识库</h2>
@@ -398,29 +398,31 @@
             <button class="ghost bordered" id="kb-add" title="新增资料（暂未接入，请直接编辑包目录下的文件）" disabled>新增</button>
           </div>
         </header>
-        <div class="page-card">
-          <div class="block-inner">
-            <label class="lbl">行业包</label>
-            <select id="kb-pack"></select>
-            <p class="hint">下面是该行业包随包分发的资料文件，生成时会被自动引用。
-              当前为<b>只读</b>查看；要改请直接编辑包目录里的文件（改完重新生成即生效）。</p>
-          </div>
-          <!-- 三列骨架：中列「文件列表」+ 右列「文件内容」。
-             与生成偏好 / 模型接口 / 行业包 共用 `.stg-cols` 骨架（2026-09-17 统一）。 -->
-          <div class="stg-cols">
-            <div class="kb-list" id="kb-list"><p class="hint">载入中…</p></div>
-            <div class="kb-view">
-              <div class="kb-view-head">
-                <span id="kb-title" class="lbl">未选择文件</span>
-                <span id="kb-size" class="hint"></span>
-              </div>
-              <pre id="kb-body" class="kb-body">从左侧选择一个文件查看内容。</pre>
+        <!-- 行业包过滤器：三层结构里位于 page-head 与 .stg-cols 之间。
+             不要套 `.page-card` 包装 —— 那层带 border-top + padding，会让面板
+             头部多一条横线、跟模型接口 / 行业包长得不一样（2026-09-17 统一）。
+             .kb-filter 自己负责 spacing（label / select / hint 三段间距）。 -->
+        <div class="kb-filter">
+          <label class="lbl">行业包</label>
+          <select id="kb-pack"></select>
+          <p class="hint">下面是该行业包随包分发的资料文件，生成时会被自动引用。
+            当前为<b>只读</b>查看；要改请直接编辑包目录里的文件（改完重新生成即生效）。</p>
+        </div>
+        <!-- 三列骨架：中列「文件列表」+ 右列「文件内容」。
+           与生成偏好 / 模型接口 / 行业包 共用 `.stg-cols` 骨架（2026-09-17 统一）。 -->
+        <div class="stg-cols">
+          <div class="kb-list" id="kb-list"><p class="hint">载入中…</p></div>
+          <div class="kb-view">
+            <div class="kb-view-head">
+              <span id="kb-title" class="lbl">未选择文件</span>
+              <span id="kb-size" class="hint"></span>
             </div>
+            <pre id="kb-body" class="kb-body">从左侧选择一个文件查看内容。</pre>
           </div>
         </div>
       </section>
 
-      <section class="stg-pane hidden" id="pane-skills" data-pane="skills">
+      <section class="stg-pane hidden has-cols" id="pane-skills" data-pane="skills">
         <header class="page-head">
           <div class="page-head-titles">
             <h2>技能</h2>
@@ -434,24 +436,23 @@
             <button class="ghost bordered" id="skills-add" title="新增技能（暂未接入，请直接编辑包目录下的文件）" disabled>新增</button>
           </div>
         </header>
-        <div class="page-card">
-          <div class="block-inner">
-            <label class="lbl">行业包</label>
-            <select id="skills-pack"></select>
-            <p class="hint">下面是该包描述技能「怎么写、怎么改、怎么校验」的文件 —— skill.yaml
-              与 rules / patterns / compliance 下的内容。当前为<b>只读</b>查看。</p>
-          </div>
-          <!-- 三列骨架：中列「文件列表」+ 右列「文件内容」。
-             与生成偏好 / 模型接口 / 行业包 / 知识库 共用 `.stg-cols` 骨架。 -->
-          <div class="stg-cols">
-            <div class="kb-list" id="skills-list"><p class="hint">载入中…</p></div>
-            <div class="kb-view">
-              <div class="kb-view-head">
-                <span id="skills-title" class="lbl">未选择文件</span>
-                <span id="skills-size" class="hint"></span>
-              </div>
-              <pre id="skills-body" class="kb-body">从左侧选择一个文件查看内容。</pre>
+        <!-- 行业包过滤器（与 kb 同型：见 #pane-kb 的 `.kb-filter` 注释）。 -->
+        <div class="kb-filter">
+          <label class="lbl">行业包</label>
+          <select id="skills-pack"></select>
+          <p class="hint">下面是该包描述技能「怎么写、怎么改、怎么校验」的文件 —— skill.yaml
+            与 rules / patterns / compliance 下的内容。当前为<b>只读</b>查看。</p>
+        </div>
+        <!-- 三列骨架：中列「文件列表」+ 右列「文件内容」。
+           与生成偏好 / 模型接口 / 行业包 共用 `.stg-cols` 骨架。 -->
+        <div class="stg-cols">
+          <div class="kb-list" id="skills-list"><p class="hint">载入中…</p></div>
+          <div class="kb-view">
+            <div class="kb-view-head">
+              <span id="skills-title" class="lbl">未选择文件</span>
+              <span id="skills-size" class="hint"></span>
             </div>
+            <pre id="skills-body" class="kb-body">从左侧选择一个文件查看内容。</pre>
           </div>
         </div>
       </section>

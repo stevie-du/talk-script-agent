@@ -317,6 +317,15 @@ body {
 .linkbtn:hover { background: var(--fill); color: var(--text-1); }
 .linkbtn:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
 
+/* 知识 / 技能面板的「行业包过滤器」：夹在 page-head 与 .stg-cols 之间。
+   原先套在 `.page-card > .block-inner` 里 —— 那一层带 border-top + padding，
+   让面板头下多一条线、跟其他三列面板不同。抽出来单独管 spacing（2026-09-17 统一）。 */
+.kb-filter {
+  display: flex; flex-direction: column; gap: var(--s3);
+  margin-bottom: var(--s5);
+}
+.kb-filter > .hint { color: var(--text-3); }
+
 /* ══════════════ 布局骨架 ══════════════
    main = 左栏（导航）+ 右栏（内容），两栏各自拥有头部；
    不再有通栏 header，导航区与工作区的视觉边界由此确立。 */

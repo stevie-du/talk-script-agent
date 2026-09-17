@@ -1235,16 +1235,57 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     kbLayout.gap >= 0 && kbLayout.gap < 50 && kbLayout.vertOverlap > 100,
     JSON.stringify(kbLayout));
 
-  // 知识 / 技能面板的「列表 + 查看器」两列形态，跟生成偏好 / 模型接口 /
-  // 行业包 这套三列骨架是**同一个家族** —— 「左栏 nav + 中列条目 +
-  // 右列详情」。这条断言是把这两条既有的几何口径**统一表达**。
-  // ⚠ 只看**宽度**（核心几何），不看高度 —— 高度取决于文件列表加载状态，
-  // 桩环境里 182~576 都有可能，加载完才算稳定。
-  check("知识 / 技能面板复用三列骨架的几何口径（list w=340 / view w=312 / gap=20）",
+// 知识 / 技能面板的「列表 + 查看器」两列形态，跟生成偏好 / 模型接口 /
+// 行业包 这套三列骨架是**同一个家族** —— 「左栏 nav + 中列条目 +
+// 右列详情」。这条断言是把这两条既有的几何口径**统一表达**。
+// ⚠ 列表宽度（kb-list w=340）与间隙（gap=20）由 .kb-list 固定，
+// 不随面板宽度变；右列查看器宽度则随节宽（has-cols 已生效，节宽
+// ≈1160px）涨到 618 上下，**不再固定 312**（那是 720px 窄面板的旧值）。
+// 判据分开两部分：① 列表 + 间隙 是「列表条目」的固有几何；
+// ② 查看器的「够宽」（≥ 一半节宽）是「与其它面板三列对齐」的几何。
+check("知识 / 技能面板三列骨架几何（list w=340 / gap=20 / view 不小于节宽一半）",
     Math.abs(kbLayout.list.w - 340) < 1
-      && Math.abs(kbLayout.view.w - 312) < 1
-      && Math.abs(kbLayout.gap - 20) < 1,
+      && Math.abs(kbLayout.gap - 20) < 1
+      && kbLayout.view.w >= 500,
     JSON.stringify(kbLayout));
+
+  // 知识 / 技能面板跟 gen / packinfo / llm **同族**：所有面板都按三列布局走
+  // 「page-head → 中间控件 → .stg-cols」结构，max-width: var(--w-stg-3col)。
+  // 旧实现是 kb/skills 缺 .has-cols、面板窄一截（720 vs 1029），.stg-cols
+  // 还套在 .page-card 里（带 border-top + padding），看起来跟其他面板是
+  // **两套布局**。
+  // 判据：把四个面板的 `最大宽度` 与 `.stg-cols 的直接父级类名` 一起比。
+  const layoutMatch = await evalIn(`return (function(){
+    var ids = ["pane-gen","pane-packinfo","pane-llm","pane-kb","pane-skills"];
+    var out = {};
+    for (var i=0; i<ids.length; i++){
+      var sec = document.getElementById(ids[i]);
+      if (!sec) { out[ids[i]] = {missing:true}; continue; }
+      var cols = sec.querySelector(".stg-cols");
+      // 不只盯 cols 父级：kb 面板内的 .kb-filter 也得是「直接挂节下」，
+      // 否则套一层 .page-card 会引入 border-top + padding，跟其它面板不同。
+      var filt = sec.querySelector(".kb-filter");
+      out[ids[i]] = {
+        hasCols: sec.classList.contains("has-cols"),
+        maxW: getComputedStyle(sec).maxWidth,
+        colsDirectParent: cols ? cols.parentElement.className.replace(/.*has-cols.*/, "stg-pane") : null,
+        filterDirectParent: filt ? (filt.parentElement === sec ? "stg-pane" : filt.parentElement.className) : "n/a",
+        secW: Math.round(sec.getBoundingClientRect().width)
+      };
+    }
+    return out;
+  })()`);
+  const maxWSet = new Set(Object.values(layoutMatch).map(p => p.maxW));
+  const colsParents = new Set(Object.values(layoutMatch).map(p => p.colsDirectParent));
+  // 「filter 直接挂在节下」只看有 .kb-filter 的面板（kb / skills）；
+  // 没 filter 的面板（gen / packinfo / llm）记成 n/a，不参与判定。
+  const filterParents = [...new Set(Object.values(layoutMatch)
+    .filter(p => p.filterDirectParent !== "n/a")
+    .map(p => p.filterDirectParent))];
+  check("知识 / 技能 与其他设置面板同族（都有 has-cols / .stg-cols 直接挂节下）",
+    maxWSet.size === 1 && [...colsParents].every(c => c === "stg-pane")
+      && filterParents.every(c => c === "stg-pane"),
+    JSON.stringify(layoutMatch));
 
   // 知识 / 技能列表条目（.kb-item）与模型 / 行业包列表条目（.pl-item）
   // 共享同一套视觉语言 —— 用户 2026-09-17 反馈「知识 / 技能 跟其他面板
