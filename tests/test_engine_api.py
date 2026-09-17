@@ -198,7 +198,6 @@ def test_quota_robustness():
 
 def test_segment_quota_divided_by_points():
     """每段配额必须按要点数均分，否则「段落超配额」的回炉分支永远不触发。"""
-    pack = load_config(ROOT)  # 仅为确保根目录可用
     import yaml
     pdata = yaml.safe_load((ROOT / "packs" / "elevator" / "pack.yaml").read_text(encoding="utf-8"))
     ban = Banwords.load(ROOT / "packs" / "elevator" / "banwords.yaml")
