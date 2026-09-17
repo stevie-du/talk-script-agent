@@ -99,6 +99,7 @@ export function setPane(pane) {
   emit("pane", pane);
   // 行业包详情每次进入都重拉：包可能被切换过，文件清单与草稿角标也可能变了
   if (pane === "packinfo") {
+    renderPackList();
     openPackInfo().catch(e => toast("读取失败：" + e.message, 3500));
   } else if (pane === "kb" || pane === "skills") {
     openPackFiles(pane);
@@ -506,7 +507,10 @@ export const bindSettings = bindOnce(function bindSettings() {
     $("pg-result").classList.add("hidden");
     setPane("packgen");
   };
-  $("pi-refresh").onclick = () => openPackInfo().catch(e => toast("刷新失败：" + e.message, 3500));
+  $("pi-refresh").onclick = () => {
+    renderPackList();
+    openPackInfo().catch(e => toast("刷新失败：" + e.message, 3500));
+  };
   $("kb-refresh").onclick = () => openPackFiles(state.settingsPane);
   $("skills-refresh").onclick = () => openPackFiles(state.settingsPane);
   $("pg-close").onclick = () => setPane(packgenFrom);
@@ -816,8 +820,67 @@ async function undraftPack() {
 // 不要在这里另写一份中文映射：两份的话改一份忘一份就漂了。
 // 之前有一份返回中文标签的 FILE_ROLE()，现已统一到 fileRole + ROLE_LABEL。
 
-async function openPackInfo() {
-  const name = $("pack").value;
+/**
+ * 渲染中列的「已安装行业包」条目列表（三列骨架的第二层级）。
+ * 与模型接口一样，保留 `.pl-item` 通用条目形态。
+ * ⚠ 与「当前启用」不同：行业包没有「唯一启用」语义（任何包都可以选），
+ *   所以 `.on` 留给业务态（这里是「草稿」），`.sel` 表示「当前在右列查看」。
+ */
+function renderPackList() {
+  const list = $("pi-list");
+  if (!list) return;
+  list.innerHTML = "";
+  const packs = (state.meta && state.meta.packs) || [];
+  if (!packs.length) {
+    list.appendChild(el("p", "hint", "还没有行业包 —— 点右上角「新建」生成一个。"));
+    return;
+  }
+  for (const p of packs) list.appendChild(packItem(p));
+  // 恢复右列当前查看的那条的 .sel（列表重建会丢选中态）
+  const cur = $("pack").value;
+  if (cur) {
+    const it = list.querySelector(`.pl-item[data-id="${CSS.escape(cur)}"]`);
+    if (it) it.classList.add("sel");
+  }
+}
+
+function packItem(p) {
+  const item = el("button", "pl-item");
+  item.type = "button";
+  item.dataset.id = p.name;
+  if (p.draft) item.classList.add("on");        // 草稿态有视觉落点（待校对）
+
+  // 图标：包名首字
+  item.appendChild(el("span", "pl-ic",
+    (p.display_name || p.name || "?").slice(0, 1)));
+
+  const txt = el("span", "pl-txt");
+  txt.appendChild(el("span", "pl-t", esc(p.display_name || p.name)));
+  txt.appendChild(el("span", "pl-s",
+    esc(p.draft ? "草稿 · 待校对" : "已校对")));
+  if (p.description) {
+    txt.appendChild(el("span", "pl-s", esc(p.description.slice(0, 60))));
+  }
+  item.appendChild(txt);
+
+  item.onclick = () => selectPack(p.name);
+  return item;
+}
+
+/** 选中一个包：右列加载它的详情（同时同步 #pack.value，其他代码依赖它）。 */
+function selectPack(name) {
+  const sel = $("pack");
+  if (sel) sel.value = name;
+  document.querySelectorAll("#pi-list .pl-item").forEach(n => {
+    n.classList.toggle("sel", n.dataset.id === name);
+  });
+  openPackInfo(name).catch(e => toast("读取失败：" + e.message, 3500));
+}
+
+async function openPackInfo(name) {
+  // 三列化后 name 由调用方传；保留旧的「未传则从 #pack 读」作为兜底，
+  // 保证 `btn-packinfo` / `pi-refresh` 这两条老路径仍然能用。
+  if (name === undefined) name = $("pack").value;
   const p = await api.pack(name);
   $("pi-title").textContent = `${p.display_name || name} · 包内容`;
   $("pi-desc").textContent = (p.description || "")

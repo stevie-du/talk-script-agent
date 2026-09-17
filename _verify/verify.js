@@ -857,6 +857,30 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     hidden: document.getElementById('pane-packinfo').classList.contains('hidden') };`);
   check("行业包详情进入即拉取文件清单", !pi.hidden && pi.rows === 3, JSON.stringify(pi));
 
+  // 行业包面板是三列（中列包列表 + 右列包详情）。
+  // 「至少有一条包」 → 中列有 `.pl-item` + 默认 `.sel` 那条就是当前正在查看的；
+  // 右列有 `#pi-files tbody tr`（文件清单）。两者宽度与间距符合骨架口径。
+  const pi3 = await evalIn(`var list = document.querySelector('#pi-list');
+    var items = list ? list.querySelectorAll('.pl-item') : [];
+    var on = [], sel = [];
+    items.forEach(function (n) {
+      if (n.classList.contains('on')) on.push(n.dataset.id);
+      if (n.classList.contains('sel')) sel.push(n.dataset.id);
+    });
+    var detail = document.querySelector('#pane-packinfo .pane-detail');
+    var lr = list ? list.getBoundingClientRect() : null;
+    var dr = detail ? detail.getBoundingClientRect() : null;
+    return { items: items.length, on: on, sel: sel,
+             listW: lr ? Math.round(lr.width) : 0,
+             detailW: dr ? Math.round(dr.width) : 0,
+             sideBySide: (lr && dr) ? Math.round(dr.left - lr.right) : -1 };`);
+  check("行业包面板是中列包列表 + 右列详情（三列骨架生效）",
+    pi3.items >= 1
+      && pi3.listW === 258 && pi3.detailW > 600
+      && pi3.sideBySide >= 0 && pi3.sideBySide < 50
+      && pi3.sel.length === 1,
+    JSON.stringify(pi3));
+
   await evalIn(`window.__ts.setPane('llm'); return true;`);
   await sleep(300);
   const llm = await evalIn(`return {

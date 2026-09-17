@@ -279,11 +279,11 @@
         </div>
       </section>
 
-      <section class="stg-pane hidden" id="pane-packinfo" data-pane="packinfo">
+      <section class="stg-pane hidden has-cols" id="pane-packinfo" data-pane="packinfo">
         <header class="page-head">
           <div class="page-head-titles">
-            <h2 id="pi-title">包详情</h2>
-            <p class="hint" id="pi-desc"></p>
+            <h2>行业包</h2>
+            <p class="hint">已安装的行业包 —— 选一个看详情与文件清单</p>
           </div>
           <div class="page-head-actions">
             <button class="ghost bordered" id="pi-refresh" title="重新拉取文件清单与配置">
@@ -296,22 +296,35 @@
             </button>
           </div>
         </header>
-        <div class="page-card">
-          <div id="pi-checklist-wrap" class="hidden">
-            <label class="lbl">校对清单（草稿包需逐项核实）</label>
-            <pre id="pi-checklist"></pre>
+        <!-- 三列骨架：中列「已安装的行业包」+ 右列「选中包的详情与文件清单」 -->
+        <div class="stg-cols">
+          <div class="pane-list" id="pi-list">
+            <!-- 包条目由 renderPackList() 渲染到这里 -->
           </div>
-          <div>
-            <label class="lbl">文件清单</label>
-            <div id="pi-files" class="tbl-wrap"></div>
-          </div>
-          <p class="hint">配置方法见 docs/知识库与技能配置指南.md</p>
-          <p class="hint" id="pi-export-hint">导出为 SKILL.md 技能目录（含独立校验工具），可放入支持技能的 agent 使用。</p>
-          <div class="page-actions">
-            <button class="ghost" id="pi-export">导出为 Agent 技能</button>
-            <button class="ghost hidden" id="pi-undraft" title="人工校对完成后，去掉草稿标记">标记为已校对</button>
-            <span class="spacer"></span>
-            <button class="ghost" id="pi-close">返回生成偏好</button>
+
+          <div class="pane-detail">
+            <header class="page-head">
+              <div class="page-head-titles">
+                <h2 id="pi-title">包详情</h2>
+                <p class="hint" id="pi-desc"></p>
+              </div>
+            </header>
+            <div id="pi-checklist-wrap" class="hidden">
+              <label class="lbl">校对清单（草稿包需逐项核实）</label>
+              <pre id="pi-checklist"></pre>
+            </div>
+            <div>
+              <label class="lbl">文件清单</label>
+              <div id="pi-files" class="tbl-wrap"></div>
+            </div>
+            <p class="hint">配置方法见 docs/知识库与技能配置指南.md</p>
+            <p class="hint" id="pi-export-hint">导出为 SKILL.md 技能目录（含独立校验工具），可放入支持技能的 agent 使用。</p>
+            <div class="page-actions">
+              <button class="ghost" id="pi-export">导出为 Agent 技能</button>
+              <button class="ghost hidden" id="pi-undraft" title="人工校对完成后，去掉草稿标记">标记为已校对</button>
+              <span class="spacer"></span>
+              <button class="ghost" id="pi-close">返回生成偏好</button>
+            </div>
           </div>
         </div>
       </section>
