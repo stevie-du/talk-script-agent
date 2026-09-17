@@ -913,6 +913,16 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
   border-top: 0.5px solid var(--line);
 }
 .page-card:first-of-type { border-top: none; padding-top: 0; }
+/* ⚠ 生成偏好右列的三张卡片是**互斥切换**的（同时只有一张可见），
+   不像 llm 右列只有一张 .page-card、packinfo 右列根本没有。
+   `.page-card` 的 border-top 语义是「堆叠卡片之间的分隔线」——
+   互斥切换下这个语义不成立：可见的那张会平白多一条线 + 20px 顶部内边距。
+   而默认停在的「行业包」（div:first-of-type）没有 → 三张不一致
+   （用户原话：「生成参数和进阶上面怎么有两个分割线？和其他设置页面不统一」）。
+   ⚠ 不能靠 `:first-of-type` 修：它认不出 `.hidden` —— 隐藏的卡片仍占
+   DOM 顺序，切到 param 时 pack 仍是 first-of-type，param 照样有线。
+   所以显式给这一族卡片去掉（与 llm / packinfo 右列首块的表现对齐）。 */
+#gen-sec-detail > .page-card { border-top: none; padding-top: 0; }
 .page-card .fg { display: flex; flex-direction: column; gap: var(--s4); }
 /* 组内字段间距由父级 .fg 的 gap 统一控制，block-inner 本身不额外加边距 */
 .block-inner { display: flex; flex-direction: column; }

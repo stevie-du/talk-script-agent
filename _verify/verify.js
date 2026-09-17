@@ -1771,6 +1771,34 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       && gen3.on.length === 1 && gen3.visible.length === 1 && gen3.on[0] === gen3.visible[0],
     JSON.stringify(gen3));
 
+  // 2026-09-17（用户报「生成参数和进阶上面怎么有两个分割线？和其他设置页面不统一」）：
+  // `.page-card` 的 border-top 是「堆叠卡片之间的分隔线」语义，而生成偏好右列的
+  // 三张卡片是**互斥切换**的（同时只有一张可见）—— 这个语义不成立，可见的那张
+  // 平白多一条线 + 20px 顶部内边距。`:first-of-type` 只放过 pack（它认不出 .hidden，
+  // 隐藏的卡片仍占 DOM 顺序），所以 param / adv 两条线一直挂着。
+  // 判据：三张卡片的 border-top 与 padding-top 必须与 llm 面板的卡片一致（都是 0）
+  // —— 比"绝对值 0"更贴用户那句"和其他设置页面不统一"：拿同角色面板当基线。
+  const cardTop = await evalIn(`window.__ts.setPane('gen');
+    function topOf(sel){
+      var c = document.querySelector(sel);
+      if (!c) return null;
+      var cs = getComputedStyle(c);
+      return { borderTop: parseFloat(cs.borderTopWidth) || 0,
+               padTop: parseFloat(cs.paddingTop) || 0 };
+    }
+    return { gen: [...document.querySelectorAll('#gen-sec-detail > .page-card')].map(function(c){
+               var cs = getComputedStyle(c);
+               return { sec: c.dataset.sec,
+                        borderTop: parseFloat(cs.borderTopWidth) || 0,
+                        padTop: parseFloat(cs.paddingTop) || 0 };
+             }),
+             llm: topOf('#pane-llm .pane-detail > .page-card') };`);
+  check("生成偏好右列三张卡片顶部都没有分割线（与 llm 面板的卡片一致）",
+    cardTop.gen.length === 3
+      && cardTop.gen.every(c => c.borderTop === cardTop.llm.borderTop
+                             && c.padTop === cardTop.llm.padTop),
+    JSON.stringify(cardTop));
+
   // 2026-09-17（任务 1）：行业包分组现在是 .block-inner 结构（与「生成参数」「进阶」同族），
   // 之前是 .fg.pack-row 单行布局（select + 详情 + 新建），高度 ~50px、右栏大片空。
   // 判据：行业包卡片内 ≥ 2 个 .block-inner，每个都包含 .lbl + 输入控件/按钮，
