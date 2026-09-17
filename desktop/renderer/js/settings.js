@@ -894,6 +894,12 @@ async function openPackInfo(name) {
   } else {
     cw.classList.add("hidden");
   }
+  // 切包 / 刷新：把文件查看器复位到「未选择文件」占位态。
+  // 不复位的话，上个包选中的行还亮着、右列还在显示上一个包的内容 —
+  // 用户切到 fitment 包会以为 elevator 还在生效。
+  $("pi-file-title").textContent = "未选择文件";
+  $("pi-file-size").textContent = "";
+  $("pi-file-body").textContent = "从上方文件清单选择一个文件查看内容。";
   const box = $("pi-files");
   box.innerHTML = "";
   const tb = el("table");
@@ -902,9 +908,19 @@ async function openPackInfo(name) {
   const body = el("tbody");
   for (const f of p.files || []) {
     const tr = el("tr");
+    tr.dataset.rel = f.rel;       // 给行一个稳定标识（不看 children）
     const kb = f.size > 1024 ? (f.size / 1024).toFixed(1) + " KB" : f.size + " B";
     tr.innerHTML = `<td class="cell-mono">${esc(f.rel)}</td>
       <td>${kb}</td><td>${esc(ROLE_LABEL[fileRole(f.rel)] || "")}</td>`;
+    // ⚠ 2026-09-17：行变可点击 → 复用 showPackFile(pfx="pi-file")，
+    // 与知识/技能共用同一套实现。showPackFile 内部给 `#${pfx}-list .kb-item`
+    // 兄弟加 `.on` —— 这里是 `<tr>` 不是 .kb-item，那个循环扫不到、跳过。
+    // 我们的 .on 高亮自己管（dataset.rel + querySelectorAll("tr.on")）。
+    tr.onclick = () => {
+      box.querySelectorAll("tr.on").forEach(x => x.classList.remove("on"));
+      tr.classList.add("on");
+      showPackFile(name, f.rel, tr, "pi-file");
+    };
     body.appendChild(tr);
   }
   tb.appendChild(body);

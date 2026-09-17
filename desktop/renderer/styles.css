@@ -1206,6 +1206,18 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 }
 .pl-item .tag-default { display: none; }   /* 2026-09-17：用户反馈「样式太丑」，CSS 隐藏但 DOM 保留 */
 
+/* 行业包的文件查看器：与知识/技能共用 .kb-body 样式（卡片语言一致），
+   但限制 max-height —— 行业包右列除了文件表还有 headbar/校对清单/导出，
+   不让查看器把它们都挤到屏外。 */
+#pi-file-view .kb-body {
+  max-height: 42vh;
+}
+/* 行业包文件表的行：可点击 → 加载预览。cursor:pointer 让「这是个可点的表格」
+   这一点对用户可见。 */
+#pi-files tbody tr { cursor: pointer; }
+#pi-files tbody tr:hover { background: var(--fill); }
+#pi-files tbody tr.on { background: var(--sel-bg); }
+
 /* 中列分组标题 */
 .pl-sec-t {
   font-size: var(--f-xs); font-weight: 600; color: var(--text-3);

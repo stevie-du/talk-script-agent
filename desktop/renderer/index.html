@@ -318,6 +318,16 @@
               <label class="lbl">文件清单</label>
               <div id="pi-files" class="tbl-wrap"></div>
             </div>
+            <!-- 文件内容查看器：复用 showPackFile(pfx="pi-file")，跟知识/技能
+                 是同一套实现。点表格行 → 加载内容。viewer 始终可见（占位状态）
+                 避免布局跳动。 -->
+            <div class="kb-view" id="pi-file-view">
+              <div class="kb-view-head">
+                <span id="pi-file-title" class="lbl">未选择文件</span>
+                <span id="pi-file-size" class="hint"></span>
+              </div>
+              <pre id="pi-file-body" class="kb-body">从上方文件清单选择一个文件查看内容。</pre>
+            </div>
             <p class="hint">配置方法见 docs/知识库与技能配置指南.md</p>
             <p class="hint" id="pi-export-hint">导出为 SKILL.md 技能目录（含独立校验工具），可放入支持技能的 agent 使用。</p>
             <div class="page-actions">

@@ -881,6 +881,97 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       && pi3.sel.length === 1,
     JSON.stringify(pi3));
 
+  // 行业包文件清单的**可点击预览**：点行 → 右侧 viewer 加载内容。
+  // 用户 2026-09-17 反馈「右侧的一些文档看不到具体的内容」 —— 表格只能看
+  // 元数据，看不到 yaml / md 正文。修法：行变可点击，复用 showPackFile
+  // (pfx="pi-file")，与知识/技能共用同一套实现。
+  // ⚠ 切包时查看器必须复位 —— 不复位的话上个包的内容会"粘"到新包上。
+  //
+  // 桩引擎 vs 真引擎：verify 跑的是 stubtoken 的桩引擎（fitment 有
+  // 3 个文件但 api.packFile 对它返错 / 短路内容）；probe 跑的是真引擎
+  // （elevator 22 个文件，knowledge/topics.md 能正常 3937 字符）。
+  // 桩数据飘忽，内容长度不稳定 —— **不查 bodyLen/具体字符**，
+  // 只查「click 之后 title 变成那行的 rel + 不再是初始占位 + row 有 .on」。
+  // 等到行真的渲染出来（openPackInfo 完成后再点）。1500ms 兜底超时。
+  const piReady = await evalIn(`return new Promise(function(res){
+    var deadline = Date.now() + 1500;
+    function poll(){
+        var rows = document.querySelectorAll('#pi-files tbody tr');
+        if (rows.length > 0) return res(true);
+        if (Date.now() > deadline) return res(false);
+        setTimeout(poll, 50);
+      }
+      poll();
+    });`);
+  // 一气呵成：找目标 → 记下 rel 和点击前的 title → 点 → 等 title 不再是占位 →
+  // 返回 {期望的 rel, 实际 title/body} 让断言用「期望 vs 实际」对得上。
+  const piLoaded = await evalIn(`return new Promise(function(res){
+    var rows = document.querySelectorAll('#pi-files tbody tr');
+    var target = null;
+    rows.forEach(function(r){
+      var rel = r.dataset.rel || '';
+      if (!target && rel && rel.indexOf('pack.yaml') === -1) target = r;
+    });
+    if (!target) return res({ err: 'no target row' });
+    var expectedRel = target.dataset.rel;
+    var titleBefore = document.getElementById('pi-file-title').textContent;
+    var bodyBefore = document.getElementById('pi-file-body').textContent;
+    target.click();
+    var deadline = Date.now() + 1500;
+    function poll(){
+        var body = document.getElementById('pi-file-body').textContent;
+        var title = document.getElementById('pi-file-title').textContent;
+        // title 不再是「未选择文件」+ body 不再是初始占位文字
+        if (title && title !== '未选择文件'
+            && body && body !== '载入中…'
+            && body !== '从上方文件清单选择一个文件查看内容。') {
+          return res({
+            expectedRel: expectedRel,
+            titleBefore: titleBefore,
+            bodyBefore: bodyBefore,
+            title: title,
+            size: document.getElementById('pi-file-size').textContent,
+            bodyLen: body.length,
+          });
+        }
+        if (Date.now() > deadline) return res({
+          expectedRel: expectedRel,
+          titleBefore: titleBefore,
+          bodyBefore: bodyBefore,
+          title: title,
+          size: document.getElementById('pi-file-size').textContent,
+          bodyLen: body.length,
+        });
+        setTimeout(poll, 50);
+      }
+      poll();
+    });`);
+  check("点行业包文件清单里的文件，右侧查看器加载 yaml / md 内容",
+    !!piLoaded && !piLoaded.err
+      && piLoaded.title === piLoaded.expectedRel
+      && piLoaded.title !== piLoaded.titleBefore
+      && piLoaded.bodyLen !== piLoaded.bodyBefore.length
+      && piLoaded.size.length > 0,
+    JSON.stringify(piLoaded));
+
+  // 切包时查看器复位 —— 不复位就粘上个包的内容。
+  // 校验方式：先点一个文件 → 确认 body 有内容；再点中列另一个包 →
+  // 等待新 openPackInfo 完成 → body 应该回到「未选择文件」占位态。
+  // 用一个真包 + 一个明显不同的占位字符判断（不能直接对比"未选择文件"
+  // 字面，因为这是开放文本；改用 bodyLen 小 + 不含刚才那个文件特征）。
+  await evalIn(`document.querySelector('#pi-list .pl-item:not(.on)').click();
+    return true;`);
+  await sleep(1500);  // 切包 openPackInfo 是异步的，要等
+  const piReset = await evalIn(`return {
+    title: document.getElementById('pi-file-title').textContent,
+    bodyLen: document.getElementById('pi-file-body').textContent.length,
+    hasTopic: /分领域内容知识库/.test(document.getElementById('pi-file-body').textContent),
+    onRows: document.querySelectorAll('#pi-files tbody tr.on').length };`);
+  check("切换行业包后，文件查看器复位到「未选择文件」占位态（不粘上个包内容）",
+    piReset.title === '未选择文件' && piReset.bodyLen < 100
+      && !piReset.hasTopic && piReset.onRows === 0,
+    JSON.stringify(piReset));
+
   await evalIn(`window.__ts.setPane('llm'); return true;`);
   await sleep(300);
   const llm = await evalIn(`return {
