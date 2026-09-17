@@ -316,6 +316,30 @@ body {
   font: 12px/1.7 var(--mono); white-space: pre-wrap; word-break: break-word;
 }
 
+/* 行业包右列：文件分组 + 查看器**左右并排**（2026-09-17）。
+   之前上下堆叠 —— 9 个角色分组全展开后查看器被推到很下面，点完一个文件
+   要滚一大段才看到内容。并排之后点文件即时可见。
+   ⚠ .pi-cols 必须给**确定高度**：`.kb-body` 是 `flex:1; overflow:auto`，
+   父链上没有定死的高度时 flex:1 不生效，查看器会塌成一小块（这正是它
+   之前只能靠内容撑高的原因）。clamp 是为了矮窗口下两栏也不被压扁。 */
+.pi-cols {
+  display: flex; gap: var(--s4); align-items: stretch;
+  height: clamp(320px, 52vh, 620px);
+}
+/* 分组栏：固定宽度、自己滚。查看器吃剩下的宽度（.kb-view 的 flex:1）。 */
+.pi-groups-col {
+  flex: 0 0 320px; min-width: 0;
+  display: flex; flex-direction: column; overflow: auto;
+}
+.pi-groups-col > .lbl { flex: 0 0 auto; }
+
+/* 右列（详情区）的标题：比面板标题（h2 / --f-xl 20px）低一级。
+   之前这里也是 `<h2>`，跟面板顶部那个 h2 一样大 —— 同一个面板里出现两个
+   同尺寸标题，层级看起来是平的两层。降到 --f-lg（16px）后主次才分清。 */
+.detail-title {
+  font-size: var(--f-lg); font-weight: 600; letter-spacing: -.2px; color: var(--text-1);
+}
+
 .linkbtn:hover { background: var(--fill); color: var(--text-1); }
 .linkbtn:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
 

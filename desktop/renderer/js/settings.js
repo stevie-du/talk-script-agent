@@ -494,7 +494,6 @@ export const bindSettings = bindOnce(function bindSettings() {
 
   $("btn-close-settings").onclick = closeSettings;
   $("btn-packinfo").onclick = () => setPane("packinfo");
-  $("pi-close").onclick = () => setPane("gen");
   // packgen 的两个入口：gen 的 [新建]（btn-newpack）和 packinfo headbar 的 [新建]（pi-newpack）。
   // 区别在于「取消」回哪里 —— 这就是 packgenFrom 的存在意义。
   $("btn-newpack").onclick = () => {
@@ -542,7 +541,11 @@ export const bindSettings = bindOnce(function bindSettings() {
     const m = ((lastCfg || {}).models || []).find(x => x.id === editingId);
     if (m) { await removeModel(m); closeModelDialog(); }
   };
-  $("pi-export").onclick = exportSkill;
+  // 「导出为 Agent 技能」与「返回生成偏好」已删（2026-09-17）：
+  //   ① 导出把 pack 目录复制成 SKILL.md，是个「用一次就忘」的动作，
+  //      占着右列底部最显眼的位置不值当；
+  //   ② 「返回生成偏好」是错的方向 —— 用户从哪个面板进来就该回哪去，
+  //      而左导航一直在，点一下就走了，不需要面板底部再放一个出口。
   $("pi-undraft").onclick = undraftPack;
 });
 
@@ -771,19 +774,10 @@ async function onPackDone() {
   } catch (e) { toast("刷新行业包列表失败：" + e.message, 3500); }
 }
 
-async function exportSkill() {
-  const name = $("pack").value;
-  const btn = $("pi-export");
-  btn.disabled = true;
-  try {
-    const out = await api.exportSkill(name, false);
-    $("pi-export-hint").innerHTML =
-      `✅ 已导出 <b>${esc(out.files)}</b> 个文件到：<br><code>${esc(out.path)}</code>`
-      + `<br>${out.hints.map(esc).join("<br>")}`;
-    toast("已导出为 Agent 技能");
-  } catch (e) { toast("导出失败：" + e.message, 4000); }
-  btn.disabled = false;
-}
+// 「导出为 Agent 技能」整个入口已删（2026-09-17）。原来它会把 pack 目录
+// 复制成一份 SKILL.md 技能目录 —— 一个用一次就忘的动作，却占着包详情底部
+// 最显眼的位置。后端 `/api/packs/<name>/export-skill` 保留（没被别处依赖，
+// 删接口是另一件事），只是界面不再暴露。
 
 async function undraftPack() {
   const name = $("pack").value;

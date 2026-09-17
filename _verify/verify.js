@@ -1058,6 +1058,30 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("行业包面板的文件卡片容得下内容（不被按钮固定高度压扁）",
     piOver.length === 0 && !piOver.hidden, JSON.stringify(piOver));
 
+  // 文件分组与查看器必须**左右并排**（2026-09-17）。
+  // 之前上下堆叠：9 个角色分组全展开后查看器被推到很下面，点完一个文件
+  // 要滚一大段才看到内容 —— 用户贴图报的就是这个。
+  // ⚠ 只看 gap 不够：上下堆叠的两块左对齐时 gap 也是 0。必须**同时**看
+  //   垂直重叠 —— 并排时两块的垂直区间重叠，堆叠时 view.top >= list.bottom。
+  // ⚠ 还要看查看器的高：父链上没定死高度时 `.kb-body{flex:1}` 不生效，
+  //   查看器会塌成一小块（这正是它以前只能靠内容撑高的原因）。
+  const piSideBySide = await evalIn(`return (function(){
+    var l = document.querySelector('#pane-packinfo .pi-groups-col');
+    var v = document.getElementById('pi-file-view');
+    if (!l || !v) return { missing: true };
+    var lr = l.getBoundingClientRect(), vr = v.getBoundingClientRect();
+    return { listW: Math.round(lr.width), viewW: Math.round(vr.width),
+             gap: Math.round(vr.left - lr.right),
+             vertOverlap: Math.round(Math.min(lr.bottom, vr.bottom) - Math.max(lr.top, vr.top)),
+             viewH: Math.round(vr.height) };
+  })()`);
+  check("包内容：文件分组与查看器左右并排（点完文件不用滚下去找）",
+    !piSideBySide.missing
+      && piSideBySide.gap >= 0 && piSideBySide.gap < 60
+      && piSideBySide.vertOverlap > 200
+      && piSideBySide.viewW >= 300 && piSideBySide.viewH >= 250,
+    JSON.stringify(piSideBySide));
+
   // 切包时查看器复位 —— 不复位就粘上个包的内容。
   // 校验方式：先点一个文件 → 确认 body 有内容；再点中列另一个包 →
   // 等待新 openPackInfo 完成 → body 应该回到「未选择文件」占位态。
@@ -1429,18 +1453,79 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     return document.querySelectorAll('.toast.bad, .toast.err').length - before; })()`);
   check("打开文件夹点下去不报错", revealErr === 0, String(revealErr));
 
-  // ── 完整流程：导出技能包（后端有测试，前端流程此前零覆盖）──
+  // ── 导出 / 返回 两个入口已删（2026-09-17）──
+  // 原来这里测的是「点导出 → 提示里给出真实文件数与路径」的**前端流程**。
+  // 入口删了，那段前端流程也就不存在了 —— 后端 `/api/packs/<n>/export-skill`
+  // 的覆盖在 pytest 里，这里只守「界面上确实没有了」。
+  // 跟 kb / skills 那次同一个道理：留一个隐藏的空壳，下一个人会以为它还在，
+  // 改的时候改了不生效的地方。
   await evalIn(`document.getElementById('btn-open-settings').click();
     window.__ts.setPane('packinfo'); return true;`);
   await sleep(500);
-  await evalIn(`document.getElementById('pi-export').click(); return true;`);
-  await sleep(600);
-  const dbg = await evalIn(`return { pack: document.getElementById('pack').value,
-    calls: JSON.stringify(window.__calls || {}) };`);
-  const exp = await evalIn(`return document.getElementById('pi-export-hint').textContent;`);
-  check("导出技能包流程：提示里给出真实文件数与路径",
-    /已导出\s*12\s*个文件/.test(exp) && /agent-skills/.test(exp) && !/undefined/.test(exp),
-    exp.slice(0, 90));
+  const piActions = await evalIn(`return {
+    exportBtn: !!document.getElementById('pi-export'),
+    exportHint: !!document.getElementById('pi-export-hint'),
+    closeBtn: !!document.getElementById('pi-close'),
+    undraftBtn: !!document.getElementById('pi-undraft'),
+    bottomActions: [].slice.call(
+      document.querySelectorAll('#pane-packinfo .pane-detail > .page-actions button')
+    ).map(function(b){ return b.id || b.textContent.trim(); }) };`);
+  check("包详情底部只剩「标记为已校对」（导出 / 返回 已移除，不残留隐藏 DOM）",
+    !piActions.exportBtn && !piActions.exportHint && !piActions.closeBtn
+      && piActions.undraftBtn
+      && piActions.bottomActions.length === 1
+      && piActions.bottomActions[0] === 'pi-undraft',
+    JSON.stringify(piActions));
+
+  // 三个设置面板的 page-head 结构必须一致（2026-09-17）：
+  // 之前 `pane-gen` 只有 `<h2>` 加 `<p.hint>` 直挂在 `.page-head` 里（缺
+  // `.page-head-titles` 包装），于是 h2 拿不到 20px 样式、hint 还跟标题
+  // **横向并排**。现在所有面板统一成 `.page-head-titles > h2 + hint`，
+  // 视觉才一致。
+  // ⚠ 这里只看**面板顶部**那个 .page-head（用 `:scope > .page-head` 锁住
+  // 直系子级），不看 .pane-detail 里嵌套的 .page-head（packinfo 右列的
+  // 「电梯 · 包内容」是 h3.detail-title，是另一回事）。
+  const pageHeadUnified = await evalIn(`return (function(){
+    var ids = ['pane-gen', 'pane-packinfo', 'pane-llm'];
+    var out = {};
+    for (var i=0; i<ids.length; i++) {
+      var sec = document.getElementById(ids[i]);
+      if (!sec) { out[id] = {missing: true}; continue; }
+      var ph = sec.querySelector(':scope > .page-head');
+      var titles = ph ? ph.querySelector(':scope > .page-head-titles') : null;
+      var h2 = titles ? titles.querySelector('h2') : null;
+      var hint = titles ? titles.querySelector('.hint') : null;
+      // computed font-size：所有面板的 h2 字号应一致（var(--f-xl) = 20px）
+      out[ids[i]] = {
+        hasTitlesWrap: !!titles,
+        hasH2: !!h2,
+        hasHint: !!hint,
+        h2FontSize: h2 ? getComputedStyle(h2).fontSize : null,
+      };
+    }
+    return out;
+  })()`);
+  const h2Sizes = new Set(Object.values(pageHeadUnified)
+    .filter(p => !p.missing && p.h2FontSize)
+    .map(p => p.h2FontSize));
+  check("三个设置面板的 page-head 结构与字号统一（.page-head-titles > h2 + hint）",
+    Object.values(pageHeadUnified).every(p => !p.missing && p.hasTitlesWrap && p.hasH2 && p.hasHint)
+      && h2Sizes.size === 1 && [...h2Sizes][0] === '20px',
+    JSON.stringify(pageHeadUnified));
+
+  // 「保存高级配置」收在它管的字段所在的折叠区里（2026-09-17）：
+  // 默认收起状态下右列只有一个「保存」可见（模型表单的），不再「俩确认」。
+  // 一旦把 #st-save 移出折叠区（回到右列底部），模型保存与高级保存就会
+  // 同时可见 —— 用户报的就是这个。判据用 closest('details') 守住位置。
+  const stSaveScoped = await evalIn(`return (function(){
+    var btn = document.getElementById('st-save');
+    if (!btn) return { missing: true };
+    return { insideDetails: !!btn.closest('details'),
+             insideAdvBody: !!btn.closest('.st-adv-body') };
+  })()`);
+  check("「保存高级配置」收在折叠区里（不在右列底部，避免与模型表单的「保存」并列成「俩确认」）",
+    !stSaveScoped.missing && stSaveScoped.insideDetails && stSaveScoped.insideAdvBody,
+    JSON.stringify(stSaveScoped));
 
   // ── 完整流程：草稿转正（fitment 包是草稿态）──
   await evalIn(`const sel = document.getElementById('pack');
