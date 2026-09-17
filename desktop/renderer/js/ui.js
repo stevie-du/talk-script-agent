@@ -102,24 +102,18 @@ export function renderModelPicker() {
   const models = m.models || [];
   const active = models.find(x => x.id === m.active_model) || models[0] || null;
   const cur = m.mock ? "mock 模式" : (active ? (active.label || active.model) : "未配置模型");
-  // 这个模型是不是内置默认（用户从没配过）。
-  //
-  // 为什么必须标出来：后端在没配 model 时会静默兜底成 DEFAULT_CONFIG 里那个
-  // （glm-4.7），界面于是把一个**用户没选过的值**当「当前模型」显示 ——
-  // 未配置状态与已配置状态长得一模一样。
-  //
-  // ⚠ 显示名与 option.value 必须分开：option.value 是模型 **id**（激活时要用它），
-  // 而显示名带「（默认）」后缀。混在一起的话激活会把「glm-4.7（默认）」
-  // 这个假 id 发出去。
-  const isDefault = !m.mock && (m.llm_defaulted || []).includes("model");
-  const tag = (name, isCur) => (isDefault && isCur) ? `${name}（默认）` : name;
-
+  // 2026-09-17（任务 5）：「默认模型」整个下线 —— 工具条 picker 上不再附
+  // 「（默认）」后缀。区分"未配置 vs 已配置"的职责完全交给 sel._warnNote
+  // （未配 Key 时显式告知「生成会被拒绝」+ warn 色）+ 模型接口的"未配置 Key"
+  // 小标（见 settings.js 的 modelItem）。未配置状态下 picker 仍然能列出
+  // 后端兜出来的那条，但它要么显示「未配置模型」占位 option（models 空时），
+  // 要么显示真名（用户必须自己判断能否用 —— 点发送也会被 warnNote 拦）。
   const sel = el("select");
   sel.id = "p-model";
   sel.dataset.pill = "1";
   for (const x of models) {
-    const o = el("option", "", esc(tag(x.label || x.model, x.id === m.active_model)));
-    o.value = x.id;                       // ← 模型 id，不是显示名
+    const o = el("option", "", esc(x.label || x.model));
+    o.value = x.id;
     sel.appendChild(o);
   }
   if (!models.length && !m.mock) {
@@ -135,13 +129,11 @@ export function renderModelPicker() {
   sel.value = active ? active.id : (m.mock ? "" : "");
   sel._mock = !!m.mock;
   // 橙色只留给「真的会失败」的情形（没 Key → 生成必被拒）。
-  // 「用的是内置默认模型」不加橙色：默认值本身是可用的（配上 Key 就能跑），
-  // 把它也染橙会让警示贬值 —— 用户一旦习惯忽略橙色，真正会失败的那条也就被忽略了。
-  // 它要传达的「这不是你配的」由文字后缀（默认）+ 这里的 title 承担。
+  // 「用的是内置默认模型」不再加标识：默认值本身确实可用，配上 Key 就能跑，
+  // 把"默认"也染橙会让警示贬值，且与"移除默认模型"的产品语义冲突。
   sel._warnNote = m.has_api_key
     ? "" : "未配置 API Key —— 生成会被拒绝，点击去「模型接口」填写";
-  sel.title = `当前模型：${cur}${isDefault ? "（内置默认，还没配过自己的）" : ""}。`
-    + "切换后对后续生成生效（正在跑的作业不受影响）";
+  sel.title = `当前模型：${cur}。切换后对后续生成生效（正在跑的作业不受影响）`;
   sel.onchange = () => pickModel(sel);
   box.appendChild(sel);
   beautifySelects(box);
@@ -199,16 +191,17 @@ export function renderPackParams() {
   front.innerHTML = "";
   const params = pack.params || {};
   const placed = new Set();
-  for (const key of MORE_KEYS) {
+  // 2026-09-17（任务 2）：生成参数卡片要展示**全量**参数 —— 工具条（TOOLBAR_KEYS）
+  // 既然存在就是为了快速设置，硬性把同样的字段在设置页再列一份叫「冗余」。
+  // 但工具条字数有限（segment/audience/duration/platform 之外就放不下），
+  // 设置页才是「所有可定制项」的总账。删掉那条 `placed.has(key) || TOOLBAR_KEYS.includes(key)`
+  // 排除之后，「生成参数」卡片与工具条胶囊共用同一份 pack.params 数据源，
+  // 用户在两处任一处改都会同步（同一 select id = p-<key>，updateStale 也听得到）。
+  for (const key of Object.keys(params)) {
+    if (placed.has(key)) continue;
     if (!params[key]?.options?.length) continue;
     front.appendChild(paramSelect(key, params[key]));
     placed.add(key);
-  }
-  // 其余参数（自定义包可能新增）也放这里；TOOLBAR_KEYS 已由工具条渲染，不重复
-  for (const key of Object.keys(params)) {
-    if (placed.has(key) || TOOLBAR_KEYS.includes(key)) continue;
-    if (!params[key]?.options?.length) continue;
-    front.appendChild(paramSelect(key, params[key]));
   }
   renderQuickParams();
   beautifySelects();

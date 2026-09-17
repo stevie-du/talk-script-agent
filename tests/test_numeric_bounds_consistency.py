@@ -50,9 +50,13 @@ _JS_ENTRY = re.compile(r"(\w+)\s*:\s*\[\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*\]")
 _INPUT = re.compile(r'<input\s+id="(st-[a-z]+)"(.*?)>', re.S)
 _ATTR = re.compile(r'\b(min|max)="(-?[\d.]+)"')
 
-# JS 里的字段名 → HTML 输入框 id
+# JS 里的字段名 → HTML 输入框 id。
+# 2026-09-17：采样温度 (temperature) 从前端**高级配置 UI**移除（任务 4）——
+# 但 NUMERIC_BOUNDS 里**仍保留** temperature 区间（与后端一致是 pytest 守卫的不变量），
+# 仅 UI 不暴露。所以 JS_TO_INPUT 不再包含 temperature（HTML 里也没 st-temperature 元素了）。
+# 后端 NUMERIC_BOUNDS 仍然有 temperature 区间 → test_temperature_is_no_longer_narrower
+# / test_temperature_accepts_zero 仍在跑且过。
 JS_TO_INPUT = {
-    "temperature": "st-temperature",
     "retries": "st-retries",
     "timeout": "st-timeout",
     "max_tokens": "st-maxtokens",
@@ -125,8 +129,10 @@ def test_html_min_max_matches_backend(key, id_):
 def test_no_orphan_numeric_input():
     """反向：每个 st-* 数值框都该在表里有归属，否则它不受区间约束。"""
     known = set(JS_TO_INPUT.values())
+    # 2026-09-17：st-temperature 已从 HTML 移除（采样温度 UI 下线）。
+    # 这条测试的语义变成"HTML 不再有表外残留" —— 直接断言 _html_bounds 的键是 known 的子集。
     assert set(_html_bounds()) <= known, \
-        f"这些输入框有 min/max 却不在 NUM_FIELDS 里：{sorted(set(_html_bounds()) - known)}"
+        f"这些输入框有 min/max 却不在 JS_TO_INPUT 里：{sorted(set(_html_bounds()) - known)}"
 
 
 # ── 3. 边界值本身自洽 ────────────────────────────────────────

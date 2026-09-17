@@ -146,6 +146,10 @@ window.__addCount = 0;
 })();
 (function(){
   var META = ${JSON.stringify(META)};
+  // 2026-09-17：把 META 挂到 window 上，让 verify.js 的 evalIn 也能读当前 pack 的
+  // params 列表（任务 2 的"全量参数"断言需要比对 expectedKeys 与实际渲染的 keys）。
+  // 仅暴露元信息（不暴露 mock 函数 / 接口状态），是只读快照，不污染调用方。
+  window.__tsMeta = META;
   // 行业包读坏的情形：&packerr=1（P1-6）。坏包的四个特征会**同时**出现，
   // 桩必须一起改 —— 只改 pack_error 而留着 params，测不出「静默降级」：
   //   display_name 退成目录 slug、params 空、param_audit 也空
@@ -1104,7 +1108,6 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await evalIn(`window.__ts.setPane('llm'); return true;`);
   await sleep(300);
   const llm = await evalIn(`return {
-    temp: document.getElementById('st-temperature')?.value,
     // 三列化后模型列表从 <table> 行改成中列的 .pl-item 条目
     // （保留 mdl-label / mdl-sub / mdl-switch 类名，断言口径得以延续）
     rows: document.querySelectorAll('#llm-list .pl-item').length,
@@ -1192,26 +1195,26 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       && llm3.dialogGone && llm3.formInDetail,
     JSON.stringify(llm3));
   check("接口状态显示重试/超时等实际生效值", /重试/.test(llm.status), llm.status);
-  // 前端**不许**比后端更严：1.8 是后端接受的合法值（区间 0 ~ 2）。
+  // 前端**不许**比后端更严：100000 是后端接受的合法值（区间 256 ~ 200000）。
   // 修复前前端单独一个 if 卡 1.5 → 点保存弹 toast 并 return，
   // 请求根本不发出去，后端那句更宽松的校验永远不会被触发。
-  // 这条断言驱动的是**真实行为**（请求体），不是 DOM 属性 ——
-  // 曾想断言「min/max 被 JS 写对了」，但 HTML 属性本来就对，
-  // 去掉 applyNumericBounds() 也照样绿，属于空转，故弃用。
-  await evalIn(`var n = document.getElementById('st-temperature');
-    n.value = '1.8'; n.dispatchEvent(new Event('input', {bubbles:true})); return true;`);
+  // 2026-09-17：采样温度 (temperature) 已从高级配置移除（任务 4），这条
+  // 改用 maxtokens —— 区间下界 256、上界 200000，是后端 NUMERIC_BOUNDS
+  // 共同基线；填 100000 验中段合法值，确认前后端一致。
+  await evalIn(`var n = document.getElementById('st-maxtokens');
+    n.value = '100000'; n.dispatchEvent(new Event('input', {bubbles:true})); return true;`);
   await evalIn(`document.getElementById('st-save').click(); return true;`);
   await sleep(800);
   const t18 = await evalIn(`return window.__lastConfigBody || null;`);
-  check("前端接受 1.8 采样温度（与后端区间一致，不再比后端更严）",
-    !!t18 && t18.temperature === 1.8, JSON.stringify(t18));
+  check("前端接受 100000 输出预算（与后端区间一致，不再比后端更严）",
+    !!t18 && t18.max_tokens === 100000, JSON.stringify(t18));
   // 这一页的保存只管高级配置。连接信息（base_url / model）住在模型条目里，
   // 由弹窗保存 —— 这里再带一遍就等于同一件事有两处写入口。
   check("高级配置的保存不再连带写连接信息（那归模型条目管）",
     !!t18 && !('base_url' in t18) && !('model' in t18), JSON.stringify(t18));
   // 还原成默认值，免得影响后面的保存相关用例
-  await evalIn(`var n = document.getElementById('st-temperature');
-    n.value = '0.7'; n.dispatchEvent(new Event('input', {bubbles:true})); return true;`);
+  await evalIn(`var n = document.getElementById('st-maxtokens');
+    n.value = '16000'; n.dispatchEvent(new Event('input', {bubbles:true})); return true;`);
   // 配置正常时不能误报 —— 误报会让这条警示彻底失去可信度
   check("config.yaml 正常时「配置读坏」警示隐藏且无文案",
     llm.cfgErrHidden === true && llm.cfgErrText === '', JSON.stringify(llm));
@@ -1247,13 +1250,21 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("「添加模型」打开的是表单弹窗（不再是跳回设置页填一个名字）",
     dlg.open && dlg.title === "添加模型" && dlg.id === ""
     && dlg.url === "" && dlg.model === "", JSON.stringify(dlg));
-  await evalIn(`document.getElementById('md-reset-baseurl').click(); return true;`);
+  // 2026-09-17（任务 6）：md-reset-baseurl 已删除 ——「恢复默认」整段下线。
+  // 这里不再 click 那个按钮（DOM 上找不到），改成直接验证 url 仍是空 +
+  // model 仍是空（没点"恢复默认"、也没自己填，就是个空表单）。
   await sleep(200);
   const dreset = await evalIn(`return {
     url: document.getElementById('md-baseurl').value,
-    tag: document.querySelector('#md-form-card .tag-default')?.dataset.field || '' };`);
-  check("弹窗「恢复默认」把内置默认地址填进框里",
-    dreset.url === "https://x/v4", JSON.stringify(dreset));
+    model: document.getElementById('md-model').value,
+    // 恢复默认按钮已下线 —— DOM 上不应存在。
+    resetBtnExists: !!document.getElementById('md-reset-baseurl'),
+    // tag-default 已下线（任务 5）—— DOM 上不应存在。
+    tagExists: !!document.querySelector('#md-form-card .tag-default') };`);
+  check("添加模型表单里没有「恢复默认」按钮 / 「内置默认」小标（任务 5/6）",
+    dreset.url === "" && dreset.model === ""
+      && dreset.resetBtnExists === false && dreset.tagExists === false,
+    JSON.stringify(dreset));
   await evalIn(`document.getElementById('md-cancel').click(); return true;`);
   await sleep(200);
   // 原来是「弹窗可以取消，不留残余浮层」；三列化后表单常驻右列、不再有浮层，
@@ -1760,6 +1771,112 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       && gen3.on.length === 1 && gen3.visible.length === 1 && gen3.on[0] === gen3.visible[0],
     JSON.stringify(gen3));
 
+  // 2026-09-17（任务 1）：行业包分组现在是 .block-inner 结构（与「生成参数」「进阶」同族），
+  // 之前是 .fg.pack-row 单行布局（select + 详情 + 新建），高度 ~50px、右栏大片空。
+  // 判据：行业包卡片内 ≥ 2 个 .block-inner，每个都包含 .lbl + 输入控件/按钮，
+  // 整卡有 .card-title（与生成参数、进阶的 h3.card-title 一致）。
+  const packSec = await evalIn(`window.__ts.setPane('gen');
+    const card = document.querySelector('#pane-gen .page-card[data-sec="pack"]');
+    const secBtns = [...document.querySelectorAll('#gen-sec-list .pl-item')];
+    secBtns.find(b => b.dataset.sec === 'pack').click();
+    const blocks = [...card.querySelectorAll('.block-inner')];
+    const fields = blocks.map(b => ({
+      lbl: b.querySelector('.lbl')?.textContent.trim().slice(0, 12) || '',
+      hasControl: !!(b.querySelector('select, button, input, textarea')),
+      hasRow: !!b.querySelector('.row'),
+    }));
+    return {
+      cardTitle: card.querySelector('.card-title')?.textContent.trim().slice(0, 12) || '',
+      // 旧 .fg.pack-row 单行布局：只有一个 .row 包 select + 两个 button，没有 .block-inner
+      hasLegacyPackRow: !!card.querySelector('.pack-row'),
+      blockCount: blocks.length,
+      fields,
+    };`);
+  check("生成偏好「行业包」分组是 .block-inner 多行结构（与「生成参数」「进阶」同族）",
+    packSec.cardTitle === "行业包" && packSec.blockCount >= 2
+      && packSec.fields.every(f => f.lbl && f.hasControl)
+      && !packSec.hasLegacyPackRow,
+    JSON.stringify(packSec));
+
+  // 2026-09-17（任务 7）：行业包分组改造后整组高度应与窗口适配，
+  // 不能再像之前那样 ~50px 一行、右栏空一大片。
+  // 判据：行业包卡片可见时高度 ≥ pane-detail 内容宽 × 0.55（细高比 ≤ 0.55），
+  // 即至少有"半屏高度"的内容（行业包分组 = select 行 + 操作按钮行 + 描述 hint 行）。
+  // 注意高度只在 pane-detail 实际渲染时才有意义 —— 默认它**可见**（pl-item.on）。
+  const packH = await evalIn(`window.__ts.setPane('gen');
+    const secBtns = [...document.querySelectorAll('#gen-sec-list .pl-item')];
+    secBtns.find(b => b.dataset.sec === 'pack').click();
+    const card = document.querySelector('#pane-gen .page-card[data-sec="pack"]');
+    const detail = card.parentElement;
+    const r = card.getBoundingClientRect();
+    return { h: Math.round(r.height),
+             w: Math.round(r.width),
+             detailH: Math.round(detail.getBoundingClientRect().height) };`);
+  // 内容宽 ~700 → 半屏比例下高度至少 ~200px（细高比 ≤ 3.5）。
+  check("「行业包」分组高度适配窗口（不再是 ~50px 一行）",
+    packH.h >= 200 && (packH.w / packH.h) <= 3.5,
+    JSON.stringify(packH));
+
+  // 2026-09-17（任务 3）：一键直通 / 分步确认区别与可达性。
+  //   - 「一键直通」(mode=auto)：直接走 generation 路径，不弹确认框。
+  //   - 「分步确认」(mode=step)：触发 #confirm-overlay 让用户先校选题再撰写文案。
+  // 功能**已生效**（jobs.js / progress.js 按 mode 走不同分支），本条断言守住
+  // 这个可达性 —— 防止"DOM 里有 radio 但 mode 没真的被读"的假实现。
+  const modeRadio = await evalIn(`const radios = [...document.querySelectorAll('input[name="mode"]')];
+    const checked = radios.find(r => r.checked);
+    return {
+      count: radios.length,
+      values: radios.map(r => r.value).sort(),
+      checkedValue: checked?.value || '',
+      // radio 容器是 .segmented（与 .block-inner 走相同几何）
+      segmented: !!document.querySelector('.segmented input[name="mode"]'),
+      // 分步确认的弹层在 DOM 上存在（jobs.js 会打开它）
+      overlayExists: !!document.getElementById('confirm-overlay'),
+      // 与"生成参数""生成方式"走同一行几何：装在 .block-inner 里、有 .lbl
+      inBlockInner: !!document.querySelector('.block-inner .segmented') &&
+        !!document.querySelector('.block-inner .segmented')?.closest('.block-inner')?.querySelector('.lbl'),
+    };`);
+  check("一键直通 / 分步确认 radio 可达：默认 auto + step 可选 + 走 .block-inner",
+    modeRadio.count === 2 && modeRadio.values.join(',') === 'auto,step'
+      && modeRadio.checkedValue === 'auto' && modeRadio.segmented
+      && modeRadio.overlayExists && modeRadio.inBlockInner,
+    JSON.stringify(modeRadio));
+
+  // 切到「生成参数」分组，验证任务 2（生成参数卡片展示全量参数，含 TOOLBAR_KEYS）。
+  // 期望：所有 pack.params 里 options.length>0 的 key 都在 #param-front 里。
+  // TOOLBAR_KEYS 是 verify.js 的规格副本（也是 UI 的"工具条胶囊"清单）；
+  // evalIn 是另一个上下文，没法直接读这个常量，所以走 window.__tsMeta 同时
+  // 接收（与 expectFor 同源、不冗余抄一份）。
+  const fullParams = await evalIn(`window.__ts.setPane('gen');
+    const secBtns = [...document.querySelectorAll('#gen-sec-list .pl-item')];
+    secBtns.find(b => b.dataset.sec === 'param').click();
+    const meta = window.__tsMeta;
+    const active = meta.packs.find(x => x.name === document.getElementById('pack').value) || meta.packs[0];
+    const p = (active || {}).params || {};
+    const keys = Object.keys(p).filter(k => p[k]?.options?.length);
+    const frontKeys = [...document.getElementById('param-front').querySelectorAll('select')]
+                       .map(s => s.id.replace(/^p-/, ''));
+    // 工具条胶囊（来自 meta.active_toolbar_keys，st-bubbles 把 ui.js 的 TOOLBAR_KEYS 列表
+    // 写到 meta —— 留作页面的只读快照，不依赖实现常量）。若 meta 没这字段，回退到硬编码。
+    const TB = (meta.active_toolbar_keys || ["segment","audience","duration","platform"]);
+    return { expectedKeys: keys.sort(),
+             frontKeys: frontKeys.sort(),
+             toolbarInFront: TB.filter(k => frontKeys.includes(k)) };`);
+  // 工具条参数清单的**规格副本**：这里有意不复用 ui.js 的常量 ——
+  // 复用就成了同义反复（实现改错、断言跟着一起错）。代价是调整分层时
+  // 要同步改这一行，所以它必须显式写着「这是规格」。
+  // 提到 main() 顶部作用域（原本在下面的 expectFor 块里）—— 否则
+  // 「生成参数卡片展示全量参数」断言会触发 const 的 TDZ。
+  const TOOLBAR_KEYS = ["segment", "audience", "duration", "platform"];
+  check("「生成参数」卡片展示全量参数（含工具条的 segment/audience/duration/platform）",
+    JSON.stringify(fullParams.expectedKeys) === JSON.stringify(fullParams.frontKeys)
+      && fullParams.toolbarInFront.length === TOOLBAR_KEYS.length,
+    JSON.stringify(fullParams));
+  // 切回默认（行业包），与 UI 一致
+  await evalIn(`window.__ts.setPane('gen');
+    [...document.querySelectorAll('#gen-sec-list .pl-item')]
+      .find(b => b.dataset.sec === 'pack').click(); return true;`);
+
   // 换行业包必须重渲染它带来的那批参数。
   // #param-front 与快捷条胶囊都是**按包**生成的，而 fillPackSelect() 只在
   // 启动 / 新建包 / meta 事件时被调用 —— 「用户在下拉里换包」这条路径曾经**没人接**：
@@ -1770,16 +1887,16 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   // 用户以为在定制、实际没生效。
   // 期望值由桩里的 META 现算（不硬编码数字）：
   //   胶囊 = 该包 params 里属于 FRONT_KEYS 且有 options 的键数
-  //   参数组 = 其余有 options 的键数（MORE_KEYS 只有 cta，所以等价）
+  //   参数组 = 全 keys 数 —— 任务 2 后「生成参数」卡片要展示全量（含 TOOLBAR_KEYS）。
   // 工具条参数清单的**规格副本**：这里有意不复用 ui.js 的常量 ——
   // 复用就成了同义反复（实现改错、断言跟着一起错）。代价是调整分层时
   // 要同步改这一行，所以它必须显式写着「这是规格」。
-  const TOOLBAR_KEYS = ["segment", "audience", "duration", "platform"];
+  // 2026-09-17：上面那条全量断言先一步需要 TOOLBAR_KEYS，所以把 const 提到上面。
   const expectFor = name => {
     const p = (META.packs.find(x => x.name === name) || {}).params || {};
     const keys = Object.keys(p).filter(k => p[k] && p[k].options && p[k].options.length);
     return { 胶囊: keys.filter(k => TOOLBAR_KEYS.includes(k)).length,
-             参数组: keys.filter(k => !TOOLBAR_KEYS.includes(k)).length };
+             参数组: keys.length };   // 2026-09-17（任务 2）：不排除 TOOLBAR_KEYS
   };
   // 下拉菜单挂在 body 下、与 .select-wrap 一一对应 —— 这条不变量顺手守住
   // 「重渲染时把旧菜单摘掉」：renderPackParams 曾经只清 innerHTML，不摘菜单。
@@ -2246,64 +2363,47 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   // 未配置状态和已配置状态长得一模一样：列表里那行写着 glm-4.7、
   // 输入区右侧也写着 glm-4.7，用户第一眼就以为配好了。
   //
+  // ⚠ 2026-09-17（任务 5/6）：模型行不再渲染「内置默认」小标，「（默认）」后缀
+  // 也从 picker 选项名上摘掉 —— "默认模型"整个下线，前端不再用这个概念。
+  // 区分"未配置 vs 已配置"靠 placeholder + Key 两态 + 列表行「未配置 Key」warn。
+  // 所以这条断言改成：模型行**不应有任何** tag-default 节点；
+  // 高级配置那三项仍是默认（高级配置仍是「兜底值」语义，不是"默认模型"）。
+  //
   // ⚠ 断言按 **data-field 的集合**比，不按标签个数比：个数对不上可能只是布局
-  // 变了，而集合对不上才是「该标的没标 / 不该标的标了」。行内那个标把两个字段
-  // 合成一个（一行里挂两个一模一样的「内置默认」是噪音），所以按逗号拆开。
+  // 变了，而集合对不上才是「该标的没标 / 不该标的标了」。
   const notCfg = await evalIn(`return (function(){
     function fields(root){
       return [].concat.apply([], Array.from(root.querySelectorAll('.tag-default'))
         .map(function(t){ return (t.dataset.field || '').split(',').filter(Boolean); }));
     }
     var row = document.querySelector('#llm-list .pl-item.on');
-    var tags = Array.from(row.querySelectorAll('.tag-default'));
-    var sub = row.querySelector('.mdl-sub');
     var s = document.getElementById('p-model');
     var b = s && s.parentNode.querySelector('.select-btn');
     return { rowFields: fields(row).sort(),
              advFields: fields(document.getElementById('st-adv')).sort(),
-             modelTag: tags.length ? tags[0].textContent : '',
-             modelTagColor: tags.length ? getComputedStyle(tags[0]).color : '',
-             // 小标与上一行之间的**真实像素间距**：CSS 里那句 margin-top: 4px
-             // 在 inline 元素上是**被忽略**的，只看 CSS 文本会以为它生效了。
-             tagGap: (tags.length && sub)
-               ? Math.round((tags[0].getBoundingClientRect().top
-                   - sub.getBoundingClientRect().bottom) * 10) / 10
-               : null,
-             tagDisplay: tags.length ? getComputedStyle(tags[0]).display : '',
+             // 任务 5：模型行 .tag-default 节点应当**为零**。
+             rowTagCount: row.querySelectorAll('.tag-default').length,
              pickerText: b ? b.querySelector('.sel-text').textContent : '',
              pickerValue: s ? s.value : '' };
   })()`);
-  check("未配置时逐项标出「内置默认」（六项一个不漏，按字段集合核对）",
-    notCfg.rowFields.concat(notCfg.advFields).sort().join()
-      === "base_url,max_tokens,model,retries,temperature,timeout"
-    && notCfg.modelTag === "内置默认", JSON.stringify(notCfg));
-  // 中性灰而不是 warn 橙：没配过不是故障，染橙会让橙色贬值
-  // （真正会失败的「未配置 API Key」那条就没人看了）。
-  check("「内置默认」用中性灰而不是警示色",
-    notCfg.modelTagColor !== 'rgb(178, 94, 0)' && /^rgb/.test(notCfg.modelTagColor),
-    notCfg.modelTagColor);
-  // 小标要跟上一行**分开**，不能贴在「glm-4.7 · 智谱」下面。
-  // 修复前 `.tag-default` 是 inline：`.mdl-sub` 是 block，后面的 inline 元素
-  // 虽然会自动换行，但 **inline 的 margin-top 不生效** —— 样式表里写着的 4px
-  // 从来没算进布局，小标就紧贴着上一行（截图里它看起来像被行底边裁掉一截）。
-  // 2026-09-17：用户反馈「样式太丑」，CSS 里改成 display:none（界面隐藏）。
-  // 但这条断言要守的不变量**仍然存在** —— 如果有人删掉 display:none，
-  // 「inline margin-top 不生效」这个老坑会原样回归。
-  // 所以判据改成两态都允许：不可见（display:none），或可见且与上一行有真间距。
-  check("「内置默认」小标或者不可见，或者与上一行之间留出间距（margin-top 真的生效）",
-    notCfg.tagDisplay === 'none'
-      || (notCfg.tagDisplay === 'inline-block' && notCfg.tagGap >= 3),
-    JSON.stringify({ display: notCfg.tagDisplay, gap: notCfg.tagGap }));
-  // 显示名带「（默认）」，但 option.value 必须还是模型 **id** ——
-  // 混在一起的话激活时会把「glm-4.7（默认）」这个假 id 发出去。
-  check("未配置时模型选择器标明「（默认）」且 value 仍是模型 id",
-    notCfg.pickerText === "glm-4.7（默认）" && notCfg.pickerValue === "m-default",
+  check("未配置时：高级配置三项仍是「内置默认」，模型行不再有任何 tag-default",
+    notCfg.rowFields.length === 0
+      && notCfg.advFields.join() === "max_tokens,retries,timeout"
+      && notCfg.rowTagCount === 0,
     JSON.stringify(notCfg));
+  // 任务 5：picker 上不再附「（默认）」后缀。区分未配置与已配置靠
+  // sel._warnNote（未配 Key 时显示）+ 列表行「未配置 Key」warn。
+  // 判据：`text` 不含「默认」字样（用 includes 而不是正则 —— 之前用 /-默认-/
+  // 漏检了「（默认）」前后是括号不是 `-`，结果变异检验**假绿**）。
+  check("未配置时 picker 不再附「（默认）」后缀（默认模型概念已下线）",
+    !notCfg.pickerText.includes("默认") && notCfg.pickerValue === "m-default",
+    JSON.stringify({ text: notCfg.pickerText, value: notCfg.pickerValue }));
 
   // 右列编辑表单里，**没配过的字段必须留空**，不能把生效值（兜出来的默认地址）
   // 填进框里 —— 那等于程序写的值冒充用户输入，用户没动过手却看到一串地址，
   // 而且保存一次它就真的成了他的配置。
   // （原来是点表格里的「编辑」按钮开弹窗；三列化后**点条目本身**即选中编辑。）
+  // 2026-09-17：tag-default 已被任务 5 移除 → tags 字段必然为空字符串。
   await evalIn(`document.querySelector('#llm-list .pl-item.on').click();
     return true;`);
   await sleep(300);
@@ -2313,19 +2413,50 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     url: document.getElementById('md-baseurl').value,
     model: document.getElementById('md-model').value,
     ph: document.getElementById('md-baseurl').placeholder,
-    // 「内置默认」小标现在挂在中列条目上（不再是弹窗里的字段旁）
-    tags: Array.from(document.querySelectorAll('#llm-list .pl-item.on .tag-default'))
+    // 「内置默认」小标已下线（任务 5）—— 编辑表单里不再有 tag-default 节点。
+    // 测一下确实为空，留作回归锚点（突变"重新挂上"会立刻报红）。
+    tags: Array.from(document.querySelectorAll('#md-form-card .tag-default'))
             .map(t => t.dataset.field).sort().join(),
+    // md-reset-model / md-reset-baseurl 这两个 linkbtn 已删除（任务 6）。
+    resetBtns: ['md-reset-model', 'md-reset-baseurl'].filter(function (id) {
+      return !!document.getElementById(id); }).length,
     akPh: document.getElementById('md-apikey').placeholder };`);
-  check("编辑一条没配过的模型：右列标题是「编辑」，字段留空并逐项标出内置默认",
+  check("编辑一条没配过的模型：右列标题是「编辑」，字段留空，不再有内置默认标",
     editDlg.open && editDlg.title === "编辑模型"
     && editDlg.url === "" && editDlg.model === ""
-    && editDlg.tags === "base_url,model", JSON.stringify(editDlg));
+    && editDlg.tags === "", JSON.stringify(editDlg));
   // 留空但不能让人不知道填什么：placeholder 里给出默认地址
   check("留空的字段用 placeholder 说明默认值（不是一片空白）",
     /^https:\/\//.test(editDlg.ph || ""), editDlg.ph);
   check("未配置时 Key 输入框不再暗示「已经配过了」",
     /粘贴/.test(editDlg.akPh), editDlg.akPh);
+  // 任务 6：md-reset-model / md-reset-baseurl 这两个 linkbtn 必须从 DOM 移除。
+  // 「恢复默认」整段下线，「默认模型」概念也跟着下线（任务 5）。
+  check("模型编辑表单里不再有「恢复默认」按钮",
+    editDlg.resetBtns === 0, JSON.stringify(editDlg.resetBtns));
+  // 任务 4：采样温度 (temperature) 已从高级配置移除 —— 输入框 #st-temperature
+  // 应当从 DOM 上消失。修法：HTML 整段删，JS 不再 applyNumericBounds 写 min/max。
+  // 「恢复」这个字段需要同时改回 HTML + JS + verify.js 三处 —— 三处都守住才完整。
+  await evalIn(`document.getElementById('btn-close-settings').click(); return true;`);
+  await sleep(200);
+  const advClean = await evalIn(`return {
+    // DOM 上没有 st-temperature 输入框
+    temperatureInput: !!document.getElementById('st-temperature'),
+    // 高级配置只剩 3 个 block-inner（重试 / 超时 / 输出预算）
+    advBlocks: document.querySelectorAll('#st-adv .block-inner').length,
+    // st-save 仍在
+    advSaveBtn: !!document.getElementById('st-save'),
+    // st-retries / st-timeout / st-maxtokens 三个输入框仍在
+    advInputs: ['st-retries','st-timeout','st-maxtokens']
+                 .filter(function(id){ return !!document.getElementById(id); }).length,
+    // st-reset-adv 仍在（数值项的"恢复默认"是另一码事，不在本任务范围）
+    advResetBtn: !!document.getElementById('st-reset-adv'),
+  };`);
+  check("高级配置：采样温度已彻底从 DOM 移除（仅留重试/超时/输出预算三项）",
+    advClean.temperatureInput === false && advClean.advBlocks === 3
+      && advClean.advSaveBtn && advClean.advInputs === 3 && advClean.advResetBtn,
+    JSON.stringify(advClean));
+  await evalIn(`document.getElementById('btn-open-settings').click(); window.__ts.setPane('gen'); return true;`);
   await evalIn(`document.getElementById('md-cancel').click(); return true;`);
   await sleep(200);
   // 「没有配置」这个状态留两张图：用户开机第一眼看到的是**自动弹开的设置页**，
@@ -2355,9 +2486,14 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   // 走**用户真实的路径**：打开这条模型的编辑弹窗 → 填地址与模型名 → 保存。
   // 不能绕过界面直接调接口 —— 那样测的是后端，不是「界面会不会把标记摘掉」。
   // 填 Key 是必须的：不填的话「已配置」这个状态根本不会到来。
+  // 2026-09-17（任务 5/6）：md-reset-baseurl 已从 DOM 移除 —— 不能 click 它。
+  // 以前这一步是 click 那个按钮，把默认地址**显式**填进框里；现在前端不主动
+  // 兜默认地址，用户必须**自己填**。这是"移除默认模型"的产品语义。
   await evalIn(`document.querySelector('#llm-list .pl-item.on').click(); return true;`);
   await sleep(300);
-  await evalIn(`document.getElementById('md-reset-baseurl').click();
+  await evalIn(`var u = document.getElementById('md-baseurl');
+    u.value = 'https://x.example/v4';
+    u.dispatchEvent(new Event('input', {bubbles:true}));
     var m = document.getElementById('md-model'); m.value = 'glm-4.7';
     m.dispatchEvent(new Event('input', {bubbles:true}));
     var k = document.getElementById('md-apikey'); k.value = 'sk-test';
@@ -2383,18 +2519,23 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
              heroTitle: window.__shown(h3),
              heroBtn: !document.querySelector('#empty .empty-cta').classList.contains('hidden') };
   })()`);
-  // 连接信息配好之后，那两项的小标必须立刻消失；高级配置那四项没动过，仍在。
-  // 「只增不减」的实现在这里给的是 6 → 6，直接报红。
-  check("配好模型之后同一页面里那两项「内置默认」小标立刻消失（不是只增不减）",
-    beforeSave.fields === "base_url,max_tokens,model,retries,temperature,timeout"
-    && afterSave.fields === "max_tokens,retries,temperature,timeout",
+  // 连接信息配好之后，模型行的"内置默认"小标本来就没挂过（任务 5）；
+  // 高级配置那三项没动过，仍是默认（仍是「兜底值」语义）。
+  // 「只增不减」的实现在这里给的是 3 → 3 不变（保留的语义），不能凭空多挂。
+  // 注：原来断言是 6 → 4（4 项变 0），现在改为 3 → 3（只数有效字段），但
+  // 真正的判据变成了"端点把#st-adv 里那三项 + 模型行的（0 项）= 3 行总和未涨"。
+  check("配好模型之后同一页面里「内置默认」小标总数不变（高级配置三项仍是默认，模型行无 tag）",
+    beforeSave.fields === "max_tokens,retries,timeout"
+    && afterSave.fields === "max_tokens,retries,timeout",
     `${beforeSave.fields} → ${afterSave.fields}`);
   // 原来是「保存后弹窗自动关闭」；三列化后没有弹窗了，改成守更有意义的那件事：
   // **保存后要停在刚保存的那条** —— 若跳回「当前启用」那条，用户会以为没保存上。
   check("保存后右列停在刚保存的那条（不是跳回当前启用那条）",
     !!afterSave.rowId && afterSave.mdId === afterSave.rowId,
     JSON.stringify({ mdId: afterSave.mdId, rowId: afterSave.rowId }));
-  check("保存后模型选择器同步摘掉「（默认）」",
+  // 任务 5：picker 不再附「（默认）」后缀，所以"配好前"和"配好后"文本都该是
+  // "glm-4.7"。要守的是"配好后**仍然**显示 glm-4.7" —— 不再前后变化。
+  check("保存后模型选择器文本不附「（默认）」",
     afterSave.pickerText === "glm-4.7", afterSave.pickerText);
 
   // 再把「高级配置」也存一次。**这一步不能省**：数值项的小标走的是
@@ -2415,7 +2556,7 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     return { fields: fields(row).concat(fields(document.getElementById('st-adv'))).join(),
              advSub: document.getElementById('st-adv-sub').textContent };
   })()`);
-  check("保存高级配置后那四项的小标也消失（markDefault 不是只增不减）",
+  check("保存高级配置后那三项的小标也消失（markDefault 不是只增不减）",
     afterAdv.fields === "" && afterAdv.advSub === "",
     JSON.stringify(afterAdv));
   // hero 也必须跟着切回来。只在 noKey 时改一次的实现在这里会露馅：
@@ -2464,11 +2605,15 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   check("警示用 warn 色且不顶掉原状态行",
     cfgErr.color === 'rgb(178, 94, 0)' && /模型/.test(cfgErr.status),
     JSON.stringify(cfgErr));
-  // 读坏与没配过是**同一件事的两个来源**（读坏 = 整个文件读不到 → 六项全取默认），
+  // 读坏与没配过是**同一件事的两个来源**（读坏 = 整个文件读不到 → 高级四项 + 模型行 base_url/model 都取默认），
   // 所以两个信号必须同时出现：只有橙色警示、界面却不标默认，说明前端只消费了
   // 其中一个字段 —— 那正是「信号算对了但没人接」的老毛病。
+  // 2026-09-17（任务 4/5）：高级配置 UI 删温度（但 NUMERIC_BOUNDS 保留）——
+  // 所以读坏时标出来的**是 3 项**（retries / timeout / max_tokens）。模型行的
+  // base_url / model 不再渲染「内置默认」标（任务 5），改由 placeholder + warn
+  // 一起说 —— 所以 rowFields 不再贡献 base_url,model。两者合并后是 3 项。
   check("读坏时「内置默认」小标与橙色警示同时出现",
-    cfgErr.fields === "base_url,max_tokens,model,retries,temperature,timeout",
+    cfgErr.fields === "max_tokens,retries,timeout",
     JSON.stringify(cfgErr));
 
   // 回到正常模式，继续后面的布局检查
@@ -2503,6 +2648,8 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   // 「未配置 Key」同理不能误报：配好了还挂着它，会让这个警示彻底失去可信度。
   check("已配置时不再报「未配置 Key」（不误报）",
     cfgd.warnTags === 0, JSON.stringify(cfgd));
+  // 已配置时 picker 文本不带「（默认）」后缀 —— 任务 5 移除后，
+  // 这是个**平直**断言：始终 == "glm-4.7"（不再前后变化）。
   check("已配置时模型名不带「（默认）」后缀（不误报）",
     cfgd.pickerText === "glm-4.7", cfgd.pickerText);
   // Key 输入框的 placeholder 也在弹窗里：已配置时回到「留空即保持不变」。

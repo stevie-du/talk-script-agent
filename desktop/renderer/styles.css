@@ -1266,9 +1266,11 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 .placeholder .hint { margin-top: var(--s2); max-width: 38em; }
 
 
-/* 设置抽屉：一级 tabs + 二级字段组 */
-.pack-row .row > :first-child { flex: 1.6; }
-.pack-row .row button { flex: 0 0 auto; height: var(--h-ctl); }   /* 与 select 同高 */
+/* 设置抽屉：一级 tabs + 二级字段组。
+   行业包分组的「操作」按钮行就是普通 .row（按钮靠左、与输入控件同节奏）——
+   .pack-row 仅作历史标记保留，不写规则（旧的 `.pack-row .row > :first-child { flex: 1.6 }`
+   与 `button { height: var(--h-ctl) }` 都是把 select 与按钮并排的旧布局特有，
+   2026-09-17 任务 1 改成 .block-inner 多行结构后那两条已不适用）。 */
 /* #param-front（「生成偏好」里由行业包参数填充的字段组）曾经是
    `grid-template-columns: 1fr 1fr` —— 仓库第一个提交就是这样，那时它装着好几个
    「更多参数」，两列正好两两配对。后来「输出内容」「文案人昧」搬进了下面的

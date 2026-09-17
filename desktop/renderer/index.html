@@ -218,16 +218,26 @@
           </div>
 
           <div class="pane-detail" id="gen-sec-detail">
+            <!-- 行业包分组：与「生成参数」「进阶」同结构（card-title + 描述 + .block-inner 多行）。
+                 之前是 .fg.pack-row 单行（select + 详情 + 新建），高度 ~50px，右栏一大片空。
+                 改成 .block-inner 结构后该组能撑起来，与窗口高度适配（任务 1 / 7）。 -->
             <div class="page-card" data-sec="pack">
-              <div class="fg pack-row">
-                <label class="lbl">行业包</label>
-                <div class="row">
+              <h3 class="card-title">行业包</h3>
+              <p class="hint">选择当前生效的行业包。改动即时生效，重新生成即用新包的内容。</p>
+              <div class="fg">
+                <div class="block-inner">
+                  <label class="lbl">当前行业包</label>
                   <select id="pack"></select>
-                  <button id="btn-packinfo" class="ghost bordered" title="查看当前包的文件与配置">详情</button>
-                  <button id="btn-newpack" class="ghost bordered" title="用模型生成新行业包">
-                    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-                    新建
-                  </button>
+                </div>
+                <div class="block-inner">
+                  <label class="lbl">操作</label>
+                  <div class="row">
+                    <button id="btn-packinfo" class="ghost bordered" title="查看当前包的文件与配置">详情</button>
+                    <button id="btn-newpack" class="ghost bordered" title="用模型生成新行业包">
+                      <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                      新建
+                    </button>
+                  </div>
                 </div>
               </div>
               <p class="hint cfg-err hidden" id="pack-err"></p>
@@ -408,10 +418,7 @@
               <input type="hidden" id="md-id">
               <div class="fg">
                 <div class="block-inner">
-                  <label class="lbl">模型 ID
-                    <button class="linkbtn" id="md-reset-model" type="button"
-                            title="恢复为内置默认模型名">恢复默认</button>
-                  </label>
+                  <label class="lbl">模型 ID</label>
                   <input id="md-model" placeholder="glm-4.7 / deepseek-chat">
                   <p class="hint">发给服务端的模型名，要和服务商文档里写的一致。</p>
                 </div>
@@ -420,10 +427,7 @@
                   <input id="md-name" placeholder="留空则直接显示模型 ID">
                 </div>
                 <div class="block-inner">
-                  <label class="lbl">请求地址
-                    <button class="linkbtn" id="md-reset-baseurl" type="button"
-                            title="恢复为内置默认地址">恢复默认</button>
-                  </label>
+                  <label class="lbl">请求地址</label>
                   <input id="md-baseurl" placeholder="https://open.bigmodel.cn/api/paas/v4">
                   <p class="hint">OpenAI 兼容接口的根地址，<b>不要</b>带 /chat/completions。</p>
                 </div>
@@ -453,13 +457,6 @@
               <span class="st-adv-sub" id="st-adv-sub"></span>
             </summary>
             <div class="st-adv-body">
-              <div class="block-inner">
-                <label class="lbl">采样温度</label>
-                <input id="st-temperature" type="number" min="0" max="2" step="0.1"
-                       placeholder="0.7（默认）">
-                <p class="hint">越低越稳、越高越发散。文案类建议 0.7~0.9；0 表示尽量确定性输出；
-                  改完保存即生效。（min/max 由 <code>NUMERIC_BOUNDS</code> 统一写入）</p>
-              </div>
               <div class="block-inner">
                 <label class="lbl">重试次数
                   <button class="linkbtn" id="st-reset-adv" type="button"

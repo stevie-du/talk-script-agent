@@ -46,9 +46,13 @@ export const NUMERIC_BOUNDS = {
 };
 
 // 区间 → 输入框的对应关系。校验与 min/max 都从这一张表来，
-// 避免「能填的范围」和「能存的范围」变成两套数（temperature 曾经就是这样）。
+// 避免「能填的范围」和「能存的范围」变成两套数（temperature 曾经是这样）。
+// 2026-09-17：采样温度 (temperature) 从高级配置的**UI**移除 —— 它属于「模型行为」
+// 语义，不是「系统稳健性」参数；想调温度去模型接口里那条模型的 base_url + 配套实现。
+// 但区间仍留在这里：① 后端重试时用它微调温度（pipeline.py 的 +0.25），删了会让
+// pipeline 报错；② 前后端 NUMERIC_BOUNDS 集合一致是 pytest 守卫的不变量 ——
+// 不一致就报红，前端多/少一个字段都是「前后端凭想象设限」。所以 UI 删、字段保留。
 const NUM_FIELDS = [
-  ["temperature", "st-temperature", "采样温度"],
   ["retries", "st-retries", "重试次数"],
   ["timeout", "st-timeout", "单次超时"],
   ["max_tokens", "st-maxtokens", "输出预算"],
@@ -119,14 +123,15 @@ async function preloadSettings() {
   const c = await api.config();
   lastCfg = c;
   const dflt = new Set(c.llm_defaulted || []);
-  fill("st-temperature", c.temperature ?? "");
   fill("st-retries", c.retries ?? "");
   fill("st-timeout", c.timeout ?? "");
   fill("st-maxtokens", c.max_tokens ?? "");
   // 「这一项还是内置默认」必须**逐项**标在框上，不能只在底部写一句总提示：
-  // 用户的视线落在「采样温度 = 0.7」这个框上，结论就是「已经配好了」，
+  // 用户的视线落在「超时 = 180」这个框上，结论就是「已经配好了」，
   // 底部那行浅灰小字他根本不会看。
-  markDefault("st-temperature", dflt.has("temperature"), "temperature");
+  // 2026-09-17：模型接口不再渲染「内置默认」标（任务 5 —— 移除默认模型）。
+  // 列表行的 markDefault 也随之删除（用户没有「内置」概念了），需要靠右上
+  // 状态行 + picker 的「未配置 Key」warning 告知「还没真配」。
   markDefault("st-retries", dflt.has("retries"), "retries");
   markDefault("st-timeout", dflt.has("timeout"), "timeout");
   markDefault("st-maxtokens", dflt.has("max_tokens"), "max_tokens");
@@ -142,7 +147,7 @@ function renderAdvSub(dflt) {
   const n = $("st-adv-sub");
   if (!n) return;
   const hit = NUM_FIELDS.filter(([key]) => dflt.has(key)).length;
-  n.textContent = hit ? `温度 / 重试 / 超时 / 输出预算 · ${hit} 项还是内置默认` : "";
+  n.textContent = hit ? `重试 / 超时 / 输出预算 · ${hit} 项还是内置默认` : "";
 }
 
 function renderStatus(c) {
@@ -228,17 +233,11 @@ function modelItem(m, total, c) {
   const sub = el("span", "pl-s mdl-sub", esc(`${m.model || "—"} · ${prov}`));
   sub.title = m.base_url || "";
   txt.appendChild(sub);
-  // 2026-09-17：DOM 里仍渲染「内置默认」小标（断言要查），但用 CSS display:none
-  // 在界面隐藏（用户反馈「样式太丑」）。DOM 与断言同步保留——见 styles.css 的
-  // `.pl-item .tag-default { display: none }`。
-  const dfl = m.defaulted || [];
-  if (dfl.length) {
-    const t = el("span", "tag-default", "内置默认");
-    t.dataset.field = dfl.join(",");
-    t.title = `这条的${dfl.map(f => FIELD_LABEL[f] || f).join("、")}`
-      + "还是内置默认，不是你保存过的配置";
-    txt.appendChild(t);
-  }
+  // 2026-09-17（任务 5）：模型行不再渲染「内置默认」小标 ——「默认模型」概念
+  // 整个下线（"移除默认模型，改为需用户自行配置"）。连 DOM 节点也不保留：
+  // 之前 `display:none` 隐藏但断言查 DOM 的方案是"假象"，未配置与已配置
+  // 在底层还是两种状态。彻底删除后断言口径改成「DOM 上不应有 tag-default 」。
+  // 用户在编辑表单里看到的提示是「字段留空 + placeholder 给示例 + Key 两态」。
   // 没 Key 要说出来：启用它生成必被拒，而列表上一切正常。
   // 环境变量给了 Key 时不说 —— 那时它其实能用，报「未配置」就是误报。
   if (!m.api_key_set && !c.env_override) {
@@ -336,8 +335,10 @@ function selectModel(id) {
   ak.value = "";
   if (!ak.dataset.phSet) ak.dataset.phSet = ak.placeholder;
   ak.placeholder = (m && m.api_key_set) ? ak.dataset.phSet : ak.dataset.phEmpty;
-  markDefault("md-model", dfl.has("model"), "model");
-  markDefault("md-baseurl", dfl.has("base_url"), "base_url");
+  // 2026-09-17（任务 5）：模型行不再渲染「内置默认」小标 —— 「默认模型」概念
+  // 整个下线，前端不再为 model / base_url 调 markDefault。
+  // DOM 与 data-field 也不再存在（HTML 里 .tag-default 已删，verify.js 改口径）。
+  // 未配置状态靠 placeholder + Key 输入框两态 + 列表行「未配置 Key」warn 一起说。
   $("md-status").textContent = "";
   // 「删除」只在编辑既有模型、且不止一条时可用 —— 至少要保留一个模型。
   const del = $("md-delete");
@@ -406,18 +407,6 @@ async function testModelDialog() {
   btn.textContent = label;
 }
 
-/** 「恢复默认」：把内置默认值**显式**填进框里。
- *  默认值从 /api/config 的 defaults 拿 —— 前端不另抄一份，否则改后端默认值时
- *  界面还按老值填。填进去之后保存，这个值就成了用户显式选定的配置。 */
-function fillDefault(inputId, field) {
-  const d = (lastCfg || {}).defaults || {};
-  const n = $(inputId);
-  if (!n || !d[field]) return;
-  n.value = d[field];
-  dirty.add(inputId);
-  toast("已填入内置默认值，点保存生效");
-}
-
 async function refreshAll() {
   await preloadSettings().catch(() => {});
   try {
@@ -427,7 +416,13 @@ async function refreshAll() {
 }
 
 /** 在字段标签上打一个「内置默认」小标。幂等 —— preloadSettings 每次打开都会跑，
- *  不能叠出第二个。`field` 写进 data-field，让「标了哪些字段」可被断言核对。 */
+ *  不能叠出第二个。`field` 写进 data-field，让「标了哪些字段」可被断言核对。
+ *
+ *  2026-09-17：模型行不再调它（任务 5 —— 移除默认模型，改为需用户自行配置）。
+ *  高级配置的数值项（retries / timeout / max_tokens）仍用它：这些是「兜底值」，
+ *  不是「默认模型」，告诉用户「这个值不是你自己存的」仍是有用的（点
+ *  「保存高级配置」就能变成自己的）。
+ *  fillDefault() 同步删除：模型上的「恢复默认」按钮已下线（任务 6）。 */
 function markDefault(inputId, on, field) {
   const input = $(inputId);
   const lbl = input && input.closest(".block-inner")?.querySelector(".lbl");
@@ -467,7 +462,7 @@ function fill(id, value) {
 
 export const bindSettings = bindOnce(function bindSettings() {
   applyNumericBounds();          // 区间由 JS 统一写入输入框的 min/max
-  ["st-temperature", "st-retries", "st-timeout", "st-maxtokens"].forEach(id => {
+  ["st-retries", "st-timeout", "st-maxtokens"].forEach(id => {
     $(id).addEventListener("input", () => dirty.add(id));
   });
   // 模型弹窗里的四个框也算「用户改过」—— 弹窗是每次打开重建内容的，
@@ -522,11 +517,9 @@ export const bindSettings = bindOnce(function bindSettings() {
       dirty.clear();
     } catch (e) { toast("保存失败：" + e.message, 3500); }
   };
-  // 「恢复默认」：数值项留空保存是无效的空操作（后端会过滤空串防手滑），
-  // 所以回到默认必须是一个显式动作。
-  // base_url / model 的「恢复默认」搬进了模型弹窗（那里才有这两个框）——
-  // 它的做法是把内置默认值**填进框里**，由用户点保存落盘，
-  // 不再是直接改服务端（那会绕过「这条模型到底存了什么」）。
+  // 「恢复默认」（数值项）：空保存是无效操作，后端过滤空串防手滑，所以回到
+  // 默认必须是一个显式动作。base_url / model 的「恢复默认」已删（2026-09-17）：
+  // 任务 5/6 ——「默认模型」整个下线，模型行不再有「恢复默认」按钮。
   $("st-reset-adv").onclick = () => resetField(
     ["retries", "timeout", "max_tokens"], ["st-retries", "st-timeout", "st-maxtokens"]);
   // 「添加模型」：右列切到空表单（editingId=""），不再是开弹窗。
@@ -534,8 +527,6 @@ export const bindSettings = bindOnce(function bindSettings() {
   $("md-cancel").onclick = closeModelDialog;
   $("md-save").onclick = saveModelDialog;
   $("md-test").onclick = testModelDialog;
-  $("md-reset-model").onclick = () => fillDefault("md-model", "model");
-  $("md-reset-baseurl").onclick = () => fillDefault("md-baseurl", "base_url");
   // 「删除」移到右列（原来在表格的操作列）：删完回到当前启用那条。
   $("md-delete").onclick = async () => {
     const m = ((lastCfg || {}).models || []).find(x => x.id === editingId);
