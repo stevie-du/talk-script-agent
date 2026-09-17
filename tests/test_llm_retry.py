@@ -38,10 +38,31 @@ def _run(handler, fn):
         return fn()
 
 
+def _cfg(**over):
+    """构造一份**不依赖仓库根 config.yaml** 的配置。
+
+    ⚠ 这些用例原来写的是 `load_config(ROOT)` —— 读仓库根的 config.yaml，
+    而那是 **.gitignore 的运行时文件**（每个开发者机器上都不一样）。
+    后果：**干净检出（`git worktree` / 新克隆）里这些用例必挂** ——
+    config.yaml 不存在 → 模型列表为空 → `cfg.llm.base_url` 为空 →
+    httpx 拼出 "/chat/completions" → `ValueError: unknown url type`。
+    实测：主仓库 9/9 过、worktree 里 5 条挂（提交自洽验证出现假红）。
+    **测试不该依赖未跟踪的运行时文件。**
+    """
+    tmp = Path(tempfile.mkdtemp(prefix="ts-llmcfg-"))
+    (tmp / "config.yaml").write_text(
+        "models:\n"
+        "  - {id: m1, name: t, base_url: 'https://api.example/v1',"
+        " api_key: 'sk-test', model: 'test-model'}\n"
+        "active_model: m1\n", encoding="utf-8")
+    cfg = load_config(tmp)
+    for k, v in over.items():
+        setattr(cfg.llm, k, v)
+    return cfg
+
+
 def test_network_retry_then_success():
-    cfg = load_config(ROOT)
-    cfg.llm.retries = 2
-    cfg.llm.timeout = 5
+    cfg = _cfg(retries=2, timeout=5)
     notes = []
     client = LLMClient(cfg.llm, on_retry=lambda n, a, t: notes.append((n, a, t)))
     calls = {"n": 0}
@@ -58,8 +79,7 @@ def test_network_retry_then_success():
 
 
 def test_401_not_retried():
-    cfg = load_config(ROOT)
-    cfg.llm.retries = 2
+    cfg = _cfg(retries=2)
     client = LLMClient(cfg.llm)
     calls = {"n": 0}
 
@@ -76,8 +96,7 @@ def test_401_not_retried():
 
 
 def test_429_retried():
-    cfg = load_config(ROOT)
-    cfg.llm.retries = 2
+    cfg = _cfg(retries=2)
     client = LLMClient(cfg.llm)
     calls = {"n": 0}
 
@@ -92,8 +111,7 @@ def test_429_retried():
 
 
 def test_retries_exhausted_reports_count():
-    cfg = load_config(ROOT)
-    cfg.llm.retries = 2
+    cfg = _cfg(retries=2)
     client = LLMClient(cfg.llm)
 
     def handler(req):
@@ -113,9 +131,7 @@ def test_streaming_empty_content_gives_actionable_error():
     非流式分支里的那段诊断，而 pipeline 全程都传 on_delta —— 于是
     「模型返回空内容，请调大 max_tokens」这条提示在真实使用中永远不出现。
     """
-    cfg = load_config(ROOT)
-    cfg.llm.retries = 0
-    cfg.llm.max_tokens = 1234
+    cfg = _cfg(retries=0, max_tokens=1234)
     client = LLMClient(cfg.llm)
 
     # 只有思考、没有正文：正是推理模型耗尽输出预算时的真实形态
@@ -138,8 +154,7 @@ def test_streaming_empty_content_gives_actionable_error():
 
 
 def test_streaming_content_accumulates_and_excludes_reasoning():
-    cfg = load_config(ROOT)
-    cfg.llm.retries = 0
+    cfg = _cfg(retries=0)
     client = LLMClient(cfg.llm)
     sse = (b'data: {"choices":[{"delta":{"reasoning_content":"\\u60f3"}}]}\n\n'
            b'data: {"choices":[{"delta":{"content":"{\\"ok\\":"}}]}\n\n'
