@@ -1926,10 +1926,11 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   // 判据取「彼此相等」而不是某个绝对值（改成 30px 也一样是统一）。
   const btnUniform = await evalIn(`return (function(){
     var out = [];
-    ['gen','packinfo','llm'].forEach(function(p){
+    ['gen','packinfo','llm','packgen'].forEach(function(p){
       window.__ts.setPane(p);
       var pane = document.getElementById('pane-' + p);
-      [].slice.call(pane.querySelectorAll('.page-actions button, .page-head-actions button'))
+      [].slice.call(pane.querySelectorAll(
+        '.page-actions button, .page-head-actions button, .pg-empty-actions button'))
         .forEach(function(b){
           var r = b.getBoundingClientRect();
           if (r.height > 0) out.push({ p: p, id: b.id, h: Math.round(r.height),
