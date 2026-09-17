@@ -2114,12 +2114,21 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     const p = (active || {}).params || {};
     const keys = Object.keys(p).filter(k => p[k]?.options?.length);
     const frontKeys = [...document.getElementById('param-front').querySelectorAll('select')]
-                       .map(s => s.id.replace(/^p-/, ''));
+                       .map(s => s.dataset.key || s.id.replace(/^p-/, ''));
+    // P1-1 唯一性契约：param-front 的 select **不得**带 p- 前缀 id ——
+    // 工具条胶囊（快速参数）已用 id="p-<key>"；文档级 id 唯一，
+    // 设置页参数组是同台常驻 DOM 的另一个视图（openSettings 只切 settings-screen 的
+    // hidden，不卸载 #view-chat），再挂一个同 id 的 select，getElementById 会取到
+    // 错误的那一个 → 「在设置里改了参数、生成的却是工具条值」的静默不一致。
+    // 判据盯「param-front 内有没有带 p- id 的 select」：实现改回带 id 就红。
+    const frontIds = [...document.getElementById('param-front').querySelectorAll('select')]
+                      .map(s => s.id).filter(x => x.indexOf('p-') === 0);
     // 工具条胶囊（来自 meta.active_toolbar_keys，st-bubbles 把 ui.js 的 TOOLBAR_KEYS 列表
     // 写到 meta —— 留作页面的只读快照，不依赖实现常量）。若 meta 没这字段，回退到硬编码。
     const TB = (meta.active_toolbar_keys || ["segment","audience","duration","platform"]);
     return { expectedKeys: keys.sort(),
              frontKeys: frontKeys.sort(),
+             frontIds: frontIds,
              toolbarInFront: TB.filter(k => frontKeys.includes(k)) };`);
   // 工具条参数清单的**规格副本**：这里有意不复用 ui.js 的常量 ——
   // 复用就成了同义反复（实现改错、断言跟着一起错）。代价是调整分层时
@@ -2130,6 +2139,11 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   check("「生成参数」卡片展示全量参数（含工具条的 segment/audience/duration/platform）",
     JSON.stringify(fullParams.expectedKeys) === JSON.stringify(fullParams.frontKeys)
       && fullParams.toolbarInFront.length === TOOLBAR_KEYS.length,
+    JSON.stringify(fullParams));
+  // P1-1：param-front 的 select 不带 `p-` 前缀 id（与工具条胶囊 id 冲突会
+  // 让 getElementById 取错；两视图同台常驻 DOM，不是「互斥显示」能兜住的）。
+  check("param-front 参数组不带 p- 前缀 id（与工具条胶囊不撞 id）",
+    fullParams.frontIds.length === 0,
     JSON.stringify(fullParams));
   // 切回默认（行业包），与 UI 一致
   await evalIn(`window.__ts.setPane('gen');

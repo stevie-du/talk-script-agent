@@ -222,7 +222,10 @@ function paramSelect(key, def) {
   const wrap = el("div");
   wrap.appendChild(el("label", "lbl", esc(def.label || KEY_FALLBACK_LABEL[key] || key)));
   const s = el("select");
-  s.id = `p-${key}`;
+  // ⚠ 不用 id（设置页参数组是整组常驻 DOM 的视图，与工具条胶囊同 key 撞 id）。
+  // 工具条胶囊（renderQuickParams）保留 `id="p-<key>"` —— getParam / prefill / verify 都读它。
+  // 文档里 id 是唯一性契约；这里再挂一份同 id 的 select，getElementById 只会取到第一个。
+  s.dataset.key = key;
   for (const opt of def.options) {
     const o = el("option", "", esc(String(opt)));
     o.value = String(opt);
