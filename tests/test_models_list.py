@@ -507,6 +507,59 @@ def test_can_delete_the_last_model(tmp_path):
     assert body["active_model"] == "", "删光后不能留悬空的 active_model"
 
 
+def test_can_deactivate_current_model(tmp_path):
+    """**开关可以关掉**（2026-09-17）。
+
+    原来 `activate_model` 对空 id 会 404，前端 `activateModel` 更是直接
+    `return`（注释写「已经是当前，别白写一次文件」）—— 于是开关**关不掉**：
+    点当前启用的那条没有任何反应（用户报「模型开启时无法关闭」）。
+    「启用」是单选语义，但「都不启用」也是合法状态（想先停用、改完配置再启用）。
+    """
+    c = _client(tmp_path)                 # seed 了一条空壳 m-default（当前启用）
+    assert c.get("/api/config").json()["active_model"] == DEFAULT_MODEL["id"]
+
+    r = c.post("/api/models/activate", json={"id": ""})
+    assert r.status_code == 200, r.text
+    body = c.get("/api/config").json()
+    assert body["active_model"] == "", "关不掉：active_model 被退回了第一条"
+    assert all(not m["active"] for m in body["models"]), "还有条目亮着"
+    # ⚠ 关键：**存回文件再读**也要是空 —— 不能只在内存里空
+    raw, active = load_raw_models(tmp_path)
+    assert active == "", f"空 active 没落盘（读回 {active!r}）"
+
+
+def test_deactivate_survives_reread(tmp_path):
+    """关掉之后重新 load 仍是「都不启用」—— 不能退回第一条。
+
+    `_parse_models` 原来对「不在 seen 里的 active」一律退回第一条，
+    空串也会被退 —— 于是开关「关了又跳回来」。
+    修法是区分「键**不存在**」（老文件 / 迁移产物 → 用第一条）与
+    「键存在但空串」（用户显式取消 → 原样保留）。
+    """
+    _seed_models(tmp_path, {"id": "a", "base_url": "https://a/v1", "model": "a"},
+                 {"id": "b", "base_url": "https://b/v1", "model": "b"}, active="a")
+    raw, active = load_raw_models(tmp_path)
+    assert active == "a"
+    save_models(tmp_path, raw, "")
+    cfg = load_config(tmp_path)
+    assert cfg.active_model == "", "空 active 被退回了第一条（关了又跳回来）"
+    # 生效配置跟着变成「空模型」—— 生成会被 _require_model 拦住
+    assert cfg.llm.api_key == "" and cfg.llm.base_url == ""
+
+
+def test_generate_without_active_model_is_refused(tmp_path):
+    """有模型但**都没启用** → 生成被拦，且理由与「没配 Key」区分开。
+
+    三种"不能生成"必须各自说清：一条模型都没加 / 加了但没启用 / 启用了没填 Key。
+    同一句话会把用户指向错的地方。
+    """
+    c = _client(tmp_path)
+    c.post("/api/models/activate", json={"id": ""})
+    r = c.post("/api/generate", json={"topic": "家用电梯怎么挑？"})
+    assert r.status_code == 400, r.text
+    assert "没有启用任何模型" in r.json()["detail"], r.json()
+
+
 def test_deleting_active_model_falls_back_to_a_remaining_one(tmp_path):
     """删掉当前模型 → 自动换成剩下的一条，不留悬空引用。
 

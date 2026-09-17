@@ -239,17 +239,19 @@ def create_app(root: Path, token: str | None = None,
         return load_config(root, data_dir)
 
     def _require_model(cfg) -> None:
-        """生成 / 建包前的模型可用性检查（两种出口各自说清缺什么）。
+        """生成 / 建包前的模型可用性检查（三种出口各自说清缺什么）。
 
-        2026-09-17：模型不再有「内置默认」**条目** —— 用户不配就是一条都没有
-        （见 `config._parse_models`）。所以这里要把两种"不能生成"的原因分开说：
-        一条模型都没加、加了但没填 Key。同一句「未配置 Key」会把前一种说成后一种，
-        把用户指向错的地方（前者要去「添加模型」，后者才是填 Key）。
+        2026-09-17：模型不再有「内置默认」**条目**，而且开关**可以关掉**
+        （用户报「模型开启时无法关闭」）—— 所以要能把三种"不能生成"分开说：
+        一条模型都没加、加了但都没启用、启用了但没填 Key。
+        同一句「未配置 Key」会把前两种说成第三种，把用户指向错的地方。
         """
         if cfg.mock:
             return
         if not cfg.models:
             raise HTTPException(400, "还没有配置模型 —— 请在「设置 → 模型接口」里点右上角「添加模型」")
+        if not cfg.active_model:
+            raise HTTPException(400, "当前没有启用任何模型 —— 请在「设置 → 模型接口」里打开一个模型的开关")
         if not cfg.llm.api_key:
             raise HTTPException(400, "当前模型还没配 API Key，请在「设置 → 模型接口」里填写")
 
@@ -716,6 +718,11 @@ def create_app(root: Path, token: str | None = None,
             mid = f"m{n}"
             it = {"id": mid, "name": "", "base_url": "", "api_key": "", "model": ""}
             raw.append(it)
+            # 原来一条都没有（或用户把开关全关了）→ 新建的这条**直接生效**，
+            # 否则用户加完还得再去点一次开关 —— 多一步，且很容易漏
+            #（漏了的后果是生成被拒，而列表上一切正常）。
+            if not active:
+                active = mid
         it["name"] = body.name.strip()
         it["model"] = model
         # 请求地址**留空 = 保持不变**（与 api_key 同一个语义）——
@@ -754,9 +761,20 @@ def create_app(root: Path, token: str | None = None,
 
     @app.post("/api/models/activate")
     def activate_model(body: ModelIdIn):
-        """切换当前生效的模型（输入区那个选择器调它）。"""
+        """切换当前生效的模型（输入区那个选择器调它）。
+
+        **传空 id 表示「都不启用」**（2026-09-17）。原来空 id 会 404
+        （"没有这个模型："），于是界面上的开关**关不掉** —— 点当前启用的那条
+        没有任何反应，看起来像坏了（用户报「模型开启时无法关闭」）。
+        但「关掉」是个合法诉求（想先停用、改完配置再启用）。
+        关掉之后生成会被 `_require_model` 拦住并说清「当前没有启用任何模型」。
+
+        ⚠ `save_models` 的 active 判据是 `is not None`，所以空串能存进文件；
+        `_parse_models` 也把「键存在但空串」与「键不存在」分开处理 ——
+        否则关掉会被静默退回第一条（关了又跳回来）。
+        """
         raw, _ = load_raw_models(root, data_dir)
-        if body.id not in {x["id"] for x in raw}:
+        if body.id and body.id not in {x["id"] for x in raw}:
             raise HTTPException(404, f"没有这个模型：{body.id}")
         save_models(root, raw, body.id, config_dir=data_dir)
         return {"ok": True, "active_model": body.id, "models": public_models(_cfg())}

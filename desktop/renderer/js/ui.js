@@ -100,14 +100,19 @@ export function renderModelPicker() {
   if (!m) return;
 
   const models = m.models || [];
-  const active = models.find(x => x.id === m.active_model) || models[0] || null;
-  const cur = m.mock ? "mock 模式" : (active ? (active.label || active.model) : "未配置模型");
+  // 2026-09-17：`|| models[0]` 的兜底**去掉了** —— 后端保证 active_model 要么是
+  // 有效的 id、要么是空串（`_parse_models` 处理悬空引用），而空串是**合法状态**
+  //（用户把开关全关了，见 settings.js 的 activateModel）。
+  // 原来的兜底会让「都没启用」时选择器仍显示第一条的名字 —— 显示与状态不一致：
+  // 用户以为还有模型在用，点生成才发现被拒。
+  const active = models.find(x => x.id === m.active_model) || null;
+  const cur = m.mock ? "mock 模式"
+    : active ? (active.label || active.model)
+      : (models.length ? "未启用模型" : "未配置模型");
   // 2026-09-17（任务 5）：「默认模型」整个下线 —— 工具条 picker 上不再附
   // 「（默认）」后缀。区分"未配置 vs 已配置"的职责完全交给 sel._warnNote
   // （未配 Key 时显式告知「生成会被拒绝」+ warn 色）+ 模型接口的"未配置 Key"
-  // 小标（见 settings.js 的 modelItem）。未配置状态下 picker 仍然能列出
-  // 后端兜出来的那条，但它要么显示「未配置模型」占位 option（models 空时），
-  // 要么显示真名（用户必须自己判断能否用 —— 点发送也会被 warnNote 拦）。
+  // 小标（见 settings.js 的 modelItem）。
   const sel = el("select");
   sel.id = "p-model";
   sel.dataset.pill = "1";
@@ -116,10 +121,13 @@ export function renderModelPicker() {
     o.value = x.id;
     sel.appendChild(o);
   }
-  if (!models.length && !m.mock) {
-    const o = el("option", "", "未配置模型");
+  // 占位项：一条都没有 → 「未配置模型」；有但都没启用 → 「未启用模型」。
+  // 两者都不该让选择器**空着** —— 空 select 会被浏览器显示成第一个 option，
+  // 那又变成"看起来有个模型在用"。
+  if (!m.mock && !active) {
+    const o = el("option", "", models.length ? "未启用模型" : "未配置模型");
     o.value = "";
-    sel.appendChild(o);
+    sel.insertBefore(o, sel.firstChild);
   }
   // 「添加模型」不是装饰项：没有它，换新模型就无处可去，这个下拉会变成封闭集合。
   // 它现在直接开弹窗，不再只是「跳到设置页让你自己找」。
@@ -128,11 +136,14 @@ export function renderModelPicker() {
   sel.appendChild(add);
   sel.value = active ? active.id : (m.mock ? "" : "");
   sel._mock = !!m.mock;
-  // 橙色只留给「真的会失败」的情形（没 Key → 生成必被拒）。
-  // 「用的是内置默认模型」不再加标识：默认值本身确实可用，配上 Key 就能跑，
-  // 把"默认"也染橙会让警示贬值，且与"移除默认模型"的产品语义冲突。
-  sel._warnNote = m.has_api_key
-    ? "" : "未配置 API Key —— 生成会被拒绝，点击去「模型接口」填写";
+  // 橙色只留给「真的会失败」的情形 —— 三种"不能生成"各自说清原因，
+  // 同一句「未配置 API Key」会把前两种指向错的地方（2026-09-17）：
+  //   ① 一条模型都没有；② 有模型但都没启用；③ 启用了但没填 Key。
+  sel._warnNote = !models.length
+    ? "还没有配置模型 —— 生成会被拒绝，点击去「模型接口」添加"
+    : !m.active_model
+      ? "没有启用任何模型 —— 生成会被拒绝，点击去「模型接口」打开一个开关"
+      : m.has_api_key ? "" : "未配置 API Key —— 生成会被拒绝，点击去「模型接口」填写";
   sel.title = `当前模型：${cur}。切换后对后续生成生效（正在跑的作业不受影响）`;
   sel.onchange = () => pickModel(sel);
   box.appendChild(sel);

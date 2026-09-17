@@ -338,9 +338,15 @@ def _parse_models(data: dict, llm: dict) -> tuple[list[dict], str, bool]:
         seen.add(it["id"])
 
     active = str(data.get("active_model") or "")
-    if items and active not in seen:
+    if items and active and active not in seen:
         # 指向了一条不存在的模型（手改文件 / 删掉了当前模型）→ 退回第一条。
         # 不能留一个悬空的 active：那会让生成时取不到任何连接信息。
+        active = items[0]["id"]
+    elif items and "active_model" not in data:
+        # 键**不存在**（老文件 / 迁移产物）→ 用第一条。
+        # ⚠ 与「键存在但值是空串」必须分开：后者是用户**显式取消启用**
+        #（2026-09-17，界面上的开关要能关掉），要原样保留空串。
+        # 混在一起的话「关掉开关」会被静默退回第一条 —— 关了又跳回来。
         active = items[0]["id"]
     elif not items:
         # 一条模型都没有：active 必须是空串，不能留一个指向不存在条目的悬空值。

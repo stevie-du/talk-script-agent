@@ -280,10 +280,11 @@ window.__addCount = 0;
     if (s.indexOf('/api/models/activate') >= 0) {
       var ab = {};
       try { ab = JSON.parse(o && o.body || '{}'); } catch (_) {}
-      if (!MODELS.some(function(x){ return x.id === ab.id; })) {
+      // 空 id = 「都不启用」（2026-09-17，开关要能关掉）—— 与真实后端一致。
+      if (ab.id && !MODELS.some(function(x){ return x.id === ab.id; })) {
         return err(404, '没有这个模型：' + ab.id);
       }
-      ACTIVE = ab.id;
+      ACTIVE = ab.id || '';
       window.__lastActivate = ab.id;
       return mk({ ok:true, active_model:ACTIVE, models:publicModels() });
     }
@@ -2953,6 +2954,35 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     act.called === "m1" && act.onRows === 1 && act.onId === "m1"
     && act.onSwitches === 1 && act.checked === "false,true", JSON.stringify(act));
 
+  // 2026-09-17：再点一次**当前已启用**的那条 = **关掉它**。
+  // 原来 activateModel 里有一句「已经是当前，别白写一次文件」直接 return ——
+  // 于是开关**关不掉**：点了没反应（用户报「模型开启时无法关闭」）。
+  // 语义上「启用」是单选，但「都不启用」也是合法状态（想先停用改配置再启用）。
+  await evalIn(`document.querySelector('#llm-list .pl-item.on')
+    .querySelector('.mdl-switch').click(); return true;`);
+  await sleep(800);
+  const off = await evalIn(`return {
+    called: window.__lastActivate,
+    onRows: document.querySelectorAll('#llm-list .pl-item.on').length,
+    onSwitches: document.querySelectorAll('#llm-list .pl-item .mdl-switch.on').length,
+    status: document.getElementById('st-status').textContent,
+    // 输入区那个选择器也要跟上：**不能** fallback 显示第一条的名字
+    //（显示与状态不一致 —— 用户以为还有模型在用，点生成才发现被拒）。
+    pickerText: (function(){ var s = document.getElementById('p-model');
+      var b = s && s.parentNode.querySelector('.select-btn');
+      return b ? b.querySelector('.sel-text').textContent : ''; })(),
+    pickerValue: (document.getElementById('p-model') || {}).value };`);
+  check("再点一次当前启用的开关 → 真的关掉（都不启用），状态行与输入区选择器都跟上",
+    off.called === "" && off.onRows === 0 && off.onSwitches === 0
+    && /都没有启用/.test(off.status)
+    && off.pickerText === "未启用模型" && off.pickerValue === "",
+    JSON.stringify(off));
+  // 复原：重新启用 **m1**（它是第 2 条）—— 后面那条断言期望「输入区选择器
+  // 跟着变成 m1」。⚠ 别点第一条（m-default），那会把状态复原错。
+  await evalIn(`document.querySelectorAll('#llm-list .pl-item')[1]
+    .querySelector('.mdl-switch').click(); return true;`);
+  await sleep(700);
+
   // 输入区那个选择器要跟着变 —— 它读的是 /api/meta，不是设置页的局部状态
   await evalIn(`document.getElementById('btn-close-settings').click(); return true;`);
   await sleep(300);
@@ -3010,17 +3040,45 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   const emptyList = await evalIn(`return {
     rows: document.querySelectorAll('#llm-list .pl-item').length,
     hint: document.querySelector('#llm-list .hint')?.textContent || '',
-    mdTitle: document.getElementById('md-title').textContent,
-    delHidden: document.getElementById('md-delete').classList.contains('hidden'),
+    // 2026-09-17：空列表时右列只显示**空态**，不摆「添加模型」表单与高级配置
+    //（用户原话「没有模型的时候不应该显示添加啊，还有高级配置」）。
+    // ⚠ 判据必须查**可见性**，不能只查 DOM 文本 —— 表单隐藏了 textContent
+    //   还在，旧断言因此全绿放过（实测）。
+    emptyShown: !document.getElementById('llm-empty').classList.contains('hidden'),
+    formHidden: document.getElementById('md-form-card').classList.contains('hidden'),
+    advHidden: document.getElementById('st-adv').classList.contains('hidden'),
+    statusText: document.getElementById('st-status').textContent,
     pickerText: (function(){ var s = document.getElementById('p-model');
       var b = s && s.parentNode.querySelector('.select-btn');
       return b ? b.querySelector('.sel-text').textContent : ''; })(),
   };`);
-  check("一条模型都没有时：中列给空引导、右列是「添加模型」、删除键不可用、picker 说「未配置模型」",
+  check("一条模型都没有时：中列给空引导、右列只显示空态（隐藏表单与高级配置、状态行留空）",
     emptyList.rows === 0 && /还没有模型/.test(emptyList.hint)
-      && emptyList.mdTitle === "添加模型" && emptyList.delHidden === true
+      && emptyList.emptyShown && emptyList.formHidden && emptyList.advHidden
+      && emptyList.statusText === ""
       && emptyList.pickerText === "未配置模型",
     JSON.stringify(emptyList));
+
+  // 空态里的「添加模型」要能把表单换出来 —— 否则那颗按钮点了没反应
+  await evalIn(`document.getElementById('llm-empty-add').click(); return true;`);
+  await sleep(300);
+  const afterEmptyAdd = await evalIn(`return {
+    emptyHidden: document.getElementById('llm-empty').classList.contains('hidden'),
+    formShown: !document.getElementById('md-form-card').classList.contains('hidden'),
+    advHidden: document.getElementById('st-adv').classList.contains('hidden'),
+    mdTitle: document.getElementById('md-title').textContent };`);
+  check("空态点「添加模型」→ 换成表单（高级配置仍隐藏：还没有模型可调）",
+    afterEmptyAdd.emptyHidden && afterEmptyAdd.formShown
+      && afterEmptyAdd.advHidden && afterEmptyAdd.mdTitle === "添加模型",
+    JSON.stringify(afterEmptyAdd));
+
+  // 留一张空态图（用户 2026-09-17 报「没有模型的时候不应该显示添加啊」）——
+  // 重新进面板会把 addingNew 归零，回到空态。
+  await shot("llm-empty-state.png",
+    `document.getElementById('btn-close-settings').click();
+     document.getElementById('btn-open-settings').click();
+     window.__ts.setPane('llm'); ${closeMenus} return true;`,
+    { x: 230, y: 0, width: 1280, height: 830, scale: 1 });
 
   // 新增时**地址必填** —— 留空要被拒（不再有「内置默认地址」可以兜：
   // 用户加一条 DeepSeek 模型却指向智谱，报错要到生成时才出现）。

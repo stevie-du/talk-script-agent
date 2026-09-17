@@ -111,6 +111,9 @@ export function setPane(pane) {
   } else if (pane === "llm") {
     // 进入模型面板：右列默认停在「当前启用」那条 —— 空着的话第一眼看到的是
     // 一张空表单，会以为还没配模型。
+    // `addingNew` 归零：重新进面板要回到「空态 / 停在当前启用那条」，
+    // 不能停在上次点到一半的「添加」表单上。
+    addingNew = false;
     if (!editingId) {
       const act = ((lastCfg || {}).models || []).find(x => x.active);
       selectModel(act ? act.id : "");
@@ -135,6 +138,7 @@ async function preloadSettings() {
   markDefault("st-timeout", dflt.has("timeout"), "timeout");
   renderAdvSub(dflt);
   renderModelList(c);
+  renderLlmEmpty(c);        // 空列表 → 右列只显示空态（隐藏表单 + 高级配置）
   renderConfigError(c.config_error);
   renderStatus(c);
 }
@@ -151,12 +155,37 @@ function renderAdvSub(dflt) {
 function renderStatus(c) {
   const env = c.env_override ? "（当前由环境变量 TALKSCRIPT_API_KEY 覆盖）" : "";
   const n = (c.models || []).length;
+  // 2026-09-17：一条模型都没有 → 状态行**留空**。空态块已经在说这件事了，
+  // 再写一句「当前启用的模型还没配 API Key」是**错的**：根本没有启用的模型。
+  // 同理 active_model 为空（用户把开关全关了）→ 说清是「都没有启用」，
+  // 而不是「没配 Key」—— 那是两种不同的缺。
   $("st-status").textContent = c.mock
     ? `当前为 mock 模式（返回夹具，不调模型）${env}`
-    : c.api_key_set
-      ? `已配置 Key · 当前启用 ${c.model}（共 ${n} 个模型）· 重试 ${c.retries} 次`
-        + ` / 超时 ${c.timeout}s${env}`
-      : `当前启用的模型还没配 API Key${env}`;
+    : !n ? ""
+      : !c.active_model ? `有 ${n} 个模型，但都没有启用${env}`
+        : c.api_key_set
+          ? `已配置 Key · 当前启用 ${c.model}（共 ${n} 个模型）· 重试 ${c.retries} 次`
+            + ` / 超时 ${c.timeout}s${env}`
+          : `当前启用的模型还没配 API Key${env}`;
+}
+
+/** 一条模型都没有时，右列只显示**空态引导** —— 隐藏「添加模型」表单与高级配置。
+ *
+ *  用户原话：「没有模型的时候不应该显示添加啊，还有高级配置」。
+ *  空表单会让人以为"已经在配了"；高级配置（重试 / 超时）是给**已配好的模型**
+ *  调优用的，没有模型时它没有对象。空态只给一件事：去哪加第一个模型。
+ *
+ *  ⚠ `addingNew` 是「空列表下用户主动点了『添加模型』」—— 此时要临时显示表单，
+ *  否则点了按钮什么都不会发生。它由 headbar / 空态的两个入口置 true，
+ *  由保存成功、取消、重新进入面板置 false。 */
+function renderLlmEmpty(c) {
+  const empty = !((c || {}).models || []).length;
+  const showEmpty = empty && !addingNew;
+  $("llm-empty").classList.toggle("hidden", !showEmpty);
+  $("md-form-card").classList.toggle("hidden", showEmpty);
+  // 高级配置：**空列表时始终隐藏**（进了添加表单也不显示）——
+  // 还没有任何模型，重试 / 超时没有对象可调。
+  $("st-adv").classList.toggle("hidden", empty);
 }
 
 // ── 模型列表 ────────────────────────────────────────────────
@@ -263,11 +292,17 @@ function modelItem(m, total, c) {
 }
 
 async function activateModel(id) {
-  if (lastCfg && lastCfg.active_model === id) return;   // 已经是当前，别白写一次文件
+  // 点**当前已启用**的那条 = **关掉它**（2026-09-17）。
+  // 原来这里直接 `return`（注释写「已经是当前，别白写一次文件」）——
+  // 于是开关**关不掉**：点当前启用的模型没有任何反应，看起来像坏了
+  //（用户报「模型开启时无法关闭」）。「启用」是单选语义，但「都不启用」
+  // 也是合法状态（想先停用、改完配置再启用）。
+  // 关掉之后生成会被后端的 `_require_model` 拦住并说清「当前没有启用任何模型」。
+  const target = (lastCfg && lastCfg.active_model === id) ? "" : id;
   try {
-    await api.activateModel(id);
+    await api.activateModel(target);
     await refreshAll();
-    toast("已切换模型");
+    toast(target ? "已切换模型" : "已停用当前模型（生成前需要重新启用）");
   } catch (e) { toast("切换失败：" + e.message, 3500); }
 }
 
@@ -302,6 +337,9 @@ async function testModel(m) {
 // ── 添加 / 编辑模型弹窗 ─────────────────────────────────────
 
 let editingId = "";
+// 空列表下用户主动点了「添加模型」→ 临时显示表单（否则点了没反应）。
+// 见 renderLlmEmpty 的说明。
+let addingNew = false;
 
 /**
  * 选中一个模型：右列加载它的编辑表单（**不再开弹窗**）。
@@ -354,8 +392,11 @@ function selectModel(id) {
 
 /** 取消编辑：回到「选中当前启用那条」的状态（不再有弹窗可关）。 */
 function closeModelDialog() {
+  addingNew = false;
   const act = ((lastCfg || {}).models || []).find(x => x.active);
   selectModel(act ? act.id : "");
+  // 空列表下取消「添加」→ 回到空态（否则表单空着、也没有模型）
+  renderLlmEmpty(lastCfg || {});
 }
 
 async function saveModelDialog() {
@@ -387,6 +428,7 @@ async function saveModelDialog() {
     // 保存后要**停在刚保存的那条**上，而不是跳回「当前启用」那条 ——
     // 编辑一条非启用模型时跳走，用户会以为没保存上。
     const savedId = (out && out.id) || editingId;
+    addingNew = false;       // 保存成功 → 离开「添加」态（列表已有模型了）
     await refreshAll();
     selectModel(savedId);
     toast(`已保存模型「${model}」`);
@@ -564,7 +606,15 @@ export const bindSettings = bindOnce(function bindSettings() {
     preloadSettings().catch(e => toast("刷新失败：" + e.message, 3500));
   };
   // 「添加模型」：右列切到空表单（editingId=""），不再是开弹窗。
-  $("st-add-model").onclick = () => selectModel("");
+  // ⚠ 两个入口同一个动作：headbar 那颗 + 空态里的那颗（`llm-empty-add`）——
+  // 空列表时右列显示的是空态，headbar 那颗点了要能把表单换出来（addingNew）。
+  const startAdd = () => {
+    addingNew = true;
+    selectModel("");
+    renderLlmEmpty(lastCfg || {});
+  };
+  $("st-add-model").onclick = startAdd;
+  $("llm-empty-add").onclick = startAdd;
   $("md-cancel").onclick = closeModelDialog;
   $("md-save").onclick = saveModelDialog;
   $("md-test").onclick = testModelDialog;

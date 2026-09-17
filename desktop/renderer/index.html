@@ -423,6 +423,31 @@
           </div>
 
           <div class="pane-detail">
+            <!-- 空态：一条模型都没有时**只显示这个**（不摆「添加模型」表单与高级配置）。
+                 用户原话「没有模型的时候不应该显示添加啊，还有高级配置」——
+                 空表单会让人以为"已经在配了"；高级配置（重试 / 超时）是给已配好的
+                 模型调优用的，没有模型时它没有对象。空态只给一件事：去哪加第一个。 -->
+            <div class="page-card hidden" id="llm-empty">
+              <div class="pg-empty">
+                <div class="pg-empty-ic">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M9 7H7a5 5 0 0 0 0 10h2"/>
+                    <path d="M15 7h2a5 5 0 0 1 0 10h-2"/>
+                    <path d="M8 12h8"/>
+                  </svg>
+                </div>
+                <p class="pg-empty-t">还没有配置模型</p>
+                <p class="pg-empty-d">生成脚本要调用一个 OpenAI 兼容的对话模型。
+                  点右上角「添加模型」，填上请求地址、API Key 和模型名就能开始。</p>
+                <div class="pg-empty-actions">
+                  <button class="primary slim" id="llm-empty-add">
+                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                    添加模型
+                  </button>
+                </div>
+              </div>
+            </div>
+
             <!-- 编辑 / 添加模型的表单（原「模型弹窗」内容搬进右列） -->
             <div class="page-card" id="md-form-card">
               <h3 class="card-title" id="md-title">添加模型</h3>
