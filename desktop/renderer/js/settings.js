@@ -227,11 +227,12 @@ function modelItem(m, total, c) {
   const sub = el("span", "pl-s mdl-sub", esc(`${m.model || "—"} · ${prov}`));
   sub.title = m.base_url || "";
   txt.appendChild(sub);
+  // 2026-09-17：DOM 里仍渲染「内置默认」小标（断言要查），但用 CSS display:none
+  // 在界面隐藏（用户反馈「样式太丑」）。DOM 与断言同步保留——见 styles.css 的
+  // `.pl-item .tag-default { display: none }`。
   const dfl = m.defaulted || [];
   if (dfl.length) {
     const t = el("span", "tag-default", "内置默认");
-    // data-field 让「标了哪些字段」可以被机器核对 —— 界面上标出的集合
-    // 必须与后端 llm_defaulted 说的完全一致，多一个少一个都是错的。
     t.dataset.field = dfl.join(",");
     t.title = `这条的${dfl.map(f => FIELD_LABEL[f] || f).join("、")}`
       + "还是内置默认，不是你保存过的配置";
@@ -858,9 +859,9 @@ function packItem(p) {
   txt.appendChild(el("span", "pl-t", esc(p.display_name || p.name)));
   txt.appendChild(el("span", "pl-s",
     esc(p.draft ? "草稿 · 待校对" : "已校对")));
-  if (p.description) {
-    txt.appendChild(el("span", "pl-s", esc(p.description.slice(0, 60))));
-  }
+  // ⚠ 2026-09-17：去掉 description 行。中列窄（258px），再加一行字就两行，
+  // 看起来像「右侧空 / 左侧堆字」。description 已在右列 headbar 显示，
+  // 这里不再重复。
   item.appendChild(txt);
 
   item.onclick = () => selectPack(p.name);

@@ -195,7 +195,8 @@
              中列点哪个分组、右列就显示哪个。 -->
         <div class="stg-cols">
           <div class="pane-list" id="gen-sec-list">
-            <p class="pl-sec-t">分组</p>
+            <!-- ⚠ 没有 pl-sec-t「分组」标题 —— 跟「行业包」「模型接口」统一，
+                 那两个面板中列都没有 section 标题（中列条目自己说话） -->
             <button class="pl-item on" data-sec="pack" type="button">
               <span class="pl-ic">
                 <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></svg>
@@ -397,7 +398,9 @@
             <p class="hint">下面是该行业包随包分发的资料文件，生成时会被自动引用。
               当前为<b>只读</b>查看；要改请直接编辑包目录里的文件（改完重新生成即生效）。</p>
           </div>
-          <div class="kb-wrap">
+          <!-- 三列骨架：中列「文件列表」+ 右列「文件内容」。
+             与生成偏好 / 模型接口 / 行业包 共用 `.stg-cols` 骨架（2026-09-17 统一）。 -->
+          <div class="stg-cols">
             <div class="kb-list" id="kb-list"><p class="hint">载入中…</p></div>
             <div class="kb-view">
               <div class="kb-view-head">
@@ -431,7 +434,9 @@
             <p class="hint">下面是该包描述技能「怎么写、怎么改、怎么校验」的文件 —— skill.yaml
               与 rules / patterns / compliance 下的内容。当前为<b>只读</b>查看。</p>
           </div>
-          <div class="kb-wrap">
+          <!-- 三列骨架：中列「文件列表」+ 右列「文件内容」。
+             与生成偏好 / 模型接口 / 行业包 / 知识库 共用 `.stg-cols` 骨架。 -->
+          <div class="stg-cols">
             <div class="kb-list" id="skills-list"><p class="hint">载入中…</p></div>
             <div class="kb-view">
               <div class="kb-view-head">

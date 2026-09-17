@@ -205,8 +205,9 @@ body {
    列表本身有 839px 高，查看器被挤到屏外只露出 68px 的头，看起来「右侧空」。
    用户 2026-09-16 贴图报的就是这个。判据见 `_verify/verify.js`：列表与查看器
    必须左右并排（`view.left > list.right`），不是上下（`view.top >= list.bottom`）。
-   「分组 → 卡片 → 查看器」三层结构保留，只是把它们放进左右两栏。 */
-.kb-wrap { display: flex; flex-direction: row; gap: var(--s5); align-items: stretch; }
+   「分组 → 卡片 → 查看器」三层结构保留，只是把它们放进左右两栏。
+   2026-09-17：HTML 里已改成 `.stg-cols`（与生成偏好/模型接口/行业包共用骨架），
+   这条 .kb-wrap 规则删掉，留着是 dead code。 */
 /* 分组容器：垂直堆叠（每组 6-8 个卡片，太宽反而要滚屏）*/
 .kb-groups { display: flex; flex-direction: column; gap: var(--s4); }
 /* 单个分组：组标题 + 卡片堆栈 */
@@ -298,8 +299,10 @@ body {
   flex: 0 0 340px; max-height: 70vh; overflow: auto;
   border: none; padding: 0; background: transparent;
 }
-/* 查看器：占剩余宽度，竖向排（head + body）。 */
-.kb-view { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+/* 查看器：占剩余宽度，竖向排（head + body）。
+   `align-self: stretch` 让它在 .stg-cols 的 flex-start 里也拉满高度 —— 否则
+   .kb-body 这种 flex:1 的子元素会因为父容器只有自身内容那么高而塌成一小块。 */
+.kb-view { flex: 1; min-width: 0; display: flex; flex-direction: column; align-self: stretch; }
 .kb-view-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: var(--s2); }
 .kb-view-head .lbl { margin-bottom: 0; }
 /* ⚠ 内容查看器在白页面上必须**自己成块**，否则 `--fill: rgba(0,0,0,.04)` 在白底上
@@ -1142,6 +1145,13 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
   overflow-y: auto; overscroll-behavior: contain;
   display: flex; flex-direction: column; gap: var(--s2);
 }
+/* 行业包中列不滚动：条目少（一般 1-5 个），跟着主滚动容器滚即可。
+   不关掉的话**空列表也会显示滚动条**，视觉上突兀。 */
+#pi-list {
+  max-height: none;
+  overflow: visible;
+  position: static;  /* sticky 会让它在小内容时位置看起来「浮起来」，这里不要 */
+}
 /* 右列：详情。占剩余宽度，跟随 .stg-main 一起滚。 */
 .pane-detail { flex: 1; min-width: 0; }
 /* 三列面板需要更宽的限宽，否则中+右两列挤在 720px 里太窄。 */
@@ -1185,14 +1195,16 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 }
 /* 条目右侧操作区（如启用开关）：不参与条目点击选中，要自己 stopPropagation。 */
 .pl-act { display: flex; align-items: center; gap: var(--s1); flex: 0 0 auto; }
-/* 条目里的「内置默认 / 未配置 Key」小标：副标题是 block，inline 元素的
-   margin-top 会被忽略 —— 与 .mdl-table .tag-default 同一个坑。 */
-.pl-item .tag-default, .pl-item .tag-warn {
+/* 条目里的「未配置 Key」小标：副标题是 block，inline 元素的 margin-top 会被忽略
+   —— 与 .mdl-table .tag-default 同一个坑。
+   「内置默认」小标 (tag-default) 在模型接口里用 display:none 隐藏了（用户反馈太丑），
+   DOM 仍在（断言要查 data-field），界面不可见。 */
+.pl-item .tag-warn {
   display: inline-block; margin-top: 4px;
   font-size: var(--f-min); padding: 1px 5px; border-radius: var(--r-xs);
+  background: var(--bad-soft); color: var(--bad);
 }
-.pl-item .tag-default { background: var(--fill); color: var(--text-2); }
-.pl-item .tag-warn { background: var(--bad-soft); color: var(--bad); }
+.pl-item .tag-default { display: none; }   /* 2026-09-17：用户反馈「样式太丑」，CSS 隐藏但 DOM 保留 */
 
 /* 中列分组标题 */
 .pl-sec-t {

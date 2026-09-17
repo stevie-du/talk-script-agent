@@ -1968,10 +1968,13 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   // 修复前 `.tag-default` 是 inline：`.mdl-sub` 是 block，后面的 inline 元素
   // 虽然会自动换行，但 **inline 的 margin-top 不生效** —— 样式表里写着的 4px
   // 从来没算进布局，小标就紧贴着上一行（截图里它看起来像被行底边裁掉一截）。
-  // 判据取**真实像素间距**，不查 CSS 文本：查文本的话，写着一句不生效的
-  // margin-top 也会判绿，正是这条断言要防的事。
-  check("「内置默认」小标与上一行之间留出间距（margin-top 真的生效）",
-    notCfg.tagDisplay === 'inline-block' && notCfg.tagGap >= 3,
+  // 2026-09-17：用户反馈「样式太丑」，CSS 里改成 display:none（界面隐藏）。
+  // 但这条断言要守的不变量**仍然存在** —— 如果有人删掉 display:none，
+  // 「inline margin-top 不生效」这个老坑会原样回归。
+  // 所以判据改成两态都允许：不可见（display:none），或可见且与上一行有真间距。
+  check("「内置默认」小标或者不可见，或者与上一行之间留出间距（margin-top 真的生效）",
+    notCfg.tagDisplay === 'none'
+      || (notCfg.tagDisplay === 'inline-block' && notCfg.tagGap >= 3),
     JSON.stringify({ display: notCfg.tagDisplay, gap: notCfg.tagGap }));
   // 显示名带「（默认）」，但 option.value 必须还是模型 **id** ——
   // 混在一起的话激活时会把「glm-4.7（默认）」这个假 id 发出去。

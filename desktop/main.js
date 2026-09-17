@@ -53,6 +53,9 @@ function engineCommand() {
   });
 }
 
+let engineStderrBuf = '';     // 引擎异常退出时一并显示，让用户看到真正的错
+const STDERR_BUF_MAX = 4096;   // 截断防止超长（ImportError 堆栈可能上千字）
+
 function startEngine() {
   const { cmd, args, via } = engineCommand();
   // 把「从哪条路起的」也打出来：引擎起不来时第一件要问的就是这个，
@@ -69,23 +72,36 @@ function startEngine() {
     windowsHide: true,
   });
   engineProc.stdout.on('data', d => console.log('[engine]', String(d).trim()));
-  engineProc.stderr.on('data', d => console.error('[engine]', String(d).trim()));
+  engineProc.stderr.on('data', d => {
+    const s = String(d);
+    console.error('[engine]', s.trim());
+    engineStderrBuf = (engineStderrBuf + s).slice(-STDERR_BUF_MAX);
+  });
   engineProc.on('exit', code => {
     engineProc = null;
     if (quitting) return;
     // 引擎中途退出：窗口还开着的话，用户只会看到「无法连接本地引擎」，
     // 必须明确告知并提供重试，否则只能自己猜。
     if (win && !win.isDestroyed()) {
+      // 把 stderr 摘要一并塞进 detail —— 用户**自己**就能看到 Python 报的错
+      // （缺模块 / 端口冲突 / 路径不对），而不是只能看到「代码 1」。
+      // ⚠ 重要：完整的 stderr 也在 console 日志的 [engine] 行里（永远不会被截断）。
+      const errTail = engineStderrBuf.trim()
+        ? `\n\n────── 引擎 stderr（最后 ${STDERR_BUF_MAX} 字符）──────\n`
+          + engineStderrBuf.trim().slice(-STDERR_BUF_MAX)
+        : '\n\n（未捕获到 stderr 输出 —— 看 console 日志的 [engine] 行）';
       const choice = dialog.showMessageBoxSync(win, {
         type: 'error',
         title: '引擎已退出',
         message: `Python 引擎异常退出（代码 ${code}）。`,
         detail: '常见原因：缺少依赖（pip install -r requirements.txt）、'
-              + '端口被占用，或 Python 环境不可用。',
+              + '端口被占用，或 Python 环境不可用。'
+              + errTail,
         buttons: ['重启引擎', '退出应用'],
         defaultId: 0,
         cancelId: 1,
       });
+      engineStderrBuf = '';   // 重置，下次崩溃从空开始累计
       if (choice === 0) restartEngine();
       else app.quit();
     }
@@ -118,6 +134,8 @@ function engineUrl() {
 
 async function restartEngine() {
   killEngine();
+  // 重启前把 stderr 缓冲清掉 —— 上次的错不要混进这次
+  engineStderrBuf = '';
   try {
     enginePort = await findFreePort();
     startEngine();
