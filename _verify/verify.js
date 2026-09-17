@@ -1792,7 +1792,9 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
         packRowW = packRow ? +packRow.getBoundingClientRect().width.toFixed(2) : null;
       }
       if (sec === 'adv') {
-        const seg = pane.querySelector('.segmented');
+        // 生成方式改成卡片式单选（.choice-cards，2026-09-17）——
+        // 原来的 .segmented 胶囊已删。这里量的是「整组卡片」的宽度。
+        const seg = pane.querySelector('.choice-cards');
         segW = seg ? +seg.getBoundingClientRect().width.toFixed(2) : null;
       }
       // 控件：所有 select / textarea / 自绘 .select-btn
@@ -2057,19 +2059,47 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       count: radios.length,
       values: radios.map(r => r.value).sort(),
       checkedValue: checked?.value || '',
-      // radio 容器是 .segmented（与 .block-inner 走相同几何）
-      segmented: !!document.querySelector('.segmented input[name="mode"]'),
+      // radio 容器是 .choice-cards（卡片式单选，2026-09-17 取代 .segmented）
+      cardForm: !!document.querySelector('.choice-cards input[name="mode"]'),
+      cardCount: document.querySelectorAll('.choice-cards .choice-card').length,
+      // 每张卡都要有名称 + 一句说明（说明是这次换形式的主要目的：
+      // 用户之前专门问过「一键直通与分步确认的区别」）
+      cardDescs: [...document.querySelectorAll('.choice-cards .choice-card')]
+        .map(c => (c.querySelector('.cc-d')?.textContent || '').trim()),
       // 分步确认的弹层在 DOM 上存在（jobs.js 会打开它）
       overlayExists: !!document.getElementById('confirm-overlay'),
-      // 与"生成参数""生成方式"走同一行几何：装在 .block-inner 里、有 .lbl
-      inBlockInner: !!document.querySelector('.block-inner .segmented') &&
-        !!document.querySelector('.block-inner .segmented')?.closest('.block-inner')?.querySelector('.lbl'),
+      // 与"生成参数"同几何：装在 .block-inner 里、有 .lbl
+      inBlockInner: !!document.querySelector('.block-inner .choice-cards') &&
+        !!document.querySelector('.block-inner .choice-cards')?.closest('.block-inner')?.querySelector('.lbl'),
     };`);
-  check("一键直通 / 分步确认 radio 可达：默认 auto + step 可选 + 走 .block-inner",
+  check("一键直通 / 分步确认：卡片式单选（默认 auto + step 可选 + 每卡带说明）",
     modeRadio.count === 2 && modeRadio.values.join(',') === 'auto,step'
-      && modeRadio.checkedValue === 'auto' && modeRadio.segmented
+      && modeRadio.checkedValue === 'auto' && modeRadio.cardForm
+      && modeRadio.cardCount === 2
+      && modeRadio.cardDescs.length === 2
+      && modeRadio.cardDescs.every(d => d.length >= 8)
       && modeRadio.overlayExists && modeRadio.inBlockInner,
     JSON.stringify(modeRadio));
+
+  // 选中的那张卡必须有**视觉落点**（2026-09-17）—— 这是换掉胶囊的主因之一：
+  // 原来选中是 `--surface` 白块 vs `--fill` 灰底，只差 ~10 等效灰度，
+  // 扫一眼看不出选了哪个。现在靠描边加深 + 抬起 + 图标染色。
+  // 判据取「选中 vs 未选中的描边色与底色都不同」+「选中卡有投影」。
+  const cardOn = await evalIn(`return (function(){
+    var cards = [...document.querySelectorAll('.choice-cards .choice-card')];
+    var on = cards.find(function(c){ return c.querySelector('input:checked'); });
+    var off = cards.find(function(c){ return !c.querySelector('input:checked'); });
+    if (!on || !off) return { none: true };
+    var a = getComputedStyle(on), b = getComputedStyle(off);
+    return { onBg: a.backgroundColor, offBg: b.backgroundColor,
+             onBorder: a.borderTopColor, offBorder: b.borderTopColor,
+             onShadow: a.boxShadow !== 'none',
+             onIconBg: getComputedStyle(on.querySelector('.cc-ic')).backgroundColor };
+  })()`);
+  check("选中的卡片有视觉落点（描边加深 + 抬起 + 图标染色，与未选中拉得开）",
+    !cardOn.none && cardOn.onBg !== cardOn.offBg
+      && cardOn.onBorder !== cardOn.offBorder && cardOn.onShadow,
+    JSON.stringify(cardOn));
 
   // 切到「生成参数」分组，验证任务 2（生成参数卡片展示全量参数，含 TOOLBAR_KEYS）。
   // 期望：所有 pack.params 里 options.length>0 的 key 都在 #param-front 里。

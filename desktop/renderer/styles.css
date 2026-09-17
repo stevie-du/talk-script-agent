@@ -18,7 +18,7 @@
      动效       --ease（常规） --ease-pop（弹性） --dur
 
    ── 命名约定 ──
-   segmented = 胶囊单选组   tabs/tab = 设置抽屉一级切换
+   choice-cards = 卡片式单选组（原 segmented 胶囊已删）   tabs/tab = 设置抽屉一级切换
    script-list / script-card = 结果区的段落流（不是卡片，是分隔线内容流）
    acc = 折叠块（分镜/合规/JSON/日志）
    select-wrap = 自绘下拉（原生 select 收进 .native-hidden 只作值容器）
@@ -588,19 +588,57 @@ select {
   resize: none; outline: none;
 }
 
-/* 胶囊单选组 */
-.segmented { background: var(--fill); border-radius: var(--r-pill); padding: 3px; }
-.segmented .radio {
+/* ══════════ 卡片式单选（.choice-cards，2026-09-17） ══════════
+   替代原来的「胶囊单选组」（`.segmented`，已删）。
+
+   为什么换：胶囊的毛病是**说不清两个选项的区别** —— 用户之前专门问过
+   「一键直通与分步确认的区别」，而那个控件只有两个词；而且选中的白块
+   与未选中的灰底对比太弱（`--surface` vs `--fill` 只差 10 等效灰度），
+   扫一眼看不出选了哪个。
+
+   现在：卡片各带图标 + 名称 + 一句说明；选中卡描边加深 + 抬起 + 图标染色，
+   视觉与左栏条目（`.pl-item.sel` / `.kb-item.on`）**同族**。
+
+   ⚠ radio 仍是 `input[name=mode]`（视觉隐藏），`name`/`value` 不能改 ——
+   `jobs.js` 读 `input[name=mode]:checked`，改了会静默失效。 */
+.choice-cards {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s3);
+}
+.choice-card {
   position: relative;
-  display: inline-flex; gap: 5px; align-items: center; font-size: var(--f-sm);
-  flex: 1; justify-content: center; padding: 4px 10px; border-radius: var(--r-pill);
-  color: var(--text-2); cursor: pointer; transition: all .15s var(--ease);
+  display: flex; align-items: flex-start; gap: var(--s3);
+  padding: 12px 14px;
+  border: 0.5px solid var(--line); border-radius: var(--r-md);
+  background: var(--surface);
+  cursor: pointer;
+  transition: border-color var(--dur) var(--ease),
+              background var(--dur) var(--ease),
+              box-shadow var(--dur) var(--ease);
 }
-.segmented .radio:has(input:checked) {
-  background: var(--surface); box-shadow: var(--shadow-raised);
-  font-weight: 500; color: var(--text-1);
+.choice-card:hover { border-color: var(--line-strong); }
+/* 选中的那张：描边加深 + 抬起 + 图标染色 —— 与 .pl-item.sel / .kb-item.on 同族。
+   `:has()` 项目里已在用（`.segmented .radio:has(...)` 的前身），浏览器支持没问题。 */
+.choice-card:has(input:checked) {
+  border-color: var(--line-strong);
+  background: var(--sel-bg);
+  box-shadow: var(--shadow-selected);
 }
-.segmented .radio input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.choice-card:has(input:checked) .cc-ic {
+  background: var(--ring-focus); color: var(--ink);
+}
+/* 视觉隐藏的 radio（口径与项目其它地方一致：绝对定位 + 1px，不参与布局） */
+.choice-card input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+/* 图标块：30×30，与 .pl-ic / .kb-icon 同尺寸 */
+.choice-card .cc-ic {
+  flex: 0 0 auto; width: 30px; height: 30px; border-radius: var(--r-sm);
+  display: grid; place-items: center;
+  background: var(--fill); color: var(--text-2);
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.choice-card .cc-txt { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.choice-card .cc-t { font-size: var(--f-sm); font-weight: 600; color: var(--text-1); }
+.choice-card .cc-d { font-size: var(--f-xs); color: var(--text-3); line-height: 1.45; }
 
 /* 自绘下拉：设置页（等宽方块）与快捷条（紧凑胶囊）共用，仅尺寸/圆角不同 */
 .native-hidden { position: absolute; opacity: 0; pointer-events: none; width: 1px; height: 1px; }
