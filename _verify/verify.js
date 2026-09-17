@@ -1982,10 +1982,28 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       && packBtns.btns.every(b => b.w < packBtns.inner / 2 && b.inRow === false),
     JSON.stringify(packBtns));
 
-  // 2026-09-17（任务 1）：行业包分组现在是 .block-inner 结构（与「生成参数」「进阶」同族），
+  // 2026-09-17：「进阶」→「生成方式与输出」（用户问「进阶有用吗？需要优化或者
+  // 合并吗？」）—— 4 项都在用（后端 pipeline.py 的 voice/format/mode 白名单 +
+  // knowledge.py 的 private_facts），**一项都不能删**；问题只在**名字太泛**：
+  // 听起来像"高级 / 不常用"，而「输出内容」「补充资料」其实常用。
+  // 判据：中列条目与右列卡片标题都必须是新名字，且旧名不残留在任何可见文本里。
+  const advName = await evalIn(`window.__ts.setPane('gen');
+    const nav = [...document.querySelectorAll('#gen-sec-list .pl-item')]
+      .find(function(b){ return b.dataset.sec === 'adv'; });
+    return { navTitle: nav.querySelector('.pl-t').textContent.trim(),
+             navSub: nav.querySelector('.pl-s').textContent.trim(),
+             cardTitle: document.querySelector(
+               '#gen-sec-detail .page-card[data-sec="adv"] .card-title').textContent.trim(),
+             staleName: document.body.innerText.indexOf('进阶') >= 0 };`);
+  check("「进阶」已改名「生成方式与输出」（中列条目与右列卡片同步，旧名不残留）",
+    advName.navTitle === "生成方式与输出" && advName.cardTitle === "生成方式与输出"
+      && advName.navSub.length > 0 && advName.staleName === false,
+    JSON.stringify(advName));
+
+  // 2026-09-17（任务 1）：行业包分组现在是 .block-inner 结构（与「生成参数」「生成方式与输出」同族），
   // 之前是 .fg.pack-row 单行布局（select + 详情 + 新建），高度 ~50px、右栏大片空。
   // 判据：行业包卡片内 ≥ 2 个 .block-inner，每个都包含 .lbl + 输入控件/按钮，
-  // 整卡有 .card-title（与生成参数、进阶的 h3.card-title 一致）。
+  // 整卡有 .card-title（与生成参数、生成方式与输出的 h3.card-title 一致）。
   const packSec = await evalIn(`window.__ts.setPane('gen');
     const card = document.querySelector('#pane-gen .page-card[data-sec="pack"]');
     const secBtns = [...document.querySelectorAll('#gen-sec-list .pl-item')];
@@ -2003,7 +2021,7 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       blockCount: blocks.length,
       fields,
     };`);
-  check("生成偏好「行业包」分组是 .block-inner 多行结构（与「生成参数」「进阶」同族）",
+  check("生成偏好「行业包」分组是 .block-inner 多行结构（与「生成参数」「生成方式与输出」同族）",
     packSec.cardTitle === "行业包" && packSec.blockCount >= 2
       && packSec.fields.every(f => f.lbl && f.hasControl)
       && !packSec.hasLegacyPackRow,
@@ -3059,15 +3077,25 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       && emptyList.pickerText === "未配置模型",
     JSON.stringify(emptyList));
 
-  // 空态里的「添加模型」要能把表单换出来 —— 否则那颗按钮点了没反应
-  await evalIn(`document.getElementById('llm-empty-add').click(); return true;`);
+  // 2026-09-17 二改：空态里**不放按钮**了（用户问「没有配置的时候有两个
+  // 添加模型入口，你觉得需要优化吗？」）—— 入口统一留给 headbar 那一颗，
+  // 空态只负责说明。判据：空态里 button 数为 0，且 headbar 那颗仍存在。
+  const emptyBtns = await evalIn(`return {
+    emptyBtnCount: document.querySelectorAll('#llm-empty button').length,
+    headbarAdd: !!document.getElementById('st-add-model') };`);
+  check("空态里不再有第二个「添加模型」入口（按钮统一在 headbar）",
+    emptyBtns.emptyBtnCount === 0 && emptyBtns.headbarAdd,
+    JSON.stringify(emptyBtns));
+
+  // 但 headbar 那颗在空列表下要能把表单换出来（addingNew），否则点了没反应
+  await evalIn(`document.getElementById('st-add-model').click(); return true;`);
   await sleep(300);
   const afterEmptyAdd = await evalIn(`return {
     emptyHidden: document.getElementById('llm-empty').classList.contains('hidden'),
     formShown: !document.getElementById('md-form-card').classList.contains('hidden'),
     advHidden: document.getElementById('st-adv').classList.contains('hidden'),
     mdTitle: document.getElementById('md-title').textContent };`);
-  check("空态点「添加模型」→ 换成表单（高级配置仍隐藏：还没有模型可调）",
+  check("空列表下点 headbar「添加模型」→ 换成表单（高级配置仍隐藏：还没有模型可调）",
     afterEmptyAdd.emptyHidden && afterEmptyAdd.formShown
       && afterEmptyAdd.advHidden && afterEmptyAdd.mdTitle === "添加模型",
     JSON.stringify(afterEmptyAdd));

@@ -211,14 +211,14 @@
                 <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>
               </span>
               <span class="pl-txt">
-                <span class="pl-t">进阶</span>
-                <span class="pl-s">生成方式、输出形式</span>
+                <span class="pl-t">生成方式与输出</span>
+                <span class="pl-s">流程、产出形式、补充资料</span>
               </span>
             </button>
           </div>
 
           <div class="pane-detail" id="gen-sec-detail">
-            <!-- 行业包分组：与「生成参数」「进阶」同结构（card-title + 描述 + .block-inner 多行）。
+            <!-- 行业包分组：与「生成参数」「生成方式与输出」同结构（card-title + 描述 + .block-inner 多行）。
                  之前是 .fg.pack-row 单行（select + 详情 + 新建），高度 ~50px，右栏一大片空。
                  改成 .block-inner 结构后该组能撑起来，与窗口高度适配（任务 1 / 7）。 -->
             <div class="page-card" data-sec="pack">
@@ -250,7 +250,12 @@
               <div id="param-front" class="fg"></div>
             </div>
             <div class="page-card" data-sec="adv">
-              <h3 class="card-title">进阶</h3>
+              <!-- 「进阶」→「生成方式与输出」（2026-09-17）：用户问「进阶有用吗？
+                   需要优化或者合并吗？」—— 4 项都在用（后端 pipeline.py 的
+                   voice/format/mode 白名单 + knowledge.py 的 private_facts），
+                   一项都不能删。问题只在**名字太泛**：听起来像"高级/不常用"，
+                   而「输出内容」「补充资料」其实常用。改成能看出内容的名称。 -->
+              <h3 class="card-title">生成方式与输出</h3>
               <div class="fg">
                 <div class="block-inner">
                   <label class="lbl">生成方式</label>
@@ -426,7 +431,12 @@
             <!-- 空态：一条模型都没有时**只显示这个**（不摆「添加模型」表单与高级配置）。
                  用户原话「没有模型的时候不应该显示添加啊，还有高级配置」——
                  空表单会让人以为"已经在配了"；高级配置（重试 / 超时）是给已配好的
-                 模型调优用的，没有模型时它没有对象。空态只给一件事：去哪加第一个。 -->
+                 模型调优用的，没有模型时它没有对象。
+                 ⚠ 这里**不放按钮**（2026-09-17 二改，用户问「没有配置的时候有两个
+                 添加模型入口，你觉得需要优化吗？」）—— 空态只负责**说清是什么、
+                 去哪加**，入口统一留给 headbar 那一颗，全页只有一个。
+                 原来这里也有一颗，且文案写着「点右上角」，等于两颗按钮 + 一句
+                 指错方向的提示（用户会去右上角，忽略眼前那颗）。 -->
             <div class="page-card hidden" id="llm-empty">
               <div class="pg-empty">
                 <div class="pg-empty-ic">
@@ -439,12 +449,6 @@
                 <p class="pg-empty-t">还没有配置模型</p>
                 <p class="pg-empty-d">生成脚本要调用一个 OpenAI 兼容的对话模型。
                   点右上角「添加模型」，填上请求地址、API Key 和模型名就能开始。</p>
-                <div class="pg-empty-actions">
-                  <button class="primary slim" id="llm-empty-add">
-                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-                    添加模型
-                  </button>
-                </div>
               </div>
             </div>
 

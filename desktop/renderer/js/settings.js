@@ -606,15 +606,15 @@ export const bindSettings = bindOnce(function bindSettings() {
     preloadSettings().catch(e => toast("刷新失败：" + e.message, 3500));
   };
   // 「添加模型」：右列切到空表单（editingId=""），不再是开弹窗。
-  // ⚠ 两个入口同一个动作：headbar 那颗 + 空态里的那颗（`llm-empty-add`）——
-  // 空列表时右列显示的是空态，headbar 那颗点了要能把表单换出来（addingNew）。
-  const startAdd = () => {
+  // ⚠ 全页**只有这一个**添加入口（2026-09-17）：空态里原来也有一颗，
+  // 与 headbar 这颗重复（用户问「没有配置的时候有两个添加模型入口」）。
+  // 现在空态只负责说明，入口统一在这里 —— 但 `addingNew` 仍需要：
+  // 空列表时右列显示的是空态，点了这颗要能把表单换出来。
+  $("st-add-model").onclick = () => {
     addingNew = true;
     selectModel("");
     renderLlmEmpty(lastCfg || {});
   };
-  $("st-add-model").onclick = startAdd;
-  $("llm-empty-add").onclick = startAdd;
   $("md-cancel").onclick = closeModelDialog;
   $("md-save").onclick = saveModelDialog;
   $("md-test").onclick = testModelDialog;
