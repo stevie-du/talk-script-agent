@@ -166,17 +166,9 @@
              层级修正：导航列资源（行业包），动作藏在资源下；点 packinfo 的 [新建] 进入。
              保留 packgen 面板 DOM（验证 setPane("packgen") 仍可达），但不占导航位。 -->
       </div>
-      <div class="nav-sec">
-        <p class="nav-sec-t">Agent 能力</p>
-        <button class="stg-nav-item" data-pane="kb">
-          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H10a2 2 0 0 1 2 2v13a1.5 1.5 0 0 0-1.5-1.5H4z"/><path d="M20 5.5A1.5 1.5 0 0 0 18.5 4H14a2 2 0 0 0-2 2v13a1.5 1.5 0 0 1 1.5-1.5H20z"/></svg>
-          <span class="nav-t">知识库</span>
-        </button>
-        <button class="stg-nav-item" data-pane="skills">
-          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l2.2 4.5 5 .7-3.6 3.5.9 4.9L12 14.3 7.5 16.6l.9-4.9L4.8 8.2l5-.7z"/></svg>
-          <span class="nav-t">技能</span>
-        </button>
-      </div>
+      <!-- 「Agent 能力」子节（知识 / 技能）已删除 —— 2026-09-17 统一进「行业包」面板：
+           一个行业一份知识 + 技能 + 合规 + 私有资料，不再并列拆成三个导航项。
+           原 #pane-kb / #pane-skills 整段不再渲染；DOM 与左导航一并去掉。 -->
     </div>
   </aside>
 
@@ -311,21 +303,22 @@
               <label class="lbl">校对清单（草稿包需逐项核实）</label>
               <pre id="pi-checklist"></pre>
             </div>
-            <div>
-              <label class="lbl">文件清单</label>
-              <div id="pi-files" class="tbl-wrap"></div>
-            </div>
-            <!-- 文件内容查看器：复用 showPackFile(pfx="pi-file")，跟知识/技能
-                 是同一套实现。点表格行 → 加载内容。viewer 始终可见（占位状态）
-                 避免布局跳动。 -->
+            <!-- 文件分组（2026-09-17 统一：知识 / 技能 / 合规 / 私有资料
+                 全部并进「行业包」面板 —— 一个行业一份知识+技能，不再并列
+                 拆成三个导航项）。原 #pi-files 的扁平表格换成 .kb-groups：
+                 与原知识面板同型（角色分组条目），复用同样的视觉语言。 -->
+            <label class="lbl">文件分组</label>
+            <div id="pi-groups" class="kb-groups"></div>
+            <!-- 文件内容查看器：showPackFile 加载到这里。viewer 始终可见
+                 （占位态），避免布局跳动。 -->
             <div class="kb-view" id="pi-file-view">
               <div class="kb-view-head">
                 <span id="pi-file-title" class="lbl">未选择文件</span>
                 <span id="pi-file-size" class="hint"></span>
               </div>
-              <pre id="pi-file-body" class="kb-body">从上方文件清单选择一个文件查看内容。</pre>
+              <pre id="pi-file-body" class="kb-body">从上方文件分组选择一个文件查看内容。</pre>
             </div>
-            <p class="hint">配置方法见 docs/知识库与技能配置指南.md</p>
+            <p class="hint">配置方法见 docs/知识库与技能配置指南.md。要新增文件请用编辑器打开包目录；该页面是只读查看。</p>
             <p class="hint" id="pi-export-hint">导出为 SKILL.md 技能目录（含独立校验工具），可放入支持技能的 agent 使用。</p>
             <div class="page-actions">
               <button class="ghost" id="pi-export">导出为 Agent 技能</button>
@@ -380,79 +373,6 @@
             <div class="pg-empty-actions">
               <button class="primary slim" id="pg-done">完成</button>
             </div>
-          </div>
-        </div>
-      </section>
-
-      <section class="stg-pane hidden has-cols" id="pane-kb" data-pane="kb">
-        <header class="page-head">
-          <div class="page-head-titles">
-            <h2>知识库</h2>
-            <p class="hint">把产品手册、服务标准、常见问答等资料沉淀在此，生成时自动引用</p>
-          </div>
-          <div class="page-head-actions">
-            <button class="ghost bordered" id="kb-refresh" title="重新拉取文件清单">
-              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 15.5-6.3L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.5 6.3L3 16"/><path d="M3 21v-5h5"/></svg>
-              刷新
-            </button>
-            <button class="ghost bordered" id="kb-add" title="新增资料（暂未接入，请直接编辑包目录下的文件）" disabled>新增</button>
-          </div>
-        </header>
-        <!-- 行业包过滤器：三层结构里位于 page-head 与 .stg-cols 之间。
-             不要套 `.page-card` 包装 —— 那层带 border-top + padding，会让面板
-             头部多一条横线、跟模型接口 / 行业包长得不一样（2026-09-17 统一）。
-             .kb-filter 自己负责 spacing（label / select / hint 三段间距）。 -->
-        <div class="kb-filter">
-          <label class="lbl">行业包</label>
-          <select id="kb-pack"></select>
-          <p class="hint">下面是该行业包随包分发的资料文件，生成时会被自动引用。
-            当前为<b>只读</b>查看；要改请直接编辑包目录里的文件（改完重新生成即生效）。</p>
-        </div>
-        <!-- 三列骨架：中列「文件列表」+ 右列「文件内容」。
-           与生成偏好 / 模型接口 / 行业包 共用 `.stg-cols` 骨架（2026-09-17 统一）。 -->
-        <div class="stg-cols">
-          <div class="kb-list" id="kb-list"><p class="hint">载入中…</p></div>
-          <div class="kb-view">
-            <div class="kb-view-head">
-              <span id="kb-title" class="lbl">未选择文件</span>
-              <span id="kb-size" class="hint"></span>
-            </div>
-            <pre id="kb-body" class="kb-body">从左侧选择一个文件查看内容。</pre>
-          </div>
-        </div>
-      </section>
-
-      <section class="stg-pane hidden has-cols" id="pane-skills" data-pane="skills">
-        <header class="page-head">
-          <div class="page-head-titles">
-            <h2>技能</h2>
-            <p class="hint">挂载可复用的能力（如合规校验、禁用词表），决定哪些在生成时被引用</p>
-          </div>
-          <div class="page-head-actions">
-            <button class="ghost bordered" id="skills-refresh" title="重新拉取文件清单">
-              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 15.5-6.3L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.5 6.3L3 16"/><path d="M3 21v-5h5"/></svg>
-              刷新
-            </button>
-            <button class="ghost bordered" id="skills-add" title="新增技能（暂未接入，请直接编辑包目录下的文件）" disabled>新增</button>
-          </div>
-        </header>
-        <!-- 行业包过滤器（与 kb 同型：见 #pane-kb 的 `.kb-filter` 注释）。 -->
-        <div class="kb-filter">
-          <label class="lbl">行业包</label>
-          <select id="skills-pack"></select>
-          <p class="hint">下面是该包描述技能「怎么写、怎么改、怎么校验」的文件 —— skill.yaml
-            与 rules / patterns / compliance 下的内容。当前为<b>只读</b>查看。</p>
-        </div>
-        <!-- 三列骨架：中列「文件列表」+ 右列「文件内容」。
-           与生成偏好 / 模型接口 / 行业包 共用 `.stg-cols` 骨架。 -->
-        <div class="stg-cols">
-          <div class="kb-list" id="skills-list"><p class="hint">载入中…</p></div>
-          <div class="kb-view">
-            <div class="kb-view-head">
-              <span id="skills-title" class="lbl">未选择文件</span>
-              <span id="skills-size" class="hint"></span>
-            </div>
-            <pre id="skills-body" class="kb-body">从左侧选择一个文件查看内容。</pre>
           </div>
         </div>
       </section>

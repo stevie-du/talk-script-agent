@@ -13,7 +13,10 @@ import { closeOverlays, openOverlay, appConfirm } from "./overlays.js";
 // 所以循环依赖在调用时已解析完毕，安全。
 import { fillPackSelect } from "./ui.js";
 
-const PANES = ["gen", "packinfo", "packgen", "llm", "kb", "skills"];
+const PANES = ["gen", "packinfo", "packgen", "llm"];
+// 2026-09-17：「知识 / 技能」两个独立面板已并入「行业包」面板，
+// PANES 去掉 "kb" / "skills"。openPackInfo 是行业包面板右列的渲染函数，
+// 进 packinfo 时自动加载；panegen 的 [新建] 不影响。
 // 导航项 → 资源；面板 → 资源下可能有的「子页面」。
 // packgen 不在左导航里（动作不是资源），但它需要让「行业包」导航高亮，
 // 读作「你在行业包这个资源下，进了它的子动作」。
@@ -101,8 +104,6 @@ export function setPane(pane) {
   if (pane === "packinfo") {
     renderPackList();
     openPackInfo().catch(e => toast("读取失败：" + e.message, 3500));
-  } else if (pane === "kb" || pane === "skills") {
-    openPackFiles(pane);
   } else if (pane === "llm") {
     // 进入模型面板：右列默认停在「当前启用」那条 —— 空着的话第一眼看到的是
     // 一张空表单，会以为还没配模型。
@@ -512,8 +513,6 @@ export const bindSettings = bindOnce(function bindSettings() {
     renderPackList();
     openPackInfo().catch(e => toast("刷新失败：" + e.message, 3500));
   };
-  $("kb-refresh").onclick = () => openPackFiles(state.settingsPane);
-  $("skills-refresh").onclick = () => openPackFiles(state.settingsPane);
   $("pg-close").onclick = () => setPane(packgenFrom);
   $("pg-run").onclick = runPackgen;
   $("pg-done").onclick = onPackDone;
@@ -543,8 +542,6 @@ export const bindSettings = bindOnce(function bindSettings() {
     const m = ((lastCfg || {}).models || []).find(x => x.id === editingId);
     if (m) { await removeModel(m); closeModelDialog(); }
   };
-  $("kb-pack").onchange = () => openPackFiles(state.settingsPane);
-  $("skills-pack").onchange = () => openPackFiles(state.settingsPane);
   $("pi-export").onclick = exportSkill;
   $("pi-undraft").onclick = undraftPack;
 });
@@ -587,19 +584,22 @@ async function resetField(field, inputId) {
   }
 }
 
-// ── 知识库 / 技能：两个面板共用一套只读查看器，但筛不同角色 ──────────
-// 之前的 kb: () => true 是设计漏洞——知识库与技能会显示**同一组文件**
-// （skill.yaml 在两边都出现），命名错位。改成按命名分组互不重叠：
-//   kb     = 包清单 + 知识库 + 私有资料  （"资料类"）
-//   skills = 技能主文件 + 规则/方法库/合规（"技能类"）
-// 做成只读而不是增删改，是刻意的：这些文件是行业包的「源码」，写坏了
-// 整个包都废，而浏览器里改文件既没有原子写也没有校验，风险与收益不成比例。
-const PANE_FILE_FILTER = {
-  kb:     (rel) => rel === "pack.yaml"
-                 || rel.startsWith("knowledge/") || rel.startsWith("private/"),
-  skills: (rel) => rel === "skill.yaml"
-                 || /^(rules|patterns|compliance)\//.test(rel),
-};
+// ── 行业包面板：把「知识库 / 技能」两个旧面板并回一个入口 ────────
+//
+// 2026-09-17 用户贴图报：「行业包 / 知识库 / 技能」三个独立面板把同一份
+// 数据切三份；知识/技能面板里那个「行业包」下拉又是空的。改为统一入口：
+//   - 进「行业包」面板 → 左栏选一个行业
+//   - 右栏直接看到**该行业全部文件按角色分组**（技能 / 规则 / 方法库 /
+//     合规 / 知识库 / 禁用词表 / 草稿校对 / 私有资料 / 包清单）
+//   - 点任一文件 → 同一个 #pi-file-view 查看器
+//
+// 数据模型本来就只有「一个行业 = packs/<slug>/ 一个目录」，现在 UI 也对应
+// 上来了 —— 行业包面板成为行业内容的**唯一入口**，#pane-kb / #pane-skills
+// 已从 DOM 与左导航里删除（见 index.html）。
+//
+// 「新增资料」按钮也一起删了：浏览器里改盘上的文件既没有原子写也没校验，
+// 风险与收益不成比例 —— Claude Code / Cursor / Skills 等成熟智能体同样
+// 不在 UI 里直接编辑。改文件 = 打开编辑器 + Ctrl+S + 回来点「刷新」即可。
 
 // ── 设置内搜索已移除 ──────────────────────────────────────
 // 曾经的 filterSettingsNav() 按「导航项文字 + 分区面板全文」过滤左导航，
@@ -651,8 +651,7 @@ const ROLE_LABEL = Object.fromEntries(ROLE_GROUP_ORDER.map(g => [g.key, g.label]
 
 // 每个 role 的图标 SVG。统一 24×24 viewBox，stroke 用 currentColor
 // （颜色由 CSS .kb-item[data-role=...] .kb-icon 的 color 接管，不写死）。
-// 必须放在 openPackFiles 之前：函数体里用到 ROLE_ICON[key]，
-// 但 async function 在模块顶层执行到时 ROLE_ICON 是 TDZ（const 不 hoist）。
+// 必须放在 renderPackGroups 之前：函数体里用到 ROLE_ICON[key]。
 const ROLE_ICON = {
   skill: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l2.2 4.5 5 .7-3.6 3.5.9 4.9L12 14.3 7.5 16.6l.9-4.9L4.8 8.2l5-.7z"/></svg>`,
   rules: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>`,
@@ -665,95 +664,78 @@ const ROLE_ICON = {
   package: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></svg>`,
 };
 
-async function openPackFiles(pane) {
-  // 知识库与技能两个面板共用一套只读查看器，但 DOM 节点分开
-  // （同一 ID 在一个文档里只能出现一次）
-  const pfx = pane === "skills" ? "skills" : "kb";
-  const list = $(pfx + "-list");
-  const sel = $(pfx + "-pack");
-  if (sel && !sel.options.length && state.meta) {
-    sel.innerHTML = "";
-    for (const p of state.meta.packs) {
-      const o = el("option", "", esc(p.display_name) + (p.draft ? "（草稿）" : ""));
-      o.value = p.name;
-      sel.appendChild(o);
-    }
-    sel.value = state.meta.default_pack || (state.meta.packs[0] || {}).name || "";
+/** 把一个包的文件按角色分组渲染到容器里。无网络调用：纯 DOM。
+ *
+ * 之前在两个 #pane-kb / #pane-skills 面板里各持一份（PANEL_FILE_FILTER
+ * 按 rel 分类过滤后再走同样的逻辑）。2026-09-17 合并到「行业包」面板
+ * 一份 ——「知识库 / 技能 / 合规 / 私有 / …」是**一个包内部**的角色分类，
+ * 不是平行资源，再单独拆面板就是把同一份数据切三份。
+ */
+function renderPackGroups(name, p, container) {
+  container.innerHTML = "";
+  const files = p.files || [];
+  if (!files.length) {
+    container.appendChild(el("p", "hint", "这个包还没有文件"));
+    return;
   }
-  const name = sel.value;
-  if (!name) { list.innerHTML = "<p class='hint'>还没有可用的行业包。</p>"; return; }
-  list.innerHTML = "<p class='hint'>载入中…</p>";
-  try {
-    const p = await api.pack(name);
-    const keep = PANE_FILE_FILTER[pane] || (() => true);
-    const files = (p.files || []).filter(f => keep(f.rel));
-    list.innerHTML = "";
-    if (!files.length) {
-      list.innerHTML = "<p class='hint'>这个包没有符合条件的文件。</p>";
-      return;
-    }
-    // 按 ROLE_GROUP_ORDER 顺序分组，未识别的归到"包清单"组（兜底）。
-    const buckets = new Map(ROLE_GROUP_ORDER.map(g => [g.key, []]));
-    for (const f of files) {
-      const k = fileRole(f.rel);
-      if (!buckets.has(k)) buckets.set(k, []);
-      buckets.get(k).push(f);
-    }
-    const groups = el("div", "kb-groups");
-    for (const { key, label } of ROLE_GROUP_ORDER) {
-      const items = buckets.get(key);
-      if (!items || !items.length) continue;        // 空组不显示（不浪费一行的分组标题）
-      const grp = el("div", "kb-group");
-      const h = el("h4", "kb-group-t");
-      h.appendChild(document.createTextNode(label));
-      h.appendChild(el("span", "kb-group-c", String(items.length)));
-      grp.appendChild(h);
-      const cards = el("div", "kb-cards");
-      for (const f of items) {
-        const row = el("button", "kb-item");
-        row.type = "button";
-        row.dataset.role = key;
-        // 顺序：图标 → 元信息（名称+描述）→ 大小。firstChild 是图标，
-        // 文件名放进 .kb-name —— 这是断言要查的元素（不是 firstChild 文本）。
-        const icon = el("span", "kb-icon");
-        icon.innerHTML = ROLE_ICON[key] || ROLE_ICON.package;
-        row.appendChild(icon);
-        const meta = el("div", "kb-meta");
-        meta.appendChild(el("span", "kb-name", f.rel));
-        // 这里曾经还挂一行 `.kb-desc`（角色小字，内容就是组标题那几个字）。
-        // 删掉的理由：卡片已经按角色分在 `.kb-group` 里，组标题上写着同样的词，
-        // 卡里再写一遍是同一信息两份表示；而且它正是「漏出卡片外那行小字」的
-        // 来源（卡片高度被全局按钮高度钉死时，漏出去的就是它）。
-        row.appendChild(meta);
-        const sizeTxt = f.size > 1024
-          ? (f.size / 1024).toFixed(1) + " KB"
-          : f.size + " B";
-        row.appendChild(el("span", "kb-size", sizeTxt));
-        row.onclick = () => showPackFile(name, f.rel, row, pfx);
-        cards.appendChild(row);
-      }
-      grp.appendChild(cards);
-      groups.appendChild(grp);
-    }
-    list.appendChild(groups);
-  } catch (e) {
-    list.innerHTML = `<p class='hint'>载入失败：${esc(e.message)}</p>`;
+  // 按 ROLE_GROUP_ORDER 顺序分组，未识别的归到"包清单"组（兜底）。
+  const buckets = new Map(ROLE_GROUP_ORDER.map(g => [g.key, []]));
+  for (const f of files) {
+    const k = fileRole(f.rel);
+    if (!buckets.has(k)) buckets.set(k, []);
+    buckets.get(k).push(f);
   }
+  const groups = el("div", "kb-groups");
+  for (const { key, label } of ROLE_GROUP_ORDER) {
+    const items = buckets.get(key);
+    if (!items || !items.length) continue;        // 空组不显示（不浪费一行的分组标题）
+    const grp = el("div", "kb-group");
+    const h = el("h4", "kb-group-t");
+    h.appendChild(document.createTextNode(label));
+    h.appendChild(el("span", "kb-group-c", String(items.length)));
+    grp.appendChild(h);
+    const cards = el("div", "kb-cards");
+    for (const f of items) {
+      const row = el("button", "kb-item");
+      row.type = "button";
+      row.dataset.role = key;
+      // 顺序：图标 → 元信息（名称）→ 大小。firstChild 是图标，
+      // 文件名放进 .kb-name —— 这是断言要查的元素（不是 firstChild 文本）。
+      const icon = el("span", "kb-icon");
+      icon.innerHTML = ROLE_ICON[key] || ROLE_ICON.package;
+      row.appendChild(icon);
+      const meta = el("div", "kb-meta");
+      meta.appendChild(el("span", "kb-name", f.rel));
+      row.appendChild(meta);
+      const sizeTxt = f.size > 1024
+        ? (f.size / 1024).toFixed(1) + " KB"
+        : f.size + " B";
+      row.appendChild(el("span", "kb-size", sizeTxt));
+      row.onclick = () => showPackFile(name, f.rel, row);
+      cards.appendChild(row);
+    }
+    grp.appendChild(cards);
+    groups.appendChild(grp);
+  }
+  container.appendChild(groups);
 }
 
-async function showPackFile(name, rel, row, pfx) {
-  document.querySelectorAll(`#${pfx}-list .kb-item`).forEach(n => n.classList.remove("on"));
+/** 行业包面板 / 唯一查看器。点 #pi-groups 里的 .kb-item → 加载到 #pi-file-view。
+ *  之前还接了 #kb-list / #skills-list 两套；现在只有一份。
+ */
+async function showPackFile(name, rel, row) {
+  document.querySelectorAll("#pi-groups .kb-item").forEach(n => n.classList.remove("on"));
   if (row) row.classList.add("on");
-  $(pfx + "-title").textContent = rel;
-  $(pfx + "-size").textContent = "";
-  $(pfx + "-body").textContent = "载入中…";
+  $("pi-file-title").textContent = rel;
+  $("pi-file-size").textContent = "";
+  $("pi-file-body").textContent = "载入中…";
   try {
     const d = await api.packFile(name, rel);
-    $(pfx + "-size").textContent =
+    $("pi-file-size").textContent =
       d.size > 1024 ? (d.size / 1024).toFixed(1) + " KB" : d.size + " B";
-    $(pfx + "-body").textContent = d.text;
+    $("pi-file-body").textContent = d.text;
   } catch (e) {
-    $(pfx + "-body").textContent = "读取失败：" + e.message;
+    $("pi-file-body").textContent = "读取失败：" + e.message;
   }
 }
 
@@ -899,30 +881,9 @@ async function openPackInfo(name) {
   // 用户切到 fitment 包会以为 elevator 还在生效。
   $("pi-file-title").textContent = "未选择文件";
   $("pi-file-size").textContent = "";
-  $("pi-file-body").textContent = "从上方文件清单选择一个文件查看内容。";
-  const box = $("pi-files");
-  box.innerHTML = "";
-  const tb = el("table");
-  tb.innerHTML = "<thead><tr><th>文件</th><th class='col-size'>大小</th>"
-    + "<th class='col-role'>说明</th></tr></thead>";
-  const body = el("tbody");
-  for (const f of p.files || []) {
-    const tr = el("tr");
-    tr.dataset.rel = f.rel;       // 给行一个稳定标识（不看 children）
-    const kb = f.size > 1024 ? (f.size / 1024).toFixed(1) + " KB" : f.size + " B";
-    tr.innerHTML = `<td class="cell-mono">${esc(f.rel)}</td>
-      <td>${kb}</td><td>${esc(ROLE_LABEL[fileRole(f.rel)] || "")}</td>`;
-    // ⚠ 2026-09-17：行变可点击 → 复用 showPackFile(pfx="pi-file")，
-    // 与知识/技能共用同一套实现。showPackFile 内部给 `#${pfx}-list .kb-item`
-    // 兄弟加 `.on` —— 这里是 `<tr>` 不是 .kb-item，那个循环扫不到、跳过。
-    // 我们的 .on 高亮自己管（dataset.rel + querySelectorAll("tr.on")）。
-    tr.onclick = () => {
-      box.querySelectorAll("tr.on").forEach(x => x.classList.remove("on"));
-      tr.classList.add("on");
-      showPackFile(name, f.rel, tr, "pi-file");
-    };
-    body.appendChild(tr);
-  }
-  tb.appendChild(body);
-  box.appendChild(tb);
+  $("pi-file-body").textContent = "从上方文件分组选择一个文件查看内容。";
+  // 2026-09-17 合并：原 #pi-files 的扁平表格换成与原知识/技能面板同型的
+  // 角色分组列表（.kb-groups）。一个行业一份知识+技能+合规+私有，
+  // 整个组的视觉语言见 styles.css 的 .kb-group 系列。
+  renderPackGroups(name, p, $("pi-groups"));
 }

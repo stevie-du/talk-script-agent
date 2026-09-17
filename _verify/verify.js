@@ -380,7 +380,22 @@ window.__addCount = 0;
     }
     if (s.indexOf('/api/packs/') >= 0) return mk({ display_name:'电梯行业包', description:'电梯行业口播脚本包',
       draft:ELEVATOR_DRAFT, checklist:'1. 核对参数 / 2. 核对禁用词',
-      files:[{rel:'pack.yaml',size:2048},{rel:'skill.yaml',size:1024},{rel:'knowledge/topics.md',size:5120}] });
+      // ⚠ 2026-09-17：桩里的文件清单必须**覆盖全部角色**。桩只有 3 个文件时，
+      // 「行业包面板覆盖知识 / 技能 / 合规 / 私有等所有角色」这条断言验的是
+      // 桩的贫瘠，不是实现的正确 —— 属于空转。真实包（elevator）有 22 个文件，
+      // 这里取覆盖 9 个角色的最小真形态。
+      files:[
+        {rel:'pack.yaml',size:2048},
+        {rel:'skill.yaml',size:1024},
+        {rel:'banwords.yaml',size:512},
+        {rel:'校对清单.md',size:768},
+        {rel:'knowledge/topics.md',size:5120},
+        {rel:'knowledge/faq.md',size:3072},
+        {rel:'compliance/platform.md',size:1536},
+        {rel:'patterns/hook.md',size:2560},
+        {rel:'rules/duration.md',size:1024},
+        {rel:'private/pricing.md',size:896},
+      ] });
     if (s.indexOf('/api/history') >= 0) return mk([]);
     return mk({});
   };
@@ -793,8 +808,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       packgenPane: !!document.getElementById('pane-packgen'),
       on: document.querySelectorAll('.stg-nav-item.on').length,
       genVisible: !document.getElementById('pane-gen').classList.contains('hidden') };`);
-  check("设置页铺满窗口，panes=6 / navs=5（packgen 不占导航位）",
-    stg.open && stg.covers && stg.panes === 6 && stg.navs === 5
+  check("设置页铺满窗口，panes=4 / navs=3（packgen 不占导航位；kb / skills 已并入行业包）",
+    stg.open && stg.covers && stg.panes === 4 && stg.navs === 3
+      && stg.panes === stg.navs + 1
       && !stg.packgenNav && stg.packgenPane,
     JSON.stringify(stg));
   check("默认分区为生成偏好且高亮唯一",
@@ -852,14 +868,42 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   await evalIn(`window.__ts.setPane('packinfo'); return true;`);
   await sleep(500);
-  const pi = await evalIn(`return { rows: document.querySelectorAll('#pi-files tbody tr').length,
+  const pi = await evalIn(`return { groups: document.querySelectorAll('#pi-groups .kb-group').length,
+    items: document.querySelectorAll('#pi-groups .kb-item').length,
     title: document.getElementById('pi-title').textContent,
     hidden: document.getElementById('pane-packinfo').classList.contains('hidden') };`);
-  check("行业包详情进入即拉取文件清单", !pi.hidden && pi.rows === 3, JSON.stringify(pi));
+  // 2026-09-17 重组后：行业包面板右列是 **按角色分组的文件列表**（不再叫
+  // 「文件清单」，也不再是单一扁平表）。ROLE_GROUP_ORDER 共 9 个角色；
+  // 桩里的包给的是覆盖全部 9 组 / 10 个文件的最小真形态，所以这里按
+  // 「≥8 组 / ≥9 条」判 —— 留一格的余量，不至于以后加一个角色就挂。
+  // ⚠ 桩只给 3 个文件时这条会空转（只能验出 3 组）：桩数据见 stubScript()
+  // 里 /api/packs/ 那段，改桩之前先想清楚它是不是还代表真实包。
+  check("行业包详情进入即按角色渲染文件分组（≥8 组 / ≥9 条）",
+    !pi.hidden && pi.groups >= 8 && pi.items >= 9,
+    JSON.stringify(pi));
+
+  // ⭐ 2026-09-17 新增断言：原「知识 / 技能」两个面板的内容（skill.yaml /
+  // knowledge/、rules/、patterns/、compliance/、private/）现在必须能在
+  // 行业包面板里看到 —— 这是把三面板并到一面板的核心证据；若 `.kb-item`
+  // 仍只显示某种角色文件（如只显示私有资料），那说明合并没成功。
+  const piAllRoles = await evalIn(`return (function(){
+    var roles = new Set();
+    document.querySelectorAll('#pi-groups .kb-item').forEach(function(n){
+      var r = n.dataset.role; if (r) roles.add(r);
+    });
+    return { roles: [...roles].sort(), n: roles.size };
+  })()`);
+  check("行业包面板覆盖知识 / 技能 / 合规 / 私有等所有角色（不再需要单独面板）",
+    piAllRoles.n >= 6
+      && piAllRoles.roles.indexOf("knowledge") >= 0
+      && piAllRoles.roles.indexOf("skill") >= 0
+      && piAllRoles.roles.indexOf("compliance") >= 0
+      && piAllRoles.roles.indexOf("private") >= 0,
+    JSON.stringify(piAllRoles));
 
   // 行业包面板是三列（中列包列表 + 右列包详情）。
   // 「至少有一条包」 → 中列有 `.pl-item` + 默认 `.sel` 那条就是当前正在查看的；
-  // 右列有 `#pi-files tbody tr`（文件清单）。两者宽度与间距符合骨架口径。
+  // 右列有 `#pi-groups .kb-item`（按角色分组的文件）。两者宽度与间距符合骨架口径。
   const pi3 = await evalIn(`var list = document.querySelector('#pi-list');
     var items = list ? list.querySelectorAll('.pl-item') : [];
     var on = [], sel = [];
@@ -881,22 +925,23 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       && pi3.sel.length === 1,
     JSON.stringify(pi3));
 
-  // 行业包文件清单的**可点击预览**：点行 → 右侧 viewer 加载内容。
-  // 用户 2026-09-17 反馈「右侧的一些文档看不到具体的内容」 —— 表格只能看
-  // 元数据，看不到 yaml / md 正文。修法：行变可点击，复用 showPackFile
-  // (pfx="pi-file")，与知识/技能共用同一套实现。
-  // ⚠ 切包时查看器必须复位 —— 不复位的话上个包的内容会"粘"到新包上。
+  // 行业包面板的文件可点击预览：点 `.kb-item` → #pi-file-view 加载内容。
+  // 2026-09-17 重组后共用同一份 `showPackFile(name, rel, row)` —— 之前还能按面板
+  // 走 pfx="kb" / "skills" / "pi-file" 的三套实例；现在只剩一份。
+  // 为什么是 .kb-item 而不是 .kb-group 行：每张卡仍是 `<button class="kb-item">`，
+  // `dataset.role` 是稳定标识，不靠 firstChild 文本（首子是图标节点），
+  // 文件名放进 `.kb-name` 是断言要查的元素。
   //
   // 桩引擎 vs 真引擎：verify 跑的是 stubtoken 的桩引擎（fitment 有
   // 3 个文件但 api.packFile 对它返错 / 短路内容）；probe 跑的是真引擎
   // （elevator 22 个文件，knowledge/topics.md 能正常 3937 字符）。
   // 桩数据飘忽，内容长度不稳定 —— **不查 bodyLen/具体字符**，
   // 只查「click 之后 title 变成那行的 rel + 不再是初始占位 + row 有 .on」。
-  // 等到行真的渲染出来（openPackInfo 完成后再点）。1500ms 兜底超时。
+  // 等到行真的渲染出来（renderPackGroups 完成后再点）。1500ms 兜底超时。
   const piReady = await evalIn(`return new Promise(function(res){
     var deadline = Date.now() + 1500;
     function poll(){
-        var rows = document.querySelectorAll('#pi-files tbody tr');
+        var rows = document.querySelectorAll('#pi-groups .kb-item');
         if (rows.length > 0) return res(true);
         if (Date.now() > deadline) return res(false);
         setTimeout(poll, 50);
@@ -906,14 +951,15 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   // 一气呵成：找目标 → 记下 rel 和点击前的 title → 点 → 等 title 不再是占位 →
   // 返回 {期望的 rel, 实际 title/body} 让断言用「期望 vs 实际」对得上。
   const piLoaded = await evalIn(`return new Promise(function(res){
-    var rows = document.querySelectorAll('#pi-files tbody tr');
+    var rows = document.querySelectorAll('#pi-groups .kb-item');
     var target = null;
     rows.forEach(function(r){
-      var rel = r.dataset.rel || '';
-      if (!target && rel && rel.indexOf('pack.yaml') === -1) target = r;
+      var nameEl = r.querySelector('.kb-name');
+      var rel = nameEl ? nameEl.textContent : '';
+      if (!target && rel && rel !== 'pack.yaml' && rel !== '校对清单.md') target = r;
     });
     if (!target) return res({ err: 'no target row' });
-    var expectedRel = target.dataset.rel;
+    var expectedRel = target.querySelector('.kb-name').textContent;
     var titleBefore = document.getElementById('pi-file-title').textContent;
     var bodyBefore = document.getElementById('pi-file-body').textContent;
     target.click();
@@ -921,10 +967,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     function poll(){
         var body = document.getElementById('pi-file-body').textContent;
         var title = document.getElementById('pi-file-title').textContent;
-        // title 不再是「未选择文件」+ body 不再是初始占位文字
         if (title && title !== '未选择文件'
             && body && body !== '载入中…'
-            && body !== '从上方文件清单选择一个文件查看内容。') {
+            && body !== '从上方文件分组选择一个文件查看内容。') {
           return res({
             expectedRel: expectedRel,
             titleBefore: titleBefore,
@@ -946,7 +991,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       }
       poll();
     });`);
-  check("点行业包文件清单里的文件，右侧查看器加载 yaml / md 内容",
+  check("点行业包文件分组里的 .kb-item，#pi-file-view 加载 yaml / md 内容",
     !!piLoaded && !piLoaded.err
       && piLoaded.title === piLoaded.expectedRel
       && piLoaded.title !== piLoaded.titleBefore
@@ -954,11 +999,71 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       && piLoaded.size.length > 0,
     JSON.stringify(piLoaded));
 
+  // .kb-item 家族一致性（kb / skills / packinfo 三处共用同一族）——
+  // 既然 kb / skills 面板已并到行业包面板里，这条断言只在新位置复核一遍。
+  // ⚠ 取 .pl-item 时要避开 .on / .sel（业务高亮态）。
+  const kbVisMatch = await evalIn(`return (function(){
+    var kb = document.querySelector('#pi-groups .kb-item:not(.on)');
+    if (!kb) return { ok: false, reason: 'no kb-item' };
+    var pl = document.querySelector('.pl-item:not(.on):not(.sel)');
+    var plUsed = pl || document.querySelector('.pl-item');
+    if (!plUsed) return { ok: false, reason: 'no pl-item' };
+    var k = getComputedStyle(kb), p = getComputedStyle(plUsed);
+    var bg = function(s){
+      var m = String(s || '').match(/^rgba?\(([^)]+)\)/);
+      if (!m) return s === 'transparent' ? 0 : null;
+      var parts = m[1].split(',').map(function(x){return parseFloat(x.trim());});
+      return parts.length >= 4 ? parts[3] : 1;
+    };
+    var firstCol = function(g){
+      var s = String(g || '').trim();
+      var first = s.split(/[ ]+/)[0] || '';
+      return /^[0-9]+(?:\.[0-9]+)?px$/.test(first) ? parseFloat(first) : null;
+    };
+    return {
+      ok: k.padding === p.padding
+        && k.borderRadius === p.borderRadius
+        && k.fontSize === p.fontSize
+        && firstCol(k.gridTemplateColumns) === firstCol(p.gridTemplateColumns)
+        && firstCol(k.gridTemplateColumns) === 30
+        && bg(k.backgroundColor) === 0
+        && bg(p.backgroundColor) === 0,
+      kb: { padding: k.padding, radius: k.borderRadius,
+            grid: k.gridTemplateColumns, fontSize: k.fontSize,
+            iconCol: firstCol(k.gridTemplateColumns),
+            bgAlpha: bg(k.backgroundColor) },
+      pl: { padding: p.padding, radius: p.borderRadius,
+            grid: p.gridTemplateColumns, fontSize: p.fontSize,
+            iconCol: firstCol(p.gridTemplateColumns),
+            bgAlpha: bg(p.backgroundColor),
+            classes: String(plUsed.className) }
+    };
+  })()`);
+  check("行业包面板的文件条目（.kb-item）与 .pl-item 视觉同族（透明默认 + 一致几何）",
+    kbVisMatch.ok, JSON.stringify(kbVisMatch));
+
+  // 「内容漏出卡片」探针：卡片高度必须容得下内容。
+  // 历史上 `.kb-item` 是 `<button>`，被全局 `button { height: 30px }` 钉死，
+  // 而卡里是「30px 图标 + 一行文件名」，内容从底部漏出、还被下一张卡的白底
+  // 盖住半行 —— 用户 2026-09-16 贴图报的就是这个。
+  // ⚠ 口径**不在这里写**，在 `_verify/lib/overflow.js`（probe.js 用同一份）。
+  // ⚠ 量到 HIDDEN 要当失败：面板 display:none 时高度全是 0，差值无意义，
+  //    不显式报出来这条断言就变成空转的假绿。
+  const overflowProbe = (sel) => probeSource({
+    selector: sel,
+    nameFn: `function(n){ var e = n.querySelector('.kb-name');
+      return e ? e.textContent : n.tagName + '.' + String(n.className || '').split(' ')[0]; }`,
+  });
+  const piOver = await evalIn(overflowProbe("#pi-groups .kb-item"));
+  check("行业包面板的文件卡片容得下内容（不被按钮固定高度压扁）",
+    piOver.length === 0 && !piOver.hidden, JSON.stringify(piOver));
+
   // 切包时查看器复位 —— 不复位就粘上个包的内容。
   // 校验方式：先点一个文件 → 确认 body 有内容；再点中列另一个包 →
   // 等待新 openPackInfo 完成 → body 应该回到「未选择文件」占位态。
   // 用一个真包 + 一个明显不同的占位字符判断（不能直接对比"未选择文件"
   // 字面，因为这是开放文本；改用 bodyLen 小 + 不含刚才那个文件特征）。
+  // ⚠ 2026-09-17 重组后「on 行」是 `.kb-item.on`，不再是 `tr.on`。
   await evalIn(`document.querySelector('#pi-list .pl-item:not(.on)').click();
     return true;`);
   await sleep(1500);  // 切包 openPackInfo 是异步的，要等
@@ -966,10 +1071,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     title: document.getElementById('pi-file-title').textContent,
     bodyLen: document.getElementById('pi-file-body').textContent.length,
     hasTopic: /分领域内容知识库/.test(document.getElementById('pi-file-body').textContent),
-    onRows: document.querySelectorAll('#pi-files tbody tr.on').length };`);
+    onItems: document.querySelectorAll('#pi-groups .kb-item.on').length };`);
   check("切换行业包后，文件查看器复位到「未选择文件」占位态（不粘上个包内容）",
     piReset.title === '未选择文件' && piReset.bodyLen < 100
-      && !piReset.hasTopic && piReset.onRows === 0,
+      && !piReset.hasTopic && piReset.onItems === 0,
     JSON.stringify(piReset));
 
   await evalIn(`window.__ts.setPane('llm'); return true;`);
@@ -1177,99 +1282,55 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   const adv2 = await evalIn("return document.getElementById('st-timeout').value;");
   check("高级项「恢复默认」还原超时值", adv2 === "180", adv2);
 
-  // 知识库 / 技能：不再是占位面板，而是包内文件的只读查看器。
-  // 桩里 api.pack('elevator') 返回 3 个文件：pack.yaml / skill.yaml / knowledge/topics.md。
-  // 改造后 kb 与 skills **按命名分组互不重叠**：
-  //   kb     = pack.yaml + knowledge/   （2 个）
-  //   skills = skill.yaml                  （1 个）
-  // 修复前 kb: () => true 把 skill.yaml 也列入知识库，命名错位 —— 两个面板
-  // 显示同一组文件，知识库的「资料」语义被偷换成了「全部」。
-  // 规则断言：①互不重叠 ②各面板筛后文件数 ≥ 1（有内容） ③按角色分组。
+  // ── 知识库 / 技能面板合并到「行业包」面板（2026-09-17 重组） ────────────
+  // 之前这里有二十多条断言守护 kb / skills 面板的几何与内容。重组后：
+  //   ① #pane-kb / #pane-skills 这两个 section 不再存在（断言下面"导航里
+  //     只有 4 个导航项"会守护）。
+  //   ② 行业包面板的 #pi-groups 是它们共同的归宿（前面那条断言
+  //     "行业包面板覆盖知识 / 技能 / 合规 / 私有等所有角色"已经覆盖）。
+  // 那二十几条 kb/skills 几何断言都被新的 #pi-groups / #pi-file 断言替代，
+  // 故此处不再重复。
+
+
+  // ── 知识库 / 技能 已并入「行业包」面板（2026-09-17 重组） ──────────────
+  // 重组前这里守着二十多条 kb / skills 面板的几何与内容断言。现在那两个
+  // section 连同导航项一起删掉了，同一份数据只由「行业包」面板承载，
+  // 断言也归并到前面的 #pi-groups / #pi-file-view 那几条。
+  // 此处只留重组后**仍然成立**的两条结构断言。
   //
-  // 「内容漏出卡片」探针（卡片高度必须容得下内容）。
-  // 修复前 `.kb-item` 是 `<button>`，全局 `button { height: var(--h-btn) }`（30px）
-  // 把它钉死，而卡里是「36px 图标 + 一行文件名」，需要 56px —— 内容从卡片底部
-  // 漏出 18px。更坏的是**下一张卡的白底正好把漏出的那半行盖住**，所以界面上
-  // 看到的是「文件名下面漂着一行小字、还压在下一张卡上」，只有每组的最后一张
-  // 整行露在组外。用户 2026-09-16 贴的截图就是这个。
-  //
-  // ⚠ 口径**不在这里写**，在 `_verify/lib/overflow.js` —— 探针脚本 `probe.js`
-  // 用的是同一个。判据、以及三个口径上的坑（scrollHeight 假阳性 / 要比外边距盒 /
-  // 折叠的 `<details>` 要跳过）都写在那个文件的注释里，改之前先读它。
-  //
-  // ⚠ 量到 `HIDDEN` 要当**失败**：面板此刻是 display:none 时高度全是 0，
-  // 差值算出来是无意义的数 —— 不显式报出来的话，这条断言就变成空转（假绿）。
-  const overflowProbe = (sel) => probeSource({
-    selector: sel,
-    nameFn: `function(n){ var e = n.querySelector('.kb-name');
-      return e ? e.textContent : n.tagName + '.' + String(n.className || '').split(' ')[0]; }`,
-  });
+  // ① 导航与面板里再没有 kb / skills 的痕迹。
+  //    这不是「顺手查一下」—— 留一个隐藏的空 section，下一个人会以为
+  //    它还在，改的时候改了不生效的地方。
+  const kbGone = await evalIn(`return {
+    navPanes: [...document.querySelectorAll('.stg-nav-item')].map(function(n){ return n.dataset.pane; }),
+    paneKb: !!document.getElementById('pane-kb'),
+    paneSkills: !!document.getElementById('pane-skills'),
+    kbPackSel: !!document.getElementById('kb-pack'),
+    skillsPackSel: !!document.getElementById('skills-pack'),
+    kbBody: !!document.getElementById('kb-body'),
+    skillsBody: !!document.getElementById('skills-body') };`);
+  check("知识库 / 技能 面板与其行业包下拉已彻底移除（不残留隐藏 DOM）",
+    !kbGone.paneKb && !kbGone.paneSkills && !kbGone.kbPackSel
+      && !kbGone.skillsPackSel && !kbGone.kbBody && !kbGone.skillsBody
+      && !kbGone.navPanes.includes('kb') && !kbGone.navPanes.includes('skills'),
+    JSON.stringify(kbGone));
 
-  await evalIn(`window.__ts.setPane('kb'); return true;`);
-  await sleep(400);
-  const kb = await evalIn(`return {
-    rows: document.querySelectorAll('#kb-list .kb-item').length,
-    names: [...document.querySelectorAll('#kb-list .kb-item .kb-name')].map(n => n.textContent),
-    groups: document.querySelectorAll('#kb-list .kb-group').length,
-    hasPlaceholder: !!document.querySelector('#pane-kb .placeholder') };`);
-  check("知识库面板列出资料类文件（kb + skills 互不重叠），且按角色分组",
-    kb.rows >= 1 && !kb.hasPlaceholder && kb.groups >= 1
-      && !kb.names.some(n => n === "skill.yaml"),
-    JSON.stringify(kb));
-  const kbOver = await evalIn(overflowProbe("#kb-list .kb-item"));
-
-  // 知识/技能面板的文件列表与内容查看器**必须左右并排**，不能上下堆叠。
-  // 历史 `.kb-wrap { flex-direction: column }` 让列表（h≈839px）把查看器挤到屏外，
-  // 只露出 68px 的头，看起来「右侧空」—— 用户 2026-09-16 贴图报的就是这个。
-  // 判据：水平重叠意味着并排（`view.left > list.right` 且垂直区间有重叠）。
-  // 不用「左右相邻」是因为中间隔了一个 `gap`，要承认那 20px。
-  const kbLayout = await evalIn(`return (function(){
-    var l = document.querySelector('#pane-kb .kb-list').getBoundingClientRect();
-    var v = document.querySelector('#pane-kb .kb-view').getBoundingClientRect();
-    return { list:{w:Math.round(l.width),h:Math.round(l.height)},
-             view:{w:Math.round(v.width),h:Math.round(v.height)},
-             gap:Math.round(v.left - l.right),
-             vertOverlap: Math.min(l.bottom, v.bottom) - Math.max(l.top, v.top) };
-  })()`);
-  check("知识面板是左右分栏（列表与查看器水平重叠，不是上下堆叠）",
-    kbLayout.gap >= 0 && kbLayout.gap < 50 && kbLayout.vertOverlap > 100,
-    JSON.stringify(kbLayout));
-
-// 知识 / 技能面板的「列表 + 查看器」两列形态，跟生成偏好 / 模型接口 /
-// 行业包 这套三列骨架是**同一个家族** —— 「左栏 nav + 中列条目 +
-// 右列详情」。这条断言是把这两条既有的几何口径**统一表达**。
-// ⚠ 列表宽度（kb-list w=340）与间隙（gap=20）由 .kb-list 固定，
-// 不随面板宽度变；右列查看器宽度则随节宽（has-cols 已生效，节宽
-// ≈1160px）涨到 618 上下，**不再固定 312**（那是 720px 窄面板的旧值）。
-// 判据分开两部分：① 列表 + 间隙 是「列表条目」的固有几何；
-// ② 查看器的「够宽」（≥ 一半节宽）是「与其它面板三列对齐」的几何。
-check("知识 / 技能面板三列骨架几何（list w=340 / gap=20 / view 不小于节宽一半）",
-    Math.abs(kbLayout.list.w - 340) < 1
-      && Math.abs(kbLayout.gap - 20) < 1
-      && kbLayout.view.w >= 500,
-    JSON.stringify(kbLayout));
-
-  // 知识 / 技能面板跟 gen / packinfo / llm **同族**：所有面板都按三列布局走
-  // 「page-head → 中间控件 → .stg-cols」结构，max-width: var(--w-stg-3col)。
-  // 旧实现是 kb/skills 缺 .has-cols、面板窄一截（720 vs 1029），.stg-cols
-  // 还套在 .page-card 里（带 border-top + padding），看起来跟其他面板是
-  // **两套布局**。
-  // 判据：把四个面板的 `最大宽度` 与 `.stg-cols 的直接父级类名` 一起比。
+  // ② 剩下的三个设置面板（生成偏好 / 行业包 / 模型接口）**同族**：
+  //    都有 .has-cols、.stg-cols 直接挂在 .stg-pane 下、max-width 一致。
+  //    重组前 kb / skills 缺 .has-cols（面板窄一截）且 .stg-cols 套在
+  //    .page-card 里（带 border-top + padding），看起来是两套布局 ——
+  //    这条断言守住「现在只有一套」。
   const layoutMatch = await evalIn(`return (function(){
-    var ids = ["pane-gen","pane-packinfo","pane-llm","pane-kb","pane-skills"];
+    var ids = ["pane-gen","pane-packinfo","pane-llm"];
     var out = {};
     for (var i=0; i<ids.length; i++){
       var sec = document.getElementById(ids[i]);
       if (!sec) { out[ids[i]] = {missing:true}; continue; }
       var cols = sec.querySelector(".stg-cols");
-      // 不只盯 cols 父级：kb 面板内的 .kb-filter 也得是「直接挂节下」，
-      // 否则套一层 .page-card 会引入 border-top + padding，跟其它面板不同。
-      var filt = sec.querySelector(".kb-filter");
       out[ids[i]] = {
         hasCols: sec.classList.contains("has-cols"),
         maxW: getComputedStyle(sec).maxWidth,
         colsDirectParent: cols ? cols.parentElement.className.replace(/.*has-cols.*/, "stg-pane") : null,
-        filterDirectParent: filt ? (filt.parentElement === sec ? "stg-pane" : filt.parentElement.className) : "n/a",
         secW: Math.round(sec.getBoundingClientRect().width)
       };
     }
@@ -1277,117 +1338,28 @@ check("知识 / 技能面板三列骨架几何（list w=340 / gap=20 / view 不�
   })()`);
   const maxWSet = new Set(Object.values(layoutMatch).map(p => p.maxW));
   const colsParents = new Set(Object.values(layoutMatch).map(p => p.colsDirectParent));
-  // 「filter 直接挂在节下」只看有 .kb-filter 的面板（kb / skills）；
-  // 没 filter 的面板（gen / packinfo / llm）记成 n/a，不参与判定。
-  const filterParents = [...new Set(Object.values(layoutMatch)
-    .filter(p => p.filterDirectParent !== "n/a")
-    .map(p => p.filterDirectParent))];
-  check("知识 / 技能 与其他设置面板同族（都有 has-cols / .stg-cols 直接挂节下）",
-    maxWSet.size === 1 && [...colsParents].every(c => c === "stg-pane")
-      && filterParents.every(c => c === "stg-pane"),
+  check("三个设置面板同族（has-cols / .stg-cols 直接挂节下 / max-width 一致）",
+    maxWSet.size === 1 && colsParents.size === 1
+      && [...colsParents].every(c => c === "stg-pane")
+      && Object.values(layoutMatch).every(p => p.hasCols),
     JSON.stringify(layoutMatch));
 
-  // 知识 / 技能列表条目（.kb-item）与模型 / 行业包列表条目（.pl-item）
-  // 共享同一套视觉语言 —— 用户 2026-09-17 反馈「知识 / 技能 跟其他面板
-  // 没有统一」。判据：padding / 圆角 / grid 布局 / 默认背景 这些**几何
-  // 字段**取一致；不写死数值、而是用 kb-item 实际拿到的 computedStyle
-  // 跟已经走过的 llm 面板上 .pl-item 比 —— 任意一边变了就让它们不一致，
-  // 就能抓到「谁飘了」。
-  // 为什么不同时取两者做绝对值断言：「写死的数值」是上一版的写法，
-  // 平移整个家族时要回填好几处；用「两者相等」就把这部分免了。
-  // ⚠ 1. 背景要看 alpha：「透明」三种写法 (`transparent` / `rgba(...,0)` /
-  //    `rgba(0,0,0,0)`) 在 computedStyle 里有不同字符串，但都该判成同色。
-  // ⚠ 2. 取 pl-item 时要避开 `.on` / `.sel`（业务高亮态）—— 那两个态有
-  //    自己的视觉落点（surface 背景 + 描边），跟默认态的「透明背景」不是一回事。
-  const kbVisMatch = await evalIn(`return (function(){
-    var kb = document.querySelector('#kb-list .kb-item');
-    if (!kb) return { ok: false, reason: 'no kb-item' };
-    // 找一条既未启用也未选中的 pl-item —— 默认态才是「视觉同族」的对照。
-    var pl = document.querySelector('.pl-item:not(.on):not(.sel)');
-    // 兜底：若所有 pl-item 都带状态（极端情况），fallback 到第一条
-    // —— 这样不会因为环境差异而报一个「没有 pl-item」的红，依然拿到对比数据。
-    var plUsed = pl || document.querySelector('.pl-item');
-    if (!plUsed) return { ok: false, reason: 'no pl-item', kb: !!kb };
-    var k = getComputedStyle(kb), p = getComputedStyle(plUsed);
-    var bg = function(s){
-      // 'transparent' / 'rgba(0, 0, 0, 0)' / 正常色 都解析出 alpha
-      var m = String(s || '').match(/^rgba?\(([^)]+)\)/);
-      if (!m) return s === 'transparent' ? 0 : null;
-      var parts = m[1].split(',').map(function(x){return parseFloat(x.trim());});
-      return parts.length >= 4 ? parts[3] : 1;
-    };
-    // grid-template-columns 是「30px 1fr auto」这种字符串，**实际像素**
-    // 取决于容器宽度（kb-list 340 vs llm-list 258，1fr 解出来不同）。
-    // 这里只比**第一列的图标宽度**（统一都该是 30px）—— 它是设计上的对齐点，
-    // 不会随容器宽度变。
-    var firstCol = function(g){
-      // ⚠ 不能在模板字符串里写包含反斜杠的正则 —— 一些写法会被外层
-      //   模板字符串吃掉反斜杠，再被吃掉模板里的反引号注释。
-      //   直接拆空格 + 用字符类 [0-9]，避开反斜杠与反引号。
-      var s = String(g || '').trim();
-      var first = s.split(/[ ]+/)[0] || '';
-      return /^[0-9]+(?:\.[0-9]+)?px$/.test(first) ? parseFloat(first) : null;
-    };
-    return {
-      ok: k.padding === p.padding
-        && k.borderRadius === p.borderRadius
-        && k.fontSize === p.fontSize
-        && firstCol(k.gridTemplateColumns) === firstCol(p.gridTemplateColumns)
-        && firstCol(k.gridTemplateColumns) === 30
-        && bg(k.backgroundColor) === 0
-        && bg(p.backgroundColor) === 0,
-      kb: { padding: k.padding, radius: k.borderRadius,
-            grid: k.gridTemplateColumns, fontSize: k.fontSize,
-            iconCol: firstCol(k.gridTemplateColumns),
-            bgAlpha: bg(k.backgroundColor) },
-      pl: { padding: p.padding, radius: p.borderRadius,
-            grid: p.gridTemplateColumns, fontSize: p.fontSize,
-            iconCol: firstCol(p.gridTemplateColumns),
-            bgAlpha: bg(p.backgroundColor),
-            classes: String(plUsed.className) }
-    };
-  })()`);
-  check("知识 / 技能列表条目与 .pl-item 视觉同族（透明默认 + 一致几何）",
-    kbVisMatch.ok, JSON.stringify(kbVisMatch));
-
-  // 内容查看器必须**自己成块**（不透明于白底），不能是 `--fill` (4%) 那种
-  // 几乎透明的底 —— 否则 3 列布局的右栏「看起来什么都没有」。
-  // 修法见 styles.css 的 `.kb-body` 注释：背景换 `--fill-strong` (7%) + `box-shadow` 发丝线。
-  // 判据：背景 alpha ≥ 5% **或** 有 box-shadow 描边。任一即可 —— 两条修法都立得住。
+  // ③ 内容查看器必须**自己成块**（不透明于白底），不能是 `--fill` (4%) 那种
+  //    几乎透明的底 —— 否则三列布局的右栏「看起来什么都没有」。
+  //    修法见 styles.css 的 `.kb-body`：背景换 `--fill-strong` (7%) + 发丝描边。
+  //    判据：背景 alpha ≥ 5% **或** 有 box-shadow 描边，任一即可。
   const kbVis = await evalIn(`return (function(){
-    var b = document.getElementById('kb-body');
+    var b = document.getElementById('pi-file-body');
+    if (!b) return { missing: true };
     var cs = getComputedStyle(b);
-    var m = cs.backgroundColor.match(/rgba?\(([^)]+)\)/);
+    var m = cs.backgroundColor.match(/rgba?\\(([^)]+)\\)/);
     var alpha = m ? parseFloat(m[1].split(',')[3]) : 0;
-    return { bg: cs.backgroundColor, alpha: alpha,
+    return { missing: false, bg: cs.backgroundColor, alpha: alpha,
              shadow: cs.boxShadow, hasShadow: cs.boxShadow !== 'none' };
   })()`);
   check("内容查看器自己成块（背景不透明于白底）",
-    kbVis.alpha >= 0.05 || kbVis.hasShadow,
+    !kbVis.missing && (kbVis.alpha >= 0.05 || kbVis.hasShadow),
     JSON.stringify(kbVis));
-
-  await evalIn(`[...document.querySelectorAll('#kb-list .kb-item')]
-    .find(n => n.querySelector('.kb-name').textContent.includes('knowledge')).click(); return true;`);
-  await sleep(300);
-  const kbBody = await evalIn(`return {
-    title: document.getElementById('kb-title').textContent,
-    body: document.getElementById('kb-body').textContent };`);
-  check("点击知识库文件显示内容",
-    /选题库/.test(kbBody.body) && kbBody.title === "knowledge/topics.md",
-    JSON.stringify(kbBody));
-
-  await evalIn(`window.__ts.setPane('skills'); return true;`);
-  await sleep(400);
-  const sk = await evalIn(`return {
-    rows: [...document.querySelectorAll('#skills-list .kb-item')]
-            .map(n => n.querySelector('.kb-name').textContent) };`);
-  check("技能面板只列技能类文件（skill.yaml / rules|patterns|compliance/）",
-    sk.rows.length === 1 && sk.rows[0] === "skill.yaml", JSON.stringify(sk));
-  const skOver = await evalIn(overflowProbe("#skills-list .kb-item"));
-  check("知识库/技能卡片容得下内容（不再被按钮的固定高度压扁）",
-    kb.rows >= 1 && sk.rows.length >= 1
-      && kbOver.length === 0 && skOver.length === 0,
-    JSON.stringify({ kb: kbOver, skills: skOver }));
 
   // 复制口播：产出的是给提词器用的纯文本，`**` 必须去掉而 `／` 必须保留
   const voice = await evalIn(`return window.__ts.voicePlainText({ sections:[
@@ -1534,10 +1506,13 @@ check("知识 / 技能面板三列骨架几何（list w=340 / gap=20 / view 不�
              导航项数: items.length,
              被隐藏的项: items.filter(n => n.classList.contains('hidden')).length,
              首项文字: (items[0] || {}).textContent };`);
-  check("设置导航：返回项 → 列表恒定 16px，五项全在且无隐藏项（搜索框已删；packgen 不占导航）",
+  // 2026-09-17 重组后导航只剩三项：生成偏好 / 模型接口（基础设置）、
+  // 行业包（行业）。知识库与技能从导航里撤掉 —— 它们本来就是把同一个
+  // 行业包的数据切两份看，现在统一由「行业包」面板承载。
+  check("设置导航：返回项 → 列表恒定 16px，三项全在且无隐藏项（搜索框已删；packgen 不占导航）",
     Math.abs(stgNavGeo.返回项到列表 - 16) <= 0.6
     && stgNavGeo.列表内上边距 === "0px"
-    && stgNavGeo.导航项数 === 5 && stgNavGeo.被隐藏的项 === 0,
+    && stgNavGeo.导航项数 === 3 && stgNavGeo.被隐藏的项 === 0,
     JSON.stringify(stgNavGeo));
 
   // 搜索框要连 DOM 一起删干净 —— 留一个隐藏的空壳，下一个人会以为它还在。
@@ -2831,8 +2806,12 @@ check("删除当前启用的模型后自动落到剩下那条，且「删除」�
     `document.querySelector('#llm-list .pl-item.on').click(); return true;`);
   await evalIn(`document.getElementById('md-cancel').click(); return true;`);
   await sleep(200);
-  await shot("settings-kb.png", "window.__ts.setPane('kb'); return true;");
-  await shot("settings-skills.png", "window.__ts.setPane('skills'); return true;");
+  // 知识 / 技能 已并入行业包面板 —— 补一张「文件分组 + 查看器」的截图。
+  // 只截面板默认态看不到查看器有内容，所以先点开一个文件再截。
+  await shot("settings-packinfo-file.png", `window.__ts.setPane('packinfo');
+    var it = document.querySelector('#pi-groups .kb-item');
+    if (it) it.click();
+    return true;`);
   // 结果页此前**从未截过图** —— 审查时看不到它，才把已实现的重跑/换一版/
   // 失败重试/版本导航误判成缺失。补上。
   await shot("result-done.png", `document.getElementById('btn-close-settings').click();

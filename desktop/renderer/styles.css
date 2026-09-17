@@ -292,14 +292,16 @@ body {
 .kb-item[data-role="compliance"] .kb-icon { background: var(--warn-soft); color: var(--warn); }
 .kb-item[data-role="knowledge"] .kb-icon { background: var(--ok-soft); color: var(--ok); }
 
-/* 列表区：固定 340px 宽，超出滚动；卡片网格本身已自带描边，列表无边框无背景。 */
-.kb-list {
-  flex: 0 0 340px; max-height: 70vh; overflow: auto;
-  border: none; padding: 0; background: transparent;
-}
-/* 查看器：占剩余宽度，竖向排（head + body）。
-   `align-self: stretch` 让它在 .stg-cols 的 flex-start 里也拉满高度 —— 否则
-   .kb-body 这种 flex:1 的子元素会因为父容器只有自身内容那么高而塌成一小块。 */
+/* 知识 / 技能 / 行业包文件列表的「分组条目」现在统一并入 #pi-groups
+   （2026-09-17），用 .kb-groups / .kb-group / .kb-cards / .kb-item 这一族；
+   旧的「左右分栏」两列骨架（#kb-list + #kb-view 并排）已不存在，
+   知识/技能面板删除。`#pi-file-view` 仍在 .pane-detail 里独占底部，
+   与分组列表上下堆叠。
+
+   ⚠ 不要再写 `.kb-list { flex: 0 0 340px; }` —— 那一条是把列表放进
+   `.stg-cols` 行布局才需要的固定宽度；现在分组是垂直流的，没有那个
+   容器了。
+*/
 .kb-view { flex: 1; min-width: 0; display: flex; flex-direction: column; align-self: stretch; }
 .kb-view-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: var(--s2); }
 .kb-view-head .lbl { margin-bottom: 0; }
@@ -316,15 +318,6 @@ body {
 
 .linkbtn:hover { background: var(--fill); color: var(--text-1); }
 .linkbtn:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
-
-/* 知识 / 技能面板的「行业包过滤器」：夹在 page-head 与 .stg-cols 之间。
-   原先套在 `.page-card > .block-inner` 里 —— 那一层带 border-top + padding，
-   让面板头下多一条线、跟其他三列面板不同。抽出来单独管 spacing（2026-09-17 统一）。 */
-.kb-filter {
-  display: flex; flex-direction: column; gap: var(--s3);
-  margin-bottom: var(--s5);
-}
-.kb-filter > .hint { color: var(--text-3); }
 
 /* ══════════════ 布局骨架 ══════════════
    main = 左栏（导航）+ 右栏（内容），两栏各自拥有头部；
