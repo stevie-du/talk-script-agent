@@ -333,12 +333,8 @@ body {
 }
 .pi-groups-col > .lbl { flex: 0 0 auto; }
 
-/* 右列（详情区）的标题：比面板标题（h2 / --f-xl 20px）低一级。
-   之前这里也是 `<h2>`，跟面板顶部那个 h2 一样大 —— 同一个面板里出现两个
-   同尺寸标题，层级看起来是平的两层。降到 --f-lg（16px）后主次才分清。 */
-.detail-title {
-  font-size: var(--f-lg); font-weight: 600; letter-spacing: -.2px; color: var(--text-1);
-}
+/* .detail-title 已删（2026-09-17）：packinfo 右列 h3 改用 .card-title，
+   与 llm / gen 同 16px / 600。 */
 
 .linkbtn:hover { background: var(--fill); color: var(--text-1); }
 .linkbtn:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
@@ -1065,7 +1061,13 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 /* 结果（checklist 预览）：同样居中，与生成前的视觉一致 */
 .pg-result { width: 100%; max-width: 640px; margin: 0 auto; }
 /* 区块标题：比字段标签大一号、用正文色，明确"这是新章节"而非另一个字段名 */
-.card-title { font-size: var(--f-base); font-weight: 600; letter-spacing: -.1px; color: var(--text-1); }
+/* 右列（.pane-detail）的 h3 标题：16px，介于面板标题（h2 / 20px）和正文（15px）之间。
+   之前是 14px，**比正文还小** —— packinfo 的「电梯 · 包内容」改用 .detail-title
+   才拉回 16px，于是三个面板右列顶部 h3 出现两种字号（packinfo 16 / llm·gen 14），
+   同角色不同字号的「不统一」。统一在 16px 后 packinfo 与 llm / gen 同型。 */
+.card-title {
+  font-size: var(--f-lg); font-weight: 600; letter-spacing: -.2px; color: var(--text-1);
+}
 /* 节奏：区块标题下(20) > 字段之间(16) > 字段标签下(6)。
    标题要"管辖"得住下面那组字段，所以它下方留白必须最大 */
 

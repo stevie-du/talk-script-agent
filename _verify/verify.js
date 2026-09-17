@@ -1484,7 +1484,7 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   // 视觉才一致。
   // ⚠ 这里只看**面板顶部**那个 .page-head（用 `:scope > .page-head` 锁住
   // 直系子级），不看 .pane-detail 里嵌套的 .page-head（packinfo 右列的
-  // 「电梯 · 包内容」是 h3.detail-title，是另一回事）。
+  // 「电梯 · 包内容」是另一个层级断言的范围）。
   const pageHeadUnified = await evalIn(`return (function(){
     var ids = ['pane-gen', 'pane-packinfo', 'pane-llm'];
     var out = {};
@@ -1512,6 +1512,40 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     Object.values(pageHeadUnified).every(p => !p.missing && p.hasTitlesWrap && p.hasH2 && p.hasHint)
       && h2Sizes.size === 1 && [...h2Sizes][0] === '20px',
     JSON.stringify(pageHeadUnified));
+
+  // 右列（.pane-detail）顶部 h3 字号一致（2026-09-17）：
+  //   packinfo: <h3 id="pi-title">（之前 .detail-title 16px）
+  //   llm:      <h3 id="md-title">（之前 .card-title 14px）
+  //   gen:      <h3 class="card-title">生成参数 / 进阶</h3>（14px）
+  // 三个 h3 同一个角色（**右列顶部 h3**）出现 14px / 16px 两种字号，
+  // 是「同角色不同字号」的典型不统一。统一在 16px：删 .detail-title、
+  // .card-title 改 16px。
+  // ⚠ 选中面板不同 → 有些 h3 是隐藏的。Computed style 仍然可信（display:none
+  //   也算正常样式），所以全量 querySelector 即可。
+  const rcTitle = await evalIn(`return (function(){
+    var ids = ['pane-gen', 'pane-packinfo', 'pane-llm'];
+    var out = {};
+    for (var i=0; i<ids.length; i++) {
+      var sec = document.getElementById(ids[i]);
+      if (!sec) { out[ids[i]] = {missing: true}; continue; }
+      var h3 = sec.querySelector('.pane-detail > .page-head h3')
+             || sec.querySelector('.pane-detail > .page-card h3')
+             || sec.querySelector('.pane-detail h3');
+      if (!h3) { out[ids[i]] = {missing: 'no h3'}; continue; }
+      var c = getComputedStyle(h3);
+      out[ids[i]] = { id: h3.id, cls: h3.className,
+                      fs: c.fontSize, fw: c.fontWeight, ls: c.letterSpacing };
+    }
+    return out;
+  })()`);
+  const fsSet = new Set(Object.values(rcTitle).filter(p => p.fs).map(p => p.fs));
+  const fwSet = new Set(Object.values(rcTitle).filter(p => p.fw).map(p => p.fw));
+  const lsSet = new Set(Object.values(rcTitle).filter(p => p.ls).map(p => p.ls));
+  check("三个右列顶部 h3 字号字重字距一致（同角色 h3 不分家）",
+    fsSet.size === 1 && [...fsSet][0] === '16px'
+      && fwSet.size === 1 && [...fwSet][0] === '600'
+      && lsSet.size === 1,
+    JSON.stringify(rcTitle));
 
   // 「保存高级配置」收在它管的字段所在的折叠区里（2026-09-17）：
   // 默认收起状态下右列只有一个「保存」可见（模型表单的），不再「俩确认」。
