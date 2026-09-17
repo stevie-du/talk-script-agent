@@ -297,6 +297,13 @@ def _parse_models(data: dict, llm: dict) -> tuple[list[dict], str, bool]:
     连接信息造一条 —— 否则老用户一升级就看到「一个模型都没有」，
     而他们的 base_url / api_key 明明还在文件里，这是最典型的静默降级。
     迁移**只在读的时候发生、不写回文件**：读一次和读十次结果必须一样。
+
+    ⚠ **只在 `llm` 段里真有配置时才迁移**（2026-09-17）。
+    全新安装时 `llm` 段是空的（模板里全是注释），此时**不再造那条「内置默认」模型** ——
+    用户原话：「没有内置默认的模型的，需要用户自己添加，添加完还需要支持删除」。
+    预置一条 `glm-4.7` 的后果是：未配置状态与已配置状态长得一样，用户以为已经配好了
+    （`MEMORY.md` 第一节第 ⑤ 种静默降级）。判据用「三个连接字段里有没有任何非空值」，
+    与 `models_defaulted` 的逐字段口径一致。
     """
     raw = data.get("models")
     items: list[dict] = []
@@ -313,13 +320,15 @@ def _parse_models(data: dict, llm: dict) -> tuple[list[dict], str, bool]:
             })
     migrated = not items
     if migrated:
-        items = [{
-            "id": DEFAULT_MODEL["id"],
-            "name": "",
-            "base_url": str(llm.get("base_url") or ""),
-            "api_key": str(llm.get("api_key") or ""),
-            "model": str(llm.get("model") or ""),
-        }]
+        legacy = {k: str(llm.get(k) or "").strip() for k in ("base_url", "api_key", "model")}
+        if any(legacy.values()):
+            items = [{
+                "id": DEFAULT_MODEL["id"],
+                "name": "",
+                "base_url": legacy["base_url"],
+                "api_key": legacy["api_key"],
+                "model": legacy["model"],
+            }]
 
     # id 去重：重复的 id 会让「当前模型」指向哪一条变得不确定
     seen: set[str] = set()
@@ -329,15 +338,27 @@ def _parse_models(data: dict, llm: dict) -> tuple[list[dict], str, bool]:
         seen.add(it["id"])
 
     active = str(data.get("active_model") or "")
-    if active not in seen:
+    if items and active not in seen:
         # 指向了一条不存在的模型（手改文件 / 删掉了当前模型）→ 退回第一条。
         # 不能留一个悬空的 active：那会让生成时取不到任何连接信息。
         active = items[0]["id"]
+    elif not items:
+        # 一条模型都没有：active 必须是空串，不能留一个指向不存在条目的悬空值。
+        active = ""
     return items, active, migrated
 
 
 def _effective(raw: dict) -> LLMModel:
-    """原始条目 → 生效条目（空字段落回内置默认）。"""
+    """原始条目 → 生效条目（空字段落回内置默认）。
+
+    ⚠ **这里的兜底必须保留**（2026-09-17 试删过一次，回退了）。
+    理由：老用户的 config.yaml 里常常只填了 api_key，base_url / model 是空的
+    —— 他们一直靠这层兜底在用。删掉它等于把这些人**正在工作的配置改坏**
+    （实测仓库根的 config.yaml 就是 `base_url: '' / model: '' / api_key: sk_...`）。
+    「移除内置默认模型」的诉求在 `_parse_models` 那一层解决（不再**预置条目**），
+    不是在这一层 —— 这一层管的是「条目里某个字段没填时用什么」，
+    属于技术兜底，界面会照旧标「内置默认」（`models_defaulted` 逐字段判）。
+    """
     return LLMModel(
         id=raw["id"],
         name=raw.get("name") or "",
@@ -371,7 +392,11 @@ def load_config(root: Path, config_dir: Path | None = None) -> AppConfig:
 
     raw_models, active, _ = _parse_models(data, llm)
     models = [_effective(r) for r in raw_models]
-    cur = next(m for m in models if m.id == active)
+    # 一条模型都没有（全新安装，或用户把模型删光了）：给一个**空模型**占位。
+    # 三个连接字段都是空串 —— 生成会被明确拒绝（见 server 的 api_key 检查），
+    # 而不是在这里 `next(...)` 抛 StopIteration 把整个 load_config 带崩。
+    cur = next((m for m in models if m.id == active), None) or LLMModel(
+        id="", name="", base_url="", api_key="", model="")
 
     # 「这条模型里哪些字段还是内置默认」——**逐字段**看原始条目里写没写。
     # 先算全量（每条模型各一份），当前那条直接取用，不另算一遍：
@@ -401,7 +426,8 @@ def load_config(root: Path, config_dir: Path | None = None) -> AppConfig:
     # base_url / model 住在**模型条目**里，逐字段看它是不是空的 ——
     # 不能按「有没有 models 段」一刀切：用户只改了模型名、没动请求地址时，
     # 请求地址仍然是内置默认，一刀切会把默认值说成「你配的」。
-    defaulted += models_defaulted[active]
+    # 用 .get：一条模型都没有时 active 是空串，不在这个表里。
+    defaulted += models_defaulted.get(active, [])
     cfg.api_key = _env("TALKSCRIPT_API_KEY", cfg.api_key)
     for key, env_name in _LLM_ENV.items():
         cur_v = getattr(cfg, key)
@@ -466,7 +492,10 @@ def save_models(root: Path, models: list[dict], active_model: str | None = None,
     p = config_path(root, config_dir)
     data, _ = read_config_file(p)
     data["models"] = models
-    if active_model:
+    # ⚠ 判据是 `is not None` 而不是真值：`""` 是**有意义的取值**（用户把模型
+    # 删光了 / active 悬空 → 写空串），不能当成「没传，别动」。
+    # 用真值判断的话，删光模型后文件里会留着一个指向不存在条目的旧 active_model。
+    if active_model is not None:
         data["active_model"] = active_model
     llm = data.get("llm")
     if isinstance(llm, dict):

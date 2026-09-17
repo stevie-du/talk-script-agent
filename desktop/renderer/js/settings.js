@@ -47,15 +47,15 @@ export const NUMERIC_BOUNDS = {
 
 // 区间 → 输入框的对应关系。校验与 min/max 都从这一张表来，
 // 避免「能填的范围」和「能存的范围」变成两套数（temperature 曾经是这样）。
-// 2026-09-17：采样温度 (temperature) 从高级配置的**UI**移除 —— 它属于「模型行为」
-// 语义，不是「系统稳健性」参数；想调温度去模型接口里那条模型的 base_url + 配套实现。
-// 但区间仍留在这里：① 后端重试时用它微调温度（pipeline.py 的 +0.25），删了会让
-// pipeline 报错；② 前后端 NUMERIC_BOUNDS 集合一致是 pytest 守卫的不变量 ——
-// 不一致就报红，前端多/少一个字段都是「前后端凭想象设限」。所以 UI 删、字段保留。
+// 2026-09-17：采样温度 (temperature) 从高级配置的**UI**移除（任务 4）；
+// 同一天「输出预算（max_tokens）」也移除（用户原话「高级设置去掉 token 限制吧」）。
+// 两项都**只删 UI、保留 NUMERIC_BOUNDS 区间** —— 前后端 NUMERIC_BOUNDS 集合
+// 一致是 pytest 守卫的不变量（不一致就报红），且后端仍需这两个值：
+// temperature 用于重试时微调（pipeline.py 的 +0.25），max_tokens 是模型输出上限。
+// 它们属于「模型行为」而非「连接稳健性」，所以不再让用户调。
 const NUM_FIELDS = [
   ["retries", "st-retries", "重试次数"],
   ["timeout", "st-timeout", "单次超时"],
-  ["max_tokens", "st-maxtokens", "输出预算"],
 ];
 
 // 把区间写到输入框的 min/max 上。HTML 里那对属性只是**初始值**，
@@ -125,16 +125,14 @@ async function preloadSettings() {
   const dflt = new Set(c.llm_defaulted || []);
   fill("st-retries", c.retries ?? "");
   fill("st-timeout", c.timeout ?? "");
-  fill("st-maxtokens", c.max_tokens ?? "");
   // 「这一项还是内置默认」必须**逐项**标在框上，不能只在底部写一句总提示：
   // 用户的视线落在「超时 = 180」这个框上，结论就是「已经配好了」，
   // 底部那行浅灰小字他根本不会看。
-  // 2026-09-17：模型接口不再渲染「内置默认」标（任务 5 —— 移除默认模型）。
-  // 列表行的 markDefault 也随之删除（用户没有「内置」概念了），需要靠右上
-  // 状态行 + picker 的「未配置 Key」warning 告知「还没真配」。
+  // 2026-09-17：模型行不再渲染「内置默认」标（任务 5 —— 移除默认模型）。
+  // 高级配置这两项仍标：它们是「兜底值」，告诉用户「这个值不是你自己存的」
+  // 仍有用（点「保存高级配置」就能变成自己的）。
   markDefault("st-retries", dflt.has("retries"), "retries");
   markDefault("st-timeout", dflt.has("timeout"), "timeout");
-  markDefault("st-maxtokens", dflt.has("max_tokens"), "max_tokens");
   renderAdvSub(dflt);
   renderModelList(c);
   renderConfigError(c.config_error);
@@ -147,7 +145,7 @@ function renderAdvSub(dflt) {
   const n = $("st-adv-sub");
   if (!n) return;
   const hit = NUM_FIELDS.filter(([key]) => dflt.has(key)).length;
-  n.textContent = hit ? `重试 / 超时 / 输出预算 · ${hit} 项还是内置默认` : "";
+  n.textContent = hit ? `重试 / 超时 · ${hit} 项还是内置默认` : "";
 }
 
 function renderStatus(c) {
@@ -340,9 +338,14 @@ function selectModel(id) {
   // DOM 与 data-field 也不再存在（HTML 里 .tag-default 已删，verify.js 改口径）。
   // 未配置状态靠 placeholder + Key 输入框两态 + 列表行「未配置 Key」warn 一起说。
   $("md-status").textContent = "";
-  // 「删除」只在编辑既有模型、且不止一条时可用 —— 至少要保留一个模型。
+  // 「删除」在编辑既有模型时**始终可用**（2026-09-17）。
+  // 原来还有 `models.length <= 1` 就隐藏的限制 —— 那是「总有一条内置默认」时代的
+  // 规则（删空了生成时取不到连接信息，而界面还会显示「已配置 Key」）。
+  // 现在模型是用户自己加的、不再有预置条目，删光就是「还没配」：
+  // 列表显示空引导，生成前被后端的 `_require_model` 明确拦住并说清原因。
+  // 用户原话：「没有内置默认的模型的，需要用户自己添加，添加完还需要支持删除」。
   const del = $("md-delete");
-  if (del) del.classList.toggle("hidden", !m || models.length <= 1);
+  if (del) del.classList.toggle("hidden", !m);
   // 中列选中态（.sel，与「启用」的 .on 分开）
   document.querySelectorAll("#llm-list .pl-item").forEach(n => {
     n.classList.toggle("sel", n.dataset.id === id);
@@ -358,6 +361,13 @@ function closeModelDialog() {
 async function saveModelDialog() {
   const model = $("md-model").value.trim();
   if (!model) { toast("模型 ID 不能为空"); return; }
+  // 新增时请求地址必填（2026-09-17）：不再有「内置默认地址」可以兜，
+  // 留空会被后端拒。前端先拦一道 —— 让错误当场可见，不必等一次往返。
+  // 编辑时留空仍是「保持不变」（那个框本来就是空的）。
+  if (!editingId && !$("md-baseurl").value.trim()) {
+    toast("请填写请求地址，例如 https://api.deepseek.com/v1", 4000);
+    return;
+  }
   const body = {
     id: editingId,
     name: $("md-name").value.trim(),
@@ -368,6 +378,12 @@ async function saveModelDialog() {
   if (key) body.api_key = key;
   try {
     const out = await api.saveModel(body);
+    // 高级配置**并入同一次保存**（2026-09-17）：用户报「模型面板有两个保存」——
+    // 原来高级配置折叠区底部有一个独立的「保存高级配置」，与这里的「保存」
+    // 同屏并列，让人不知道该点哪个。现在一屏一个保存：点它同时存
+    // 这条模型 + 全局的重试 / 超时。
+    // ⚠ 顺序：先存模型（它有校验，失败要能拦住），再存高级配置。
+    await saveAdvancedConfig();
     // 保存后要**停在刚保存的那条**上，而不是跳回「当前启用」那条 ——
     // 编辑一条非启用模型时跳走，用户会以为没保存上。
     const savedId = (out && out.id) || editingId;
@@ -378,6 +394,30 @@ async function saveModelDialog() {
   } catch (e) {
     toast("保存失败：" + e.message, 4000);
   }
+}
+
+/** 保存高级配置（重试次数 / 单次超时）。
+ *
+ *  2026-09-17：不再有独立的「保存高级配置」按钮 —— 由模型表单的「保存」
+ *  一并调用。**一屏一个保存**是各家 Agent 设置页的通行做法，
+ *  同屏两个确认按钮是更差的设计（用户原话「模型面板有两个保存」）。
+ *
+ *  ⚠ 越界值要**抛异常**让调用方统一 toast —— 前端不许比后端更严，也不许更松：
+ *  越界当场拒掉、请求根本不发（后端那份校验永远不会被触发才叫更严）。 */
+async function saveAdvancedConfig() {
+  const body = {};
+  for (const [key, id, label] of NUM_FIELDS) {
+    const raw = $(id).value.trim();
+    if (raw === "") continue;
+    const n = Number(raw);
+    const [lo, hi] = NUMERIC_BOUNDS[key];
+    if (!Number.isFinite(n) || n < lo || n > hi) {
+      throw new Error(`${label}需在 ${lo} ~ ${hi} 之间`);
+    }
+    body[key] = n;
+  }
+  if (Object.keys(body).length) await api.saveConfig(body);
+  dirty.clear();
 }
 
 async function testModelDialog() {
@@ -462,7 +502,7 @@ function fill(id, value) {
 
 export const bindSettings = bindOnce(function bindSettings() {
   applyNumericBounds();          // 区间由 JS 统一写入输入框的 min/max
-  ["st-retries", "st-timeout", "st-maxtokens"].forEach(id => {
+  ["st-retries", "st-timeout"].forEach(id => {
     $(id).addEventListener("input", () => dirty.add(id));
   });
   // 模型弹窗里的四个框也算「用户改过」—— 弹窗是每次打开重建内容的，
@@ -511,17 +551,18 @@ export const bindSettings = bindOnce(function bindSettings() {
   $("pg-run").onclick = runPackgen;
   $("pg-done").onclick = onPackDone;
 
-  $("st-save").onclick = async () => {
-    try {
-      await saveSettings();
-      dirty.clear();
-    } catch (e) { toast("保存失败：" + e.message, 3500); }
-  };
+  // 「保存高级配置」按钮已删（2026-09-17）：高级配置改由模型表单的「保存」
+  // 一并存掉（见 saveAdvancedConfig），不再有独立的 st-save。
   // 「恢复默认」（数值项）：空保存是无效操作，后端过滤空串防手滑，所以回到
   // 默认必须是一个显式动作。base_url / model 的「恢复默认」已删（2026-09-17）：
   // 任务 5/6 ——「默认模型」整个下线，模型行不再有「恢复默认」按钮。
   $("st-reset-adv").onclick = () => resetField(
-    ["retries", "timeout", "max_tokens"], ["st-retries", "st-timeout", "st-maxtokens"]);
+    ["retries", "timeout"], ["st-retries", "st-timeout"]);
+  // headbar 的「刷新」：与行业包面板同构（2026-09-17）。
+  // 重跑一次 preloadSettings 就够 —— 它重拉 /api/config 并重建列表与表单。
+  $("llm-refresh").onclick = () => {
+    preloadSettings().catch(e => toast("刷新失败：" + e.message, 3500));
+  };
   // 「添加模型」：右列切到空表单（editingId=""），不再是开弹窗。
   $("st-add-model").onclick = () => selectModel("");
   $("md-cancel").onclick = closeModelDialog;
@@ -539,30 +580,6 @@ export const bindSettings = bindOnce(function bindSettings() {
   //      而左导航一直在，点一下就走了，不需要面板底部再放一个出口。
   $("pi-undraft").onclick = undraftPack;
 });
-
-async function saveSettings() {
-  // 这一页只剩高级配置（生成参数）—— 连接信息住在模型条目里，由弹窗保存。
-  // 原来这里无条件带上 base_url / model，那是在「模型只有一条」时才对的做法。
-  const body = {};
-  // 数值项（含采样温度）：留空表示不改，填了就在前端先卡一遍范围。
-  // 后端也会卡，这里只是让错误当场可见，不必等一次往返；
-  // 区间与输入框 min/max 共用 NUMERIC_BOUNDS 这一张表。
-  for (const [key, id, label] of NUM_FIELDS) {
-    const raw = $(id).value.trim();
-    if (raw === "") continue;
-    const n = Number(raw);
-    const [lo, hi] = NUMERIC_BOUNDS[key];
-    if (!Number.isFinite(n) || n < lo || n > hi) {
-      toast(`${label}需在 ${lo} ~ ${hi} 之间`);
-      return;
-    }
-    body[key] = n;
-  }
-  await api.saveConfig(body);
-  toast("已保存，下次生成即生效");
-  // 顶栏的模型名/Key 状态要跟着变，否则用户以为没保存成功
-  await refreshAll();
-}
 
 async function resetField(field, inputId) {
   const fields = [].concat(field);

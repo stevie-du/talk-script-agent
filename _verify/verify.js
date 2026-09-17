@@ -182,14 +182,25 @@ window.__addCount = 0;
   // 它测的是一个与真实后端不同的口径。
   var CONFIGURED = !NOKEY && !CFGERR;
   var DEFAULT_URL = "https://x/v4", DEFAULT_NAME = "glm-4.7";
+  // 2026-09-17：全新安装**不再预置模型**（用户原话「没有内置默认的模型的，
+  // 需要用户自己添加，添加完还需要支持删除」）—— 真实后端在「文件里没有任何
+  // 连接信息」时给出**空列表**。查询串 nomodels=1 模拟那个形态（一条都没有），
+  // 默认仍给一条「空壳」：它 = 迁移产物 / 用户加了一条没填全，
+  // 且本文件大量断言要验「有模型时」的行为，需要这个起点。
+  var NOMODELS = /(^|[?&])nomodels=1/.test(location.search);
   // 原始条目：**空字段保持空**（与真实后端一致 —— 只有空 base_url 才报「内置默认」）
-  var MODELS = [{ id: "m-default", name: "",
+  var MODELS = NOMODELS ? [] : [{ id: "m-default", name: "",
                   base_url: CONFIGURED ? DEFAULT_URL : "",
                   api_key: CONFIGURED ? "sk-stub" : "",
                   model: CONFIGURED ? DEFAULT_NAME : "" }];
-  var ACTIVE = "m-default";
+  var ACTIVE = NOMODELS ? "" : "m-default";
   var savedNum = CONFIGURED ? { temperature:1, retries:1, timeout:1, max_tokens:1 } : {};
+  // 一条模型都没有时给一个「空条目」——真实后端也是这么做的（config.py 的
+  // cur = next(...) or LLMModel(...)），不能让 activeRaw() 返回 undefined。
+  // ⚠ 注释里不许用反引号：桩整体是一个模板串，反引号会提前把它截断。
+  var EMPTY_RAW = { id: "", name: "", base_url: "", api_key: "", model: "" };
   function activeRaw() {
+    if (!MODELS.length) return EMPTY_RAW;
     return MODELS.filter(function(x){ return x.id === ACTIVE; })[0] || MODELS[0];
   }
   function publicModels() {
@@ -204,9 +215,13 @@ window.__addCount = 0;
   }
   function llmDefaulted() {
     var d = ["temperature","retries","timeout","max_tokens"].filter(function(k){ return !savedNum[k]; });
-    var r = activeRaw();
-    if (!r.base_url) d.push("base_url");
-    if (!r.model) d.push("model");
+    // 连接两项只在**有模型**时才进名单（没有模型时该说的是「还没有配置模型」，
+    // 而不是「你的地址是内置默认」）—— 与真实后端 load_config 的口径一致。
+    if (MODELS.length) {
+      var r = activeRaw();
+      if (!r.base_url) d.push("base_url");
+      if (!r.model) d.push("model");
+    }
     return d;
   }
   function hasKey(){ return !!activeRaw().api_key; }
@@ -216,7 +231,10 @@ window.__addCount = 0;
   }
   function configBody() {
     var r = activeRaw();
-    return { base_url: (r.base_url || DEFAULT_URL), model: (r.model || DEFAULT_NAME),
+    // 一条模型都没有时 base_url / model 是**空串**（不是兜底值）——
+    // 与真实后端一致：_effective() 只在**有条目**时才兜底。
+    return { base_url: MODELS.length ? (r.base_url || DEFAULT_URL) : "",
+             model: MODELS.length ? (r.model || DEFAULT_NAME) : "",
              api_key_set: hasKey(), mock: false, retries: 2, timeout: 180,
              max_tokens: 16000, temperature: 0.7, env_override: false,
              defaults: { base_url: DEFAULT_URL, model: DEFAULT_NAME },
@@ -250,7 +268,10 @@ window.__addCount = 0;
     if (s.indexOf('/api/meta') >= 0) {
       return mk(Object.assign({}, META,
         { has_api_key: hasKey(), mock: false, llm_defaulted: llmDefaulted(),
-          models: publicModels(), active_model: ACTIVE }));
+          models: publicModels(), active_model: ACTIVE,
+          // 一条模型都没有时头部/选择器不该显示一个兜底出来的模型名
+          model: MODELS.length ? META.model : "",
+          base_url: MODELS.length ? META.base_url : "" }));
     }
     // ── 模型列表接口 ──
     // 三个具体路径必须排在「/api/models」的通用匹配**之前** ——
@@ -269,11 +290,15 @@ window.__addCount = 0;
     if (s.indexOf('/api/models/delete') >= 0) {
       var db = {};
       try { db = JSON.parse(o && o.body || '{}'); } catch (_) {}
-      if (MODELS.length <= 1) return err(400, '至少要保留一个模型');
       var before = MODELS.length;
       MODELS = MODELS.filter(function(x){ return x.id !== db.id; });
       if (MODELS.length === before) return err(404, '没有这个模型：' + db.id);
-      if (ACTIVE === db.id) ACTIVE = MODELS[0].id;
+      // 2026-09-17：**允许删到空**（不再拦「至少要保留一个模型」）——
+      // 那是「总有一条内置默认」时代的规则。删光 = 还没配，由空列表引导 +
+      // 生成前的检查说清。ACTIVE 同步成空串，不留悬空引用。
+      if (ACTIVE === db.id || !MODELS.some(function(x){ return x.id === ACTIVE; })) {
+        ACTIVE = MODELS.length ? MODELS[0].id : '';
+      }
       return mk({ ok:true, active_model:ACTIVE, models:publicModels() });
     }
     if (s.indexOf('/api/models') >= 0) {
@@ -286,11 +311,18 @@ window.__addCount = 0;
         target = MODELS.filter(function(x){ return x.id === mid; })[0];
         if (!target) return err(404, '没有这个模型：' + mid);
       } else {
+        // 新增时请求地址**必填**（2026-09-17）：不再有「内置默认地址」可以兜，
+        // 留空会被静默填成别家的 —— 报错要到生成时才出现（老坑）。编辑时留空
+        // 仍是「保持不变」，见下面。
+        if (!String(mb.base_url || '').trim()) {
+          return err(400, '请填写请求地址，例如 https://api.deepseek.com/v1');
+        }
         var n = 1;
         while (MODELS.some(function(x){ return x.id === 'm' + n; })) n++;
         mid = 'm' + n;
         target = { id:mid, name:'', base_url:'', api_key:'', model:'' };
         MODELS.push(target);
+        if (!ACTIVE) ACTIVE = mid;   // 第一条加进来就该是当前生效的
       }
       if (!String(mb.model || '').trim()) return err(400, '模型 ID 不能为空');
       var burl = String(mb.base_url || '').trim().replace(/[/]+$/, '');
@@ -308,6 +340,14 @@ window.__addCount = 0;
     }
     if (s.indexOf('/api/generate') >= 0) {
       calls.gen++; calls.job = 0;
+      // 2026-09-17：两种「不能生成」的原因分开说（与后端 _require_model 一致）——
+      // 一条模型都没有 vs 有模型但没填 Key。同一句「未配置 Key」会把前者说成后者。
+      if (!MODELS.length) {
+        return err(400, '还没有配置模型 —— 请在「设置 → 模型接口」里点右上角「添加模型」');
+      }
+      if (!hasKey()) {
+        return err(400, '当前模型还没配 API Key，请在「设置 → 模型接口」里填写');
+      }
       // 主题里带「失败」就返回一个必然失败的作业，用来覆盖失败态渲染
       var body = {};
       try { body = JSON.parse(o && o.body || '{}'); } catch (_) {}
@@ -526,7 +566,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   // 现在统一走 util.bindOnce，`__ts.rebind()` 把五个绑定函数全再跑一遍。
   const ctrlAdd = await evalIn(`return (function(){
     var n = window.__addCount;
-    document.getElementById('st-save').addEventListener('click', function(){});
+    // 用 md-save（模型表单的「保存」）当锚点 —— 原先是 st-save，
+    // 2026-09-17 那个按钮已删（高级配置并入模型表单的保存）。
+    document.getElementById('md-save').addEventListener('click', function(){});
     return { before: n, after: window.__addCount };
   })()`);
   check("监听器计数器是活的（正对照：手工挂一个必须被数到）",
@@ -1195,26 +1237,45 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       && llm3.dialogGone && llm3.formInDetail,
     JSON.stringify(llm3));
   check("接口状态显示重试/超时等实际生效值", /重试/.test(llm.status), llm.status);
-  // 前端**不许**比后端更严：100000 是后端接受的合法值（区间 256 ~ 200000）。
-  // 修复前前端单独一个 if 卡 1.5 → 点保存弹 toast 并 return，
-  // 请求根本不发出去，后端那句更宽松的校验永远不会被触发。
-  // 2026-09-17：采样温度 (temperature) 已从高级配置移除（任务 4），这条
-  // 改用 maxtokens —— 区间下界 256、上界 200000，是后端 NUMERIC_BOUNDS
-  // 共同基线；填 100000 验中段合法值，确认前后端一致。
-  await evalIn(`var n = document.getElementById('st-maxtokens');
-    n.value = '100000'; n.dispatchEvent(new Event('input', {bubbles:true})); return true;`);
-  await evalIn(`document.getElementById('st-save').click(); return true;`);
+  // 前端**不许**比后端更严，也不许更松：越界值要当场拒掉、请求根本不发出去。
+  // 修复前前端单独一个 if 卡 temperature 1.5（比后端的 2.0 严）→ 点保存弹 toast
+  // 并 return，后端那句更宽松的校验永远不会被触发。
+  // 2026-09-17：temperature / max_tokens 先后从高级配置 UI 移除，只剩
+  // retries（0~10）与 timeout（5~1800）—— 用 retries 填 99 验「越界被拒」。
+  // ⚠ 同日起「保存」是**模型表单那颗按钮**（高级配置并入它，不再有 st-save），
+  //   所以要先保证 md-model / md-baseurl 有值，否则会被表单自己的校验拦住。
+  await evalIn(`var n = document.getElementById('st-retries');
+    n.value = '99'; n.dispatchEvent(new Event('input', {bubbles:true}));
+    var m = document.getElementById('md-model'); m.value = 'glm-4.7';
+    m.dispatchEvent(new Event('input', {bubbles:true}));
+    var u = document.getElementById('md-baseurl');
+    if (!u.value) { u.value = 'https://x/v4'; u.dispatchEvent(new Event('input', {bubbles:true})); }
+    window.__lastConfigBody = null; return true;`);
+  await evalIn(`document.getElementById('md-save').click(); return true;`);
+  await sleep(800);
+  const over = await evalIn(`return window.__lastConfigBody || null;`);
+  check("越界的重试次数被前端当场拒掉（与后端区间一致，不发请求）",
+    over === null, JSON.stringify(over));
+  // 还原成默认，免得影响后面「重试 / 超时已回填」那条断言
+  await evalIn(`var n = document.getElementById('st-retries');
+    n.value = '2'; n.dispatchEvent(new Event('input', {bubbles:true})); return true;`);
+
+  // 数值项的保存请求体里**只有数值项** —— 连接信息归模型条目管，
+  // 这里再带一遍就等于同一件事有两处写入口。
+  // 2026-09-17 后它由模型表单的「保存」间接触发（saveModel 先、saveConfig 后），
+  // 但两者的**职责边界没变**：POST /api/config 只该收到数值项。
+  await evalIn(`var n = document.getElementById('st-timeout');
+    n.value = '90'; n.dispatchEvent(new Event('input', {bubbles:true}));
+    window.__lastConfigBody = null; return true;`);
+  await evalIn(`document.getElementById('md-save').click(); return true;`);
   await sleep(800);
   const t18 = await evalIn(`return window.__lastConfigBody || null;`);
-  check("前端接受 100000 输出预算（与后端区间一致，不再比后端更严）",
-    !!t18 && t18.max_tokens === 100000, JSON.stringify(t18));
-  // 这一页的保存只管高级配置。连接信息（base_url / model）住在模型条目里，
-  // 由弹窗保存 —— 这里再带一遍就等于同一件事有两处写入口。
-  check("高级配置的保存不再连带写连接信息（那归模型条目管）",
-    !!t18 && !('base_url' in t18) && !('model' in t18), JSON.stringify(t18));
-  // 还原成默认值，免得影响后面的保存相关用例
-  await evalIn(`var n = document.getElementById('st-maxtokens');
-    n.value = '16000'; n.dispatchEvent(new Event('input', {bubbles:true})); return true;`);
+  check("数值项的保存请求体里不带连接信息（那归模型条目管）",
+    !!t18 && !('base_url' in t18) && !('model' in t18) && t18.timeout === 90,
+    JSON.stringify(t18));
+  // 还原成默认值，免得影响后面「重试 / 超时已回填」（它查 timeout === "180"）
+  await evalIn(`var n = document.getElementById('st-timeout');
+    n.value = '180'; n.dispatchEvent(new Event('input', {bubbles:true})); return true;`);
   // 配置正常时不能误报 —— 误报会让这条警示彻底失去可信度
   check("config.yaml 正常时「配置读坏」警示隐藏且无文案",
     llm.cfgErrHidden === true && llm.cfgErrText === '', JSON.stringify(llm));
@@ -1279,15 +1340,18 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   !!dclosed.onId && dclosed.id === dclosed.onId && dclosed.title === "编辑模型",
   JSON.stringify(dclosed));
 
-  // 重试 / 超时 / 输出预算：原来只在状态行里展示、无法修改
+  // 重试 / 超时：原来只在状态行里展示、无法修改。
+  // 2026-09-17：输出预算（max_tokens）已从高级配置 UI 移除
+  //（用户原话「高级设置去掉 token 限制吧」），这里只查剩下两项。
   const adv = await evalIn(`window.__ts.setPane('llm');
     const t = document.getElementById('st-timeout'); return {
       retries: document.getElementById('st-retries')?.value,
       timeout: t?.value,
-      max: document.getElementById('st-maxtokens')?.value,
+      // 输出预算的输入框必须**彻底不在 DOM 上**（不是藏起来）
+      maxInputGone: !document.getElementById('st-maxtokens'),
       editable: !!t && !t.readOnly && !t.disabled };`);
-  check("重试 / 超时 / 输出预算可编辑且已回填",
-    adv.retries === "2" && adv.timeout === "180" && adv.max === "16000" && adv.editable,
+  check("重试 / 超时可编辑且已回填（输出预算已从 UI 移除）",
+    adv.retries === "2" && adv.timeout === "180" && adv.maxInputGone && adv.editable,
     JSON.stringify(adv));
 
   // 同一组字段的标签必须一样高。
@@ -1558,19 +1622,25 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       && lsSet.size === 1,
     JSON.stringify(rcTitle));
 
-  // 「保存高级配置」收在它管的字段所在的折叠区里（2026-09-17）：
-  // 默认收起状态下右列只有一个「保存」可见（模型表单的），不再「俩确认」。
-  // 一旦把 #st-save 移出折叠区（回到右列底部），模型保存与高级保存就会
-  // 同时可见 —— 用户报的就是这个。判据用 closest('details') 守住位置。
-  const stSaveScoped = await evalIn(`return (function(){
-    var btn = document.getElementById('st-save');
-    if (!btn) return { missing: true };
-    return { insideDetails: !!btn.closest('details'),
-             insideAdvBody: !!btn.closest('.st-adv-body') };
+  // 「一屏一个保存」（2026-09-17 二改）：独立的高级配置保存按钮**整段删掉**，
+  // 高级配置改由模型表单的「保存」一并存掉（settings.js 的 saveAdvancedConfig）。
+  // 用户原话「模型面板有两个保存」—— 第一次是用折叠区把两个按钮错开，
+  // 但同屏两个确认按钮依然是更差的设计，所以这次直接合并。
+  // 判据：DOM 上**不存在** st-save；且右列可见的保存类按钮只有一个。
+  const saveBtns = await evalIn(`window.__ts.setPane('llm');
+    return (function(){
+    var pane = document.getElementById('pane-llm');
+    var vis = [].slice.call(pane.querySelectorAll('button'))
+      .filter(function(b){ return !b.classList.contains('hidden')
+        && b.offsetParent !== null
+        && /保存/.test(b.textContent); })
+      .map(function(b){ return b.id + ':' + b.textContent.trim(); });
+    return { stSaveGone: !document.getElementById('st-save'), visibleSaves: vis };
   })()`);
-  check("「保存高级配置」收在折叠区里（不在右列底部，避免与模型表单的「保存」并列成「俩确认」）",
-    !stSaveScoped.missing && stSaveScoped.insideDetails && stSaveScoped.insideAdvBody,
-    JSON.stringify(stSaveScoped));
+  check("模型面板一屏只有一个「保存」（独立的高级配置保存按钮已删）",
+    saveBtns.stSaveGone && saveBtns.visibleSaves.length === 1
+      && saveBtns.visibleSaves[0] === "md-save:保存",
+    JSON.stringify(saveBtns));
 
   // 顶部「新增 / 添加」主操作按钮样式统一（2026-09-17）：
   // packinfo 的 [+ 新建] 跟 llm 的 [+ 添加模型] 都是 .page-head-actions
@@ -1798,6 +1868,117 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       && cardTop.gen.every(c => c.borderTop === cardTop.llm.borderTop
                              && c.padTop === cardTop.llm.padTop),
     JSON.stringify(cardTop));
+
+  // 2026-09-17（用户报「右列高度行为不一致」）：三个三列面板的右列都要
+  // 撑满「除 .stg-pane 上下边距外的全部可见高度」—— 不能有的撑满有的不撑
+  // （原来只有行业包撑满，gen / llm 的右列是内容多高就多高，下方一大片空白）。
+  // 判据：**右列容器**（.pane-detail）的底边贴近 .stg-main 的可见底边
+  // （差 ≤ 48px = .stg-pane 的 padding-bottom 32px + 余量）。
+  // ⚠ 量容器而不是量首块：模型接口右列在首块下面还有折叠区 + 状态行，
+  // 量首块会把那两行算成"没撑满"（那是正常布局，不是缺陷）。
+  const detailFill = await evalIn(`return (function(){
+    var out = {};
+    ['gen','packinfo','llm'].forEach(function(p){
+      window.__ts.setPane(p);
+      var pane = document.getElementById('pane-' + p);
+      var detail = pane.querySelector('.pane-detail');
+      var main = document.querySelector('#settings-screen .stg-main');
+      if (!detail || !main) { out[p] = null; return; }
+      var db = detail.getBoundingClientRect(), mb = main.getBoundingClientRect();
+      out[p] = { gapToBottom: Math.round(mb.bottom - db.bottom),
+                 detailH: Math.round(db.height) };
+    });
+    window.__ts.setPane('gen');
+    return out;
+  })()`);
+  check("三个三列面板的右列都撑满可见高度（除边距外占满）",
+    ['gen','packinfo','llm'].every(p => detailFill[p]
+      && detailFill[p].gapToBottom >= 0 && detailFill[p].gapToBottom <= 48),
+    JSON.stringify(detailFill));
+
+  // 2026-09-17（用户报「headbar 按钮不齐」）：两个「列表型」面板的 headbar
+  // 同构 —— 次级动作 ghost bordered（刷新）+ 主操作 primary slim（新建 / 添加）。
+  // 原来只有行业包有刷新、模型接口只有一个主按钮。
+  const headbar = await evalIn(`return (function(){
+    var out = {};
+    ['packinfo','llm'].forEach(function(p){
+      window.__ts.setPane(p);
+      var box = document.getElementById('pane-' + p).querySelector('.page-head-actions');
+      if (!box) { out[p] = null; return; }
+      var bs = [].slice.call(box.querySelectorAll('button'));
+      out[p] = {
+        n: bs.length,
+        kinds: bs.map(function(b){ return b.classList.contains('primary') ? 'primary' : 'ghost'; }),
+        ids: bs.map(function(b){ return b.id; }),
+      };
+    });
+    window.__ts.setPane('gen');
+    return out;
+  })()`);
+  check("两个列表型面板的 headbar 同构（刷新 ghost + 主操作 primary）",
+    ['packinfo','llm'].every(p => headbar[p]
+      && headbar[p].n === 2 && headbar[p].kinds.join() === 'ghost,primary'),
+    JSON.stringify(headbar));
+
+  // 2026-09-17（用户报「按钮大小，文字大小等等」不统一）：
+  // headbar / 底部操作区的按钮原来混用 —— `.ghost` 走全局 30px + 继承 14px 字号，
+  // `.primary.slim` 是 28px / 13px，并排时底边差 2px、字差 1px。
+  // 判据取「彼此相等」而不是某个绝对值（改成 30px 也一样是统一）。
+  const btnUniform = await evalIn(`return (function(){
+    var out = [];
+    ['gen','packinfo','llm'].forEach(function(p){
+      window.__ts.setPane(p);
+      var pane = document.getElementById('pane-' + p);
+      [].slice.call(pane.querySelectorAll('.page-actions button, .page-head-actions button'))
+        .forEach(function(b){
+          var r = b.getBoundingClientRect();
+          if (r.height > 0) out.push({ p: p, id: b.id, h: Math.round(r.height),
+                                       fs: getComputedStyle(b).fontSize });
+        });
+    });
+    window.__ts.setPane('gen');
+    return out;
+  })()`);
+  check("设置页的操作按钮统一高度与字号（不再 ghost 30px / primary slim 28px 混用）",
+    btnUniform.length >= 4
+      && new Set(btnUniform.map(b => b.h)).size === 1
+      && new Set(btnUniform.map(b => b.fs)).size === 1,
+    JSON.stringify(btnUniform));
+
+  // 2026-09-17：行业包右列首块改用 .page-card（与 gen / llm 同结构）——
+  // 原来套的是 `.page-head`（那是**面板顶部**的 headbar 结构，含
+  // .page-head-actions），用在右列里是错位复用，且间距节奏
+  // （margin-bottom 20px）与 .page-card 的 gap 16px 不同。
+  const piCard = await evalIn(`window.__ts.setPane('packinfo');
+    var d = document.querySelector('#pane-packinfo .pane-detail');
+    return { firstTag: d.firstElementChild.tagName,
+             firstClass: d.firstElementChild.className,
+             strayPageHead: !!d.querySelector(':scope > .page-head') };`);
+  check("行业包右列首块是 .page-card（不再错位复用面板顶部的 .page-head）",
+    piCard.firstTag === "DIV" && /page-card/.test(piCard.firstClass)
+      && piCard.strayPageHead === false,
+    JSON.stringify(piCard));
+  await evalIn(`window.__ts.setPane('gen'); return true;`);
+
+  // 2026-09-17：行业包分组的「详情 / 新建」是**两个纯按钮**，不该套 `.row`
+  // —— `.row > :first-child { flex: 1 }` 是给「一个主控件 + 若干按钮」设计的，
+  // 套上去会把「详情」拉满整行（截图里横跨 700px）。用 .btn-row。
+  const packBtns = await evalIn(`window.__ts.setPane('gen');
+    [...document.querySelectorAll('#gen-sec-list .pl-item')]
+      .find(function(b){ return b.dataset.sec === 'pack'; }).click();
+    var card = document.querySelector('#pane-gen .page-card[data-sec="pack"]');
+    var detail = card.parentElement;
+    var inner = detail.getBoundingClientRect().width;
+    var bs = ['btn-packinfo','btn-newpack'].map(function(id){
+      var b = document.getElementById(id);
+      var r = b.getBoundingClientRect();
+      return { id: id, w: Math.round(r.width), inRow: !!b.closest('.row') };
+    });
+    return { inner: Math.round(inner), btns: bs };`);
+  check("行业包分组的「详情 / 新建」按内容取宽、不被拉满整行（按钮行不套 .row）",
+    packBtns.btns.length === 2
+      && packBtns.btns.every(b => b.w < packBtns.inner / 2 && b.inRow === false),
+    JSON.stringify(packBtns));
 
   // 2026-09-17（任务 1）：行业包分组现在是 .block-inner 结构（与「生成参数」「进阶」同族），
   // 之前是 .fg.pack-row 单行布局（select + 详情 + 新建），高度 ~50px、右栏大片空。
@@ -2347,8 +2528,14 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   await evalIn(`document.getElementById('btn-open-settings').click();
     window.__ts.setPane('llm'); return true;`);
   await sleep(300);
-  await evalIn(`document.getElementById('st-save').click(); return true;`);
-  await sleep(700);
+  // 「保存」现在是模型表单那颗（高级配置并入它，2026-09-17）——
+  // 先保证 md-model / md-baseurl 有值，否则会被表单自己的校验拦住。
+  await evalIn(`var m = document.getElementById('md-model'); m.value = 'glm-4.7';
+    m.dispatchEvent(new Event('input', {bubbles:true}));
+    var u = document.getElementById('md-baseurl');
+    if (!u.value) { u.value = 'https://x/v4'; u.dispatchEvent(new Event('input', {bubbles:true})); }
+    document.getElementById('md-save').click(); return true;`);
+  await sleep(900);
   const kept = await evalIn(`return {
     pack: document.getElementById('pack').value,
     options: document.getElementById('pack').options.length };`);
@@ -2414,9 +2601,9 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
              pickerText: b ? b.querySelector('.sel-text').textContent : '',
              pickerValue: s ? s.value : '' };
   })()`);
-  check("未配置时：高级配置三项仍是「内置默认」，模型行不再有任何 tag-default",
+  check("未配置时：高级配置两项仍是「内置默认」，模型行不再有任何 tag-default",
     notCfg.rowFields.length === 0
-      && notCfg.advFields.join() === "max_tokens,retries,timeout"
+      && notCfg.advFields.join() === "retries,timeout"
       && notCfg.rowTagCount === 0,
     JSON.stringify(notCfg));
   // 任务 5：picker 上不再附「（默认）」后缀。区分未配置与已配置靠
@@ -2468,21 +2655,23 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   await evalIn(`document.getElementById('btn-close-settings').click(); return true;`);
   await sleep(200);
   const advClean = await evalIn(`return {
-    // DOM 上没有 st-temperature 输入框
+    // DOM 上没有 st-temperature / st-maxtokens 输入框（两项都已下线）
     temperatureInput: !!document.getElementById('st-temperature'),
-    // 高级配置只剩 3 个 block-inner（重试 / 超时 / 输出预算）
+    maxTokensInput: !!document.getElementById('st-maxtokens'),
+    // 高级配置只剩 2 个 block-inner（重试 / 超时）
     advBlocks: document.querySelectorAll('#st-adv .block-inner').length,
-    // st-save 仍在
-    advSaveBtn: !!document.getElementById('st-save'),
-    // st-retries / st-timeout / st-maxtokens 三个输入框仍在
-    advInputs: ['st-retries','st-timeout','st-maxtokens']
+    // 独立的「保存高级配置」按钮已删（并入模型表单的「保存」，2026-09-17）
+    stSaveGone: !document.getElementById('st-save'),
+    // st-retries / st-timeout 两个输入框仍在
+    advInputs: ['st-retries','st-timeout']
                  .filter(function(id){ return !!document.getElementById(id); }).length,
     // st-reset-adv 仍在（数值项的"恢复默认"是另一码事，不在本任务范围）
     advResetBtn: !!document.getElementById('st-reset-adv'),
   };`);
-  check("高级配置：采样温度已彻底从 DOM 移除（仅留重试/超时/输出预算三项）",
-    advClean.temperatureInput === false && advClean.advBlocks === 3
-      && advClean.advSaveBtn && advClean.advInputs === 3 && advClean.advResetBtn,
+  check("高级配置：采样温度与输出预算都已彻底从 DOM 移除（仅留重试 / 超时两项）",
+    advClean.temperatureInput === false && advClean.maxTokensInput === false
+      && advClean.advBlocks === 2
+      && advClean.stSaveGone && advClean.advInputs === 2 && advClean.advResetBtn,
     JSON.stringify(advClean));
   await evalIn(`document.getElementById('btn-open-settings').click(); window.__ts.setPane('gen'); return true;`);
   await evalIn(`document.getElementById('md-cancel').click(); return true;`);
@@ -2547,14 +2736,14 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
              heroTitle: window.__shown(h3),
              heroBtn: !document.querySelector('#empty .empty-cta').classList.contains('hidden') };
   })()`);
-  // 连接信息配好之后，模型行的"内置默认"小标本来就没挂过（任务 5）；
-  // 高级配置那三项没动过，仍是默认（仍是「兜底值」语义）。
-  // 「只增不减」的实现在这里给的是 3 → 3 不变（保留的语义），不能凭空多挂。
-  // 注：原来断言是 6 → 4（4 项变 0），现在改为 3 → 3（只数有效字段），但
-  // 真正的判据变成了"端点把#st-adv 里那三项 + 模型行的（0 项）= 3 行总和未涨"。
-  check("配好模型之后同一页面里「内置默认」小标总数不变（高级配置三项仍是默认，模型行无 tag）",
-    beforeSave.fields === "max_tokens,retries,timeout"
-    && afterSave.fields === "max_tokens,retries,timeout",
+  // 连接信息配好之后：
+  //  · 模型行本来就没挂过「内置默认」标（任务 5）；
+  //  · 高级配置那两项**随同一次保存被落盘**（2026-09-17 起模型表单的「保存」
+  //    一并调用 saveAdvancedConfig）→ 小标也跟着消失。
+  // 「只增不减」的实现在这里给不出 ""（它会留在名单里），直接报红。
+  check("配好模型之后小标符合预期（模型行无 tag；数值项随同一次保存被落盘 → 也消失）",
+    beforeSave.fields === "retries,timeout"
+    && afterSave.fields === "",
     `${beforeSave.fields} → ${afterSave.fields}`);
   // 原来是「保存后弹窗自动关闭」；三列化后没有弹窗了，改成守更有意义的那件事：
   // **保存后要停在刚保存的那条** —— 若跳回「当前启用」那条，用户会以为没保存上。
@@ -2573,7 +2762,13 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   // 实测漏过一次：把 markDefault 改成「只加不摘」之后，整套断言**全绿** ——
   // 因为「已配置」的页面里它本来就没挂过标，看不出区别。只有在同一个页面里
   // 走一遍「没配 → 配好」，那个「摘」的动作才有东西可摘。
-  await evalIn(`document.getElementById('st-save').click(); return true;`);
+  // 「保存」现在是模型表单那颗（高级配置并入它，2026-09-17）——
+  // 先保证表单字段有值，否则会被表单自己的校验拦住。
+  await evalIn(`var m = document.getElementById('md-model'); m.value = 'glm-4.7';
+    m.dispatchEvent(new Event('input', {bubbles:true}));
+    var u = document.getElementById('md-baseurl');
+    if (!u.value) { u.value = 'https://x/v4'; u.dispatchEvent(new Event('input', {bubbles:true})); }
+    document.getElementById('md-save').click(); return true;`);
   await sleep(900);
   const afterAdv = await evalIn(`return (function(){
     function fields(root){
@@ -2584,7 +2779,7 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     return { fields: fields(row).concat(fields(document.getElementById('st-adv'))).join(),
              advSub: document.getElementById('st-adv-sub').textContent };
   })()`);
-  check("保存高级配置后那三项的小标也消失（markDefault 不是只增不减）",
+  check("保存后高级配置两项的小标也消失（markDefault 不是只增不减）",
     afterAdv.fields === "" && afterAdv.advSub === "",
     JSON.stringify(afterAdv));
   // hero 也必须跟着切回来。只在 noKey 时改一次的实现在这里会露馅：
@@ -2633,15 +2828,15 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   check("警示用 warn 色且不顶掉原状态行",
     cfgErr.color === 'rgb(178, 94, 0)' && /模型/.test(cfgErr.status),
     JSON.stringify(cfgErr));
-  // 读坏与没配过是**同一件事的两个来源**（读坏 = 整个文件读不到 → 高级四项 + 模型行 base_url/model 都取默认），
-  // 所以两个信号必须同时出现：只有橙色警示、界面却不标默认，说明前端只消费了
-  // 其中一个字段 —— 那正是「信号算对了但没人接」的老毛病。
-  // 2026-09-17（任务 4/5）：高级配置 UI 删温度（但 NUMERIC_BOUNDS 保留）——
-  // 所以读坏时标出来的**是 3 项**（retries / timeout / max_tokens）。模型行的
-  // base_url / model 不再渲染「内置默认」标（任务 5），改由 placeholder + warn
-  // 一起说 —— 所以 rowFields 不再贡献 base_url,model。两者合并后是 3 项。
+  // 读坏与没配过是**同一件事的两个来源**（读坏 = 整个文件读不到 →
+  // 高级数值项 + 连接信息都取默认），所以两个信号必须同时出现：
+  // 只有橙色警示、界面却不标默认，说明前端只消费了其中一个字段 ——
+  // 那正是「信号算对了但没人接」的老毛病。
+  // 2026-09-17：temperature / max_tokens 先后从高级配置 UI 移除、
+  // 模型行也不再渲染「内置默认」标（任务 4/5）—— 所以读坏时标出来的
+  // **是 2 项**（retries / timeout）。
   check("读坏时「内置默认」小标与橙色警示同时出现",
-    cfgErr.fields === "max_tokens,retries,timeout",
+    cfgErr.fields === "retries,timeout",
     JSON.stringify(cfgErr));
 
   // 回到正常模式，继续后面的布局检查
@@ -2701,8 +2896,12 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   const mdlBefore = await evalIn(`return {
     rows: document.querySelectorAll('#llm-list .pl-item').length,
     delHidden: document.getElementById('md-delete').classList.contains('hidden') };`);
-  check("只有一条模型时「删除」是禁用的（把「至少留一条」这条规则摆到界面上）",
-    mdlBefore.rows === 1 && mdlBefore.delHidden === true, JSON.stringify(mdlBefore));
+  // 2026-09-17：删除键**始终可用**（编辑既有模型时）。
+  // 原来「只有一条时禁用」是「总有一条内置默认」时代的规则；
+  // 现在模型是用户自己加的，删光就是「还没配」，由列表空引导 +
+  // 生成前的 `_require_model` 明确拦住（用户原话「添加完还需要支持删除」）。
+  check("编辑既有模型时「删除」始终可用（不再因只剩一条而隐藏）",
+    mdlBefore.rows === 1 && mdlBefore.delHidden === false, JSON.stringify(mdlBefore));
 
   await evalIn(`document.getElementById('st-add-model').click(); return true;`);
   await sleep(250);
@@ -2789,12 +2988,82 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     onId: document.querySelector('#llm-list .pl-item.on')?.dataset.id };`);
   // 删掉的正是当前启用的那条 → 必须自动换到剩下的一条，不留悬空引用。
   // 悬空的后果是「当前模型」指向一条不存在的记录，生成时取不到任何连接信息。
-  // 删完只剩一条 → 「删除」必须重新不可用（至少留一条），这里是 hidden
-// （原来是 disabled；三列化后删除键是右列按钮，用 hidden 表达不可用）。
-check("删除当前启用的模型后自动落到剩下那条，且「删除」重新不可用",
-  mdlAfter.rows === 1 && mdlAfter.ids[0] === "m1"
-    && mdlAfter.onId === "m1" && mdlAfter.delHidden === true,
-  JSON.stringify(mdlAfter));
+  // 2026-09-17：只剩一条时「删除」**仍然可用**（删光也是允许的，见后端
+  // `test_can_delete_the_last_model`）—— 断言从 `delHidden === true`
+  // 改成 `=== false`，守住"能删到空"这条产品语义。
+  check("删除当前启用的模型后自动落到剩下那条（且删除键仍可用）",
+    mdlAfter.rows === 1 && mdlAfter.ids[0] === "m1"
+      && mdlAfter.onId === "m1" && mdlAfter.delHidden === false,
+    JSON.stringify(mdlAfter));
+
+  // ── 12g) 空列表：一条模型都没有（2026-09-17 全新安装的真实形态）──────
+  // 用户原话：「没有内置默认的模型的，需要用户自己添加，添加完还需要支持删除」。
+  // 这一段验完整闭环：空 → 加（地址必填）→ 能删 → 又空。
+  // 桩的 `?nomodels=1` 模拟真实后端「文件里没有任何连接信息」时的空列表。
+  await cdp.send("Page.navigate",
+    { url: `http://127.0.0.1:${PORT}/?token=stubtoken&nomodels=1` });
+  await sleep(1800);
+  await evalIn(`document.getElementById('btn-open-settings').click();
+    window.__ts.setPane('llm'); return true;`);
+  await sleep(700);
+  const emptyList = await evalIn(`return {
+    rows: document.querySelectorAll('#llm-list .pl-item').length,
+    hint: document.querySelector('#llm-list .hint')?.textContent || '',
+    mdTitle: document.getElementById('md-title').textContent,
+    delHidden: document.getElementById('md-delete').classList.contains('hidden'),
+    pickerText: (function(){ var s = document.getElementById('p-model');
+      var b = s && s.parentNode.querySelector('.select-btn');
+      return b ? b.querySelector('.sel-text').textContent : ''; })(),
+  };`);
+  check("一条模型都没有时：中列给空引导、右列是「添加模型」、删除键不可用、picker 说「未配置模型」",
+    emptyList.rows === 0 && /还没有模型/.test(emptyList.hint)
+      && emptyList.mdTitle === "添加模型" && emptyList.delHidden === true
+      && emptyList.pickerText === "未配置模型",
+    JSON.stringify(emptyList));
+
+  // 新增时**地址必填** —— 留空要被拒（不再有「内置默认地址」可以兜：
+  // 用户加一条 DeepSeek 模型却指向智谱，报错要到生成时才出现）。
+  await evalIn(`document.getElementById('st-add-model').click(); return true;`);
+  await sleep(250);
+  await evalIn(`document.getElementById('md-model').value = 'glm-4.7';
+    document.getElementById('md-name').value = '智谱';
+    document.getElementById('md-apikey').value = 'sk-new';
+    document.getElementById('md-save').click(); return true;`);
+  await sleep(700);
+  const deniedAdd = await evalIn(`return {
+    rows: document.querySelectorAll('#llm-list .pl-item').length,
+    toast: document.getElementById('toast').textContent };`);
+  check("新增模型留空地址会被拒（不再有内置默认地址可兜）",
+    deniedAdd.rows === 0 && /请求地址/.test(deniedAdd.toast), JSON.stringify(deniedAdd));
+
+  await evalIn(`document.getElementById('md-baseurl').value = 'https://open.bigmodel.cn/api/paas/v4';
+    document.getElementById('md-save').click(); return true;`);
+  await sleep(800);
+  const addedFirst = await evalIn(`return {
+    rows: document.querySelectorAll('#llm-list .pl-item').length,
+    id: document.querySelector('#llm-list .pl-item')?.dataset.id,
+    active: document.querySelectorAll('#llm-list .pl-item.on').length,
+    mdId: document.getElementById('md-id').value,
+    delHidden: document.getElementById('md-delete').classList.contains('hidden') };`);
+  check("空列表加一条：出现在中列、成为当前启用、删除键可用",
+    addedFirst.rows === 1 && addedFirst.id === "m1" && addedFirst.active === 1
+      && addedFirst.mdId === "m1" && addedFirst.delHidden === false,
+    JSON.stringify(addedFirst));
+
+  await evalIn(`document.getElementById('md-delete').click(); return true;`);
+  await sleep(300);
+  await evalIn(`document.getElementById('cd-yes').click(); return true;`);
+  await sleep(800);
+  const backToEmpty = await evalIn(`return {
+    rows: document.querySelectorAll('#llm-list .pl-item').length,
+    hint: document.querySelector('#llm-list .hint')?.textContent || '',
+    mdTitle: document.getElementById('md-title').textContent };`);
+  check("删掉最后一条 → 回到空引导（允许删到空，不再强制「至少保留一条」）",
+    backToEmpty.rows === 0 && /还没有模型/.test(backToEmpty.hint)
+      && backToEmpty.mdTitle === "添加模型",
+    JSON.stringify(backToEmpty));
+  await evalIn(`document.getElementById('btn-close-settings').click(); return true;`);
+  await sleep(200);
   await evalIn(`document.getElementById('btn-close-settings').click(); return true;`);
   await sleep(200);
   // 冷启动就配好的情形（老用户）：hero 不该停在配置引导上

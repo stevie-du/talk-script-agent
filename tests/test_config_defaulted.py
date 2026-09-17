@@ -63,17 +63,45 @@ def _client(root: Path):
     return c
 
 
+def _seed_placeholder_model(root: Path) -> Path:
+    """一条**空壳**模型（id = DEFAULT_MODEL["id"]，三个连接字段都空）。
+
+    2026-09-17：全新安装**不再预置模型**（用户原话「没有内置默认的模型的，
+    需要用户自己添加」），而本文件要验的「连接两项（base_url / model）算不算
+    内置默认」只有在**存在一条模型**时才有对象 —— 显式造出来，
+    不再依赖产品隐式预置（那种依赖会在产品语义变化时集体报红）。
+    这也是**已有用户**文件里可能存着的形态（迁移产物）。
+    """
+    p = root / "config.yaml"
+    p.write_text(
+        "models:\n"
+        "  - {id: m-default, name: '', base_url: '', api_key: '', model: ''}\n"
+        "active_model: m-default\n", encoding="utf-8")
+    return p
+
+
 # ── 1. 全新安装：六个字段全是内置默认 ────────────────────────
 
 def test_fresh_install_reports_every_llm_field_defaulted(tmp_path):
-    """没有 config.yaml 时，六个字段**一个都不该漏**。
+    """有模型时六个字段**一个都不该漏**；没有模型时只报数值四项。
 
     漏掉某个键的后果不是「少提示一条」，而是界面继续把那个值当用户配置显示 ——
     而它恰恰是最容易被忽略的那个（temperature / max_tokens 这类不显眼的）。
+
+    ⚠ 2026-09-17：全新安装不再预置模型 → 连接两项（base_url / model）
+    **无处依附**，此时报它们反而是错的（该说的是「还没有配置模型」）。
+    所以这里验两态：空列表只报数值四项、有一条空壳模型才六项全报。
     """
+    only_num = sorted(k for k in ALL_KEYS if k not in ("base_url", "model"))
+
+    cfg0 = load_config(tmp_path)
+    assert sorted(cfg0.llm_defaulted) == only_num, (
+        f"没有模型时不该报连接字段：{cfg0.llm_defaulted}")
+
+    _seed_placeholder_model(tmp_path)
     cfg = load_config(tmp_path)
     assert sorted(cfg.llm_defaulted) == ALL_KEYS, (
-        f"全新安装下这些字段应是内置默认：{ALL_KEYS}，实际 {cfg.llm_defaulted}")
+        f"这些字段应是内置默认：{ALL_KEYS}，实际 {cfg.llm_defaulted}")
     assert cfg.llm.model == DEFAULT_CONFIG["llm"]["model"]
 
 
@@ -90,6 +118,13 @@ def test_generated_template_counts_as_not_configured(tmp_path):
     """
     p = ensure_config_template(tmp_path)
     assert p is not None, "首次运行应当写下模板"
+    # 模板里不含 models 段（连接信息是用户自己加的）→ 连接两项无处依附，
+    # 此时只报数值四项。写一条空壳模型再验六项全报（见上一条的分工）。
+    cfg0 = load_config(tmp_path)
+    assert sorted(cfg0.llm_defaulted) == sorted(
+        k for k in ALL_KEYS if k not in ("base_url", "model")), "程序写的模板被当成了用户配置"
+
+    _seed_placeholder_model(tmp_path)
     cfg = load_config(tmp_path)
     assert sorted(cfg.llm_defaulted) == ALL_KEYS, "程序写的模板被当成了用户配置"
     assert cfg.llm.model == DEFAULT_CONFIG["llm"]["model"], "注释掉之后取值必须不变"
@@ -124,6 +159,8 @@ def test_env_override_removes_field_from_defaulted(tmp_path, monkeypatch, field,
     就把「用户显式配成默认值」误判成「没配」。所以判定必须在覆盖**之前**记名单。
     """
     monkeypatch.setenv(env_name, _VALID[field])
+    # 连接两项（base_url / model）只在**存在一条模型**时才进名单 —— 显式造一条。
+    _seed_placeholder_model(tmp_path)
     cfg = load_config(tmp_path)
     assert field not in cfg.llm_defaulted, f"{env_name} 已覆盖，不该还在名单里"
     # 别的字段照旧 —— 不能因为配了一个就整体放行。
@@ -165,7 +202,10 @@ def test_empty_value_counts_as_not_configured(tmp_path, raw):
     `model: ""` 与「键缺失」走到完全相同的默认值，判定也必须一致 ——
     否则用户会看到「模型名框是空的、但没提示这是默认值」。
     """
-    (tmp_path / "config.yaml").write_text(f"llm:\n  model: {raw}\n", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text(
+        "models:\n"
+        f"  - {{id: m1, base_url: 'https://a/v1', model: {raw}}}\n"
+        "active_model: m1\n", encoding="utf-8")
     cfg = load_config(tmp_path)
     assert cfg.llm.model == DEFAULT_CONFIG["llm"]["model"]
     assert "model" in cfg.llm_defaulted
@@ -180,25 +220,32 @@ def test_corrupt_file_reports_both_signals(tmp_path):
     (tmp_path / "config.yaml").write_text("llm:\n  model: [unclosed\n", encoding="utf-8")
     cfg = load_config(tmp_path)
     assert cfg.config_error
-    assert sorted(cfg.llm_defaulted) == ALL_KEYS
+    # 2026-09-17：文件读坏 → models 段也读不到 → 一条模型都没有。
+    # 所以这里报的是**数值四项**；连接两项此刻无处依附（正确的说法是
+    # 「还没有配置模型」，由界面另说 —— 见 verify.js 的读坏断言）。
+    assert sorted(cfg.llm_defaulted) == sorted(
+        k for k in ALL_KEYS if k not in ("base_url", "model"))
 
 
 # ── 4. 透出到接口：算出来但不下发 = 白算 ────────────────────
 
 def test_api_config_exposes_defaulted(tmp_path):
     """前端要拿得到 —— 拿不到就还是不可见（本项目最忌讳的那种「白算」）。"""
+    _seed_placeholder_model(tmp_path)
     body = _client(tmp_path).get("/api/config").json()
     assert sorted(body["llm_defaulted"]) == ALL_KEYS
 
 
 def test_api_meta_exposes_defaulted(tmp_path):
     """输入区右侧的模型选择器读的是 /api/meta，不是 /api/config。"""
+    _seed_placeholder_model(tmp_path)
     body = _client(tmp_path).get("/api/meta").json()
     assert "model" in body["llm_defaulted"]
 
 
 def test_api_config_defaulted_clears_after_save(tmp_path):
     """存过一次之后就不再是「没配」—— 提示必须消失，否则用户会一直看到它。"""
+    _seed_placeholder_model(tmp_path)
     c = _client(tmp_path)
     assert "model" in c.get("/api/config").json()["llm_defaulted"]
 
@@ -216,9 +263,11 @@ def main() -> int:                                        # pragma: no cover
     tmp = Path(tempfile.mkdtemp(prefix="talkscript-df-"))
     try:
         cfg = load_config(tmp)
-        assert sorted(cfg.llm_defaulted) == ALL_KEYS
+        # 2026-09-17：全新安装不再预置模型 → 连接两项无处依附，只报数值四项
+        only_num = sorted(k for k in ALL_KEYS if k not in ("base_url", "model"))
+        assert sorted(cfg.llm_defaulted) == only_num
         assert cfg.config_error == ""
-        print("  ✅ 全新安装：六个字段都报「内置默认」，且没有 config_error")
+        print("  ✅ 全新安装：数值四项报「内置默认」，且没有 config_error")
         return 0
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

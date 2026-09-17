@@ -162,6 +162,11 @@ body {
 
 .row { display: flex; gap: var(--s2); align-items: center; }
 .row > :first-child { flex: 1; }
+/* 纯按钮行（2026-09-17）：按钮各自按内容取宽、靠左排。
+   ⚠ 不要用 .row —— 它的 `.row > :first-child { flex: 1 }` 是给
+   「一个主控件 + 若干按钮」设计的（原来的 select + 详情 + 新建）；
+   两个纯按钮时会**把第一个拉满整行**（「详情」横跨 700px，见截图）。 */
+.btn-row { display: flex; gap: var(--s2); align-items: center; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s3); }
 .spacer { flex: 1; }
 /* 字段标签：小号 + 中等字重，作为"控件说明"存在，不与区块标题抢层级 */
@@ -321,10 +326,17 @@ body {
    要滚一大段才看到内容。并排之后点文件即时可见。
    ⚠ .pi-cols 必须给**确定高度**：`.kb-body` 是 `flex:1; overflow:auto`，
    父链上没有定死的高度时 flex:1 不生效，查看器会塌成一小块（这正是它
-   之前只能靠内容撑高的原因）。clamp 是为了矮窗口下两栏也不被压扁。 */
+   之前只能靠内容撑高的原因）。
+
+   2026-09-17 二改（用户报「高度设置占满高度，自适应高度，除了边距外占满」）：
+   高度不再是 `clamp(320px, 52vh, 620px)` —— 那个上限 620px 让窗口再高
+   也只到 620，下面留一大片空白。现在由父链撑开（见下面 `#pane-packinfo`
+   那组规则）：面板 → .stg-cols → .pane-detail → .pi-cols 逐级 flex:1，
+   占满「除 .stg-pane 上下边距外的全部可见高度」。min-height 只作兜底，
+   窗口极矮时不至于被压扁（撑不下时由 .stg-main 出滚动条）。 */
 .pi-cols {
   display: flex; gap: var(--s4); align-items: stretch;
-  height: clamp(320px, 52vh, 620px);
+  min-height: 320px;
 }
 /* 分组栏：固定宽度、自己滚。查看器吃剩下的宽度（.kb-view 的 flex:1）。 */
 .pi-groups-col {
@@ -332,6 +344,14 @@ body {
   display: flex; flex-direction: column; overflow: auto;
 }
 .pi-groups-col > .lbl { flex: 0 0 auto; }
+
+/* 行业包右列「占满剩余高度」的整条 flex 链。
+   ⚠ 2026-09-17 二改：这组规则已**泛化到所有三列面板**（见下面
+   「三列面板的右列统一撑满」）—— 原来只有行业包撑满，生成偏好 / 模型接口
+   的右列是「内容多高就多高」，下方留一大片空白（用户报「右列高度行为不一致」）。
+   这里只保留行业包特有的部分：查看器最小高度与底部固定行。 */
+#pane-packinfo .pi-cols { flex: 1; }
+#pane-packinfo .pane-detail > .page-actions { flex: 0 0 auto; }
 
 /* .detail-title 已删（2026-09-17）：packinfo 右列 h3 改用 .card-title，
    与 llm / gen 同 16px / 600。 */
@@ -928,6 +948,16 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 .block-inner { display: flex; flex-direction: column; }
 .page-actions { display: flex; gap: var(--s2); margin-top: var(--s2); align-items: center; }
 
+/* ⚠ headbar / 底部操作区的按钮**统一 28px 高 + 13px 字号**（2026-09-17）。
+   原来混用：`.ghost` 走全局 `button { height: var(--h-btn) }`（30px）且
+   `font: inherit` 继承到 14px，而 `.primary.slim` 是 28px / 13px ——
+   并排时**底边差 2px、字也差 1px**（用户报「按钮大小，文字大小等等」不统一）。
+   这两处都是紧凑操作区，统一走 slim 那一档。
+   packgen 的空态按钮组（.pg-empty-actions）同理。 */
+.page-head-actions button,
+.page-actions button,
+.pg-empty-actions button { height: var(--h-btn-sm); font-size: var(--f-sm); }
+
 /* ── 模型接口：模型列表 ────────────────────────────────────
    参考各家 Agent 工具的「模型」页：一行一条模型（模型 / 服务商 / 启用 / 操作），
    每行自带启用开关与测试·编辑·删除。
@@ -1193,6 +1223,25 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 /* 三列面板需要更宽的限宽，否则中+右两列挤在 720px 里太窄。 */
 .stg-pane.has-cols { max-width: var(--w-stg-3col); }
 
+/* ══════════ 三列面板的右列：统一「撑满剩余高度」 ══════════
+   2026-09-17（用户报「右列高度行为不一致」）：原来只有行业包右列撑满，
+   生成偏好 / 模型接口的右列是「内容多高就多高」，下方留一大片空白。
+   现在统一成一条 flex 链：面板 → .stg-cols → .pane-detail → 首块逐级 flex:1，
+   占满「除 .stg-pane 上下边距（24 / 32px）外的全部可见高度」。
+
+   ⚠ 必须带 `:not(.hidden)`：`.stg-pane.hidden { display: none }` 与
+   `.stg-pane.has-cols` 同为 (0,2,0)，只靠源码顺序太脆；写成 id 选择器
+   则会**盖掉 display:none**（面板永远可见、切不走 —— 本项目踩过的
+   「id 压过 class 状态」的坑）。`:not(.hidden)` 提到 (0,3,0) 才两者兼顾。 */
+.stg-pane.has-cols:not(.hidden) { display: flex; flex-direction: column; }
+.stg-pane.has-cols .stg-cols { flex: 1; min-height: 0; align-items: stretch; }
+.stg-pane.has-cols .pane-detail { display: flex; flex-direction: column; min-height: 0; }
+/* 右列首块（表单卡片 / 文件分组 + 查看器）吃掉剩余高度；
+   底部固定行（page-actions）不参与拉伸 —— 它是一行按钮。 */
+.stg-pane.has-cols .pane-detail > .page-card { flex: 1; min-height: 0; }
+.stg-pane.has-cols .pane-detail > .pi-cols { flex: 1; min-height: 320px; }
+.stg-pane.has-cols .pane-detail > .page-actions { flex: 0 0 auto; }
+
 /* 中列条目（通用）：图标 + 标题/副标题 + 右侧操作区，选中态靠 .on。
    ⚠ 第三列 `auto` 是给条目自带的操作件留的（模型列表的启用开关就放这里）——
    有它才不用把「哪个启用」挤到右列去，一眼就能看见。 */
@@ -1242,12 +1291,13 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 }
 .pl-item .tag-default { display: none; }   /* 2026-09-17：用户反馈「样式太丑」，CSS 隐藏但 DOM 保留 */
 
-/* 行业包的文件查看器：与知识/技能共用 .kb-body 样式（卡片语言一致），
-   但限制 max-height —— 行业包右列除了文件表还有 headbar/校对清单/导出，
-   不让查看器把它们都挤到屏外。 */
-#pi-file-view .kb-body {
-  max-height: 42vh;
-}
+/* 行业包的文件查看器：与知识/技能共用 .kb-body 样式（卡片语言一致）。
+   2026-09-17 二改：`max-height: 42vh` 已删 —— 它把查看器钉在 42vh，
+   而 `.pi-cols` 现在要占满剩余高度（用户报「除边距外占满」），
+   限制高度会让它比左栏的分组列表矮一截，两栏底部参差。
+   现在高度由 `.kb-view` 的 flex 链给出（.pi-cols 撑满 → .kb-view flex:1
+   → .kb-body flex:1），内容超出时 .kb-body 自己滚（overflow:auto 已在）。 */
+
 /* 行业包文件表的行：可点击 → 加载预览。cursor:pointer 让「这是个可点的表格」
    这一点对用户可见。 */
 #pi-files tbody tr { cursor: pointer; }

@@ -96,12 +96,18 @@ def _root() -> Path:
 
 @pytest.mark.parametrize("name", sorted(BROKEN))
 def test_broken_config_does_not_raise_and_is_reported(name, tmp_path):
-    """每一种坏法都要：① 不抛异常；② `config_error` 非空。"""
+    """每一种坏法都要：① 不抛异常；② `config_error` 非空。
+
+    ⚠ 2026-09-17：读坏 → `models` 段也读不到 → 一条模型都没有，
+    所以 `cfg.llm` 是**空模型**（不再是「落回内置默认的 glm-4.7」）。
+    这是对的：文件都读不出来，说「你用的是 glm-4.7」才是撒谎。
+    界面另有一行「还没有配置模型」的引导（见 verify.js 的读坏断言）。
+    """
     (tmp_path / "config.yaml").write_text(BROKEN[name], encoding="utf-8")
     cfg = load_config(tmp_path)
     assert cfg.config_error, f"{name}：读坏了却报告「没问题」"
-    assert cfg.llm.model == DEFAULT_CONFIG["llm"]["model"]
-    assert cfg.llm.base_url == DEFAULT_CONFIG["llm"]["base_url"]
+    assert cfg.models == [], f"{name}：文件都读坏了，却凭空冒出一条模型"
+    assert cfg.llm.model == "" and cfg.llm.base_url == ""
 
 
 def test_good_config_reports_nothing(tmp_path):
@@ -115,11 +121,14 @@ def test_good_config_reports_nothing(tmp_path):
 
 
 def test_missing_file_is_not_an_error(tmp_path):
-    """首次运行没有 config.yaml —— 这是正常状态，不该报「读坏了」。"""
+    """首次运行没有 config.yaml —— 这是正常状态，不该报「读坏了」。
+
+    2026-09-17：全新安装**不再预置模型**，所以这里是空模型 + 空列表。
+    """
     assert not (tmp_path / "config.yaml").exists()
     cfg = load_config(tmp_path)
     assert cfg.config_error == ""
-    assert cfg.llm.model == DEFAULT_CONFIG["llm"]["model"]
+    assert cfg.models == [] and cfg.llm.model == ""
 
 
 def test_empty_file_is_not_an_error(tmp_path):

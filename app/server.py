@@ -238,6 +238,21 @@ def create_app(root: Path, token: str | None = None,
         """每次现读配置：设置里改完 Key，/api/meta 要立刻反映出来。"""
         return load_config(root, data_dir)
 
+    def _require_model(cfg) -> None:
+        """生成 / 建包前的模型可用性检查（两种出口各自说清缺什么）。
+
+        2026-09-17：模型不再有「内置默认」**条目** —— 用户不配就是一条都没有
+        （见 `config._parse_models`）。所以这里要把两种"不能生成"的原因分开说：
+        一条模型都没加、加了但没填 Key。同一句「未配置 Key」会把前一种说成后一种，
+        把用户指向错的地方（前者要去「添加模型」，后者才是填 Key）。
+        """
+        if cfg.mock:
+            return
+        if not cfg.models:
+            raise HTTPException(400, "还没有配置模型 —— 请在「设置 → 模型接口」里点右上角「添加模型」")
+        if not cfg.llm.api_key:
+            raise HTTPException(400, "当前模型还没配 API Key，请在「设置 → 模型接口」里填写")
+
     app = FastAPI(title="TalkScript Engine", version=version)
     app.state.token = token
     app.state.pipeline = pipeline
@@ -401,8 +416,7 @@ def create_app(root: Path, token: str | None = None,
     @app.post("/api/packs/create")
     def packs_create(req: PackCreateRequest):
         cfg = _cfg()
-        if not (cfg.llm.api_key or cfg.mock):
-            raise HTTPException(400, "未配置模型 API Key，请先在设置中填写")
+        _require_model(cfg)
         try:
             return create_pack(root, LLMClient(cfg.llm, mock=cfg.mock),
                                req.industry, req.description)
@@ -450,8 +464,7 @@ def create_app(root: Path, token: str | None = None,
     @app.post("/api/generate")
     def generate(req: GenerateRequest):
         cfg = _cfg()
-        if not (cfg.llm.api_key or cfg.mock):
-            raise HTTPException(400, "未配置模型 API Key，请在设置中填写后重试")
+        _require_model(cfg)
         pipeline.reload_llm()          # 用最新的 Key/模型，且不影响正在跑的作业
         return {"job_id": pipeline.start_generate(req)}
 
@@ -618,6 +631,13 @@ def create_app(root: Path, token: str | None = None,
                                   ("model", body.model)) if v not in ("", None)}
         if link:
             raw, active = load_raw_models(root, data_dir)
+            if not raw:
+                # 一条模型都没有（2026-09-17 起全新安装不再预置条目）。
+                # 旧入口仍要能用：自动建一条，把这次写的连接信息装进去 ——
+                # 不能 `next(...)` 硬取，那会 StopIteration 冒泡成 500。
+                active = "m1"
+                raw = [{"id": active, "name": "", "base_url": "",
+                        "api_key": "", "model": ""}]
             it = next(x for x in raw if x["id"] == active)
             if "base_url" in link:
                 it["base_url"] = str(link["base_url"]).rstrip("/")
@@ -653,10 +673,13 @@ def create_app(root: Path, token: str | None = None,
             save_config(root, {f: "" for f in num_fields}, config_dir=data_dir)
         if link_fields:
             raw, active = load_raw_models(root, data_dir)
-            it = next(x for x in raw if x["id"] == active)
-            for f in link_fields:
-                it[f] = ""
-            save_models(root, raw, active, config_dir=data_dir)
+            # 一条模型都没有 → 没什么可重置的（2026-09-17 起全新安装不再预置条目）。
+            # 不能 `next(...)` 硬取，那会 StopIteration 冒泡成 500。
+            if raw:
+                it = next(x for x in raw if x["id"] == active)
+                for f in link_fields:
+                    it[f] = ""
+                save_models(root, raw, active, config_dir=data_dir)
         return {"ok": True, "fields": body.fields}
 
     # ── 模型列表（增删改 + 切换当前）────────────────────────
@@ -680,6 +703,12 @@ def create_app(root: Path, token: str | None = None,
             if it is None:
                 raise HTTPException(404, f"没有这个模型：{mid}")
         else:
+            # 新增时请求地址**必填**（2026-09-17）。不再有「内置默认地址」兜底
+            # 的语义可以借：留空会被静默填成智谱的 —— 用户加一条 DeepSeek 模型
+            # 却指向智谱，报错要到生成时才出现（「未配置与已配置长得一样」的老坑）。
+            # 编辑时留空仍是「保持不变」，那是另一个语义，见下面。
+            if not base_url:
+                raise HTTPException(400, "请填写请求地址，例如 https://api.deepseek.com/v1")
             used = {x["id"] for x in raw}
             n = 1
             while f"m{n}" in used:
@@ -689,10 +718,10 @@ def create_app(root: Path, token: str | None = None,
             raw.append(it)
         it["name"] = body.name.strip()
         it["model"] = model
-        # 请求地址**留空 = 保持不变**（与 api_key 同一个语义），新增时留空则沿用
-        # 内置默认地址。不能要求必填：编辑一条还没配过地址的模型时那个框本来就是
-        # 空的，用户只改了展示名，却会因为「地址不能为空」被拒 —— 而他压根没动过地址。
-        # 「显式回到默认」由弹窗里的「恢复默认」承担（它把默认值填进框里）。
+        # 请求地址**留空 = 保持不变**（与 api_key 同一个语义）——
+        # 只对**编辑**成立：新增时上面已经拦过必填。
+        # 不能要求编辑时必填：编辑一条还没配过地址的模型时那个框本来就是空的，
+        # 用户只改了展示名，却会因为「地址不能为空」被拒 —— 而他压根没动过地址。
         if base_url:
             it["base_url"] = base_url
         # 空 = 保持不变：编辑时那个框是空的，用户没重填就说明密钥不该动
@@ -703,18 +732,23 @@ def create_app(root: Path, token: str | None = None,
 
     @app.post("/api/models/delete")
     def delete_model(body: ModelIdIn):
+        """删掉一条模型。**允许删到一条不剩**（2026-09-17）。
+
+        原来拦着「至少要保留一个模型」—— 那是「总有一条内置默认」时代的规则：
+        删空了生成时取不到连接信息，而界面还会显示「已配置 Key」。
+        现在模型是用户自己加的（不再有预置条目），删光就是「还没配」：
+        界面显示空列表引导，生成前被 `_require_model` 明确拦住（说清"还没配置模型"）。
+        留着这条拦反而让用户删不掉自己不想要的那条 —— 用户原话
+        「没有内置默认的模型的，需要用户自己添加，添加完还需要支持删除」。
+        """
         raw, active = load_raw_models(root, data_dir)
-        if len(raw) <= 1:
-            # 删到一条不剩 = 生成时没有任何连接信息可用，而界面还会显示
-            # 「已配置 Key」—— 留一条兜底比事后报错好。
-            raise HTTPException(400, "至少要保留一个模型")
         left = [x for x in raw if x["id"] != body.id]
         if len(left) == len(raw):
             raise HTTPException(404, f"没有这个模型：{body.id}")
-        if active == body.id:
-            # 删掉的正是当前模型 → 换成剩下的第一条。
-            # 不留悬空引用：那会让「当前模型」指向一条不存在的记录。
-            active = left[0]["id"]
+        if active == body.id or active not in {x["id"] for x in left}:
+            # 删掉的正是当前模型（或 active 已悬空）→ 换成剩下的第一条；
+            # 一条不剩时写空串，不留悬空引用。
+            active = left[0]["id"] if left else ""
         save_models(root, left, active, config_dir=data_dir)
         return {"ok": True, "active_model": active, "models": public_models(_cfg())}
 

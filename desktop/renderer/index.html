@@ -231,7 +231,10 @@
                 </div>
                 <div class="block-inner">
                   <label class="lbl">操作</label>
-                  <div class="row">
+                  <!-- ⚠ 用 .btn-row 而不是 .row：`.row > :first-child { flex: 1 }`
+                       是给「一个主控件 + 若干按钮」设计的（原来的 select + 按钮），
+                       两个纯按钮时会**把第一个拉满整行**（「详情」横跨 700px）。 -->
+                  <div class="btn-row">
                     <button id="btn-packinfo" class="ghost bordered" title="查看当前包的文件与配置">详情</button>
                     <button id="btn-newpack" class="ghost bordered" title="用模型生成新行业包">
                       <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
@@ -305,33 +308,35 @@
           </div>
 
           <div class="pane-detail">
-            <header class="page-head">
-              <div class="page-head-titles">
-                <h3 class="card-title" id="pi-title">包详情</h3>
-                <p class="hint" id="pi-desc"></p>
+            <!-- 右列首块统一用 .page-card（与 gen / llm 同结构）——
+                 原来是 <header class="page-head"> 包一层，那套是**面板顶部**的
+                 headbar 结构（含 .page-head-actions），用在右列里是错位复用，
+                 且间距节奏（margin-bottom 20px）与 .page-card 的 gap 16px 不同。 -->
+            <div class="page-card">
+              <h3 class="card-title" id="pi-title">包详情</h3>
+              <p class="hint" id="pi-desc"></p>
+              <div id="pi-checklist-wrap" class="hidden">
+                <label class="lbl">校对清单（草稿包需逐项核实）</label>
+                <pre id="pi-checklist"></pre>
               </div>
-            </header>
-            <div id="pi-checklist-wrap" class="hidden">
-              <label class="lbl">校对清单（草稿包需逐项核实）</label>
-              <pre id="pi-checklist"></pre>
-            </div>
-            <!-- 文件分组 + 查看器**左右并排**（2026-09-17）。
-                 之前上下堆叠：9 个角色分组全展开后查看器被推到很下面，
-                 点完一个文件要滚一大段才看到内容 —— 用户贴图报的就是这个。
-                 并排后点文件即时可见；两栏各自内部滚动，高度由 .pi-cols 定住。
-                 分组（知识 / 技能 / 合规 / 私有资料）已统一并进「行业包」面板，
-                 一个行业一份知识+技能，不再并列拆成三个导航项。 -->
-            <div class="pi-cols">
-              <div class="pi-groups-col">
-                <label class="lbl">文件分组</label>
-                <div id="pi-groups" class="kb-groups"></div>
-              </div>
-              <div class="kb-view" id="pi-file-view">
-                <div class="kb-view-head">
-                  <span id="pi-file-title" class="lbl">未选择文件</span>
-                  <span id="pi-file-size" class="hint"></span>
+              <!-- 文件分组 + 查看器**左右并排**（2026-09-17）。
+                   之前上下堆叠：9 个角色分组全展开后查看器被推到很下面，
+                   点完一个文件要滚一大段才看到内容 —— 用户贴图报的就是这个。
+                   并排后点文件即时可见；两栏各自内部滚动，高度由 .pi-cols 定住。
+                   分组（知识 / 技能 / 合规 / 私有资料）已统一并进「行业包」面板，
+                   一个行业一份知识+技能，不再并列拆成三个导航项。 -->
+              <div class="pi-cols">
+                <div class="pi-groups-col">
+                  <label class="lbl">文件分组</label>
+                  <div id="pi-groups" class="kb-groups"></div>
                 </div>
-                <pre id="pi-file-body" class="kb-body">从左侧选择一个文件查看内容。</pre>
+                <div class="kb-view" id="pi-file-view">
+                  <div class="kb-view-head">
+                    <span id="pi-file-title" class="lbl">未选择文件</span>
+                    <span id="pi-file-size" class="hint"></span>
+                  </div>
+                  <pre id="pi-file-body" class="kb-body">从左侧选择一个文件查看内容。</pre>
+                </div>
               </div>
             </div>
             <div class="page-actions">
@@ -395,6 +400,13 @@
             <p class="hint">可以配多个模型（每个自带请求地址与 Key），启用的那个用于生成</p>
           </div>
           <div class="page-head-actions">
+            <!-- 「刷新」与行业包面板的 headbar 同构（次级动作 ghost bordered +
+                   主操作 primary slim）—— 2026-09-17 用户报「headbar 按钮不齐」：
+                   原来只有行业包有刷新、模型接口只有一个主按钮。 -->
+            <button class="ghost bordered" id="llm-refresh" title="重新拉取模型列表与配置">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 15.5-6.3L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.5 6.3L3 16"/><path d="M3 21v-5h5"/></svg>
+              刷新
+            </button>
             <button class="primary slim" id="st-add-model"
                     title="添加一个模型（可以是另一家服务商，Key 各存各的）">
               <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
@@ -429,7 +441,8 @@
                 <div class="block-inner">
                   <label class="lbl">请求地址</label>
                   <input id="md-baseurl" placeholder="https://open.bigmodel.cn/api/paas/v4">
-                  <p class="hint">OpenAI 兼容接口的根地址，<b>不要</b>带 /chat/completions。</p>
+                  <p class="hint">OpenAI 兼容接口的根地址，<b>不要</b>带 /chat/completions。
+                    新增模型时必填；编辑时留空表示不改动。</p>
                 </div>
                 <div class="block-inner">
                   <label class="lbl">API Key</label>
@@ -460,7 +473,7 @@
               <div class="block-inner">
                 <label class="lbl">重试次数
                   <button class="linkbtn" id="st-reset-adv" type="button"
-                          title="恢复为默认：重试 2 次 / 超时 180 秒 / 输出预算 16000">恢复默认</button>
+                          title="恢复为默认：重试 2 次 / 超时 180 秒">恢复默认</button>
                 </label>
                 <input id="st-retries" type="number" min="0" max="10" step="1" placeholder="2（默认）">
                 <p class="hint">请求失败（网络 / 超时 / 429 / 5xx）时自动重试的次数。</p>
@@ -470,22 +483,16 @@
                 <input id="st-timeout" type="number" min="5" max="1800" step="5"
                        placeholder="180（默认）">
               </div>
-              <div class="block-inner">
-                <label class="lbl">输出预算（tokens）</label>
-                <input id="st-maxtokens" type="number" min="256" max="200000" step="500"
-                       placeholder="16000（默认）">
-                <p class="hint">推理型模型的「思考」也计入这个预算，给得太小会拿到空内容
-                  （接口仍返回 200），表现为「模型输出无法解析」。</p>
-              </div>
-              <!-- 「保存」跟着它管的那几个字段走（2026-09-17）：
-                   折叠区收起时右列只有模型表单那一个「保存」，不再出现
-                   「两个保存、该点哪个」。这也是各家 Agent 设置页的通行做法 ——
-                   按区保存，不搞一个全局保存按钮。 -->
-              <div class="page-actions">
-                <span class="spacer"></span>
-                <button class="primary slim" id="st-save"
-                        title="只保存上面的高级配置；模型的地址与 Key 在模型表单里各自保存">保存高级配置</button>
-              </div>
+              <!-- 「输出预算（tokens）」已删（2026-09-17，用户原话「高级设置去掉
+                   token 限制吧」）。后端 `max_tokens` 仍有内置默认值（推理型模型
+                   需要它，见 app/config.py 的 DEFAULT_CONFIG），只是不再让用户调 ——
+                   它属于「模型自身的输出上限」，不是「连接稳健性」参数，
+                   与重试 / 超时不同类。NUMERIC_BOUNDS 里保留该区间：
+                   前后端一致是 pytest 守卫的不变量，且后端仍在用。 -->
+              <!-- 「保存高级配置」已删（2026-09-17）：用户报「模型面板有两个保存」——
+                   同一屏里两个确认按钮让人不知道该点哪个。高级配置（重试 / 超时）
+                   改由模型表单的「保存」一并存掉，见 settings.js 的 saveAdvancedConfig()。
+                   这也是各家 Agent 设置页的通行做法：**一屏一个保存**。 -->
             </div>
           </details>
 

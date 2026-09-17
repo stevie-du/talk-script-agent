@@ -50,12 +50,19 @@ def _clean_env(monkeypatch):
         monkeypatch.delenv(k, raising=False)
 
 
-def _client(root: Path):
+def _client(root: Path, seed: bool = True):
     try:
         from fastapi.testclient import TestClient
     except ImportError:                                   # pragma: no cover
         pytest.skip("未安装 fastapi/httpx")
     from app.server import create_app
+    # 2026-09-17：全新安装**不再预置模型**（用户原话「没有内置默认的模型的，
+    # 需要用户自己添加，添加完还需要支持删除」）。而本文件绝大多数测试测的是
+    # 「已有模型时的增删改 / 迁移 / 密钥剥离」，需要一个起点 —— 由测试自己显式造，
+    # 不再依赖产品隐式预置（那种依赖会在产品语义变化时集体报红，
+    # 而它们守的东西其实没变）。文件已存在时不覆盖：`_write_legacy()` 先写过就尊重它。
+    if seed and not (root / "config.yaml").exists():
+        _seed_placeholder_model(root)
     c = TestClient(create_app(root, token="ml-token"),
                    base_url="http://127.0.0.1:8765",
                    raise_server_exceptions=False)
@@ -69,6 +76,31 @@ def _write_legacy(root: Path, **llm) -> Path:
     body = "".join(f"  {k}: {v}\n" for k, v in llm.items())
     p.write_text(f"llm:\n{body}", encoding="utf-8")
     return p
+
+
+def _seed_models(root: Path, *items: dict, active: str | None = None) -> Path:
+    """显式写一份 `models` 段。"""
+    lines = ["models:"]
+    for it in items:
+        body = ", ".join(f"{k}: {v!r}" for k, v in it.items())
+        lines.append(f"  - {{{body}}}")
+    if active is not None:
+        lines.append(f"active_model: {active!r}")
+    p = root / "config.yaml"
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return p
+
+
+def _seed_placeholder_model(root: Path) -> Path:
+    """一条**空壳**模型（id = DEFAULT_MODEL["id"]，三个连接字段都空）。
+
+    这正是 2026-09-17 之前「全新安装自动预置」的那条。产品上不再预置了，
+    但**已有用户**的文件里可能存着这么一条（迁移产物），且本文件要测的
+    迁移 / 写路径 / 密钥剥离 / 增删改边界都需要一个起点。
+    """
+    return _seed_models(root, {"id": DEFAULT_MODEL["id"], "name": "",
+                               "base_url": "", "api_key": "", "model": ""},
+                        active=DEFAULT_MODEL["id"])
 
 
 # ── 1. 迁移：老文件不能变成「一个模型都没有」──────────────────
@@ -123,11 +155,61 @@ def test_migration_keeps_defaulted_signal_per_field(tmp_path):
     assert "model" not in cfg.llm_defaulted, "写过的模型名不该还在名单里"
 
 
-def test_fresh_install_gets_one_placeholder_model(tmp_path):
-    """全新安装也要有一条 —— 空列表会让「至少保留一个模型」这条规则自相矛盾。"""
+def test_fresh_install_has_no_model(tmp_path):
+    """全新安装**一条模型都没有**（2026-09-17 产品决定）。
+
+    用户原话：「没有内置默认的模型的，需要用户自己添加，添加完还需要支持删除」。
+    预置一条 glm-4.7 的后果是未配置状态与已配置状态长得一样 ——
+    用户以为已经配好了（`MEMORY.md` 第一节第 ⑤ 种静默降级）。
+
+    ⚠ 与 `test_legacy_config_migrates_into_one_model` 是一对：
+    老文件（llm 段里有真实值）**仍要迁移**（否则静默丢配置），
+    新文件（llm 段全空）才是空列表。判据是「llm 段里有没有任何非空值」。
+    """
     cfg = load_config(tmp_path)
-    assert [m.id for m in cfg.models] == [DEFAULT_MODEL["id"]]
-    assert cfg.active_model == DEFAULT_MODEL["id"]
+    assert cfg.models == [], "全新安装不该预置模型"
+    assert cfg.active_model == "", "没有模型时 active 必须是空串（不留悬空引用）"
+    # 不能崩：load_config 里那句 next(...) 在空列表上会 StopIteration
+    assert cfg.llm.api_key == "" and cfg.llm.model == ""
+
+
+def test_fresh_install_can_add_then_delete_back_to_empty(tmp_path):
+    """空 → 加一条 → 删掉 → 又空。这是用户原话的完整路径。
+
+    原来 `delete_model` 拦着「至少要保留一个模型」—— 那是「总有一条内置默认」
+    时代的规则。现在模型是用户自己加的，删光就是「还没配」，
+    生成前会被 `_require_model` 明确拦住（说清「还没有配置模型」）。
+    """
+    c = _client(tmp_path, seed=False)
+    assert c.get("/api/config").json()["models"] == []
+
+    r = c.post("/api/models", json={"id": "", "name": "智谱",
+                                    "base_url": "https://x/v4", "model": "glm-4.7",
+                                    "api_key": SECRET})
+    assert r.status_code == 200, r.text
+    body = c.get("/api/config").json()
+    assert [m["id"] for m in body["models"]] == ["m1"]
+    assert body["active_model"] == "m1", "第一条加进来就该是当前生效的"
+
+    r = c.post("/api/models/delete", json={"id": "m1"})
+    assert r.status_code == 200, r.text
+    body = c.get("/api/config").json()
+    assert body["models"] == [] and body["active_model"] == ""
+    # 文件里的 active_model 也要被清掉，不能留一个指向不存在条目的悬空值
+    raw, active = load_raw_models(tmp_path)
+    assert raw == [] and active == ""
+
+
+def test_generate_without_any_model_is_refused_with_a_clear_reason(tmp_path):
+    """一条模型都没有时生成 → 400 且说清「还没配置模型」。
+
+    与「有模型但没填 Key」是**两种不同的缺**：前者要去「添加模型」，
+    后者才是填 Key。同一句「未配置 Key」会把用户指向错的地方。
+    """
+    c = _client(tmp_path, seed=False)
+    r = c.post("/api/generate", json={"topic": "家用电梯怎么挑？"})
+    assert r.status_code == 400, r.text
+    assert "还没有配置模型" in r.json()["detail"], r.json()
 
 
 def test_dangling_active_model_falls_back_to_first(tmp_path):
@@ -174,6 +256,7 @@ def test_raw_entry_keeps_empty_fields(tmp_path):
     下次读回来，那个地址就成了「用户显式配的」，界面上「内置默认」的小标
     凭空消失。用户没做任何操作，提示却没了，而且再也回不来。
     """
+    _seed_placeholder_model(tmp_path)
     raw, active = load_raw_models(tmp_path)
     assert raw[0]["base_url"] == "", "原始条目被填实了"
     assert raw[0]["model"] == ""
@@ -352,23 +435,28 @@ def test_upsert_rejects_blank_model_and_malformed_url(tmp_path):
     assert len(c.get("/api/config").json()["models"]) == 1, "被拒的请求不该留下痕迹"
 
 
-def test_upsert_allows_blank_url_meaning_keep_or_default(tmp_path):
-    """地址**留空**是另一回事：不是「填错」，是「没填」。
+def test_upsert_requires_url_when_creating(tmp_path):
+    """新增时请求地址**必填**（2026-09-17）；编辑时留空仍是「保持不变」。
 
-    编辑一条还没配过地址的模型时，弹窗里那个框本来就是空的 —— 用户只改了
-    展示名，不该因为「地址不能为空」被拒（他压根没动过地址）。
-    新增时留空则沿用内置默认地址，与「存了空值」的生效结果完全一致。
+    新增留空的旧行为是「落回内置默认地址」—— 不再有那层语义可以借：
+    用户加一条 DeepSeek 模型却指向智谱，报错要到生成时才出现，
+    而且完全指不到根因（「未配置与已配置长得一样」的老坑）。
+    编辑时那个框本来就是空的（还没配过地址），用户只改展示名不该被拒 ——
+    他压根没动过地址，留空表示「保持不变」。
     """
     c = _client(tmp_path)
-    # 新增：留空 → 落回内置默认地址，且仍报「内置默认」（因为它确实没配过）
+    # 新增：地址留空 → 拒，并说清要填什么
     r = c.post("/api/models", json={"id": "", "name": "占位", "model": "a"})
-    assert r.status_code == 200, r.text
-    m = next(x for x in c.get("/api/config").json()["models"] if x["id"] == "m1")
-    assert m["base_url"] == DEFAULT_MODEL["base_url"]
-    assert "base_url" in m["defaulted"]
+    assert r.status_code == 400, r.text
+    assert "请求地址" in r.json()["detail"]
+    assert len(c.get("/api/config").json()["models"]) == 1, "被拒的请求不该留下痕迹"
 
-    # 编辑：只改展示名，地址留空 → 已存的那条地址不能被动过
-    c.post("/api/models", json={"id": "m1", "base_url": "https://a/v1", "model": "a"})
+    # 新增：填了地址 → 通过
+    r = c.post("/api/models", json={"id": "", "name": "占位",
+                                    "base_url": "https://a/v1", "model": "a"})
+    assert r.status_code == 200, r.text
+
+    # 编辑：只改展示名、地址留空 → 已存的那条地址不能被动过
     r = c.post("/api/models", json={"id": "m1", "name": "改个名", "model": "a"})
     assert r.status_code == 200, r.text
     m = next(x for x in c.get("/api/config").json()["models"] if x["id"] == "m1")
@@ -402,12 +490,21 @@ def test_new_ids_do_not_collide_with_existing(tmp_path):
     assert len(ids) == len(set(ids)) == 4, ids
 
 
-def test_cannot_delete_the_last_model(tmp_path):
-    """删到一条不剩 = 生成时没有任何连接信息可用，而界面还会显示「已配置 Key」。"""
+def test_can_delete_the_last_model(tmp_path):
+    """**删光也可以**（2026-09-17 产品决定）。
+
+    原来拦着「至少要保留一个模型」—— 那是「总有一条内置默认」时代的规则
+    （删空了生成时取不到连接信息，而界面还会显示「已配置 Key」）。
+    现在模型是用户自己加的（不再有预置条目），删光就是「还没配」：
+    界面显示空列表引导，生成前被 `_require_model` 明确拦住。
+    用户原话：「没有内置默认的模型的，需要用户自己添加，添加完还需要支持删除」。
+    """
     c = _client(tmp_path)
     r = c.post("/api/models/delete", json={"id": DEFAULT_MODEL["id"]})
-    assert r.status_code == 400
-    assert len(c.get("/api/config").json()["models"]) == 1
+    assert r.status_code == 200, r.text
+    body = c.get("/api/config").json()
+    assert body["models"] == [], "最后一条也该能删掉"
+    assert body["active_model"] == "", "删光后不能留悬空的 active_model"
 
 
 def test_deleting_active_model_falls_back_to_a_remaining_one(tmp_path):

@@ -167,11 +167,18 @@ def test_config_merge_keeps_untouched_fields():
 
 
 def test_broken_config_falls_back_to_defaults():
-    """配置写坏不该让引擎起不来（原来会直接抛异常，界面只剩「无法连接引擎」）。"""
+    """配置写坏不该让引擎起不来（原来会直接抛异常，界面只剩「无法连接引擎」）。
+
+    2026-09-17：读坏 → `models` 段也读不到 → **一条模型都没有**
+    （不再是「落回内置默认的 glm-4.7」—— 文件都读不出来还说「你用的是 glm-4.7」
+    才是撒谎）。这里守的核心是**不抛异常** + 两个信号都在：
+    `config_error` 说「读坏了」、空列表让界面说「还没有配置模型」。
+    """
     tmp = Path(tempfile.mkdtemp(prefix="ts-badcfg-"))
     (tmp / "config.yaml").write_text("llm: [this is: not a mapping\n", encoding="utf-8")
     cfg = load_config(tmp)
-    assert cfg.llm.model == "glm-4.7"
+    assert cfg.config_error, "读坏了却报告「没问题」"
+    assert cfg.models == [] and cfg.llm.model == ""
     assert cfg.default_pack == "elevator"
 
 

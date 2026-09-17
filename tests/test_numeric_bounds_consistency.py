@@ -51,15 +51,16 @@ _INPUT = re.compile(r'<input\s+id="(st-[a-z]+)"(.*?)>', re.S)
 _ATTR = re.compile(r'\b(min|max)="(-?[\d.]+)"')
 
 # JS 里的字段名 → HTML 输入框 id。
-# 2026-09-17：采样温度 (temperature) 从前端**高级配置 UI**移除（任务 4）——
-# 但 NUMERIC_BOUNDS 里**仍保留** temperature 区间（与后端一致是 pytest 守卫的不变量），
-# 仅 UI 不暴露。所以 JS_TO_INPUT 不再包含 temperature（HTML 里也没 st-temperature 元素了）。
-# 后端 NUMERIC_BOUNDS 仍然有 temperature 区间 → test_temperature_is_no_longer_narrower
-# / test_temperature_accepts_zero 仍在跑且过。
+# 2026-09-17：采样温度 (temperature) 与输出预算 (max_tokens) 先后从**高级配置 UI**
+# 移除（用户原话「移除高级配置中的采样温度」「高级设置去掉 token 限制吧」）——
+# 但 NUMERIC_BOUNDS 里**仍保留**这两项区间（与后端一致是 pytest 守卫的不变量，
+# 且后端仍在用：temperature 供重试时微调、max_tokens 是模型输出上限），仅 UI 不暴露。
+# 所以 JS_TO_INPUT 不再包含它们（HTML 里也没有对应输入框了）。
+# 后端 NUMERIC_BOUNDS 仍有这两项 → test_temperature_is_no_longer_narrower /
+# test_temperature_accepts_zero 仍在跑且过。
 JS_TO_INPUT = {
     "retries": "st-retries",
     "timeout": "st-timeout",
-    "max_tokens": "st-maxtokens",
 }
 
 

@@ -106,7 +106,10 @@ def test_config_fresh(tmp_path=None):
         denied = c.post("/api/packs/create",
                         json={"industry": "假体陀机", "description": "测试用行业描述"})
     assert denied.status_code == 400, (denied.status_code, denied.text)
-    assert "未配置" in denied.json()["detail"], denied.text
+    # 2026-09-17 文案调整：从「未配置模型 API Key」改成「当前模型还没配 API Key，
+    # 请在「设置 → 模型接口」里填写」—— 多了「当前模型」这个主语（明确改哪一条）
+    # 与下一步动作。断言只认「API Key」这个关键信息，不锁整句。
+    assert "API Key" in denied.json()["detail"], denied.text
 
     # 用户在设置页保存 Key 与模型（这一步之后不重启）
     save_config(tmp, {"api_key": "sk-after-startup", "model": "saved-model"})
