@@ -1527,6 +1527,35 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     !stSaveScoped.missing && stSaveScoped.insideDetails && stSaveScoped.insideAdvBody,
     JSON.stringify(stSaveScoped));
 
+  // 顶部「新增 / 添加」主操作按钮样式统一（2026-09-17）：
+  // packinfo 的 [+ 新建] 跟 llm 的 [+ 添加模型] 都是 .page-head-actions
+  // 里的**主动作**，用 primary slim（实心深色）；同区「刷新」用 ghost bordered
+  // —— 主次分明。判据：列 .page-head-actions 里所有 primary 按钮，
+  // 并至少有一个 + 至少有一个 ghost.bordered（说明主次都存在）。
+  const topBtns = await evalIn(`return (function(){
+    var out = [];
+    ['pane-gen','pane-packinfo','pane-llm'].forEach(function(id){
+      var sec = document.getElementById(id);
+      if (!sec) return;
+      var act = sec.querySelector('.page-head-actions');
+      if (!act) { out.push({id:id, hasAct: false}); return; }
+      var btns = [].slice.call(act.querySelectorAll('button')).map(function(b){
+        return { id: b.id, cls: b.className, text: b.textContent.trim() };
+      });
+      out.push({id:id, hasAct: true, btns: btns});
+    });
+    return out;
+  })()`);
+  // 找出所有顶级操作（带 primary slim 的）+ 所有次级操作（ghost bordered 的）
+  var prims = topBtns.flatMap(function(p){ return (p.btns||[]).filter(function(b){ return /\bprimary\b/.test(b.cls) && /\bslim\b/.test(b.cls); }).map(function(b){ return {pane:p.id, btn:b}; }); });
+  var ghosts = topBtns.flatMap(function(p){ return (p.btns||[]).filter(function(b){ return /\bghost\b/.test(b.cls) && /\bbordered\b/.test(b.cls); }).map(function(b){ return {pane:p.id, btn:b}; }); });
+  check("顶部新增按钮样式：主动作统一 primary slim，次动作 ghost bordered",
+    prims.length >= 2 && ghosts.length >= 1
+      // 所有 primary slim 都是「新建/添加」类语义（按钮文案以 + 新建/添加 开头）
+      && prims.every(function(p){ return /^[+]?\s*(新建|添加)/.test(p.btn.text); }),
+    JSON.stringify({ prims: prims.map(function(p){ return p.pane+":"+p.btn.id; }),
+                     ghosts: ghosts.map(function(p){ return p.pane+":"+p.btn.id; }) }));
+
   // ── 完整流程：草稿转正（fitment 包是草稿态）──
   await evalIn(`const sel = document.getElementById('pack');
     sel.value = 'fitment'; sel.dispatchEvent(new Event('change', {bubbles:true}));

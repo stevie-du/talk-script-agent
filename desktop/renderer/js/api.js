@@ -76,9 +76,9 @@ export const api = {
   pack: (name) => request(`/api/packs/${encodeURIComponent(name)}`),
   createPack: (industry, description) =>
     request("/api/packs/create", { method: "POST", body: { industry, description } }),
-  exportSkill: (name, includePrivate = false) =>
-    request(`/api/packs/${encodeURIComponent(name)}/export-skill?include_private=${includePrivate}`,
-      { method: "POST", body: {} }),
+  // 注：「导出为 Agent 技能」的 UI 入口已删（2026-09-17），后端
+  // /api/packs/<n>/export-skill 端点仍由 pytest 覆盖 —— 想恢复 UI 时
+  // 把 exportSkill 加回来 + 复刻按钮 + 在 README 写明用途。
   undraft: (name) => request(`/api/packs/${encodeURIComponent(name)}/undraft`, { method: "POST", body: {} }),
 
   config: () => request("/api/config"),
