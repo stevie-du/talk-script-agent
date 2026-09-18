@@ -35,6 +35,7 @@ from app.pipeline import Pipeline                              # noqa: E402
 from app.schemas import GenerateRequest                        # noqa: E402
 from app.security import origin_allowed, token_ok              # noqa: E402
 from app.server import create_app                              # noqa: E402
+from app.store import INDEX_VERSION                            # noqa: E402
 
 TOKEN = "test-token-abc"
 
@@ -284,10 +285,15 @@ def test_history_keeps_failed_and_deletes_clean(tmp_path):
     assert any(x["id"] == jid for x in items), items
     assert c.get(f"/api/history/{jid}").json()["id"] == jid
 
-    # 索引文件存在且只有摘要字段
+    # 索引文件存在且只有摘要字段。
+    # ⚠ 版本号**比对常量**，不写死数字：写死 1 的话，以后每升一次版本都要改这行，
+    # 而漏改的表现是「这条与版本无关的断言先红」，把真正的回归盖掉。
     idx = json.loads((tmp / "generated" / "index.json").read_text(encoding="utf-8"))
-    assert idx["version"] == 1 and any(x["id"] == jid for x in idx["items"])
+    assert idx["version"] == INDEX_VERSION and any(x["id"] == jid for x in idx["items"])
     assert "sections" not in idx["items"][0]
+    # 摘要要带 platform：会话列表副标题靠它显示「抖音 / 小红书 / 视频号」。
+    # 漏了不会报错，界面只是那一格永远空着（与「用户没选平台」长得一样）。
+    assert idx["items"][0].get("platform"), idx["items"][0]
 
     # 删除后索引与磁盘都干净，且不会「复活」
     assert c.delete(f"/api/history/{jid}").status_code == 200

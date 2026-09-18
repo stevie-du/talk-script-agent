@@ -387,9 +387,11 @@ window.__addCount = 0;
     if (s.indexOf('/api/history') >= 0 && NOKEY) return mk([]);
     if (s.indexOf('/api/history') >= 0) return mk([
       { id:'s1', created_at:'2026-09-13 10:00', pack:'elevator',
-        topic:'家用电梯怎么挑？', duration:60, chars:42, passed:true, state:'done' },
+        topic:'家用电梯怎么挑？', platform:'小红书',
+        duration:60, chars:42, passed:true, state:'done' },
       { id:'s2', created_at:'2026-09-13 15:30', pack:'elevator',
-        topic:'扶梯突然停了怎么办', duration:null, chars:null, passed:null, state:'writing' } ]);
+        topic:'扶梯突然停了怎么办', platform:'抖音',
+        duration:null, chars:null, passed:null, state:'writing' } ]);
     if (s.indexOf('/api/config/test') >= 0) return mk({ ok:true, model:'glm-4.7', detail:'延迟 320ms' });
     // 必须在 /api/config 的通用匹配之前：indexOf('/api/config') 也会命中 reset
     if (s.indexOf('/api/config/reset') >= 0) return mk({ ok:true, fields:['base_url'] });
@@ -2482,6 +2484,105 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     return r ? r.querySelector('.sess-sub').textContent : '';`);
   check("会话行副标题用行业包显示名而非 slug",
     /电梯行业包/.test(rowSub) && !/elevator/.test(rowSub), rowSub);
+
+  // 副标题的信息结构：**只留「行业 · 时间 · 平台」**。
+  // 用户 2026-09-18 的原话：「不用展示时间和字数还有合格，只需要展示行业、时间
+  // 还有平台」。此前那三项是跟在时间后面的（「电梯 · 时刻 · 时长 · 字数 · 合格」）
+  // —— 时长与字数在同一个包里基本恒定、「合格」几乎每条都是，一列同值词只有噪声；
+  // 而真正区分记录的**平台**（同选题的抖音稿/小红书稿是两个产物）压根没显示。
+  //
+  // ⚠ 断言要盯住「挪走了什么」，不能只盯「平台出现了」：只测 `/小红书/` 的话，
+  // 把 duration/chars/passed 再塞回去照样全绿 —— 而用户告的就是那几个字段。
+  const subFields = await evalIn(`const r = document.querySelector('#session-list .sess-item');
+    return r ? { text: r.querySelector('.sess-sub').textContent,
+                 segs: r.querySelector('.sess-sub').textContent.split(' · ') } : null;`);
+  check("会话行副标题只留行业 · 时间 · 平台（不再有秒数/字数/合格）",
+    subFields && subFields.segs.length === 3
+      && /电梯行业包/.test(subFields.segs[0])
+      && /^[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}$/.test(subFields.segs[1])
+      && subFields.segs[2] === "小红书"
+      && !/[0-9]+s\b/.test(subFields.text) && !/字/.test(subFields.text)
+      && !/合格/.test(subFields.text),
+    JSON.stringify(subFields));
+
+  // 失败/在跑的记录仍要把状态摆进副标题 —— 状态不能只靠状态点的颜色表达
+  //（色弱与读屏用户拿不到颜色信息）。
+  // 用 data-id 精确取那条 writing 记录（s2）：按文案猜行会随桩数据变动而选错。
+  const subState = await evalIn(`const r = document.querySelector('#session-list .sess-item[data-id="s2"]');
+    return r ? { sub: r.querySelector('.sess-sub').textContent,
+                 dot: r.querySelector('.dot').className } : null;`);
+  check("未完成记录的副标题带文字状态，不只靠状态点颜色",
+    subState && / · /.test(subState.sub) && subState.sub.split(' · ').length === 4,
+    JSON.stringify(subState));
+
+  // 挪走的时长/字数/校验结果要能在悬浮提示里找回来（否则「想看还得点进去」）。
+  const rowTip = await evalIn(`const r = document.querySelector('#session-list .sess-item');
+    return r ? r.title : '';`);
+  check("悬浮提示补回了被挪走的时长/字数/校验结果",
+    /60s/.test(rowTip) && /42 字/.test(rowTip) && /已通过校验/.test(rowTip), rowTip);
+
+  // 删除按钮悬停态：**只把图标由灰转红，背景保持透明**。
+  // 用户 2026-09-18 两句话，第二句是对第一句实现的否决：
+  //   ①「删除按钮悬浮时的样式改一下，现在会显得距离边距不统一」
+  //   ②「不是让你改成红色的删除按钮，不要背景色，就改删除图标的颜色就行了啊」
+  // 先按 ① 做了「实色红底 + 反白图标」，被 ② 直接否掉 —— 凭空多出的一块面积
+  // 反而加重了「边距不统一」的观感，用户要的是图标自己变醒目。
+  //
+  // ⚠ 断言必须把 bg 也钉住（=== 透明），只测 fg 是不够的：
+  //   「红底 + 白图标」和「透明底 + 红图标」的 fg 完全不同，看似能区分，但
+  //   只要有人给按钮补一个**任意**底色（连 --fill-strong 淡灰底都算），
+  //   只测 fg 的断言照样绿 —— 而那正是用户明确不要的东西。
+  //
+  // ⚠ 用真悬停（dispatchMouseEvent）而不是加 class：样式写错时假 hover 照样绿。
+  const delPt = await evalIn(`const d = document.querySelector('#session-list .sess-item .sess-del');
+    d.scrollIntoView({ block: 'center' });
+    const b = d.getBoundingClientRect();
+    return { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) };`);
+  await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: delPt.x, y: delPt.y });
+  await sleep(250);
+  const delHover = await evalIn(`const d = document.querySelector('#session-list .sess-item .sess-del');
+    const s = getComputedStyle(d);
+    return { bg: s.backgroundColor, fg: s.color, op: s.opacity };`);
+  // --bad: #d70015 → rgb(215, 0, 21)
+  // 透明底在 computedStyle 里的写法是 rgba(0, 0, 0, 0)（不是 "transparent"）；
+  // 用 /0\\)$/ 匹配 alpha=0，顺带挡住任何带底色的写法。
+  check("删除按钮悬停只改图标颜色、不加背景色（用户明确否掉了实色红底）",
+    /rgba?\([^)]*,\s*0\)$/.test(delHover.bg) && delHover.fg === "rgb(215, 0, 21)"
+      && delHover.op === "1",
+    JSON.stringify(delHover));
+
+  // 按下态同样不许长背景色 —— 只换个更深的红 + 缩放。
+  // 单测 :hover 挡不住「hover 透明但 active 给底色」这种半吊子改法。
+  await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", x: delPt.x, y: delPt.y, button: "left", clickCount: 1 });
+  await sleep(120);
+  const delActive = await evalIn(`const d = document.querySelector('#session-list .sess-item .sess-del');
+    const s = getComputedStyle(d);
+    return { bg: s.backgroundColor, fg: s.color };`);
+  await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: delPt.x, y: delPt.y, button: "left", clickCount: 1 });
+  check("删除按钮按下态也不给背景色（仍是透明底 + 更深一档的红）",
+    /rgba?\([^)]*,\s*0\)$/.test(delActive.bg) && delActive.fg === "rgb(194, 0, 20)",
+    JSON.stringify(delActive));
+
+  // 悬停块的几何必须与行对齐：28px 方块垂直居中、右边距与行的 padding 一致。
+  // 「显得距离边距不统一」的另一半是这个 —— 底色方案被否掉之后，
+  // 几何是**唯一**还留着的东西，方块若偏上/贴边，问题原样还在。
+  const delGeo = await evalIn(`const row = document.querySelector('#session-list .sess-item');
+    const del = row.querySelector('.sess-del');
+    const rb = row.getBoundingClientRect(), db = del.getBoundingClientRect();
+    const rs = getComputedStyle(row);
+    return { up: Math.round(db.top - rb.top), down: Math.round(rb.bottom - db.bottom),
+             right: Math.round(rb.right - db.right),
+             padR: Math.round(parseFloat(rs.paddingRight)),
+             size: [Math.round(db.width), Math.round(db.height)] };`);
+  check("删除按钮悬停块在行内垂直居中、右距合理（不再像歪着的色斑）",
+    delGeo.size[0] === 28 && delGeo.size[1] === 28
+      && Math.abs(delGeo.up - delGeo.down) <= 1
+      && delGeo.right <= delGeo.padR,
+    JSON.stringify(delGeo));
+
+  // 测完把鼠标挪开：后面还有断言要量别处的悬停态，留着会污染。
+  await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 5, y: 5 });
+  await sleep(200);
 
   // 左栏会话列表溢出时必须能滚到首尾。
   // 回归的 bug：.left-scroll 曾用 justify-content: flex-end 贴底 —— flex-end 会让

@@ -30,7 +30,12 @@ from .fileio import rmtree_resilient, write_atomic
 log = logging.getLogger(__name__)
 
 INDEX_NAME = "index.json"
-INDEX_VERSION = 1
+# v2：摘要多了 platform（会话列表副标题要显示「平台」）。
+# ⚠ 必须跟着升版本号 —— 老索引里的条目**没有** platform 字段，
+# 不重建的话列表永远显示不出平台，而这与「用户当时真没选平台」在界面上
+# 长得一模一样（参见审查基线里的「静默降级」）。_read_index_file 见到
+# 版本不符会走 _rebuild()，从 result.json/job.json 重新摘一次。
+INDEX_VERSION = 2
 
 # 墓碑只用于拦住「删除后仍在跑的作业」，不需要长期留存
 _TOMBSTONE_CAP = 512
@@ -297,6 +302,11 @@ class ArtifactStore:
         return {
             "id": r.get("id"), "created_at": r.get("created_at", ""),
             "pack": r.get("pack", ""), "topic": p.get("topic", ""),
+            # 会话列表副标题现在显示「行业 · 时间 · 平台」，摘要必须带上 platform。
+            # ⚠ 这是**两条**摘要路径里的第一条（另一条是 _summary_from_job）——
+            # 只补一条的话，已完成与未完成记录的副标题会差一格，而缺的这一格
+            # 与「用户当时真没选平台」在界面上长得一模一样（静默降级）。
+            "platform": p.get("platform"),
             "duration": p.get("duration"), "chars": c.get("chars_total"),
             "passed": c.get("passed"), "state": "done",
         }
@@ -307,6 +317,7 @@ class ArtifactStore:
         return {
             "id": snap.get("id"), "created_at": snap.get("created_at", ""),
             "pack": p.get("pack", ""), "topic": p.get("topic", ""),
+            "platform": p.get("platform"),
             "duration": p.get("duration"), "chars": None, "passed": None,
             "state": snap.get("state", "failed"), "error": snap.get("error"),
         }

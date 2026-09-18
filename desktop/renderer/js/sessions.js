@@ -147,9 +147,14 @@ function updateRow(row, it) {
   row.classList.toggle("active", isCur);
 
   const packName = packLabel(it.pack);
-  const sub = st === "done"
-    ? `${packName} · ${fmtTime(it.created_at)} · ${it.duration ?? "-"}s`
-    : `${packName} · ${STATE_LABEL[st] || st} · ${fmtTime(it.created_at)}`;
+  // 副标题只留「行业 · 时间 · 平台」：时长 / 字数 / 合格三项从列表里撤掉，
+  // 它们既占宽又互相压字，而列表这一层的用途只是「认哪条是哪条」。
+  // 撤掉的信息不丢 —— 全部并进 row.title 的悬浮提示（见下方）。
+  // 未完成的记录另把文字状态插在行业之后（只有色点会让读屏与色弱用户丢信息）。
+  const parts = [packName, fmtTime(it.created_at)];
+  if (it.platform) parts.push(it.platform);
+  if (st !== "done") parts.splice(1, 0, STATE_LABEL[st] || st);
+  const sub = parts.join(" · ");
   const sig = [isCur, st, it.topic, sub].join("\u0001");
   if (row._sig === sig) return;
   row._sig = sig;
@@ -164,7 +169,16 @@ function updateRow(row, it) {
   row.setAttribute("aria-label", `${it.topic || "未命名"}，${stateText}`);
   row.querySelector(".sess-topic").textContent = it.topic || "";
   row.querySelector(".sess-sub").textContent = sub;
-  row.title = `${it.topic || ""}\n${packName} · ${fmtTime(it.created_at)}${done ? "" : " · 生成中"}`;
+  // 列表里撤掉的三项在这里补回：副标题只是「窄」，不是「没有」。
+  // 每项都先判 null —— 后端对在跑的作业不给 duration/chars/passed，
+  // 硬拼会印出 undefined；filter(Boolean) 把空项整段丢掉，不留空行。
+  const tip = [it.topic || "", sub];
+  if (done) {
+    if (it.duration != null) tip.push(`${it.duration}s`);
+    if (it.chars != null) tip.push(`${it.chars} 字`);
+    if (it.passed != null) tip.push(it.passed ? "已通过校验" : "未通过校验");
+  }
+  row.title = tip.filter(Boolean).join("\n");
   const del = row.querySelector(".sess-del");
   del.title = done ? "删除这条记录" : "放弃这次生成并移除记录";
   del.dataset.act = done ? "del" : "cancel";

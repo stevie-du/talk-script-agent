@@ -526,6 +526,11 @@ def create_app(root: Path, token: str | None = None,
             running.append({
                 "id": snap["id"], "created_at": snap["created_at"],
                 "pack": p.get("pack", ""), "topic": p.get("topic", ""),
+                # platform 必须一并带上：会话列表副标题现在显示「行业 · 时间 · 平台」，
+                # 漏了它，**正在生成的那条**会缺一格 —— 而它与「用户没选平台」
+                # 在界面上长得一模一样（静默降级）。store 的两条摘要路径已带上，
+                # 这条是第三处构造点，容易漏。
+                "platform": p.get("platform"),
                 "duration": p.get("duration"),
                 "chars": None, "passed": None,
                 "state": snap["state"],

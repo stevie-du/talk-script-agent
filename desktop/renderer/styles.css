@@ -876,9 +876,20 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
   padding-right: 32px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-/* 删除：常驻图标按钮（悬停才提亮）
+/* 删除：常驻图标按钮（悬停只把图标提亮成深红，**不加任何底色**）
    以前默认 opacity:0 —— 按钮不现身时用户第一下往往点在行上（触发打开记录），
-   看上去就像「删除要点好几次」。现在常驻淡显，随时可瞄准；命中区也放大到 28px。 */
+   看上去就像「删除要点好几次」。现在常驻淡显，随时可瞄准；命中区也放大到 28px。
+
+   ⚠ 悬停态**只改图标颜色**，背景一律保持透明。
+   中途试过「实色红底 + 白图标」，被用户直接否掉：「不是让你改成红色的删除按钮，
+   不要背景色，就改删除图标的颜色就行了啊」。理由是那个实色方块在行里凭空多出
+   一块面积，反而强化了「距离边距不统一」的观感 —— 用户要的是**图标自己变醒目**，
+   不是按钮长出一块底。所以这里把 background 钉死在 transparent，连 :active
+   也不给底色（只靠 scale 缩放 + 更深一档的红做按压反馈）。
+
+   顺带澄清「边距不统一」的真正来源：不是颜色，是几何 ——
+   按钮 right:3px / 宽 28，而行 padding 是 7px 9px；副标题的 padding-right:32px
+   按「28+3」留白。三者必须互相对齐，否则悬停时露出的矩形一定显得偏心。 */
 .sess-del {
   /* 垂直居中不能用 top:50% + translateY(-50%)：全局的 button:active{transform:scale(.96)}
      会在按下瞬间覆盖掉 translateY，按钮直接下移 14px 脱离指针，
@@ -889,11 +900,16 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
   display: grid; place-items: center; border-radius: var(--r-sm);
   background: transparent; color: var(--text-3);
   opacity: .5;
-  transition: opacity .12s var(--ease), background .12s, color .12s;
+  transition: opacity .12s var(--ease), color .12s var(--ease);
 }
 .sess-item:hover .sess-del, .sess-del:focus-visible { opacity: 1; }
-.sess-del:hover { background: var(--fill-strong); color: var(--bad); opacity: 1; }
-.sess-del:active { background: var(--fill-strong); color: var(--bad); transform: scale(.9); }
+/* 悬停：只有图标由灰转红，底色始终透明 —— 见上方说明，不加背景色。 */
+.sess-del:hover { background: transparent; color: var(--bad); opacity: 1; }
+/* 按下：颜色再深一档 + 缩放，仍然不给底色。 */
+.sess-del:active { background: transparent; color: var(--bad-hover); transform: scale(.9); }
+/* 键盘聚焦：背景透明，只能靠外圈表达焦点 —— 用 --bad 画环。
+   （不能省：这是纯图标按钮唯一的键盘可见反馈。） */
+.sess-del:focus-visible { outline: 2px solid var(--bad); outline-offset: 1px; }
 .sess-del svg { pointer-events: none; }
 .sess-empty { padding: 6px 12px; }
 
@@ -998,53 +1014,32 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 
 /* ── 模型接口：模型列表 ────────────────────────────────────
    参考各家 Agent 工具的「模型」页：一行一条模型（模型 / 服务商 / 启用 / 操作），
-   每行自带启用开关与测试·编辑·删除。
+   每条自带启用开关与测试·编辑·删除。
    改造前这里是三个平铺输入框（Base URL / API Key / 模型名）—— 加第二个模型
    没有位置可填，只能把第一个覆盖掉。 */
-.mdl-wrap { width: 100%; }
-.mdl-table {
-  width: 100%; border-collapse: collapse; font-size: var(--f-sm);
-  table-layout: fixed;
-}
-.mdl-table thead th {
-  /* 表头**只用一条发丝线**，不铺底色。
-     原来这里铺的是 --fill，而「当前启用」那一行（tr.on）也是 --fill —— 两者
-     上下相邻且同色，在界面上读成**一整块灰**：表头和模型行连成一片，看不出
-     哪一行才是数据行；行自带 --r-sm 圆角，还在表头下沿留下两个白色缺口。
-     全站其他表格（「产物」段的 `th, td { border-bottom: 0.5px solid var(--line) }`）
-     本来就是发丝线表头，这里跟它们对齐之后，灰底就只归「当前启用」那一行，
-     高亮也才真的在高亮。
-     判据见 `_verify/verify.js`：表头与 tr.on 的**有效底色必须不同**。 */
-  color: var(--text-2);
-  font-size: var(--f-xs); font-weight: 600; text-align: left;
-  padding: 7px 10px; letter-spacing: .1px;
-  border-bottom: 0.5px solid var(--line);
-}
-.mdl-table .col-mdl { width: auto; }
-.mdl-table .col-prov { width: 108px; }
-.mdl-table .col-on { width: 62px; text-align: center; }
-.mdl-table .col-ops { width: 158px; text-align: right; }
-.mdl-table tbody td {
-  padding: 10px; border-bottom: 0.5px solid var(--line); vertical-align: middle;
-}
-.mdl-table tbody tr:last-child td { border-bottom: none; }
-/* 当前启用的那一行要有落点：不然「启用」列里那个亮着的开关是唯一的线索，
-   一眼扫过去三行长得一样 */
-.mdl-table tbody tr.on { background: var(--fill); }
-.mdl-table tbody tr.on td:first-child { border-radius: var(--r-sm) 0 0 var(--r-sm); }
-.mdl-table tbody tr.on td:last-child { border-radius: 0 var(--r-sm) var(--r-sm) 0; }
+
+/* 这里原本是一整块 `.mdl-table`（thead/tbody/tr.on/col-mdl·col-prov·col-on·col-ops）。
+   已删除：模型列表已从 `<table class="mdl-table">` 改成 `.pl-item` 条目
+   （见 settings.js 里 renderModelList 的说明），全项目没有任何模板串再产出
+   `mdl-table` —— grep 在 index.html 与 js/ 里命中 0 处。
+   ⚠ 唯一要留神的是 `.mdl-table thead th` 那段注释提到的「表头与 tr.on 有效底色
+   必须不同」判据：那条断言现在随表格一起去掉了，但同样的坑在 `.pl-item` 上
+   依然成立（条目表头也不能和选中条目同色）。 */
+
+/* 下面这三组**仍在用**（settings.js 的 renderModelList 产出）：
+   条目左侧的名称/副行、启用开关、以及两个小标。 */
 .mdl-label { display: block; font-weight: 600; color: var(--text-1); letter-spacing: -.1px; }
 .mdl-sub {
   display: block; margin-top: 1px; font-size: var(--f-2xs); color: var(--text-3);
   font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-/* 表格单元格里的两个小标另起一行。
+/* 条目里的两个小标另起一行。
    ⚠ 必须显式 `display: inline-block`：`.mdl-sub` 是 block，后面的 inline 元素
    虽然会自动换行，但 **inline 元素的 margin-top 是被忽略的** —— 这里写的 4px
    一直没生效，小标就死死贴在上一行文字下面（用户贴的截图里能看到它紧挨着
    「glm-4.7 · 智谱」）。同一类坑：inline 元素的 padding 只是"画出格"，
    不参与行盒高度。判据见 `_verify/verify.js`：小标顶边与上一行底边要有真间距。 */
-.mdl-table .tag-default, .mdl-table .tag-warn {
+.tag-default, .tag-warn {
   display: inline-block; margin-left: 0; margin-top: 4px;
 }
 .tag-warn {
@@ -1068,14 +1063,9 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 .mdl-switch.on { background: var(--ink); }
 .mdl-switch.on::after { transform: translateX(14px); }
 .mdl-switch:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
-.mdl-op {
-  border: 0; background: transparent; color: var(--text-2);
-  font-size: var(--f-xs); font-weight: 500; padding: 4px 6px;
-  border-radius: var(--r-sm); cursor: pointer;
-}
-.mdl-op:hover { background: var(--fill-strong); color: var(--text-1); }
-.mdl-op.danger:hover { background: var(--bad-soft); color: var(--bad); }
-.mdl-op:disabled { color: var(--text-3); cursor: not-allowed; background: transparent; }
+/* `.mdl-op`（表格行尾的「测试 / 编辑 / 删除」文字操作）已删除：模型列表改成
+   `.pl-item` 之后，行内操作走的是 `.pl-act` + 图标按钮，没有任何代码产出
+   `mdl-op`。 */
 
 /* ── 模型接口：高级配置（折叠）────────────────────────────
    温度 / 重试 / 超时 / 输出预算与「连到哪家」无关，是全局一份的生成参数。
@@ -1316,6 +1306,14 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
   font-size: var(--f-xs); color: var(--text-3);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+/* 这里原本有一条「坏包条目转警示红」（.pl-item.bad 的 .pl-t / .pl-s / .pl-ic）。
+   已删除：`renderPackGroups()` 对坏包的处理是**在下拉选项上标「（损坏）」+
+   在右栏顶部亮一条 warn 横幅**，不给列表条目加 `.bad` 类 ——
+   全项目没有代码产出 `.pl-item.bad`。别按这个类名去改坏包样式，改了不生效。 */
+
+/* 这里原本有一条「模型表单有未保存改动时标题旁亮红点」（#md-title.dirty::after）。
+   已删除：`#md-title` 由 settings.js 写入，但全项目没有任何代码给它加 `.dirty`
+   类 —— 未保存状态目前靠「保存」钮的可用性表达，没有这个红点信号。 */
 /* 条目右侧操作区（如启用开关）：不参与条目点击选中，要自己 stopPropagation。 */
 .pl-act { display: flex; align-items: center; gap: var(--s1); flex: 0 0 auto; }
 /* 条目里的「未配置 Key」小标：副标题是 block，inline 元素的 margin-top 会被忽略
@@ -1348,21 +1346,12 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
   padding: var(--s2) 10px var(--s1); letter-spacing: .2px;
 }
 
-/* 占位内容（知识库 / 技能待接入）：居中留白 + 图标 + 说明 */
-.placeholder {
-  display: flex; flex-direction: column; align-items: center; text-align: center;
-  gap: var(--s2); padding: var(--s8) var(--s5);
-}
-.ph-ic {
-  width: 52px; height: 52px; border-radius: 50%;
-  display: grid; place-items: center; margin-bottom: var(--s2);
-  background: var(--fill); color: var(--text-2);
-  border: 0.5px solid var(--line);
-}
-.ph-t { font-size: var(--f-md); font-weight: 600; color: var(--text-1); }
-.ph-d { font-size: var(--f-sm); color: var(--text-2); max-width: 34em; line-height: 1.6; }
-.placeholder .hint { margin-top: var(--s2); max-width: 38em; }
-
+/* 这里原本有一整块「占位内容」（.placeholder / .ph-ic / .ph-t / .ph-d，
+   注释写的是「知识库 / 技能待接入」）。已删除：知识库与技能面板 2026-09-17
+   已并入行业包面板，`placeholderBody()` 吐的是 `.thinking`/`.steps` 那套骨架，
+   全项目没有任何代码产出 `.placeholder` 或 `.ph-*` —— 整块是不可达的死样式。
+   ⚠ 别再按 `.ph-*` 这个前缀新增类：index.html 里还有 `data-ph-empty` 这类
+   **属性**（不是类）在用 `.ph-` 字样，grep 时会撞上，容易误判成「还有人在用」。 */
 
 /* 设置抽屉：一级 tabs + 二级字段组。
    行业包分组的「操作」按钮行就是普通 .row（按钮靠左、与输入控件同节奏）——
@@ -1483,6 +1472,11 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
   background: transparent; scrollbar-width: thin;
 }
 
+/* 这里原本有一块「正文撰写中」实时草稿（.draft-live / .dl-title / .dl-body）。
+   已删除：全项目没有任何 JS 产出 `.draft-live` —— 生成中的正文仍走
+   `.think-stream`（思考过程）与 `#gen-hint`，没有第二个"边写边显示正文"的面板。
+   留着会让下一个人以为存在实时草稿流。 */
+
 /* 小标签/胶囊（指标、状态徽标共用同一套基础样式） */
 .m-chip, .acc-badge {
   font-size: var(--f-xs); padding: 2px 9px; border-radius: var(--r-pill);
@@ -1517,6 +1511,9 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 .banner.info { background: var(--sel-bg); color: var(--ink); }
 .banner::before { content: "⚠"; font-weight: 600; }
 .banner.info::before { content: "ℹ"; }
+/* 这里原本有一组「占位符补齐」的内联输入行（.ph-fill-row / .ph-fill-input）。
+   已删除：占位事实目前的交互是**点横幅跳到首处、让用户自己改正文**，
+   没有"在横幅里直接填值"这条路 —— 全项目没有代码产出 `.ph-fill-*`。 */
 .banner.jumpable { cursor: pointer; transition: filter .15s; }
 .banner.jumpable:hover { filter: brightness(.97); }
 
@@ -1542,6 +1539,10 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
   text-align: right; line-height: 1.8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .card-text { line-height: 1.92; white-space: pre-wrap; font-size: var(--f-md); color: var(--text-1); letter-spacing: .1px; }
+/* 这里原本有三条「结果正文可直改」（.card-text.editable / :hover / :focus 与
+   .card-text.saving，注释写的是 P0-3）。已删除：全项目没有任何代码给
+   `.card-text` 加 `editable` 或 `saving` —— 正文目前**不支持就地编辑**，
+   要改内容走输入区的「按此修改」。留着会让人以为正文能点开改。 */
 .card-text strong { font-weight: 600; }
 .card-text .over { color: var(--warn); background: var(--warn-soft); border-radius: var(--r-xs); padding: 0 3px; }
 .card-foot { margin-top: 8px; display: flex; gap: var(--s2); align-items: center; }
@@ -1564,7 +1565,6 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 .card-foot input:focus { box-shadow: var(--shadow-focus); }
 
 /* 折叠块：分镜 / 合规 / JSON / 日志 */
-.acc-list { display: flex; flex-direction: column; gap: 0; margin-top: var(--s4); border-top: 0.5px solid var(--line); }
 .acc { border-bottom: 0.5px solid var(--line); }
 .acc summary {
   list-style: none; cursor: pointer; user-select: none;
@@ -1574,13 +1574,10 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 }
 .acc summary::-webkit-details-marker { display: none; }
 .acc summary:hover { color: var(--ink); }
-.acc summary .acc-ic {
-  flex: 0 0 auto; display: inline-flex; color: var(--text-3);
-  transition: color .12s;
-}
-.acc summary:hover .acc-ic { color: var(--text-2); }
-.acc.ok summary .acc-ic { color: var(--ok); }
-.acc.bad summary .acc-ic { color: var(--bad); }
+/* 这里原本有四条 `.acc-ic` 规则（summary 里那个前置图标及其三态着色）。
+   已删除：`renderDataPane()` 产出的 summary 只有 `.acc-t` 与 `.acc-badge`，
+   全项目没有任何代码往折叠块 summary 里放 `.acc-ic` —— 图标从来没被渲染过，
+   那几句 color/transition 是在给一个不存在的元素配色。 */
 .acc summary .acc-t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acc summary::after, .log-block summary::after {
   content: ""; width: 6px; height: 6px; flex: 0 0 auto;
@@ -1606,9 +1603,10 @@ td.bad { color: var(--bad); font-weight: 500; }
    `_verify/verify.js` 会监听 securitypolicyviolation，写回去就会报红。 */
 .col-time { width: 86px; }
 .col-item { width: 160px; }
-.col-size { width: 90px; }
-.col-role { width: 110px; }
-.cell-mono { font-family: var(--mono); font-size: 12px; }
+/* `.col-size` / `.col-role` / `.cell-mono` 三条已删除：它们是「产物清单」表格
+   那一版的列宽（尺寸列 / 角色列 / 等宽单元格），现在没有任何模板串产出这些类
+   —— `result.js` 里在用这套列宽工具类的只有 `.col-time`（时间列）与
+   `.col-item`（检查项列）。留着会让下一个人以为还有张带「尺寸/角色」列的表。 */
 .log-block { border-bottom: 0.5px solid var(--line); padding: var(--s3) 0; }
 .log-block:last-child { border-bottom: none; }
 .log-block summary { cursor: pointer; color: var(--text-2); font-size: var(--f-sm); display: flex; align-items: center; gap: 6px; }
@@ -1752,6 +1750,14 @@ td.bad { color: var(--bad); font-weight: 500; }
 #btn-generate.send .ic-stop { display: none; }
 #btn-generate.send.stopping .ic-send { display: none; }
 #btn-generate.send.stopping .ic-stop { display: block; }
+/* 这里原本有一条把停止态刷成**红色渐变**的规则（.stopping / .stopping:hover）。
+   已删除：它不是这条断言需要的东西。上面那条「停止键仍是实心按钮」的判据查的是
+   `backgroundImage !== "none"`，而 `#btn-generate.send` 的底色本来就是
+   `var(--grad-btn)`（一条 linear-gradient，落在 background-image 上）——
+   断言在 HEAD 就是绿的，不靠这两行。
+   也就是说这两行只是**把停止态从墨色改成红色**的观感调整，且属于未经确认的
+   擅改（与本轮任务无关）。要恢复必须有明确要求，并同步补一条"停止态应为红色"
+   的断言，否则下次被改回去没人会发现。 */
 
 /* 生成中：工具条控件置灰锁定 */
 .quick-bar.locked { opacity: .55; }
@@ -1884,6 +1890,11 @@ pre#pg-checklist {
 }
 .fu-chip:hover { background: var(--sel-bg); color: var(--ink); border-color: var(--line-strong); }
 .fu-chip:focus-visible { outline: none; box-shadow: var(--shadow-focus); }
+
+/* 这里原本有一组「结果区自由追问」的输入行（.fu-text / .fu-input / .fu-go，
+   注释写的是「一行输入 + 按此修改」）。已删除：结果区的后续操作仍只有
+   `.fu-chip` 那排建议胶囊（点了**预填**输入区，不直接提交），
+   没有第二个"就地输入追问"的框 —— 全项目没有代码产出 `.fu-*` 这三个类。 */
 
 /* 回到最新：只在用户主动上滚、且不在底部时出现 */
 .scroll-bottom {
