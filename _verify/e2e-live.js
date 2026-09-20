@@ -39,8 +39,11 @@ const check = (n, ok, d) => results.push([n, !!ok, d || ""]);
   const dataDir = path.join(_tmp, "data");
   fs.mkdirSync(dataDir, { recursive: true });
 
+  // --parent-pid：本脚本被 Ctrl-C / 崩溃打断时，node 死了但 Windows 不会连带杀
+  // python.exe，端口就长期被僵尸引擎占住（实测 pkill -f 在 Git Bash 也杀不掉）。
   engine = spawn(PY, ["-m", "app.server", "--port", String(port),
-                      "--root", ROOT, "--data-dir", dataDir, "--token", token], {
+                      "--root", ROOT, "--data-dir", dataDir, "--token", token,
+                      "--parent-pid", String(process.pid)], {
     cwd: ROOT,
     env: { ...process.env, TALKSCRIPT_MOCK: "1", PYTHONIOENCODING: "utf-8" },
     stdio: ["ignore", "pipe", "pipe"],

@@ -141,15 +141,28 @@ def test_add_if_room_full_leaves_registry_untouched():
     assert _ORIG_RUNNING_COUNT(reg) == LIMIT
 
 
-def test_add_if_room_ignores_paused_jobs():
-    """口径与 BUSY_STATES 一致：待确认不占额度，所以还能再进一个。"""
-    reg = JobRegistry()
-    for i in range(LIMIT):
-        reg.add_if_room(Job(f"a{i}", "generate", {}), LIMIT)
-    # 把其中一个挪到待确认（腾出额度）
-    reg.get("a0").transition("selecting", error=None)
-    reg.get("a0").transition("paused_awaiting_confirmation", error=None)
-    assert reg.add_if_room(Job("fresh", "generate", {}), LIMIT) is True
+def test_every_live_state_occupies_quota():
+    """额度口径：**除终态外，任何状态都必须占额度**。
+
+    原来有一条 `test_add_if_room_ignores_paused_jobs`（待确认不占额度）——
+    那是为了给"开着确认卡慢慢想"腾地方而刻意开的口子，代价是必须再补一道
+    `PAUSED_KEEP` 内存上界，并且攒够就会静默丢卡。分步确认移除后这个状态没了，
+    口径回到最简单也最安全的形式：只要作业还活着就占额度。
+
+    这条断言守的是**别再开这种口子**：哪天有人往状态机加一个"不占额度的活跃态"，
+    并发上限就会被绕过，而绕过的方式总是"这次情况特殊"。
+    """
+    from app.jobs import TERMINAL_STATES, TRANSITIONS
+
+    live = {"queued", "selecting", "writing", "checking", "rewriting"}
+    assert live == set(TRANSITIONS) - TERMINAL_STATES, (
+        "状态机加了新状态，请同步判断它占不占额度 —— 默认应当占")
+    for st in live:
+        reg = JobRegistry()
+        job = Job("x", "generate", {})
+        job.state = st
+        reg.add(job)
+        assert reg.running_count() == 1, f"{st} 不占额度 → 并发上限可被绕过"
 
 
 # ── 2. start_generate 在真并发下不超额 ───────────────────────

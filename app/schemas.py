@@ -31,15 +31,10 @@ class GenerateRequest(BaseModel):
     persona: str | None = Field(default=None, max_length=64)
     cta: str | None = Field(default=None, max_length=32)
     facts: str | None = Field(default=None, max_length=FACTS_MAX)  # 产品手册/数据/案例
-    mode: Literal["auto", "step"] = "auto"      # auto=一键直通 / step=分步确认
     rate: float | None = Field(default=None, gt=0, le=20)          # 覆盖语速
     voice: Literal["strong", "standard", "off"] = "strong"         # 人味档位
     format: Literal["both", "voice"] = "both"   # 输出内容：both=口播+分镜 / voice=仅口播
     reroll: bool = False                        # 「换一版」：同参数重掷，略提温度
-
-
-class ConfirmRequest(BaseModel):
-    plan: dict                        # 编辑后的选题卡
 
 
 class RewriteSegmentRequest(BaseModel):

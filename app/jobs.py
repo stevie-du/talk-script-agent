@@ -8,14 +8,20 @@
 
 状态机
 ------
-    queued → selecting → (paused_awaiting_confirmation)
-                       → writing → checking(第N轮) → done / failed / cancelled
+    queued → selecting → writing → checking(第N轮) → done / failed / cancelled
     单段重写：done → rewriting → done / failed / cancelled
 
 所有迁移都必须走 `Job.transition()`——**检查与置位在同一把锁内完成**。
 修复前的写法是「先无锁读 job.state 判断，再 job.update(state=…)」，
 两个并发请求会双双通过检查（TOCTOU）：连点两次「继续」起两个写线程，
 双倍 token、steps 重复、result 互相覆盖。
+
+这里曾经还有 `paused_awaiting_confirmation`（分步确认：选题后暂停等用户改角度），
+2026-09-19 整条移除。移除理由不是"没人用"，而是成本收益不划算：它省下的只是
+"角度不对时白跑一次撰写调用"，换来的却是全链路最脆的一段 —— 确认卡要跨
+"作业驻内存"这个前提活着，于是重启后记录点不开（/confirm 404）、待确认卡
+攒到上限被静默丢弃、以及一张因快照不含 result 而整个空掉的确认卡。
+事后修正本来就有「换一版」「重写本段」「按此修改」三条路，代价并不更高。
 """
 from __future__ import annotations
 
@@ -27,30 +33,14 @@ from datetime import datetime
 TERMINAL_STATES = frozenset({"done", "failed", "cancelled"})
 
 # 真正占用模型资源的作业状态 —— **并发额度只看这些**。
-#
-# `paused_awaiting_confirmation`（分步确认卡住）刻意不计入：它既不烧 token
-# 也不占线程，只是在等用户编辑选题卡。
-#
-# 修复前它是被算作「运行中」的，而 `prune()` 又只回收终态作业 —— 于是连开 4 条
-# 分步生成、都不点「继续」，之后**所有** /api/generate 一律 409「已达上限」，
-# 用户看到的是一句与自己操作无关的错误，唯一出路是重启应用。
-# 而「开着确认卡慢慢想」恰恰是分步模式的正常用法，不是异常操作。
 BUSY_STATES = frozenset({"queued", "selecting", "writing", "checking", "rewriting"})
-
-# 待确认作业的保留上限。
-#
-# 把它们排除出并发额度之后，数量就不再被 MAX_CONCURRENT_JOBS 兜住了，
-# 所以这里补一道单独的内存上界：超出就丢最旧的。
-# 每个待确认作业都花过一次选题 LLM 调用，正常使用远到不了这个数。
-PAUSED_KEEP = 20
 
 # 合法迁移表：from_state -> 允许去的 to_state。
 # 写成表而不是散落在各方法里的 if，是为了让「谁能到哪儿」一眼可查，
 # 也让非法迁移统一变成 409 而不是静默写坏状态。
 TRANSITIONS: dict[str, frozenset[str]] = {
     "queued": frozenset({"selecting", "writing", "failed", "cancelled"}),
-    "selecting": frozenset({"paused_awaiting_confirmation", "writing", "failed", "cancelled"}),
-    "paused_awaiting_confirmation": frozenset({"writing", "failed", "cancelled"}),
+    "selecting": frozenset({"writing", "failed", "cancelled"}),
     "writing": frozenset({"checking", "rewriting", "done", "failed", "cancelled"}),
     "checking": frozenset({"writing", "rewriting", "done", "failed", "cancelled"}),
     "rewriting": frozenset({"checking", "done", "failed", "cancelled"}),
@@ -283,16 +273,14 @@ class JobRegistry:
             return sum(1 for j in self._jobs.values() if j.state in BUSY_STATES)
 
     def prune(self, keep: int = 200) -> None:
-        """回收作业，防止长跑进程内存无界增长。
+        """回收终态作业，只保留最近 `keep` 个，防止长跑进程内存无界增长。
 
-        两类分开处理：
-          - **终态**作业只保留最近 `keep` 个（原有行为）；
-          - **待确认**作业只保留最近 `PAUSED_KEEP` 个 —— 它们被排除出并发额度后
-            数量不再受 MAX_CONCURRENT_JOBS 约束，需要单独一道上界。
+        这里曾并列着第二条 `_trim(paused, PAUSED_KEEP)` —— 给"待确认作业"单独
+        设一道内存上界（它们当时被排除在并发额度外，数量不受 MAX_CONCURRENT_JOBS
+        约束）。分步确认移除后这条上界连同它的静默丢弃一起没了。
         """
         with self._lock:
             self._trim(lambda j: j.state in TERMINAL_STATES, keep)
-            self._trim(lambda j: j.state == "paused_awaiting_confirmation", PAUSED_KEEP)
 
     def _trim(self, pred, keep: int) -> None:
         """丢掉匹配 pred 的、最旧的超出部分（调用方须持锁）。"""

@@ -134,8 +134,10 @@ def test_cancel_idempotent():
     shutil.copytree(ROOT / "packs", tmp / "packs")
     llm = SlowLLM()
     pl = make_pipeline(tmp, llm)
-    jid = pl.start_generate(GenerateRequest(pack="elevator", topic="加装电梯一楼不同意", mode="step"))
-    wait_state(pl, jid, {"paused_awaiting_confirmation"})
+    jid = pl.start_generate(GenerateRequest(pack="elevator", topic="加装电梯一楼不同意"))
+    # 原来这里靠 mode="step" 把作业停在待确认态，好让「取消」落在一个稳定点上。
+    # 分步确认已移除，改为等作业进入活跃态再取消 —— SlowLLM 保证它还在跑。
+    wait_state(pl, jid, {"selecting", "writing", "checking"})
     assert pl.cancel(jid)["state"] == "cancelled"
     assert pl.cancel(jid)["state"] == "cancelled", "重复取消应幂等"
     try:

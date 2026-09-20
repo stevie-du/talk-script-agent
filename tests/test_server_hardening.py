@@ -137,6 +137,13 @@ def test_access_control(tmp_path=None):
     assert anon.get("/api/history").status_code == 401
     assert anon.get("/api/history", headers={"X-TalkScript-Token": "x"}).status_code == 401
 
+    # FastAPI 默认挂 /docs、/redoc、/openapi.json，而中间件的令牌那道只查 `/api/*`
+    # —— 三个文档端点因此一直在鉴权之外。现在必须拿不到。
+    # 断"401 或 404"而不是死盯 404：将来若重新开放文档但纳入鉴权（401）也算合格。
+    for doc_path in ["/docs", "/redoc", "/openapi.json"]:
+        r = anon.get(doc_path)
+        assert r.status_code in (401, 404), (doc_path, r.status_code, r.text[:200])
+
     c = TestClient(app, base_url=LOOPBACK, raise_server_exceptions=False)
     c.headers.update({"X-TalkScript-Token": TOKEN})
 
@@ -322,67 +329,6 @@ def test_delete_removes_all_duplicate_dirs(tmp_path=None):
     assert c.delete(f"/api/history/{jid}").status_code == 200
     assert list((tmp / "generated").glob(f"*/{jid}")) == [], "只删了一个目录，记录会复活"
     assert not any(x["id"] == jid for x in c.get("/api/history").json())
-    shutil.rmtree(tmp, ignore_errors=True)
-
-
-def test_paused_jobs_do_not_block_new_generations(tmp_path=None):
-    """停在「待确认」的作业不该占并发额度。
-
-    用户可见的症状（修复前）：连开 4 条**分步确认**生成、都不点「继续」，
-    之后每次点发送都只得到「同时进行的生成已达上限（4 个）」——
-    而用户根本没在跑任何东西，唯一出路是重启应用。
-
-    根因是两处口径凑在一起：`running_count()` 数「所有非终态作业」（含待确认），
-    而 `prune()` 只回收终态作业，待确认的永不出栈。
-    而「开着确认卡慢慢想」恰恰是分步模式的**正常用法**，不是异常操作。
-    """
-    from app.jobs import PAUSED_KEEP
-
-    tmp = _tmp_root_mock()
-    c = _client(tmp)
-
-    for i in range(4):
-        r = c.post("/api/generate",
-                   json={"pack": "elevator", "topic": f"分步{i}", "mode": "step"})
-        assert r.status_code == 200, (r.status_code, r.text)
-        _wait_state(c, r.json()["job_id"], "paused_awaiting_confirmation")
-
-    items = c.get("/api/history").json()
-    paused = [x for x in items if x.get("state") == "paused_awaiting_confirmation"]
-    assert len(paused) == 4, items
-    assert len(items) == 4, f"待确认作业仍要留在列表里（界面要能点回去）：{items}"
-
-    # ★ 关键：4 张没人理的确认卡不该把后续生成挡死
-    r = c.post("/api/generate", json={"pack": "elevator", "topic": "第 5 条"})
-    assert r.status_code == 200, (
-        f"待确认作业占满了并发额度：{r.status_code} {r.text}")
-    assert _wait_done(c, r.json()["job_id"])["state"] == "done"
-
-    # 真正在跑的作业仍然要算满额度 —— 修复不能把上限一起放开
-    from app.jobs import Job
-    reg = c.app.state.pipeline.registry
-    for i in range(4):
-        j = Job(f"20260915-00000{i}-busy01", "generate", {})
-        j.state = "writing"
-        reg.add(j)
-    r = c.post("/api/generate", json={"pack": "elevator", "topic": "应被挡"})
-    assert r.status_code == 409, (r.status_code, r.text)
-    assert "上限" in r.json()["detail"], r.json()
-    # 清掉这 4 个假作业，别影响后面的清理
-    for i in range(4):
-        reg.remove(f"20260915-00000{i}-busy01")
-
-    # 待确认作业另有一道上界：被排除出额度后，数量不再受 MAX_CONCURRENT_JOBS 约束
-    for i in range(PAUSED_KEEP + 5):
-        j = Job(f"20260915-1000{i:02d}-paa{i:03d}", "generate", {})
-        j.state = "paused_awaiting_confirmation"
-        reg.add(j)
-    reg.prune()
-    left = [s for s in reg.snapshots()
-            if s["state"] == "paused_awaiting_confirmation"]
-    assert len(left) == PAUSED_KEEP, (
-        f"待确认作业没有上界，会无界增长：{len(left)}（上限 {PAUSED_KEEP}）")
-
     shutil.rmtree(tmp, ignore_errors=True)
 
 
@@ -834,6 +780,53 @@ def test_pack_detail_rejects_traversal(tmp_path=None):
     assert ok.json()["name"] == "elevator"
     assert ok.json()["files"], "文件清单不该为空"
     shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_generate_pack_name_cannot_escape_packs_dir(tmp_path=None):
+    """`POST /api/generate` 的包名要过校验 —— 它是唯一走**请求体**取包的入口。
+
+    其余四个按名字取包的端点（pack_detail / pack_file / undraft / export-skill）
+    都调了 `_safe_name`，只有这个漏了：`Pack(root, "../../..")` 会解析到 packs
+    **之外**，于是任何放得下 pack.yaml 的目录都能被当成行业包加载 ——
+    它的 `private/*.yaml` 会被当私有资料注入提示词。而 404 与 409 的差值本身
+    就是一个「这个路径上有没有 pack.yaml」的探测 oracle。
+
+    ⚠ 这条同时验**不变式**：绕过 HTTP 直接构造 `Pack` 也必须进不去。
+    只测端点的话，下一个忘了调 `_safe_name` 的入口就又漏了 ——
+    端点那层给的是 400 的语义，「包目录不会越界」才是底线。
+    """
+    from app.knowledge import Pack, PackError
+
+    tmp = _tmp_root()
+    # 穿越着陆点：packs 之外一个看起来很像行业包的目录
+    (tmp / "pack.yaml").write_text(
+        "name: OUTSIDE\ndisplay_name: 包外的包\nparams: {}\n", encoding="utf-8")
+    c = _client(tmp)
+
+    for bad in ("../../..", "..", "..\\..", "elevator/..", "/etc"):
+        r = c.post("/api/generate", json={"pack": bad, "topic": "穿越"})
+        assert r.status_code == 400, (bad, r.status_code, r.text)
+        assert "名称不合法" in r.json()["detail"], (bad, r.text)
+        # 泄漏底线：不能把包外目录当成包回出去
+        assert "OUTSIDE" not in r.text and "包外的包" not in r.text, (bad, r.text)
+
+    # 不变式：不经过 HTTP 也一样拦得住
+    for bad in ("../../..", "..", "..\\..", "elevator/.."):
+        try:
+            Pack(tmp, bad)
+        except PackError:
+            pass
+        else:
+            raise AssertionError(f"Pack 越界成功：{bad!r}")
+
+    # 正常包不受影响（用带 mock Key 的根，生成不会真去调模型）
+    mroot = _tmp_root_mock()
+    mc = _client(mroot)
+    ok = mc.post("/api/generate", json={"pack": "elevator", "topic": "正常"})
+    assert ok.status_code == 200, (ok.status_code, ok.text)
+    assert ok.json()["job_id"]
+    shutil.rmtree(tmp, ignore_errors=True)
+    shutil.rmtree(mroot, ignore_errors=True)
 
 
 # ── 7 版本号单一来源 ────────────────────────────────────────

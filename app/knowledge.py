@@ -320,7 +320,24 @@ class Pack:
     def __init__(self, root: Path, name: str):
         self.root = root
         self.name_arg = name
+        # ⚠ 名字必须先校验再用 —— `root / "packs" / name` 里塞 `../../..`
+        # 会解析到 packs **之外**，于是任何放得下 pack.yaml 的目录都能被当成
+        # 行业包加载，它的 `private/*.yaml` 会被当私有资料注入提示词。
+        # 而 `pack.yaml` 存在与否的差值会反映成 404/409，等于一个
+        # 「这个路径上有没有 pack.yaml」的探测 oracle。
+        #
+        # 两层各守各的（与上面「构造期 / 出口」同一口径，不是重复机制）：
+        #   · 端点上的 `_safe_name` 负责给出 **400 名称不合法**（web 层的语义）；
+        #   · 这里负责**不变式** —— 任何调用方（generate / rewrite / packgen /
+        #     导出，以及未来新增的）都不可能拿到 packs/ 之外的目录。
+        # 只修端点的话，下一个忘了调用的入口就又漏了。
+        packs_root = (root / "packs").resolve()
+        if not name or "/" in name or "\\" in name or ".." in name:
+            raise PackError(f"行业包名称不合法：{name!r}")
         self.dir = root / "packs" / name
+        if packs_root not in self.dir.resolve().parents:
+            # 名字里没有分隔符也可能翻出去（符号链接、Windows 短名、大小写）
+            raise PackError(f"行业包名称不合法（解析到 packs 之外）：{name!r}")
         if not (self.dir / "pack.yaml").exists():
             raise PackError(f"行业包不存在：{name}")
         self.data, _ = read_yaml_cached(self.dir / "pack.yaml")

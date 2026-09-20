@@ -35,6 +35,8 @@ import os
 import re
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import yaml
@@ -51,7 +53,7 @@ from .knowledge import Pack, PackBrokenError, PackError, list_packs
 from .llm import LLMClient, LLMError
 from .packgen import create_pack
 from .pipeline import MAX_CONCURRENT_JOBS, Pipeline
-from .schemas import (ConfirmRequest, GenerateRequest, PackCreateRequest,
+from .schemas import (GenerateRequest, PackCreateRequest,
                       RewriteSegmentRequest)
 from .security import (TOKEN_HEADER, allowed_hostnames, new_token,
                         origin_allowed, token_ok)
@@ -255,7 +257,14 @@ def create_app(root: Path, token: str | None = None,
         if not cfg.llm.api_key:
             raise HTTPException(400, "当前模型还没配 API Key，请在「设置 → 模型接口」里填写")
 
-    app = FastAPI(title="TalkScript Engine", version=version)
+    # 中间件的令牌那道只管 `/api/*`（见下面 guard 的 startswith），而 FastAPI 默认就把
+    # /docs、/redoc、/openapi.json 挂在中间件之内、令牌范围之外 —— 实测默认参数下
+    # `GET /openapi.json` 返回 200 全量接口结构，里面连读配置的 GET /api/config 都写清楚了。
+    # 同机任意进程或浏览器里任意一个页面都能顺着它把接口摸清楚。
+    # 直接关掉而不是补白名单 —— 少一类要记得拦的东西。
+    # 需要看接口清单就读 README，那里也写了参数含义。
+    app = FastAPI(title="TalkScript Engine", version=version,
+                  docs_url=None, redoc_url=None, openapi_url=None)
     app.state.token = token
     app.state.pipeline = pipeline
 
@@ -465,6 +474,13 @@ def create_app(root: Path, token: str | None = None,
     # ── 脚本生成 ────────────────────────────────────────────
     @app.post("/api/generate")
     def generate(req: GenerateRequest):
+        # 入参校验排在「有没有配模型」之前：非法包名跟环境状态无关，
+        # 放在后面会让同一个错误请求因为用户配没配 Key 而返回不同内容。
+        # 包名过 `_safe_name`：其余四个按名字取包的端点（pack_detail / pack_file /
+        # undraft / export-skill）都调了，只有这个走请求体的入口漏了 ——
+        # 于是 `{"pack":"../../.."}` 能把 packs 之外的目录当包加载。
+        # knowledge.Pack 里还有一层不变式，这层负责给出 400 而不是 404。
+        _safe_name(req.pack)
         cfg = _cfg()
         _require_model(cfg)
         pipeline.reload_llm()          # 用最新的 Key/模型，且不影响正在跑的作业
@@ -477,15 +493,6 @@ def create_app(root: Path, token: str | None = None,
         except KeyError:
             raise HTTPException(404, "作业不存在或已随重启释放")
         return job.snapshot(include_result=full)
-
-    @app.post("/api/jobs/{jid}/confirm")
-    def job_confirm(jid: str, req: ConfirmRequest):
-        try:
-            return pipeline.confirm(jid, req)
-        except KeyError:
-            raise HTTPException(404, "作业不存在")
-        except ValueError as e:
-            raise HTTPException(400, str(e))
 
     @app.post("/api/jobs/{jid}/rewrite_segment")
     def job_rewrite(jid: str, req: RewriteSegmentRequest):
@@ -645,6 +652,14 @@ def create_app(root: Path, token: str | None = None,
                 active = "m1"
                 raw = [{"id": active, "name": "", "base_url": "",
                         "api_key": "", "model": ""}]
+            elif not any(x["id"] == active for x in raw):
+                # 有模型但**一条都没启用**：界面上的开关能关掉（2026-09-17），
+                # 关掉后 `load_raw_models` 原样返回 (非空列表, "")。
+                # 上面那条 `if raw` 守卫只挡住了"列表为空"，挡不住这个空串，
+                # 于是 `next(...)` 在这里抛 StopIteration → 500。
+                # 这里也不替用户猜一个：连接信息该写进哪一条是用户的事，
+                # 悄悄建第四条或写进第一条都是替他做决定。给可行动的提示。
+                raise HTTPException(400, "没有启用中的模型：请先在「模型接口」里启用一条，或新建一条")
             it = next(x for x in raw if x["id"] == active)
             if "base_url" in link:
                 it["base_url"] = str(link["base_url"]).rstrip("/")
@@ -680,12 +695,14 @@ def create_app(root: Path, token: str | None = None,
             save_config(root, {f: "" for f in num_fields}, config_dir=data_dir)
         if link_fields:
             raw, active = load_raw_models(root, data_dir)
-            # 一条模型都没有 → 没什么可重置的（2026-09-17 起全新安装不再预置条目）。
-            # 不能 `next(...)` 硬取，那会 StopIteration 冒泡成 500。
-            if raw:
-                it = next(x for x in raw if x["id"] == active)
+            # 一条模型都没有、或有模型但**没启用任何一条**（开关能关掉）→
+            # 都没有"当前模型的连接字段"可重置，静默 no-op。
+            # 原来只判 `if raw:`，空串 active 会让下面的 `next(...)` 抛
+            # StopIteration 冒成 500 —— 注释写着"不能 next 硬取"却只修了一半。
+            target = next((x for x in raw if x["id"] == active), None) if active else None
+            if target is not None:
                 for f in link_fields:
-                    it[f] = ""
+                    target[f] = ""
                 save_models(root, raw, active, config_dir=data_dir)
         return {"ok": True, "fields": body.fields}
 
@@ -828,6 +845,67 @@ def _reveal_in_explorer(target: Path) -> None:
         subprocess.Popen(["xdg-open", p])
 
 
+def parent_alive(pid: int) -> bool:
+    """父进程还活着吗。看门狗用它决定要不要自杀。
+
+    不能依赖 psutil —— 运行时依赖只有 fastapi / httpx / pydantic / uvicorn / pyyaml。
+
+    ⚠ Windows 上**不能**用 `os.kill(pid, 0)` 探活：signal 0 在 Windows 的模拟实现里
+    走的不是"发 0 号信号"，而是 `TerminateProcess`，实测会把目标直接干掉 ——
+    也就是"探测父进程是否活着"这个动作本身会杀掉 Electron。
+    所以这里用 OpenProcess + GetExitCodeProcess。
+    """
+    if pid <= 0:
+        return True                       # 没传 = 不启用看门狗（手动起引擎调试的场景）
+    if os.name == "nt":
+        import ctypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        k32 = ctypes.windll.kernel32
+        h = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not h:
+            return False                  # 打不开 = 进程已不存在（父进程必属同一用户，不涉及权限）
+        try:
+            code = ctypes.c_ulong()
+            if not k32.GetExitCodeProcess(h, ctypes.byref(code)):
+                return False
+            return code.value == STILL_ACTIVE
+        finally:
+            k32.CloseHandle(h)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True                       # 活着但没权限看，宁可不误杀
+    except OSError:
+        return False
+    return True
+
+
+def watch_parent(pid: int, interval: float = 2.0) -> None:
+    """父进程（Electron 主进程）一没就自杀，别留孤儿引擎。
+
+    实测：主进程被强杀或崩溃时，Windows 上子进程不会跟着走。多崩几次就有几份
+    引擎常驻，每份占一个端口 + 一份内存；更糟的是下一次启动的健康检查可能被
+    **旧引擎**应答（它同样在 127.0.0.1 上回 200），于是界面连到的是一个
+    拿着旧 token / 旧配置的僵尸进程。
+
+    用 `os._exit` 而不是优雅停机：拿不到 uvicorn 的 server 实例（`uvicorn.run`
+    内部自建），而窗口都没了，等不到"当前作业写完"。产物落盘本来就是原子的
+    （`fileio.write_atomic`），半截文件不会留在盘上。
+    """
+    def loop() -> None:
+        while True:
+            time.sleep(interval)
+            if not parent_alive(pid):
+                print("[engine] 主进程已退出，引擎自行关闭", file=sys.stderr, flush=True)
+                os._exit(0)
+
+    threading.Thread(target=loop, name="parent-watchdog", daemon=True).start()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
@@ -840,6 +918,9 @@ def main():
     ap.add_argument("--version", default=None,
                     help="版本号（打包版由 Electron 传入；不传则读 desktop/package.json）")
     ap.add_argument("--open", action="store_true", help="启动后自动打开浏览器")
+    ap.add_argument("--parent-pid", type=int, default=0,
+                    help="Electron 主进程 PID；它一退出引擎就自行关闭（不留孤儿引擎）。"
+                         "不传则不启用看门狗 —— 命令行手动起引擎调试时正是要这样。")
     args = ap.parse_args()
 
     import uvicorn
@@ -862,6 +943,9 @@ def main():
             webbrowser.open(url)
         except Exception:                       # noqa: BLE001
             pass
+    # 看门狗要在进入阻塞的 run() 之前起，且晚于端口绑定前的任何准备工作。
+    if args.parent_pid:
+        watch_parent(args.parent_pid)
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 

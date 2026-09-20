@@ -36,6 +36,8 @@ const fs = require('fs');
  * @param {string} o.version       版本号（唯一来源是 desktop/package.json）
  * @param {number} o.port
  * @param {string} o.token
+ * @param {number} [o.parentPid]   Electron 主进程 PID；传了引擎就会在它退出时自杀
+ *                                 （不传 = 不启用看门狗，命令行手动起引擎时用）
  * @param {string} [o.platform]    默认 process.platform
  * @param {object} [o.env]         默认 process.env
  * @param {function} [o.exists]    默认 fs.existsSync —— 测试用，避免真建文件
@@ -50,6 +52,10 @@ function resolveEngine(o) {
   const engineArgs = ['--port', String(o.port), '--root', o.rootDir,
                       '--data-dir', o.dataDir, '--token', o.token,
                       '--version', o.version];
+  // 看门狗：主进程被强杀/崩溃时 Windows 不会连带杀掉 python.exe，
+  // 于是每次崩溃都留一份引擎常驻（占端口 + 占内存，而且 /api/health 还会回 200，
+  // 下一次启动可能被**旧引擎**应答）。传了 parent-pid，引擎自己就会退。
+  if (o.parentPid) engineArgs.push('--parent-pid', String(o.parentPid));
   // 用 `python -m app.server` 跑时参数要多一个 `-m app.server`；
   // engine.exe 是已经封好的可执行文件，不带。
   const moduleArgs = ['-m', 'app.server', ...engineArgs];

@@ -106,3 +106,26 @@ test('via 字段总是有值（日志要靠它说清从哪条路起的）', () =
     assert.ok(r.via && r.via.length > 0);
   }
 });
+
+test('传了 parentPid → 引擎拿到 --parent-pid（看门狗开关）', () => {
+  const r = resolveEngine(base({ exists: only(EXE), parentPid: 4321 }));
+  const i = r.args.indexOf('--parent-pid');
+  assert.notStrictEqual(i, -1, '没传 --parent-pid，引擎不会自我回收');
+  assert.strictEqual(r.args[i + 1], '4321');
+});
+
+test('不传 parentPid → 不加该参数（手动起引擎调试时不该被看门狗杀掉）', () => {
+  for (const over of [{ exists: only(EXE) }, { exists: only(PY) }]) {
+    const r = resolveEngine(base(over));
+    assert.ok(!r.args.includes('--parent-pid'),
+      `${r.via} 凭空带了 --parent-pid：${r.args.join(' ')}`);
+  }
+});
+
+test('engine.exe 与 python -m 两条路都带上 --parent-pid', () => {
+  const exe = resolveEngine(base({ exists: only(EXE), parentPid: 7 }));
+  const py = resolveEngine(base({ exists: only(PY), parentPid: 7 }));
+  assert.ok(exe.args.includes('--parent-pid'), 'engine.exe 漏了');
+  assert.ok(py.args.includes('--parent-pid'), 'python -m 漏了');
+  assert.strictEqual(py.args.indexOf('-m') + 1 >= 0, true);
+});

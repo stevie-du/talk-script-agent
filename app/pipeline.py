@@ -39,7 +39,7 @@ from .jobs import (TERMINAL_STATES, Job, JobCancelled, JobRegistry,  # noqa: F40
 from .knowledge import Pack, PackError  # noqa: F401
 from .llm import LLMClient
 from .prompts import PromptRenderer
-from .schemas import (ConfirmRequest, GenerateRequest, RewriteSegmentRequest,
+from .schemas import (GenerateRequest, RewriteSegmentRequest,
                       ScriptResult, ScriptSection, StoryboardShot, TopicPlan)
 from .store import ArtifactStore
 
@@ -100,7 +100,7 @@ MAX_CONCURRENT_JOBS = 4
 # 1) 落进 result.json 的 `params`
 PERSISTED_PARAMS: tuple[str, ...] = (
     "topic", "segment", "audience", "duration", "style",
-    "platform", "persona", "cta", "mode", "rate", "voice", "format",
+    "platform", "persona", "cta", "rate", "voice", "format",
 )
 # 2) 不进 params，但在 result.json 顶层另有落点
 PARAMS_ELSEWHERE: dict[str, str] = {
@@ -196,20 +196,6 @@ class Pipeline:
         self._spawn(job, lambda: self._run_generate(job, pack))
         return jid
 
-    def confirm(self, jid: str, req: ConfirmRequest) -> dict:
-        job = self.get_job(jid)
-        plan = TopicPlan.model_validate(req.plan)
-        pack = Pack(self.root, job.params["pack"])
-        skill = pack.skill()
-        if not skill:
-            raise ValueError(f"行业包缺少 skill.yaml：{pack.name}")
-        # 原子迁移：检查「当前是待确认」与置位「writing」在同一把锁内完成。
-        # 修复前是先无锁读 job.state 判断、再 update 置位 —— 连点两次「继续」
-        # 两个请求都会通过检查，起两个写线程，双倍 token 且结果互相覆盖。
-        job.transition_or_raise("writing", error=None)
-        self._spawn(job, lambda: self._continue_write(job, pack, skill, plan))
-        return job.snapshot()
-
     def rewrite_segment(self, jid: str, req: RewriteSegmentRequest) -> dict:
         job = self.get_job(jid)
         result = job.result
@@ -256,11 +242,6 @@ class Pipeline:
             plan = self._select(job, pack, skill, p)
             self._step(job, "select", "选题策划", {"plan": plan.model_dump()})
             self._abort_if_cancelled(job)
-            if p.get("mode") == "step":
-                if job.transition("paused_awaiting_confirmation",
-                                  result={"plan": plan.model_dump()}):
-                    self._persist(job)
-                return
             self._continue_write(job, pack, skill, plan)
         except JobCancelled:
             pass                              # 已由 request_cancel 置 cancelled，别再写回
@@ -305,7 +286,7 @@ class Pipeline:
             "duration": duration, "style": style,
             "platform": pick("platform"), "persona": pick("persona"),
             "cta": pick("cta"), "facts": params.get("facts") or "",
-            "mode": params.get("mode", "auto"), "rate": float(rate),
+            "rate": float(rate),
             "voice": params.get("voice") if params.get("voice") in ("strong", "standard", "off") else "strong",
             "format": params.get("format") if params.get("format") in ("both", "voice") else "both",
             "reroll": bool(params.get("reroll")),

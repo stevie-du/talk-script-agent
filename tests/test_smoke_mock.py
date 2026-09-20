@@ -28,7 +28,7 @@ from app.config import load_config                             # noqa: E402
 from app.export_skill import export_agent_skill                # noqa: E402
 from app.packgen import create_pack                            # noqa: E402
 from app.pipeline import Pipeline, wait_job                    # noqa: E402
-from app.schemas import (ConfirmRequest, GenerateRequest,      # noqa: E402
+from app.schemas import (GenerateRequest,                # noqa: E402
                          RewriteSegmentRequest)
 
 
@@ -53,10 +53,9 @@ def test_end_to_end_mock():
     shutil.copytree(ROOT / "packs", tmp / "packs")
     pl = _pipeline(tmp)
     try:
-        _case_direct_and_recheck(pl, tmp)
+        jid_direct = _case_direct_and_recheck(pl, tmp)
         _case_voice_and_format(pl)
-        jid_step = _case_step_confirm(pl)
-        _case_rewrite_segment(pl, tmp, jid_step)
+        _case_rewrite_segment(pl, tmp, jid_direct)
         _case_packgen(pl, tmp)
         _case_export_skill(tmp)
     finally:
@@ -65,7 +64,7 @@ def test_end_to_end_mock():
 
 # ── 1. 一键直通 + 回炉闭环 ──────────────────────────────────
 def _case_direct_and_recheck(pl: Pipeline, tmp: Path):
-    jid = pl.start_generate(GenerateRequest(pack="elevator", topic="被困电梯怎么办", mode="auto"))
+    jid = pl.start_generate(GenerateRequest(pack="elevator", topic="被困电梯怎么办"))
     snap = wait_job(pl, jid)
     assert snap["state"] == "done", snap.get("error")
     r = snap["result"]
@@ -83,18 +82,19 @@ def _case_direct_and_recheck(pl: Pipeline, tmp: Path):
     assert list(out.glob(f"*/{jid}/脚本.md")), "脚本.md 未落盘"
     # 落盘目录只有一个（回归「跨零点分裂成两个目录」）
     assert len(list(out.glob(f"*/{jid}"))) == 1, "产物落进了多个日期目录"
+    return jid
 
 
 # ── 1b/1c. 人味档位与输出内容开关 ───────────────────────────
 def _case_voice_and_format(pl: Pipeline):
     jid = pl.start_generate(GenerateRequest(pack="elevator", topic="被困电梯怎么办",
-                                            mode="auto", voice="off"))
+                                            voice="off"))
     snap = wait_job(pl, jid)
     assert snap["state"] == "done", snap.get("error")
     assert snap["result"]["params"]["voice"] == "off"
 
     jid = pl.start_generate(GenerateRequest(pack="elevator", topic="被困电梯怎么办",
-                                            mode="auto", format="voice"))
+                                            format="voice"))
     snap = wait_job(pl, jid)
     assert snap["state"] == "done", snap.get("error")
     assert snap["result"]["sections"], "仅口播仍应有分段文案"
@@ -102,18 +102,10 @@ def _case_voice_and_format(pl: Pipeline):
     assert snap["result"]["params"]["format"] == "voice"
 
 
-# ── 2. 分步确认 + 选题编辑 ──────────────────────────────────
-def _case_step_confirm(pl: Pipeline) -> str:
-    jid = pl.start_generate(GenerateRequest(pack="elevator", topic="加装电梯一楼不同意", mode="step"))
-    snap = _wait_state(pl, jid, {"paused_awaiting_confirmation"})
-    assert snap["state"] == "paused_awaiting_confirmation", f"应暂停：{snap['state']}"
-    plan = snap["result"]["plan"]
-    plan["hook_line"] = "一楼反对的从来不是电梯本身。"
-    pl.confirm(jid, ConfirmRequest(plan=plan))
-    snap = wait_job(pl, jid)
-    assert snap["state"] == "done" and snap["result"]["sections"], "确认后应完成"
-    assert snap["result"]["plan"]["hook_line"].startswith("一楼反对"), "编辑后的选题应生效"
-    return jid
+# ── 2. 单段重写 ────────────────────────────────────────────
+# 原先这里是「分步确认 + 选题编辑」（2026-09-19 随功能一并移除）。
+# 它曾顺带承担"编辑后的选题会生效"这条断言；那条改由 _case_rewrite_segment
+# 与 pipeline 的回炉用例覆盖 —— 角度不对时的修正走「按此修改」/「换一版」。
 
 
 # ── 3. 单段重写（含落盘同步与时间轴重算）────────────────────

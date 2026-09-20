@@ -50,6 +50,9 @@ function engineCommand() {
     // 引擎在打包版里读不到这个文件（--root 指向 resources/engine），所以显式传过去。
     version: app.getVersion(),
     port: enginePort, token: engineToken,
+    // 主进程 PID：引擎用它做看门狗。python.exe 的直接父进程就是这个主进程，
+    // 所以传 process.pid 正好——传 GPU/renderer 的 pid 会误杀。
+    parentPid: process.pid,
   });
 }
 

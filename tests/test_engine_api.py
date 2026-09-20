@@ -22,6 +22,7 @@ import shutil
 import sys
 import tempfile
 import time
+import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -154,8 +155,13 @@ def test_error_mapping_and_bounds(tmp_path):
     assert c.post("/api/generate", json={"pack": "elevator", "topic": "ok",
                                         "duration": 100000}).status_code == 422
     assert c.post("/api/generate", json={"pack": "elevator", "topic": "x" * 300}).status_code == 422
+    # 非法枚举值 → 422。靶子原是 `mode`（auto/step），随分步确认一起删了；
+    # 这里换用仍然存在的两个 Literal 字段顶上 —— 枚举校验这条能力不能因为
+    # 少了一个字段就失去回归保护。
     assert c.post("/api/generate", json={"pack": "elevator", "topic": "ok",
-                                        "mode": "bogus"}).status_code == 422
+                                        "voice": "bogus"}).status_code == 422
+    assert c.post("/api/generate", json={"pack": "elevator", "topic": "ok",
+                                        "format": "bogus"}).status_code == 422
 
     # export-skill 的 name 白名单（修复前这条路由没有校验）
     r = c.post("/api/packs/%2e%2e/export-skill")
@@ -377,50 +383,41 @@ def test_cancel_does_not_write_artifact(tmp_path):
     shutil.rmtree(tmp, ignore_errors=True)
 
 
-def test_concurrent_confirm_is_rejected(tmp_path):
-    """同一作业并发确认：第二次必须失败（原子迁移），不能起两个写线程。"""
-    tmp = _tmp_root()
-    cfg = load_config(tmp)
-    cfg.mock = False
-    pl = Pipeline(tmp, cfg)
-    started = []
+def test_transition_is_atomic_under_concurrent_calls():
+    """同一作业被并发推同一个迁移：只能有一个赢，其余 StateConflict。
 
-    class Slow:
-        class cfg:                                     # noqa: N801
-            temperature = 0.7
-            max_tokens = 100
-        def chat_json(self, task, system, user, model_cls, max_retries=1,
-                      on_retry=None, temperature=None, on_delta=None):
-            from app.schemas import TopicPlan
-            if task == "select":
-                return TopicPlan(angle="a", hook_type="h", hook_line="l",
-                                 points=["p"], cta="c")
-            started.append(1)
-            time.sleep(2.0)
-            raise RuntimeError("停在这")
-    pl.llm = Slow()
+    原来这条叫 `test_concurrent_confirm_is_rejected`，靶子是分步确认的
+    「连点两次继续」。功能删了，但它守的东西一个字都没变 ——
+    **检查与置位必须在同一把锁内完成**，否则两个并发请求双双通过检查，
+    起两个写线程：双倍 token、steps 重复、result 互相覆盖。
+    这里直接压 `Job.transition()`，不再借某个业务入口，因此也与被删功能脱钩。
+    """
+    from app.jobs import Job, StateConflict
 
-    jid = pl.start_generate(GenerateRequest(pack="elevator", topic="并发确认", mode="step"))
-    from app.pipeline import wait_job
-    from app.jobs import StateConflict
-    deadline = time.time() + 10
-    while time.time() < deadline:
-        if pl.get_job(jid).state == "paused_awaiting_confirmation":
-            break
-        time.sleep(0.05)
+    job = Job("atomic-1", "generate", {})
+    winners = []
+    losers = []
+    gate = threading.Barrier(8)
 
-    from app.schemas import ConfirmRequest
-    plan = {"angle": "a", "hook_type": "h", "hook_line": "l", "points": ["p"], "cta": "c"}
-    pl.confirm(jid, ConfirmRequest(plan=plan))
-    try:
-        pl.confirm(jid, ConfirmRequest(plan=plan))
-        raise AssertionError("第二次确认应当被拒绝（状态已不是待确认）")
-    except StateConflict:
-        pass
-    time.sleep(0.3)
-    assert len(started) == 1, f"起了 {len(started)} 个写线程"
-    pl.cancel(jid)
-    shutil.rmtree(tmp, ignore_errors=True)
+    def go():
+        gate.wait()                             # 尽量让 8 个线程同时撞进去
+        try:
+            job.transition_or_raise("writing")  # 业务入口走的就是这个
+            winners.append(1)
+        except StateConflict:
+            losers.append(1)
+
+    threads = [threading.Thread(target=go) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(winners) == 1, f"{len(winners)} 个线程同时通过迁移检查（TOCTOU）"
+    assert len(losers) == 7, f"落败方应是 7，实际 {len(losers)}"
+    assert job.state == "writing"
+    # 已经离开 queued 之后，再推 queued→writing 必须继续被拒
+    assert job.transition("writing") is False
 
 
 # ── J 并发上限 ──────────────────────────────────────────────

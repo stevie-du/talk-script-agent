@@ -626,6 +626,47 @@ def test_env_key_override_beats_the_stored_one(tmp_path, monkeypatch):
     assert next(x for x in raw if x["id"] == "m1")["api_key"] == "sk-from-file"
 
 
+def test_legacy_config_write_needs_an_active_model(tmp_path):
+    """**关掉开关后旧写入口不能 500**（2026-09-19 修）。
+
+    `POST /api/config` 写 base_url/model/api_key 时落点是「当前那条模型」。
+    开关关掉后 `load_raw_models` 返回 (非空列表, "")，而代码只挡了
+    「列表为空」那一种，`next(x for x in raw if x["id"] == active)`
+    在这里抛 StopIteration —— TestClient 下冒成 500。
+    修法不是硬猜一条写进去（写进哪条是用户的决定），而是给可行动的 400。
+    """
+    _seed_models(tmp_path, {"id": "a", "base_url": "https://a/v1", "model": "a"},
+                 {"id": "b", "base_url": "https://b/v1", "model": "b"}, active="a")
+    c = _client(tmp_path, seed=False)
+    assert c.post("/api/models/activate", json={"id": ""}).status_code == 200
+
+    r = c.post("/api/config", json={"base_url": "https://x/v1", "model": "m-x"})
+    assert r.status_code == 400, f"应为可行动的 400，实际 {r.status_code}：{r.text}"
+    assert "模型" in r.json()["detail"], r.text
+    # 报错了也不能把任何一条模型的连接信息改掉
+    raw, _ = load_raw_models(tmp_path)
+    assert [x["base_url"] for x in raw] == ["https://a/v1", "https://b/v1"], r.text
+
+
+def test_config_reset_link_fields_without_active_is_noop(tmp_path):
+    """**重置连接字段同理**：没启用任何一条时静默 no-op，不是 500。
+
+    数字字段（timeout 等）住在配置本身，照常重置；连接字段没有落点，
+    跳过即可 —— 原来 `if raw:` 挡住的是"一条都没有"，挡不住"有但都没启用"。
+    """
+    _seed_models(tmp_path, {"id": "a", "base_url": "https://a/v1", "model": "a"},
+                 active="a")
+    c = _client(tmp_path, seed=False)
+    assert c.post("/api/models/activate", json={"id": ""}).status_code == 200
+
+    r = c.post("/api/config/reset", json={"fields": ["base_url", "timeout"]})
+    assert r.status_code == 200, f"应为 200 no-op，实际 {r.status_code}：{r.text}"
+    raw, _ = load_raw_models(tmp_path)
+    assert raw[0]["base_url"] == "https://a/v1", "没启用时不该改动任何一条模型"
+    # 数字字段住在配置本身，照常重置 —— 不能因为连接字段跳过就连它一起漏掉
+    assert load_config(tmp_path).llm.timeout == 180, "timeout 没被重置回默认"
+
+
 def main() -> int:                                        # pragma: no cover
     """独立跑一遍迁移那组（不依赖 pytest fixture）。"""
     tmp = Path(tempfile.mkdtemp(prefix="talkscript-ml-"))
