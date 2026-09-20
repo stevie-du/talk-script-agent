@@ -18,7 +18,7 @@
      动效       --ease（常规） --ease-pop（弹性） --dur
 
    ── 命名约定 ──
-   choice-cards = 卡片式单选组（原 segmented 胶囊已删）   tabs/tab = 设置抽屉一级切换
+   tabs/tab = 设置抽屉一级切换
    script-list / script-card = 结果区的段落流（不是卡片，是分隔线内容流）
    acc = 折叠块（分镜/合规/JSON/日志）
    select-wrap = 自绘下拉（原生 select 收进 .native-hidden 只作值容器）
@@ -29,7 +29,12 @@
   /* ── 文本 ── */
   --text-1: #1d1d1f;
   --text-2: #6e6e73;
-  --text-3: #a1a1a6;
+  /* 第三档灰**并进第二档**。原来 --text-3 是 #a1a1a6，白底实算 2.57:1，
+     而它有 44 处用法几乎都在承载信息（副标题、meta、占位说明、计数、图标）。
+     想同时满足「≥4.5:1」和「与 --text-2 看得出差别」在数学上没有位置：
+     达标的下限约 #707075，与 #6e6e73 只差 2~3 个色阶，等于没有第三档。
+     纯装饰的弱色请改用 --line / --line-strong / --fill-*，不要拿文字色当装饰色。 */
+  --text-3: var(--text-2);
   --text-inv: #ffffff;
 
   /* ── 字体 ── */
@@ -49,10 +54,7 @@
   --bubble: #ededee;                     /* 用户消息气泡 */
   --scrim: rgba(29, 29, 31, .30);        /* 弹层遮罩 */
   --toast-bg: rgba(29, 29, 31, .88);
-  /* 深色底上的次级线条色。⚠ 当前**没有使用者**：唯一用它的是发送键里那条
-     不可达的 .spinner 规则（已删）。保留是作为配色语言的一部分 ——
-     以后往深色底上放转圈/次级描边时用它，别另挑一个值。 */
-  --on-ink-dim: rgba(255, 255, 255, .40);
+
   --scrollbar: rgba(0, 0, 0, .18);
   --scrollbar-hover: rgba(0, 0, 0, .32);
 
@@ -80,51 +82,70 @@
   --grad-btn: linear-gradient(180deg, #434349, #26262b);
   --grad-btn-hover: linear-gradient(180deg, #4c4c53, #2e2e34);
 
+  /* ── 层次（elevation）只有三档 ──
+     边界一律靠 0.5px 发丝线立住，阴影只做"离开纸面一点点"，透明度 ≤ .10。
+     一个元素只用一档，不得与描边 / 玻璃 / 渐变叠加（docs/UI视觉规范.md §3）。 */
+  --e1: 0 0 0 0.5px var(--line);
+  --e2: 0 0 0 0.5px var(--line), 0 1px 2px rgba(0, 0, 0, .04);
+  --e3: 0 0 0 0.5px var(--line-strong), 0 8px 24px rgba(0, 0, 0, .10);
+  /* 原来 12 个阴影名各写一套数值，同一语义有两种线宽、层级靠"谁叠得多"区分。
+     现在全部并进上面三档 —— 保留旧名只为少改 50 多处引用，不要再新增使用点。 */
+  --shadow-input: var(--e1);
+  --shadow-input-hover: 0 0 0 0.5px var(--line-strong);
+  --shadow-ghost: var(--e1);
+  --shadow-selected: var(--e1);
+  --shadow-raised: var(--e2);
+  --shadow-lift: var(--e2);
+  /* 输入卡聚焦：它是浮在消息流之上的操作面，用浮层档。
+     ⚠ 不能并进 --e2 —— 那样聚焦只多 1px 模糊，"输入卡立起来"这个信号就没了
+     （断言「聚焦比未聚焦多一层真实抬升」量的正是模糊半径 ≥16px）。 */
+  --shadow-composer: var(--e3);
+  --shadow-pop: var(--e3);
+  /* 状态环是**状态**不是**层次**，单独一族，不得拿来表达层级 */
+  --shadow-focus: 0 0 0 1px rgba(0, 0, 0, .22), 0 0 0 4px var(--ring-focus);
+  --shadow-flash: 0 0 0 3px rgba(0, 0, 0, .09);
+  /* 深色实心主 CTA 专用，不扩散到卡片 */
   --shadow-ink: 0 1px 3px rgba(0, 0, 0, .26), inset 0 1px 0 rgba(255, 255, 255, .20);
   --shadow-ink-lg: 0 4px 14px rgba(0, 0, 0, .26), inset 0 1px 0 rgba(255, 255, 255, .24);
-  --shadow-raised: 0 0.5px 2px rgba(0, 0, 0, .10), 0 1px 4px rgba(0, 0, 0, .06);
-  --shadow-ghost: 0 0 0 0.5px var(--line-strong), 0 1px 2px rgba(0, 0, 0, .03);
-  /* 输入类控件：静态只用一层极淡描边，不叠内阴影（内阴影在浅底上会显脏） */
-  --shadow-input: 0 0 0 0.5px var(--line);
-  --shadow-input-hover: 0 0 0 0.5px var(--line-strong);
-  /* 聚焦：细描边加深 + 柔和光圈，不用纯墨色实线（那会变成刺眼双描边） */
-  --shadow-focus: 0 0 0 1px rgba(0, 0, 0, .22), 0 0 0 4px var(--ring-focus);
-  /* 选中/打开态：与输入框同级的淡描边，避免"选中就变粗框" */
-  --shadow-selected: 0 0 0 0.5px var(--line-strong);
-  /* 输入卡聚焦时的投影。原来两层都是 5% —— 在纯白页面上等于没有，
-     卡片立不住（那正是「白底白卡」看起来平的第二个原因，第一个是缺描边）。
-     加一层更大更实的落影，让卡片真的「浮」起来。 */
-  --shadow-composer: 0 1px 2px rgba(0, 0, 0, .06), 0 6px 20px rgba(0, 0, 0, .10);
-  /* 以下两个原本散落在具体规则里写死，收进变量以保证视觉语言统一 */
-  --shadow-lift: 0 3px 10px rgba(0, 0, 0, .05);      /* 卡片 hover 抬升 */
-  --shadow-flash: 0 0 0 3px rgba(0, 0, 0, .09);      /* 占位事实跳转后的闪烁高亮 */
-  --shadow-pop: 0 0 0 0.5px rgba(0, 0, 0, .06), 0 8px 24px rgba(0, 0, 0, .12),
-                0 24px 64px rgba(0, 0, 0, .12);
 
   --glass: rgba(255, 255, 255, .72);
   --glass-strong: rgba(255, 255, 255, .85);
   --glass-blur: saturate(1.6) blur(20px);
 
-  /* ── 间距（4/8pt 节奏）── */
-  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 20px; --s6: 24px; --s8: 32px;
+  /* ── 间距：一律 4 的倍数（docs/UI视觉规范.md §2）── */
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s6: 24px; --s8: 32px;
 
-  /* ── 字阶 ── */
-  --f-min: 10px; --f-2xs: 11px; --f-xs: 12px; --f-sm: 13px;
-  --f-base: 14px; --f-md: 15px; --f-lg: 16px; --f-xl: 20px;
+  /* ── 字阶：四档 ── */
+  --f-2xs: 11px;   /* 字段标签、小标、计数 */
+  --f-sm: 13px;    /* 控件、列表、提示文字 */
+  --f-md: 15px;    /* 正文与卡片标题（标题靠字重与正文区分，不靠字号）*/
+  --f-xl: 20px;    /* 页标题 */
+  /* 旧名并入上面四档。保留别名只为少改几十处引用，**不要再新增使用点**：
+     10/12/14/16 这四个值已经没有自己的位置了。 */
+  --f-min: var(--f-2xs); --f-xs: var(--f-2xs);
+  --f-base: var(--f-md); --f-lg: var(--f-md);
 
   /* ── 等宽字体（文件清单、代码块、耗时数字）── */
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 
-  /* ── 圆角 ── */
-  --r-xs: 6px; --r-sm: 8px; --r-ctl: 9px; --r-md: 10px;
-  --r-lg: 14px; --r-xl: 18px; --r-pill: 999px;
+  /* ── 圆角：三档 + 胶囊 ── */
+  --r-ctl: 8px;    /* 控件、图标块、小卡 */
+  --r-card: 12px;  /* 卡片与容器 */
+  --r-pop: 16px;   /* 弹层 */
+  --r-pill: 999px;
+  /* 旧名并入（6/8/9/10/14/18 → 8/12/16）。⚠ 原来 --r-ctl 是 9px、--r-sm 是 8px，
+     两个只差 1px 的档并存，正是"看着差不多但不一样"的来源。 */
+  --r-xs: var(--r-ctl); --r-sm: var(--r-ctl);
+  --r-md: var(--r-card); --r-lg: var(--r-card); --r-xl: var(--r-pop);
 
-  /* ── 控件高度 ── */
-  --h-ctl: 32px;        /* 输入类控件基准 */
-  --h-btn: 30px;        /* 常规按钮 */
-  --h-btn-lg: 32px;     /* 新建对话等主按钮 */
-  --h-btn-sm: 28px;     /* 紧凑按钮（slim / tab / 快捷条）*/
-  --h-icon: 30px;
+  /* ── 控件高度：两档，4 的倍数 ── */
+  --h-sm: 28px;    /* 紧凑按钮、图标块 */
+  --h-md: 32px;    /* 常规控件（输入 / 选择 / 按钮）*/
+
+  /* 旧名并入。⚠ 原来 --h-btn 与 --h-icon 都是 30px、--h-ctl 与 --h-btn-lg 都是
+     32px —— 同值双名各两份，加上实测的 34/36，一屏里并存的按钮高度有六档。 */
+  --h-ctl: var(--h-md); --h-btn: var(--h-sm); --h-btn-lg: var(--h-md);
+  --h-btn-sm: var(--h-sm); --h-icon: var(--h-sm);
 
   /* ── 动效 ── */
   --ease: cubic-bezier(.32, .72, .35, 1);
@@ -150,10 +171,17 @@ body {
   -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
 }
 ::selection { background: rgba(0, 0, 0, .10); }
+/* 图标只有一套笔画（docs/UI视觉规范.md §2·5）。
+   SVG 的 stroke-width 是 presentation attribute，CSS 声明能盖住它，
+   所以这一条就把全站 1.8 / 2 / 2.4 三种粗细归了档 —— 不必逐个改 HTML。 */
+svg { stroke-width: 1.6; }
 
 /* ══════════════ 工具类 ══════════════ */
 .hidden { display: none !important; }
-.hint { font-size: var(--f-xs); color: var(--text-3); margin-top: var(--s1); line-height: 1.55; }
+/* 提示文字：字阶第 2 档（13）+ 辅助色 --text-2。
+   原来用 --f-xs(12) + --text-3，而 --text-3 白底实算只有 2.57:1 ——
+   它是承载信息的正文级文字，不是装饰，对比度不达标（规范 §5）。 */
+.hint { font-size: var(--f-sm); color: var(--text-2); margin-top: var(--s1); line-height: 1.6; }
 /* config.yaml 读坏时的警示行（#st-cfg-err）。用 --warn 而不是 --bad：
    配置读坏不是错误状态，引擎照常起来、用户重存一次就好 —— 吓人的红字反而
    会让人以为数据丢了。它要传达的是「现在显示的这份不是你的」。 */
@@ -167,10 +195,11 @@ body {
    「一个主控件 + 若干按钮」设计的（原来的 select + 详情 + 新建）；
    两个纯按钮时会**把第一个拉满整行**（「详情」横跨 700px，见截图）。 */
 .btn-row { display: flex; gap: var(--s2); align-items: center; }
-.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s3); }
+/* `.grid2` 已删：只有分步确认弹层里「钩子类型 / 结尾引导」那一对字段用它，弹层随功能一并移除。 */
 .spacer { flex: 1; }
 /* 字段标签：小号 + 中等字重，作为"控件说明"存在，不与区块标题抢层级 */
-.lbl { display: block; font-size: var(--f-xs); font-weight: 600; color: var(--text-2); margin-bottom: 6px; letter-spacing: .1px; }
+.lbl { display: block; font-size: var(--f-2xs); font-weight: 600; color: var(--text-2);
+  margin-bottom: var(--s2); line-height: 1.35; letter-spacing: 0; }
 
 /* 「这一项还是内置默认」的小标（设置 → 模型接口，由 markDefault() 挂上）。
    存在的理由：**从没配过**时输入框里填的是内置默认值 —— glm-4.7 / 0.7 / 180 /
@@ -179,7 +208,7 @@ body {
    中性灰而不是 --warn 橙：没配过不是故障，染成警示色会让橙色贬值
    （真正会失败的「未配置 API Key」那条就没人看了）。 */
 .tag-default {
-  margin-left: 6px; padding: 1px 6px; border-radius: var(--r-xs);
+  margin-left: var(--s2); padding: 1px var(--s2); border-radius: var(--r-xs);
   background: var(--fill-strong); color: var(--text-2);
   font-size: var(--f-2xs); font-weight: 500; letter-spacing: 0;
 }
@@ -195,7 +224,7 @@ body {
    压回 16px（行盒看的是外边距盒），于是标签仍是 16px、可点区域仍是 20px。
    判据见 `_verify/verify.js`：同一组字段的 `.lbl` 高度必须完全一致。 */
 .linkbtn {
-  height: auto; margin: -2px 0 -2px 8px; padding: 2px 6px; border: 0; border-radius: var(--r-sm);
+  height: auto; margin: -2px 0 -2px var(--s2); padding: 2px var(--s2); border: 0; border-radius: var(--r-sm);
   background: transparent; color: var(--text-2); font-size: var(--f-xs);
   font-weight: 500; cursor: pointer; text-decoration: underline;
   text-decoration-color: var(--line-strong); text-underline-offset: 2px;
@@ -221,51 +250,48 @@ body {
 .kb-group-t {
   display: flex; align-items: baseline; gap: 8px;
   font-size: var(--f-sm); font-weight: 600; color: var(--text-1);
-  margin: 0; letter-spacing: -.1px;
+  margin: 0; letter-spacing: -.02em;
 }
+/* 分组计数：与左栏 `.group-lbl .count` **同一颗药丸**。
+   原来这里是裸数字，左栏是灰底药丸 —— 同一种信息（"这一组有几条"）两种画法。 */
 .kb-group-c {
-  font-size: var(--f-2xs); font-weight: 500; color: var(--text-3);
+  font-size: var(--f-2xs); font-weight: 600; color: var(--text-2);
   font-variant-numeric: tabular-nums;
+  background: var(--fill); border-radius: var(--r-pill); padding: 1px var(--s2);
 }
 /* 卡片堆栈：gap 用 --s1（4px）让卡片贴近读作"一组"，
    用 --s2 会散开读作"几张卡" */
-.kb-cards { display: flex; flex-direction: column; gap: 2px; }
-/* 条目：图标 + 文件名 + 大小 —— 与 .pl-item 同一族视觉语言
-   （2026-09-17 统一：默认无背景，hover 时浮起，.on 时高亮）。
-   网格：图标(30) | 名称(1fr) | 大小(auto) —— 与 .pl-item 完全一致。 */
+.kb-cards { display: flex; flex-direction: column; gap: var(--s1); }
+/* 条目：图标 + 文件名 + 大小 —— 与 .pl-item 同一族视觉语言，
+   几何逐项相等（规范 v1；断言「.kb-item 与 .pl-item 视觉同族」钉的就是这个）。
+   网格：图标(--h-sm=28) | 名称(1fr) | 大小(auto) —— 与 .pl-item 完全一致。 */
 .kb-item {
-  display: grid; grid-template-columns: 30px 1fr auto;
-  align-items: center; gap: var(--s3);
-  width: 100%; padding: 9px 10px;
-  /* ⚠ 这一行不能删：全局 `button { height: var(--h-btn) }`（30px）会把这张卡钉死，
-     而卡里是「30px 图标 + 一行文件名」，需要 ~48px。少了它，内容从卡片底部漏出
+  display: grid; grid-template-columns: var(--h-sm) 1fr auto;
+  align-items: center; gap: var(--s2);
+  width: 100%; padding: var(--s2) var(--s3);
+  /* ⚠ 这一行不能删：全局 `button { height: var(--h-btn) }` 会把这张卡钉死，
+     而卡里是「图标 + 一行文件名」，需要 ~48px。少了它，内容从卡片底部漏出
      18px —— 而**下一张条目的白底正好把漏出的那半行盖住**，界面读成「文件名下面
      漂着一行小字、还压在下一条上」。
      判据见 `_verify/verify.js` 的「卡片容得下内容」断言：拿每个非绝对定位子元素
      的底边与卡的内容盒底边比，**不能有溢出**。 */
   height: auto;
-  border: 0.5px solid transparent; border-radius: var(--r-md);
-  background: transparent; color: var(--text-1);
+  border: 0; border-radius: var(--r-ctl);
+  background: transparent; color: var(--text-1); box-shadow: none;
   font-size: var(--f-sm); text-align: left;
   cursor: pointer;
-  transition: background var(--dur) var(--ease),
-              border-color var(--dur) var(--ease),
-              box-shadow var(--dur) var(--ease);
+  transition: background var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
 }
 .kb-item:hover { background: var(--fill); }
-.kb-item.on {
-  background: var(--sel-bg);
-  border-color: var(--line-strong);
-  box-shadow: var(--shadow-selected);
-}
-/* 图标容器：30×30 方块，文件按 role 上色。
-   与 .pl-ic 同尺寸（30×30），颜色绑定 role —— 这是「知识 / 技能」
+.kb-item.on { background: var(--fill); box-shadow: var(--e1); }
+/* 图标容器：28×28 方块，文件按 role 上色。
+   与 .pl-ic 同尺寸，颜色绑定 role —— 这是「知识 / 技能」
    比 .pl-item 多出来的一层语义信息（哪个组的文件），保留它。 */
 .kb-icon {
-  width: 30px; height: 30px; flex: 0 0 auto;
+  width: var(--h-sm); height: var(--h-sm); flex: 0 0 auto;
   display: grid; place-items: center;
   background: var(--fill); color: var(--text-2);
-  border-radius: var(--r-sm);
+  border-radius: var(--r-ctl);
 }
 .kb-icon svg { width: 18px; height: 18px; }
 /* 文件名（sans）。`.kb-desc`（卡内那行角色小字）已删：卡片已经按角色分在
@@ -273,7 +299,7 @@ body {
    字号 / 字重 / 颜色跟 .pl-t 一致。 */
 .kb-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .kb-name {
-  font: 500 var(--f-sm)/1.4 var(--font);
+  font: 500 var(--f-sm)/1.35 var(--font);
   color: var(--text-1);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
@@ -318,7 +344,7 @@ body {
   flex: 1; margin: 0; overflow: auto;
   background: var(--fill-strong); border-radius: var(--r-md); padding: 12px;
   box-shadow: var(--shadow-input);
-  font: 12px/1.7 var(--mono); white-space: pre-wrap; word-break: break-word;
+  font: var(--f-sm)/1.6 var(--mono); white-space: pre-wrap; word-break: break-word;
 }
 
 /* 行业包右列：文件分组 + 查看器**左右并排**（2026-09-17）。
@@ -372,14 +398,14 @@ main { display: flex; flex: 1; min-height: 0; }
 .res-tabs-wrap { margin-top: var(--s4); }
 .res-tabs {
   display: flex; align-items: stretch; gap: 4px;
-  border-bottom: 1px solid var(--line); margin-bottom: var(--s4);
+  border-bottom: 0.5px solid var(--line); margin-bottom: var(--s4);
 }
 .res-tab {
-  display: flex; align-items: center; gap: 6px;
-  padding: 8px 14px; border: 0; border-radius: 0;
+  display: flex; align-items: center; gap: var(--s2);
+  padding: var(--s2) var(--s4); border: 0; border-radius: 0;
   border-bottom: 2px solid transparent;
   background: transparent; color: var(--text-2); cursor: pointer;
-  font: 13px/1.4 var(--font); white-space: nowrap;
+  font: var(--f-sm)/1.35 var(--font); white-space: nowrap;
   margin-bottom: -1px;            /* 让选中态的黑线压在容器分隔线上 */
 }
 .res-tab:hover { color: var(--text-1); }
@@ -395,7 +421,7 @@ main { display: flex; flex: 1; min-height: 0; }
 /* 字幕预览表 */
 .sub-pane .hint { margin: 0 0 var(--s3); }
 .sub-table { width: 100%; border-collapse: collapse; font-size: var(--f-sm); }
-.sub-table td { padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.sub-table td { padding: var(--s2); border-bottom: 0.5px solid var(--line); vertical-align: top; }
 .sub-table .sn { width: 34px; color: var(--text-3); font-family: var(--mono); }
 .sub-table .tm {
   width: 88px; color: var(--text-2); font-family: var(--mono);
@@ -416,7 +442,7 @@ main { display: flex; flex: 1; min-height: 0; }
 .model-pick .select-wrap .select-btn.is-mock:hover { color: var(--ok); background: var(--ok-soft); }
 
 .sess-search {
-  position: relative; display: flex; align-items: center; gap: 6px;
+  position: relative; display: flex; align-items: center; gap: var(--s2);
   /* 高度/圆角必须走 --h-ctl / --r-ctl：这是「输入类控件」的基准 token。
      此前硬编码 30px + --r-sm，与正上方同宽的「新建对话」(32px / --r-ctl) 差
      2px 高、1px 圆角 —— 两个通栏控件叠放时这点差会读成失误而不是设计。
@@ -424,7 +450,7 @@ main { display: flex; flex: 1; min-height: 0; }
   /* 上下间距全部交给 .left-top 的 gap：上方是分隔线，下方直接贴列表。
      不要再给 margin —— 否则「搜索」和它过滤的列表之间会被撑开。 */
   margin: 0; padding: 0 8px; height: var(--h-ctl);
-  border: 1px solid var(--line); border-radius: var(--r-ctl);
+  border: 0.5px solid var(--line); border-radius: var(--r-ctl);
   background: var(--fill);
 }
 .sess-search:focus-within { border-color: var(--line-strong); background: var(--surface); }
@@ -434,7 +460,7 @@ main { display: flex; flex: 1; min-height: 0; }
   /* 外观由外层 .sess-search 承担，这里必须显式清掉全局 input 的
      box-shadow / min-height / padding —— 见「输入控件」节的说明 */
   border-radius: 0; box-shadow: none; min-height: 0; padding: 0;
-  font: 12px/1 var(--font); color: var(--text-1); outline: none;
+  font: var(--f-sm)/1 var(--font); color: var(--text-1); outline: none;
 }
 .sess-search input::placeholder { color: var(--text-3); }
 .sess-search input::-webkit-search-cancel-button { display: none; }
@@ -453,10 +479,13 @@ main { display: flex; flex: 1; min-height: 0; }
      注意：折叠态下 #left 宽度归 0，这条线自然不可见，不会留残影。 */
   border-bottom: 0.5px solid var(--line);
 }
-.left-head #btn-toggle-left { margin-left: -6px; }
+/* 光学补偿（规范 §2 例外 1）：全局 button 有 `padding: 0 var(--s3)`（12px），
+   折叠键的图标因此比左栏其它内容右移 12px。拉回**半个内边距**让它视觉对齐 ——
+   写成 `--s3 / -2` 而不是 -6px：值完全相同，但按钮内边距一改它就跟着改，不会失配。 */
+.left-head #btn-toggle-left { margin-left: calc(var(--s3) / -2); }
 .brand { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
 .brand .logo-wrap {
-  width: 22px; height: 22px; flex: 0 0 auto;
+  width: 24px; height: 24px; flex: 0 0 auto;
   display: grid; place-items: center; border-radius: var(--r-xs);
   background: var(--grad-ink); color: var(--text-inv);
   box-shadow: var(--shadow-ink);
@@ -464,21 +493,21 @@ main { display: flex; flex: 1; min-height: 0; }
 .brand .logo-wrap svg { width: 13px; height: 13px; }
 .brand .name { font-size: var(--f-base); font-weight: 600; color: var(--text-1); }
 .badge {
-  font-size: var(--f-2xs); padding: 2px 9px; border-radius: var(--r-pill);
+  font-size: var(--f-2xs); padding: 2px var(--s2); border-radius: var(--r-pill);
   background: var(--warn-soft); color: var(--warn); font-weight: 500;
   flex: 0 0 auto;
 }
 
 /* ── 右栏头部：当前视图标题 + 状态 ── */
 .right-head {
-  flex: 0 0 auto; height: 48px; padding: 0 var(--s5);
+  flex: 0 0 auto; height: 48px; padding: 0 var(--s6);
   display: flex; align-items: center; justify-content: space-between; gap: var(--s4);
   border-bottom: 0.5px solid var(--line);
 }
 /* 折叠时按钮浮在内容区左上角，右栏头部让出按钮宽度（30px）+ 间距 */
-#left.folded ~ #right .right-head { padding-left: 54px; }
+#left.folded ~ #right .right-head { padding-left: 56px; }
 
-.rh-title { display: flex; align-items: baseline; gap: 9px; min-width: 0; }
+.rh-title { display: flex; align-items: baseline; gap: var(--s2); min-width: 0; }
 .rh-title h1 {
   font-size: var(--f-base); font-weight: 600; color: var(--text-1);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 460px;
@@ -487,7 +516,7 @@ main { display: flex; flex: 1; min-height: 0; }
 .rh-actions { display: flex; align-items: center; gap: var(--s2); flex: 0 0 auto; }
 .rh-state {
   font-size: var(--f-2xs); font-weight: 500; color: var(--text-3);
-  padding: 3px 10px; border-radius: var(--r-pill); background: var(--fill);
+  padding: var(--s1) var(--s2); border-radius: var(--r-pill); background: var(--fill);
 }
 .rh-state:empty { display: none; }
 .rh-state.ok { color: var(--ok); background: var(--ok-soft); }
@@ -498,7 +527,7 @@ main { display: flex; flex: 1; min-height: 0; }
   display: inline-flex; align-items: center; justify-content: center;
   width: var(--h-icon); height: var(--h-icon); padding: 0;
   border-radius: var(--r-sm); color: var(--text-2); flex: 0 0 auto;
-  transition: background .12s var(--ease), color .12s;
+  transition: background var(--dur) var(--ease), color var(--dur);
 }
 .icon-btn svg { flex: 0 0 auto; }
 .icon-btn:hover { background: var(--fill); color: var(--text-1); }
@@ -506,9 +535,9 @@ main { display: flex; flex: 1; min-height: 0; }
 
 /* ══════════════ 按钮 ══════════════ */
 button {
-  font: inherit; height: var(--h-btn); padding: 0 13px; border-radius: var(--r-ctl);
+  font: inherit; height: var(--h-btn); padding: 0 var(--s3); border-radius: var(--r-ctl);
   border: none; background: transparent; cursor: pointer; color: var(--text-1);
-  display: inline-flex; align-items: center; gap: 6px; justify-content: center;
+  display: inline-flex; align-items: center; gap: var(--s2); justify-content: center;
   font-weight: 500; letter-spacing: .1px;
   transition: background var(--dur) var(--ease), color var(--dur) var(--ease),
               transform var(--dur) var(--ease), box-shadow .15s var(--ease);
@@ -524,13 +553,13 @@ button.ghost, button.bordered {
 button.ghost:hover, button.bordered:hover { background: var(--fill-hover); }
 button.primary {
   background: var(--grad-btn); color: var(--text-inv); font-weight: 500;
-  height: var(--h-btn); border-radius: var(--r-ctl); padding: 0 15px; font-size: var(--f-sm);
+  height: var(--h-btn); border-radius: var(--r-ctl); padding: 0 var(--s4); font-size: var(--f-sm);
   box-shadow: var(--shadow-ink);
 }
 button.primary:hover { background: var(--grad-btn-hover); color: var(--text-inv); }
 button.primary:active { background: var(--ink-press); }
 button.primary:disabled { background: var(--fill); color: var(--text-3); box-shadow: none; cursor: not-allowed; transform: none; }
-button.primary.slim { height: var(--h-btn-sm); padding: 0 13px; font-size: var(--f-sm); border-radius: var(--r-sm); }
+button.primary.slim { height: var(--h-btn-sm); padding: 0 var(--s3); font-size: var(--f-sm); border-radius: var(--r-sm); }
 button.primary.danger { background: var(--bad); }
 button.primary.danger:hover { background: var(--bad-hover); color: var(--text-inv); }
 button:disabled { cursor: not-allowed; opacity: .5; }
@@ -539,13 +568,13 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 /* 输入框"白底 + 淡描边 + 圆角"这一套外观；合成器里的 #topic 是透明无框的
    （外观交给外层 #composer-body），用下方的 ID 规则覆盖，不靠 !important */
 input, select, textarea {
-  width: 100%; min-height: var(--h-ctl); padding: 6px 11px;
+  width: 100%; min-height: var(--h-ctl); padding: var(--s2) var(--s3);
   border: none; border-radius: var(--r-ctl);
   font: inherit; background: var(--surface); color: var(--text-1);
   box-shadow: var(--shadow-input);
-  transition: box-shadow .15s var(--ease);
+  transition: box-shadow var(--dur) var(--ease);
 }
-textarea { resize: vertical; line-height: 1.7; }
+textarea { resize: vertical; line-height: 1.6; }
 input::placeholder, textarea::placeholder { color: var(--text-3); }
 /* 输入区的 placeholder 比全局那档（--text-3）深一级。两个理由：
    ① 它是空白输入区里的**主指令**，不是搜索框那种装饰性提示；
@@ -569,7 +598,7 @@ input:focus, select:focus, textarea:focus { outline: none; box-shadow: var(--sha
 }
 select {
   appearance: none; -webkit-appearance: none;
-  padding: 6px 30px 6px 11px; text-overflow: ellipsis;
+  padding: var(--s2) 28px var(--s2) var(--s3); text-overflow: ellipsis;
   background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23a1a1a6' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   background-color: var(--surface);
   background-repeat: no-repeat;
@@ -580,7 +609,7 @@ select {
    容器 padding 归零后，内边距由这里承担（工具条那边自己管自己的）。 */
 #composer #topic {
   flex: 0 0 auto; min-width: 0; width: 100%;
-  min-height: 46px; max-height: 140px; padding: 14px 16px 6px;
+  min-height: 48px; max-height: 140px; padding: var(--s4) var(--s4) var(--s2);
   border: none; border-radius: 0;
   background: transparent; color: var(--text-1);
   font-size: var(--f-md); line-height: 1.6;
@@ -588,72 +617,20 @@ select {
   resize: none; outline: none;
 }
 
-/* ══════════ 卡片式单选（.choice-cards，2026-09-17） ══════════
-   替代原来的「胶囊单选组」（`.segmented`，已删）。
-
-   为什么换：胶囊的毛病是**说不清两个选项的区别** —— 用户之前专门问过
-   「一键直通与分步确认的区别」，而那个控件只有两个词；而且选中的白块
-   与未选中的灰底对比太弱（`--surface` vs `--fill` 只差 10 等效灰度），
-   扫一眼看不出选了哪个。
-
-   现在：卡片各带图标 + 名称 + 一句说明；选中卡描边加深 + 抬起 + 图标染色，
-   视觉与左栏条目（`.pl-item.sel` / `.kb-item.on`）**同族**。
-
-   ⚠ radio 仍是 `input[name=mode]`（视觉隐藏），`name`/`value` 不能改 ——
-   `jobs.js` 读 `input[name=mode]:checked`，改了会静默失效。 */
-.choice-cards {
-  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--s3);
-}
-.choice-card {
-  position: relative;
-  display: flex; align-items: flex-start; gap: var(--s3);
-  padding: 12px 14px;
-  border: 0.5px solid var(--line); border-radius: var(--r-md);
-  background: var(--surface);
-  cursor: pointer;
-  transition: border-color var(--dur) var(--ease),
-              background var(--dur) var(--ease),
-              box-shadow var(--dur) var(--ease);
-}
-.choice-card:hover { border-color: var(--line-strong); }
-/* 选中的那张：描边加深 + 抬起 + 图标染色 —— 与 .pl-item.sel / .kb-item.on 同族。
-   `:has()` 项目里已在用（`.segmented .radio:has(...)` 的前身），浏览器支持没问题。 */
-.choice-card:has(input:checked) {
-  border-color: var(--line-strong);
-  background: var(--sel-bg);
-  box-shadow: var(--shadow-selected);
-}
-.choice-card:has(input:checked) .cc-ic {
-  background: var(--ring-focus); color: var(--ink);
-}
-/* 视觉隐藏的 radio（口径与项目其它地方一致：绝对定位 + 1px，不参与布局） */
-.choice-card input { position: absolute; opacity: 0; width: 1px; height: 1px; }
-/* 图标块：30×30，与 .pl-ic / .kb-icon 同尺寸 */
-.choice-card .cc-ic {
-  flex: 0 0 auto; width: 30px; height: 30px; border-radius: var(--r-sm);
-  display: grid; place-items: center;
-  background: var(--fill); color: var(--text-2);
-  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
-}
-.choice-card .cc-txt { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.choice-card .cc-t { font-size: var(--f-sm); font-weight: 600; color: var(--text-1); }
-.choice-card .cc-d { font-size: var(--f-xs); color: var(--text-3); line-height: 1.45; }
-
 /* 自绘下拉：设置页（等宽方块）与快捷条（紧凑胶囊）共用，仅尺寸/圆角不同 */
 .native-hidden { position: absolute; opacity: 0; pointer-events: none; width: 1px; height: 1px; }
 .select-wrap { position: relative; }
 .select-btn {
-  width: 100%; height: var(--h-ctl); padding: 0 11px;
+  width: 100%; height: var(--h-ctl); padding: 0 var(--s3);
   justify-content: flex-start; gap: 0;
   background: var(--surface); color: var(--text-1); font: inherit; border-radius: var(--r-ctl);
   box-shadow: var(--shadow-input);
-  transition: box-shadow .15s var(--ease);
+  transition: box-shadow var(--dur) var(--ease);
 }
 .select-btn:hover { box-shadow: var(--shadow-input-hover); }
 .select-wrap.open .select-btn { box-shadow: var(--shadow-selected); }
 .select-btn .sel-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.select-btn .chev { margin-left: auto; color: var(--text-3); flex: 0 0 auto; transition: transform .15s var(--ease); }
+.select-btn .chev { margin-left: auto; color: var(--text-3); flex: 0 0 auto; transition: transform var(--dur) var(--ease); }
 .select-wrap.open .chev { transform: rotate(180deg); }
 
 /* 工具条内的控件（参数胶囊 / 模型选择器）一律**幽灵态**：纯文字 + 箭头，无底色。
@@ -661,8 +638,8 @@ select {
    而不是靠一个灰底胶囊。一排灰底胶囊会让工具条比输入区本身还重。 */
 .select-wrap.pill { flex: 0 0 auto; }
 .select-wrap.pill .select-btn {
-  width: auto; height: 26px; min-height: 26px;
-  padding: 0 7px; gap: 4px; font-size: var(--f-xs);
+  width: auto; height: 24px; min-height: 24px;
+  padding: 0 var(--s2); gap: var(--s1); font-size: var(--f-xs);
   border-radius: var(--r-sm);
   background: transparent; box-shadow: none;
   color: var(--text-2);
@@ -685,12 +662,12 @@ select {
   scrollbar-width: thin;
 }
 /* 胶囊菜单：行高更紧凑，避免 8 项时占满半屏（JS 给菜单加 .compact） */
-.select-menu.compact .select-opt { padding: 5px 9px; font-size: var(--f-xs); }
+.select-menu.compact .select-opt { padding: var(--s2); font-size: var(--f-xs); }
 
 .select-opt {
   display: flex; align-items: center; gap: 8px;
-  padding: 7px 9px; border-radius: var(--r-sm); cursor: pointer;
-  font-size: var(--f-sm); color: var(--text-1); line-height: 1.5;
+  padding: var(--s2); border-radius: var(--r-sm); cursor: pointer;
+  font-size: var(--f-sm); color: var(--text-1); line-height: 1.35;
   white-space: nowrap;          /* 胶囊菜单按内容取宽，不允许换行折断 */
 }
 .select-opt:hover, .select-opt.hover { background: var(--fill); }
@@ -713,7 +690,7 @@ select {
 .select-wrap .select-btn.is-warn .chev { color: var(--warn); }
 .select-wrap .select-btn.is-warn .sel-text::before {
   content: ""; display: inline-block; width: 5px; height: 5px; border-radius: 50%;
-  background: var(--warn); margin-right: 5px; vertical-align: middle;
+  background: var(--warn); margin-right: var(--s2); vertical-align: middle;
 }
 /* 菜单项上的标记：必须在**选中之前**就能看出这个值没定制 */
 .select-opt.uncovered .opt-warn {
@@ -730,7 +707,7 @@ select {
   backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);
   border-right: 0.5px solid var(--line);
   display: flex; flex-direction: column; min-height: 0;
-  transition: width .22s var(--ease), min-width .22s var(--ease);
+  transition: width var(--dur) var(--ease), min-width var(--dur) var(--ease);
 }
 #left.folded { width: 0; min-width: 0; border-right: none; position: relative; z-index: 46; }
 /* 折叠时：头部只保留"展开"按钮，且按钮脱离 0 宽容器浮到内容区左上角。
@@ -747,7 +724,7 @@ select {
 #left.folded .left-scroll,
 #left.folded .left-foot { display: none; }
 #left.folded #btn-toggle-left {
-  position: fixed; top: 9px; left: 12px; z-index: 45;
+  position: fixed; top: var(--s2); left: 12px; z-index: 45;
   background: var(--glass-strong);
   box-shadow: var(--shadow-input);
 }
@@ -758,7 +735,7 @@ select {
    但 Windows / dpr=1 下 Chrome 会把它**向上取整成 1px 渲染**（getComputedStyle
    也返回 1px）。所以量「线底 → 设置按钮顶」时，线底 = border box 顶边 + borderTopWidth，
    拿 .left-foot 的 border box 顶边当线会凭空多出 1px。 */
-.left-foot { flex: 0 0 auto; padding: var(--s4) var(--s3) 10px;
+.left-foot { flex: 0 0 auto; padding: var(--s4) var(--s3) var(--s2);
   border-top: 0.5px solid var(--line); }
 /* 顶部固定区：搜索 + 新建对话，flex: 0 0 auto 防止被滚动区挤压 */
 /* 左栏竖向节奏**统一 16px**（= --s4）：品牌线→按钮→搜索框→列表，三段都是 16。
@@ -788,10 +765,10 @@ select {
 
 /* 新建对话：ID 选择器提高特异性，无需 !important；
    同时 flex: 0 0 auto + min-height 防止作为 flex 子项被压缩 */
-button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto; }
+button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0 auto; }
 #btn-new-chat.primary {
   height: var(--h-btn-lg); min-height: var(--h-btn-lg);
-  padding: 0 13px; border-radius: var(--r-ctl);
+  padding: 0 var(--s3); border-radius: var(--r-ctl);
 }
 
 /* 会话记录 */
@@ -810,10 +787,50 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
    注意：行盒比内容区矮，文字是**溢出**行盒的（overflow 可见，不会被裁），
    标签的实际高度由 12px 的计数药丸撑起，所以改行高不动布局。 */
 .group-lbl {
-  font-size: var(--f-2xs); font-weight: 600; color: var(--text-3); letter-spacing: .3px;
-  padding: var(--s3) 8px var(--s1); margin-top: var(--s2);
-  display: flex; align-items: flex-start; gap: 6px; line-height: 9px;
+  font-size: var(--f-2xs); font-weight: 600; color: var(--text-2); letter-spacing: .3px;
+  margin-top: var(--s2);
+  /* line-height 与计数药丸**同值**（药丸是 line-height:1 的 11px 盒），
+   两者的墨底才齐平 —— 原来写死 9px 是配着药丸 10px 时代调出来的魔数，
+   字阶并进 11px 之后那个数就失效了（断言量的正是这 1px 的错位）。
+   gap 6px → 8px：一律 4 的倍数。 */
+  display: flex; align-items: flex-start; gap: var(--s2); line-height: 9px;
+  /* 折叠按钮的复位。⚠⚠ 这一块每一条都不能省 —— 全局 `button` 规则
+     （styles.css「按钮」段）会把它接管成另一种东西：
+       · `padding: 0 var(--s3)`   → 顶掉这里的垂直内边距，标签被压扁；
+       · `justify-content: center` → 三角/文字/计数**居中**，标签看着像浮在行中间；
+       · `height: var(--h-btn)` → 撑成 30px 高，顶坏分组之间的竖向节奏。
+     实测踩过：漏了 `justify-content` 与 `padding` 两条，量出来三角距左边 80px、
+     计数右边距 80px（本该贴左），视觉上整行是"居中"的。
+     **判据**：改完必须量 `三角.left - 标签.left` 与 `文字.left - 标签.left`，
+     它们应当只有 8px 上下的差异（= 标签自身的 padding-left）。 */
+  width: 100%; height: auto; min-height: 0; border: 0; background: transparent;
+  font-family: inherit; text-align: left; cursor: pointer;
+  justify-content: flex-start;
+  padding: var(--s3) 8px var(--s1);
+  border-radius: var(--r-xs);
 }
+/* 悬停/聚焦给一点落点，告诉用户「这行是能点的」——折叠标签此前是纯文本，
+   没有任何可点击的暗示，用户不会想到去点它。 */
+.group-lbl:hover { color: var(--text-2); }
+.group-lbl:focus-visible { outline: 2px solid var(--ring-focus); outline-offset: 0; }
+/* 折叠三角：展开时朝下、折起时朝右（与文件树的惯例一致）。
+   用字符边框三角而不是图标，避免再多一个 SVG 依赖；
+   ⚠ 尺寸固定 4px，不能跟着字号缩 —— 2xs 字号太小，三角形会糊成一团。 */
+.group-lbl .gl-arrow {
+  width: 0; height: 0; flex: 0 0 auto;
+  border-left: 4px solid currentColor;
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+  /* 与文字墨顶（盒顶 + 0px，见上方推导）对齐：行盒 9px，三角高 7px，
+     往下推 1px 让它的尖端大致落在文字的中线上 */
+  margin-top: 1px;
+  transition: transform var(--dur) var(--ease);
+}
+.group-lbl.folded .gl-arrow { transform: rotate(90deg); }
+/* 折起时整行读起来是「一个收起的抽屉」：把标签颜色提一档、
+   计数药丸留在原位（数量是折起后唯一还能看的信息）。 */
+.group-lbl.folded { color: var(--text-2); }
+.group-lbl .gl-t { flex: 0 0 auto; }
 /* 第一个分组标签是「搜索框的下一行」，不是「上一条记录的下一条」——
    margin-top 和 padding-top 都要归零，让搜索框到「本周」的距离**等于**
    滚动区上边界的距离（即 .left-top 的 padding-bottom 16px）。
@@ -823,7 +840,7 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 .group-lbl:first-child { margin-top: 0; padding-top: 0; }
 .group-lbl .count {
   font-size: var(--f-min); background: var(--fill); color: var(--text-2);
-  border-radius: var(--r-pill); padding: 1px 7px; font-weight: 600;
+  border-radius: var(--r-pill); padding: 1px var(--s2); font-weight: 600;
   /* line-height 1.6 → 1：药丸从 18px 收到 12px。
      文字改成顶对齐后，18px 的药丸会把「59」的基线留在 29.6px，而「本周」在 25.6px，
      两者错开 4px（实测基线差 -4，肉眼能看出数字被压低）。收紧到 12px 后错位消失，
@@ -832,7 +849,8 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
      中文与数字的「基线→墨底」关系不同，拿基线比会得出反的结论。
      .group-lbl 的行盒后来从 11px 收到 9px（让字墨顶对齐），文字墨底随之从 187.5
      上移到 186.5，正好与药丸墨底重合（改前是药丸高 1px）。两边必须一起改。 */
-  line-height: 1;
+  line-height: 9px;   /* 与 .group-lbl 的行盒同值：两个盒子的度量必须一致，
+             否则「墨顶对齐」与「墨底对齐」两条断言方向相反、不可能同时过 */
 }
 /* 列表从容器**顶部**开始排，会话少时也不许贴底。
    曾经写过 margin-top: auto（为了绕开 justify-content: flex-end 的滚动陷阱），
@@ -845,8 +863,8 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
    子项溢出到列表盒之外，既滚不动也画不出来。 */
 #session-list { display: flex; flex-direction: column; gap: 1px; flex: 0 0 auto; }
 .sess-item {
-  position: relative; padding: 7px 9px; border-radius: var(--r-sm); cursor: pointer;
-  transition: background .12s var(--ease);
+  position: relative; padding: var(--s2); border-radius: var(--r-sm); cursor: pointer;
+  transition: background var(--dur) var(--ease);
 }
 .sess-item:hover { background: var(--fill); }
 .sess-item.active { background: var(--sel-bg); }
@@ -888,19 +906,21 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
    也不给底色（只靠 scale 缩放 + 更深一档的红做按压反馈）。
 
    顺带澄清「边距不统一」的真正来源：不是颜色，是几何 ——
-   按钮 right:3px / 宽 28，而行 padding 是 7px 9px；副标题的 padding-right:32px
+   按钮 right:var(--s1) / 宽 28，而行 padding 是 7px 9px；副标题的 padding-right:32px
    按「28+3」留白。三者必须互相对齐，否则悬停时露出的矩形一定显得偏心。 */
 .sess-del {
   /* 垂直居中不能用 top:50% + translateY(-50%)：全局的 button:active{transform:scale(.96)}
      会在按下瞬间覆盖掉 translateY，按钮直接下移 14px 脱离指针，
      mouseup 于是落在行里 → click 归属变成「打开记录」，删除确认永远弹不出来。
      改用 top/bottom:0 + margin-block:auto，位置由布局决定，transform 再怎么变都不影响。 */
-  position: absolute; right: 3px; top: 0; bottom: 0; margin-block: auto;
+  position: absolute; right: var(--s1); top: 0; bottom: 0; margin-block: auto;
   width: 28px; height: 28px; padding: 0; min-height: 0;
   display: grid; place-items: center; border-radius: var(--r-sm);
   background: transparent; color: var(--text-3);
-  opacity: .5;
-  transition: opacity .12s var(--ease), color .12s var(--ease);
+  /* 默认**完全隐藏**，悬停或键盘聚焦才现（下一节的 :hover / :focus-visible 给 opacity 1）。
+     原来是 .5 —— 那不是"淡出"，是"常驻但半透明"：一列 20 行就有 20 个垃圾桶，
+     删除是这个列表里最不该一直嚷嚷的动作。 */
+  opacity: 0; transition: opacity var(--dur) var(--ease), color var(--dur) var(--ease);
 }
 .sess-item:hover .sess-del, .sess-del:focus-visible { opacity: 1; }
 /* 悬停：只有图标由灰转红，底色始终透明 —— 见上方说明，不加背景色。 */
@@ -911,21 +931,21 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
    （不能省：这是纯图标按钮唯一的键盘可见反馈。） */
 .sess-del:focus-visible { outline: 2px solid var(--bad); outline-offset: 1px; }
 .sess-del svg { pointer-events: none; }
-.sess-empty { padding: 6px 12px; }
+.sess-empty { padding: var(--s2) var(--s3); }
 
 /* 左栏分组导航（底部）：设置 / 行业 / 模型接口 三组
    组间以发丝线分隔，组标签小字大写感，向 Zcode 的"分组左导航"靠 */
 /* 项间距交给 gap，不再用 .nav-item 的 margin —— 见 .nav-item 里的说明。
    相邻两项原本靠上下各 1px 的 margin 叠出 2px，gap: 2px 完全等价，
    但 gap **只在项与项之间**生效，不会像 margin 那样在容器边界处也插一脚。 */
-.nav-sec { display: flex; flex-direction: column; gap: 2px; }
+.nav-sec { display: flex; flex-direction: column; gap: var(--s1); }
 /* 6px → 7px：补回上一个组的末项不再贡献的那 1px margin-bottom，组间距保持原样
    （7 + 1px 的线 + 8 = 16，与改前的 1 + 6 + 0.5 + 8 视觉一致）。 */
-.nav-sec + .nav-sec { margin-top: 7px; border-top: 0.5px solid var(--line); padding-top: 8px; }
+.nav-sec + .nav-sec { margin-top: var(--s2); border-top: 0.5px solid var(--line); padding-top: var(--s2); }
 /* 组标签：比导航项更弱，只作分区提示，不参与点击 */
 .nav-sec-t {
-  font-size: var(--f-2xs); font-weight: 600; letter-spacing: .3px;
-  color: var(--text-3); padding: 2px 9px 4px; text-transform: none;
+  font-size: var(--f-2xs); font-weight: 600; letter-spacing: .3px; line-height: 1.35;
+  color: var(--text-2); padding: var(--s1) var(--s3); text-transform: none;
 }
 .nav-item {
   /* ⚠ 与设置页的 .stg-nav-item 是**同一个控件的两处实例**，改这里必须同步改那边。 */
@@ -934,8 +954,8 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
      直接叠在 .left-foot 的 padding-top(16) 上，把「分隔线 → 设置」顶成 17px
      （再加 1px 的线就是实测的 18），左栏竖向 16px 节奏正是在这里破的。
      margin 的语义是"我自己要离邻居多远"，容器边界处的间距必须由容器说了算。 */
-  width: 100%; height: 34px; padding: 0 9px; margin: 0;
-  border-radius: var(--r-sm); justify-content: flex-start; gap: 8px;
+  width: 100%; height: var(--h-md); padding: 0 var(--s3); margin: 0;
+  border-radius: var(--r-ctl); justify-content: flex-start; gap: 8px;
   background: transparent; color: var(--text-2); font-size: var(--f-sm); font-weight: 500;
 }
 .nav-item:hover { background: var(--fill); color: var(--text-1); }
@@ -961,7 +981,7 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 .page {
   flex: 1; min-height: 0; overflow-y: auto;
   width: 100%; max-width: var(--w-content); margin-inline: auto;
-  padding: var(--s5) var(--s6) var(--s8);
+  padding: var(--s6) var(--s6) var(--s8);
 }
 /* 页面头：左标题 + 右上操作组（参考 Zcode 的 headbar 范式）。
    之前是单列单行（标题 + 副标题），只能放下静态文案。
@@ -969,37 +989,34 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
    flex-start 是因为「标题」里有 h2 + 副标题两行（操作按钮要按顶对齐），
    不要再用 baseline —— 第二行 hint 会把操作按钮顶下去 */
 .page-head {
-  margin-bottom: var(--s5);
+  margin-bottom: var(--s6);
   display: flex; align-items: flex-start; justify-content: space-between; gap: var(--s4);
 }
 .page-head-titles {
-  flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px;
+  flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: var(--s1);
 }
-.page-head-titles h2 { font-size: var(--f-xl); font-weight: 600; letter-spacing: -.3px; margin-bottom: 3px; }
+.page-head-titles h2 { font-size: var(--f-xl); font-weight: 600; letter-spacing: -.02em; margin-bottom: 0; }
 /* 操作组：与左栏底部 / page-actions 同一套间距（gap=--s2），
    padding-top 让按钮垂直基线和标题第二行 hint 顶对齐 */
 .page-head-actions {
-  display: flex; align-items: center; gap: var(--s2); flex: 0 0 auto; padding-top: 6px;
+  display: flex; align-items: center; gap: var(--s2); flex: 0 0 auto; padding-top: 0;
 }
+/* 规范 v1：右列卡片用**发丝边 + 12 圆角 + 一档极轻抬起**立住（层次只用一种手法）。
+   原来这里是 `padding: --s6 0` + `border-top` 分割线 —— 分割线的语义是
+   「堆叠卡片之间的分隔」，而生成偏好的三张卡是**互斥切换**的（同时只显示一张），
+   于是可见那张会平白多一条头顶线 + 20px 上内边距，用户原话
+   「生成参数和进阶上面怎么有两个分割线？和其他设置页面不统一」。
+   改成整圈发丝边之后，那条线不再存在，`:first-of-type` / `#gen-sec-detail`
+   两处"去线"补丁一并删掉 —— 不再需要按 DOM 位置猜谁该有线。 */
 .page-card {
-  padding: var(--s5) 0;
+  padding: var(--s4);
   display: flex; flex-direction: column; gap: var(--s4);
-  border-top: 0.5px solid var(--line);
+  border-radius: var(--r-card); background: var(--surface); box-shadow: var(--e2);
 }
-.page-card:first-of-type { border-top: none; padding-top: 0; }
-/* ⚠ 生成偏好右列的三张卡片是**互斥切换**的（同时只有一张可见），
-   不像 llm 右列只有一张 .page-card、packinfo 右列根本没有。
-   `.page-card` 的 border-top 语义是「堆叠卡片之间的分隔线」——
-   互斥切换下这个语义不成立：可见的那张会平白多一条线 + 20px 顶部内边距。
-   而默认停在的「行业包」（div:first-of-type）没有 → 三张不一致
-   （用户原话：「生成参数和进阶上面怎么有两个分割线？和其他设置页面不统一」）。
-   ⚠ 不能靠 `:first-of-type` 修：它认不出 `.hidden` —— 隐藏的卡片仍占
-   DOM 顺序，切到 param 时 pack 仍是 first-of-type，param 照样有线。
-   所以显式给这一族卡片去掉（与 llm / packinfo 右列首块的表现对齐）。 */
-#gen-sec-detail > .page-card { border-top: none; padding-top: 0; }
 .page-card .fg { display: flex; flex-direction: column; gap: var(--s4); }
-/* 组内字段间距由父级 .fg 的 gap 统一控制，block-inner 本身不额外加边距 */
-.block-inner { display: flex; flex-direction: column; }
+/* 组内字段间距由父级 .fg 的 gap 统一控制；block-inner 只管自己标签与控件之间
+   的那一段（规范 v1：一律 --s2，4 的倍数）。 */
+.block-inner { display: flex; flex-direction: column; gap: var(--s2); }
 .page-actions { display: flex; gap: var(--s2); margin-top: var(--s2); align-items: center; }
 
 /* ⚠ headbar / 底部操作区的按钮**统一 28px 高 + 13px 字号**（2026-09-17）。
@@ -1028,7 +1045,7 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 
 /* 下面这三组**仍在用**（settings.js 的 renderModelList 产出）：
    条目左侧的名称/副行、启用开关、以及两个小标。 */
-.mdl-label { display: block; font-weight: 600; color: var(--text-1); letter-spacing: -.1px; }
+.mdl-label { display: block; font-weight: 600; color: var(--text-1); letter-spacing: -.02em; }
 .mdl-sub {
   display: block; margin-top: 1px; font-size: var(--f-2xs); color: var(--text-3);
   font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -1043,7 +1060,7 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
   display: inline-block; margin-left: 0; margin-top: 4px;
 }
 .tag-warn {
-  display: inline-block; padding: 1px 6px; border-radius: var(--r-xs);
+  display: inline-block; padding: 1px var(--s2); border-radius: var(--r-xs);
   background: var(--warn-soft); color: var(--warn);
   font-size: var(--f-2xs); font-weight: 500; letter-spacing: 0;
 }
@@ -1107,7 +1124,7 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
    整体宽度 520px 居中，让用户聚焦于"输入什么"而不是"翻找字段"。 */
 .pg-empty {
   display: flex; flex-direction: column; align-items: center; text-align: center;
-  gap: var(--s4); padding: var(--s8) var(--s5);
+  gap: var(--s4); padding: var(--s8) var(--s6);
   max-width: 560px; margin: 0 auto;
 }
 /* 大圆图标：64px 灰底圆，比 settings.js 里 32px placeholder 更大、更"主操作" */
@@ -1118,11 +1135,11 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
   border: 0.5px solid var(--line);
 }
 .pg-empty-ic svg { width: 28px; height: 28px; }
-.pg-empty-t { font-size: var(--f-lg); font-weight: 600; color: var(--text-1); letter-spacing: -.1px; }
+.pg-empty-t { font-size: var(--f-lg); font-weight: 600; color: var(--text-1); letter-spacing: -.02em; }
 .pg-empty-d { font-size: var(--f-sm); color: var(--text-2); line-height: 1.6; max-width: 38em; }
 /* 表单：中段左对齐 + 整行 480px 宽，比居中卡片稍窄以提示"这里要打字" */
 .pg-form { display: flex; flex-direction: column; gap: var(--s3); width: 100%; max-width: 480px; margin-top: var(--s3); text-align: left; }
-.pg-form .block-inner { gap: 6px; }
+.pg-form .block-inner { gap: var(--s2); }
 /* pg-empty-actions：底部按钮组的图标要稍稍离开文字，2px 间距。 */
 .pg-empty-actions { display: flex; gap: var(--s2); margin-top: var(--s4); justify-content: center; }
 .pg-empty-actions .ic-spark { margin-right: 2px; }
@@ -1134,7 +1151,7 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
    才拉回 16px，于是三个面板右列顶部 h3 出现两种字号（packinfo 16 / llm·gen 14），
    同角色不同字号的「不统一」。统一在 16px 后 packinfo 与 llm / gen 同型。 */
 .card-title {
-  font-size: var(--f-lg); font-weight: 600; letter-spacing: -.2px; color: var(--text-1);
+  font-size: var(--f-lg); font-weight: 600; letter-spacing: -.02em; color: var(--text-1);
 }
 /* 节奏：区块标题下(20) > 字段之间(16) > 字段标签下(6)。
    标题要"管辖"得住下面那组字段，所以它下方留白必须最大 */
@@ -1167,9 +1184,9 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
    直接给足 16px —— 与左栏同一套节奏（两侧栏同宽，读作"另一层工作区"）。
    同时 .stg-nav-scroll 的 padding-top 归 0，见那里的说明。 */
 .stg-back {
-  flex: 0 0 auto; height: 36px; margin: var(--s3) var(--s3) var(--s4);
-  padding: 0 9px; justify-content: flex-start; gap: 8px;
-  border-radius: var(--r-sm);
+  flex: 0 0 auto; height: var(--h-md); margin: var(--s3) var(--s3) var(--s4);
+  padding: 0 var(--s3); justify-content: flex-start; gap: var(--s2);
+  border-radius: var(--r-ctl);
   background: transparent; color: var(--text-2); font-size: var(--f-sm); font-weight: 500;
 }
 .stg-back:hover { background: var(--fill); color: var(--text-1); }
@@ -1182,7 +1199,7 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
      padding 区，滚到中间时首项会一路贴到返回按钮下沿，所以"永久间距"只能由
      margin 给。留 0 之后，内容滚到顶也被裁在容器上边，而容器上边距返回按钮
      恒定 16px。 */
-  padding: 0 var(--s3) var(--s5);
+  padding: 0 var(--s3) var(--s6);
   display: flex; flex-direction: column;
 }
 /* ⚠ 与左栏底部的 .nav-item 是**同一个控件的两处实例**（类名不同、规则内容一致）。
@@ -1190,8 +1207,8 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
    的 margin，这半边残留的 margin: 1px 0 与 .nav-sec 新加的 gap: 2px 叠成 4px 项间距，
    差点成为漏改的连带回归。 */
 .stg-nav-item {
-  width: 100%; height: 34px; padding: 0 9px; margin: 0;
-  border-radius: var(--r-sm); justify-content: flex-start; gap: 8px;
+  width: 100%; height: var(--h-md); padding: 0 var(--s3); margin: 0;
+  border-radius: var(--r-ctl); justify-content: flex-start; gap: 8px;
   background: transparent; color: var(--text-2); font-size: var(--f-sm); font-weight: 500;
 }
 .stg-nav-item:hover { background: var(--fill); color: var(--text-1); }
@@ -1229,7 +1246,7 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
    原本是为了不让滚动条出现在居中盒子右边。中列用 sticky + 自身 max-height
    达到「条目列表独立滚动」的效果，同时不破坏那条断言。 */
 .stg-cols {
-  display: flex; gap: var(--s5); align-items: flex-start;
+  display: flex; gap: var(--s6); align-items: flex-start;
 }
 /* 中列：条目列表。固定宽、sticky 吸顶、超出自身滚动。 */
 .pane-list {
@@ -1251,11 +1268,18 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 /* 三列面板需要更宽的限宽，否则中+右两列挤在 720px 里太窄。 */
 .stg-pane.has-cols { max-width: var(--w-stg-3col); }
 
-/* ══════════ 三列面板的右列：统一「撑满剩余高度」 ══════════
-   2026-09-17（用户报「右列高度行为不一致」）：原来只有行业包右列撑满，
-   生成偏好 / 模型接口的右列是「内容多高就多高」，下方留一大片空白。
-   现在统一成一条 flex 链：面板 → .stg-cols → .pane-detail → 首块逐级 flex:1，
-   占满「除 .stg-pane 上下边距（24 / 32px）外的全部可见高度」。
+/* ══════════ 三列面板的右列：撑满与否按「内容有没有尽头」分 ══════════
+   2026-09-17 曾把右列首块统一撑满（用户报「右列高度行为不一致」，当时只有
+   行业包撑满）。但撑满给表单卡带来的结果是：**一个 950px 高的空盒子立在那儿，
+   内容只占上面 250px** —— 发丝边框把空白框成了可见的东西，比不撑满更难看。
+
+   现在按内容的性质分，这比"全部撑满"更有原则：
+     · **表单卡（.page-card）按内容自然高度** —— 字段数是有限的，读完就完了，
+       下方留白是页面留白，不是"一个空容器"。
+     · **文件浏览器（.pi-cols）仍然撑满** —— 它是「分组列表 + 查看器」两栏，
+       查看器内部要滚（.kb-body flex:1 + overflow:auto），必须有一个确定高度
+       才能滚；不撑满它就没边界，滚动条无处可来。
+   两者不一致是**对的**：一个装有限内容，一个是需要视口的滚动容器。
 
    ⚠ 必须带 `:not(.hidden)`：`.stg-pane.hidden { display: none }` 与
    `.stg-pane.has-cols` 同为 (0,2,0)，只靠源码顺序太脆；写成 id 选择器
@@ -1264,46 +1288,80 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 .stg-pane.has-cols:not(.hidden) { display: flex; flex-direction: column; }
 .stg-pane.has-cols .stg-cols { flex: 1; min-height: 0; align-items: stretch; }
 .stg-pane.has-cols .pane-detail { display: flex; flex-direction: column; min-height: 0; }
-/* 右列首块（表单卡片 / 文件分组 + 查看器）吃掉剩余高度；
-   底部固定行（page-actions）不参与拉伸 —— 它是一行按钮。 */
-.stg-pane.has-cols .pane-detail > .page-card { flex: 1; min-height: 0; }
+.stg-pane.has-cols .pane-detail > .page-card { flex: 0 0 auto; }
 .stg-pane.has-cols .pane-detail > .pi-cols { flex: 1; min-height: 320px; }
 .stg-pane.has-cols .pane-detail > .page-actions { flex: 0 0 auto; }
+
+/* ══════════ 模型接口：一条模型都没有时收起三列骨架 ══════════
+   三列是「条目 + 选中那条的编辑区」两件事都成立才需要的结构。空列表时中列
+   只剩一句「还没有模型。」、右列那张卡被它顶到右边贴着页面左上角，下面一整片
+   空白 —— 两列在演一个还不存在的层级关系，读起来像页面坏了（用户报空态布局）。
+   这里按状态把中列收掉，右列限成一条 560 的可读栏并在内容区里水平 + 垂直居中。
+   ⚠ 限宽给**列容器**而不是给卡片：卡片之外还有「配置读坏」警示行与状态行
+   （读坏时 models 必为空，见 tests/test_config_corruption.py），只居中卡片
+   会让那两行铺满 956px，一行 60 个字的正文是没法读的。
+   ⚠ 垂直居中用 `justify-content: safe center`，不是 `center`：这张卡在
+   点「添加模型」之后是**表单**，窗口矮时比视口还高。普通 center 会把卡片
+   顶部推到滚动区上沿之外、滚不回去；`safe` 在放不下时退回顶对齐。
+   老浏览器解析不了 `safe center` 会整条丢弃，于是等于不居中 —— 可接受的降级。 */
+#pane-llm.no-models .pane-list { display: none; }
+#pane-llm.no-models .pane-detail {
+  max-width: 560px; margin-inline: auto;
+  justify-content: center; justify-content: safe center;
+}
 
 /* 中列条目（通用）：图标 + 标题/副标题 + 右侧操作区，选中态靠 .on。
    ⚠ 第三列 `auto` 是给条目自带的操作件留的（模型列表的启用开关就放这里）——
    有它才不用把「哪个启用」挤到右列去，一眼就能看见。 */
 .pl-item {
-  display: grid; grid-template-columns: 30px 1fr auto; align-items: center; gap: var(--s3);
-  width: 100%; padding: 9px 10px;
-  /* 与 .kb-item 同源的坑：全局 button{height:var(--h-btn)}（30px）会把它钉死。 */
+  /* 规范 v1：几何一律 4 的倍数；层次只用一种手法（透明 → hover 底色 → 选中发丝边）。
+     改前这里同时写着 30px 图标列 / 9px 10px 内边距 / 0.5px 透明描边 / 10px 圆角，
+     而 `.on` 又叠 描边 + 阴影 + 底色 三件套 —— 与 .sel 的深浅差一档根本分不出来。 */
+  display: grid; grid-template-columns: var(--h-sm) 1fr auto; align-items: center;
+  gap: var(--s2);
+  width: 100%; padding: var(--s2) var(--s3);
+  /* ⚠ 这一行不能删：全局 button{height:var(--h-btn)} 会把它钉死。 */
   height: auto;
-  border: 0.5px solid transparent; border-radius: var(--r-md);
-  background: transparent; color: var(--text-1);
+  border: 0; border-radius: var(--r-ctl);
+  background: transparent; color: var(--text-1); box-shadow: none;
   font-size: var(--f-sm); text-align: left; cursor: pointer;
-  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease);
+  transition: background var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
 }
 .pl-item:hover { background: var(--fill); }
+/* div 当按钮用还会顺手丢掉文字不可选这一件（原生 button 如此）；光标已单独给过。 */
+.pl-item, .kb-item, .sess-item { user-select: none; }
 /* `.on` = 业务上的「当前启用」；`.sel` = UI 上的「当前在右列编辑」。
    两者是**不同的状态**，混在一个 class 上会出现「启用的那条永远高亮、
-   切到别的条目看不出选中了谁」。 */
-.pl-item.on { background: var(--surface); border-color: var(--line-strong); box-shadow: var(--shadow-raised); }
-.pl-item.sel {
-  background: var(--sel-bg); border-color: var(--line-strong);
-}
+   切到别的条目看不出选中了谁」。现在用**不同元素**分别承载：
+   启用 → 图标块染成实色（开关感）；正在编辑 → 只给发丝边（焦点感）。 */
+.pl-item.on { background: var(--fill); box-shadow: var(--e1); }
+.pl-item.sel { background: var(--surface); box-shadow: var(--e1); }
 .pl-item.sel .pl-t { font-weight: 600; }
+/* 列表行的焦点环。⚠ 位置有讲究，必须在上面 `.on` / `.sel` 之后：
+   三者特异性相同（0,2,0），谁在后面谁赢 —— 放前面会被状态规则盖掉，
+   键盘用户 Tab 过来看到的是"选中样式"而不是焦点环。
+   为什么不能只靠全局 `button:focus-visible`：模型行是 `<div role=button>`
+   （行里嵌了启用开关，不能是 `<button>`），左栏会话行 `.sess-item` 同样是 div。 */
+.pl-item:focus-visible,
+.kb-item:focus-visible,
+.sess-item:focus-visible { box-shadow: var(--shadow-focus); outline: none; }
 .pl-item .pl-ic {
-  width: 30px; height: 30px; border-radius: var(--r-sm);
+  width: var(--h-sm); height: var(--h-sm); border-radius: var(--r-ctl);
   display: grid; place-items: center; background: var(--fill); color: var(--text-2);
 }
-.pl-item.on .pl-ic { background: var(--ring-focus); color: var(--ink); }
-.pl-item .pl-txt { min-width: 0; }
+.pl-item.on .pl-ic { background: var(--ink); color: var(--text-inv); }
+.pl-item .pl-txt { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+/* ⚠ display:block 不能省：两者都是 <span>（inline），不显式成块就会**连成一行**，
+   「行业包 选择当前生效的行业」读起来像一个词，副标题这一层直接消失。
+   中列条目的层级全靠这两行的大小/深浅差，合成一行等于没有层级。 */
 .pl-item .pl-t {
-  font-size: var(--f-sm); font-weight: 500; color: var(--text-1);
+  display: block;
+  font-size: var(--f-sm); font-weight: 500; color: var(--text-1); line-height: 1.35;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .pl-item .pl-s {
-  font-size: var(--f-xs); color: var(--text-3);
+  display: block;
+  font-size: var(--f-2xs); color: var(--text-2); line-height: 1.35;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 /* 这里原本有一条「坏包条目转警示红」（.pl-item.bad 的 .pl-t / .pl-s / .pl-ic）。
@@ -1334,21 +1392,13 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
    现在高度由 `.kb-view` 的 flex 链给出（.pi-cols 撑满 → .kb-view flex:1
    → .kb-body flex:1），内容超出时 .kb-body 自己滚（overflow:auto 已在）。 */
 
-/* 行业包文件表的行：可点击 → 加载预览。cursor:pointer 让「这是个可点的表格」
-   这一点对用户可见。 */
-#pi-files tbody tr { cursor: pointer; }
-#pi-files tbody tr:hover { background: var(--fill); }
-#pi-files tbody tr.on { background: var(--sel-bg); }
-
-/* 中列分组标题 */
-.pl-sec-t {
-  font-size: var(--f-xs); font-weight: 600; color: var(--text-3);
-  padding: var(--s2) 10px var(--s1); letter-spacing: .2px;
-}
+/* 中列分组标题 —— 已删除：三列面板的中列条目自己说话，
+   `#pi-files` 扁平表格也早在 2026-09-17 换成文件分组（`.kb-group`），
+   那三条 `#pi-files tbody tr*` 规则连同本条一起清掉。 */
 
 /* 这里原本有一整块「占位内容」（.placeholder / .ph-ic / .ph-t / .ph-d，
    注释写的是「知识库 / 技能待接入」）。已删除：知识库与技能面板 2026-09-17
-   已并入行业包面板，`placeholderBody()` 吐的是 `.thinking`/`.steps` 那套骨架，
+   已并入行业包面板，`placeholderBody()` 吐的是 `.steps`/`.think-stream` 那套骨架，
    全项目没有任何代码产出 `.placeholder` 或 `.ph-*` —— 整块是不可达的死样式。
    ⚠ 别再按 `.ph-*` 这个前缀新增类：index.html 里还有 `data-ph-empty` 这类
    **属性**（不是类）在用 `.ph-` 字样，grep 时会撞上，容易误判成「还有人在用」。 */
@@ -1372,24 +1422,24 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 /* ══════════════ 消息流 ══════════════ */
 #chat-stream {
   flex: 1; min-height: 0; overflow-y: auto;
-  padding: var(--s5) var(--s6) var(--s4);
-  display: flex; flex-direction: column; gap: var(--s5);
+  padding: var(--s6) var(--s6) var(--s4);
+  display: flex; flex-direction: column; gap: var(--s6);
 }
-.msg { display: flex; gap: 11px; max-width: var(--w-stream); width: 100%; margin-inline: auto; animation: fadeUp .26s var(--ease-pop); }
+.msg { display: flex; gap: var(--s3); max-width: var(--w-stream); width: 100%; margin-inline: auto; animation: fadeUp .26s var(--ease-pop); }
 .msg-user { justify-content: flex-end; align-items: flex-start; gap: 4px; padding-left: 60px; }
 .msg-user .bub {
   background: var(--bubble); color: var(--text-1);
-  padding: 8px 14px; border-radius: var(--r-xl) var(--r-xl) var(--r-xs) var(--r-xl);
+  padding: var(--s2) var(--s4); border-radius: var(--r-xl) var(--r-xl) var(--r-xs) var(--r-xl);
   font-size: var(--f-md); line-height: 1.6; max-width: 100%;
   word-break: break-word;
 }
 /* 编辑入口：悬停/聚焦才显形（与 .sess-del / .card-foot .rw 同一套路）。
    修复前用户消息是死的 —— 打错一个字只能重开一条，线程被澄清消息污染。 */
 .msg-edit {
-  flex: 0 0 auto; margin-top: 5px; width: 24px; height: 24px; border-radius: var(--r-xs);
+  flex: 0 0 auto; margin-top: var(--s2); width: 24px; height: 24px; border-radius: var(--r-xs);
   display: grid; place-items: center; color: var(--text-3);
   background: transparent; border: none; cursor: pointer;
-  opacity: 0; transition: opacity .15s var(--ease), background .15s, color .15s;
+  opacity: 0; transition: opacity var(--dur) var(--ease), background var(--dur) var(--ease), color var(--dur) var(--ease);
 }
 .msg-user:hover .msg-edit, .msg-user:focus-within .msg-edit { opacity: .7; }
 .msg-edit:hover { opacity: 1; background: var(--fill); color: var(--ink); }
@@ -1397,14 +1447,14 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 .bub-edit {
   width: min(46vw, 420px); min-height: 34px; resize: none; font: inherit;
   color: var(--text-1); background: var(--surface);
-  border: 1px solid var(--line-strong); border-radius: var(--r-md);
-  padding: 6px 9px; line-height: 1.6;
+  border: 0.5px solid var(--line-strong); border-radius: var(--r-md);
+  padding: var(--s2); line-height: 1.6;
 }
-.bub-actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 7px; }
-.ghost.tiny, .primary.tiny { height: 24px; font-size: var(--f-xs); padding: 0 10px; }
-.msg-assistant { padding-right: var(--s5); }
+.bub-actions { display: flex; gap: var(--s2); justify-content: flex-end; margin-top: var(--s2); }
+.ghost.tiny, .primary.tiny { height: var(--h-sm); font-size: var(--f-xs); padding: 0 var(--s2); }
+.msg-assistant { padding-right: var(--s6); }
 .msg-assistant .avatar {
-  width: 26px; height: 26px; flex: 0 0 auto; border-radius: var(--r-sm);
+  width: 24px; height: 24px; flex: 0 0 auto; border-radius: var(--r-ctl);
   display: grid; place-items: center; margin-top: 2px;
   background: var(--grad-ink); color: var(--text-inv);
   box-shadow: var(--shadow-ink);
@@ -1412,74 +1462,112 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 .msg-assistant .avatar svg { width: 14px; height: 14px; }
 .msg-body { flex: 1; min-width: 0; }
 
-/* 生成中进度 */
-.thinking { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.thinking .spinner {
-  width: 14px; height: 14px; border-radius: 50%;
-  border: 2px solid var(--line-strong); border-top-color: var(--ink);
-  animation: spin .7s linear infinite; display: inline-flex; flex: 0 0 auto;
-}
-.thinking .t-text { font-size: var(--f-md); font-weight: 500; color: var(--text-1); }
-.thinking .t-elapsed { margin-left: auto; font-size: var(--f-xs); color: var(--text-3); font-variant-numeric: tabular-nums; }
+/* ══════════════ 生成中：步骤 / 思考流 / 状态行 ══════════════
+   三块按时间顺序自上而下：做完的 → 正在想的 → 此刻在干什么。
+   状态行在思考流**下方**（2026-09-20，用户原话「可以参考其他智能体都是在思考
+   下方」）—— 原来它顶着 15px/500 的「正在生成…」大标题坐在气泡最上面，
+   比正文还抢眼，而它下面既有步骤列表又有思考流，根本不需要它再报一次「在动」。 */
 
 /* 步骤时间线：每一步都可见并带耗时。
    参考 Claude / Cursor 的 tool-use 展示 —— 用户能判断是「模型在想」还是「卡住了」。
-   修复前是一个扁平的 pstep 列表，没有耗时、失败也不区分是哪一步。 */
-.steps { list-style: none; margin: 9px 0 2px; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+   修复前是一个扁平的 pstep 列表，没有耗时、失败也不区分是哪一步。
+   ⚠ 这里只放**已完成**的步骤；进行中的那一步由下面的状态行报。 */
+.steps {
+  list-style: none; margin: 0 0 var(--s2); padding: 0;
+  display: flex; flex-direction: column; gap: var(--s1);
+}
+/* 一条都还没完成时不占位（生成刚开始的那几秒，气泡里只该有状态行）。 */
+.steps:empty { display: none; }
 .step {
-  display: flex; align-items: center; gap: 8px;
-  font-size: var(--f-xs); color: var(--text-2); line-height: 1.9;
+  display: flex; align-items: baseline; gap: var(--s2);
+  font-size: var(--f-sm); color: var(--text-2); line-height: 1.6;
 }
 .step-dot {
-  width: 5px; height: 5px; border-radius: 50%; flex: 0 0 auto;
-  background: var(--ok); opacity: .75;
+  /* 与左栏会话列表的状态点 .dot 同尺寸同画法：同一种东西只有一种画法。 */
+  width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto; align-self: center;
+  background: var(--ok); opacity: .85;
 }
-.step.done .step-t { color: var(--text-2); }
-.step-note { color: var(--text-3); }
+.step-note { color: var(--text-2); opacity: .75; }
 .step-dur {
-  margin-left: auto; color: var(--text-3);
-  font-variant-numeric: tabular-nums; font-size: var(--f-min);
+  margin-left: auto; color: var(--text-3); opacity: .75;
+  font-variant-numeric: tabular-nums; font-size: var(--f-2xs);
 }
-.step.active .step-dot { background: var(--warn); animation: dotPulse 1.4s var(--ease) infinite; }
-.step.active .step-t { color: var(--ink); font-weight: 500; }
 .step.err .step-dot { background: var(--bad); opacity: 1; }
 .step.err .step-t { color: var(--bad); font-weight: 500; }
-.step.stopped .step-dot { background: var(--text-3); }
+.step.stopped .step-dot { background: var(--line-strong); opacity: 1; }
 .step.stopped .step-t { color: var(--text-3); }
 
 /* 流式思考过程：生成中展开、完成折叠。推理型模型「想」远久于「写」，
-   把这部分露出来，用户就不必盯着「正在生成…」干等几十秒 */
+   把这部分露出来，用户就不必盯着转圈干等几十秒 */
 .think-stream {
-  margin: 10px 0 4px; border: 1px solid var(--line);
-  border-radius: var(--r-md); background: var(--fill); overflow: hidden;
+  margin: 0; border: 0.5px solid var(--line);
+  border-radius: var(--r-card); background: var(--fill); overflow: hidden;
 }
 .think-stream > summary {
-  cursor: pointer; padding: 6px 10px; font-size: var(--f-xs); color: var(--text-3);
-  display: flex; align-items: center; gap: 6px; list-style: none; user-select: none;
+  cursor: pointer; padding: var(--s2) var(--s3);
+  font-size: var(--f-sm); line-height: 1.35; color: var(--text-2);
+  display: flex; align-items: center; gap: var(--s2);
+  list-style: none; user-select: none;
 }
 .think-stream > summary::-webkit-details-marker { display: none; }
+/* 展开箭头用**三角边框**，与「高级配置」折叠块（.st-adv > summary::before）
+   同一画法。原来是 `content: "▸"` —— 规范 §4 明确禁止拿文本字形当图标，
+   字形三角在不同字体里的朝向、大小、基线都不受控，两个折叠块还会长得不一样。 */
 .think-stream > summary::before {
-  content: "▸"; font-size: var(--f-min); color: var(--text-3);
-  transition: transform .16s var(--ease);
+  content: ""; flex: 0 0 auto; width: 0; height: 0; align-self: center;
+  border-left: 5px solid var(--text-3);
+  border-top: 4px solid transparent; border-bottom: 4px solid transparent;
+  transition: transform var(--dur) var(--ease);
 }
 .think-stream[open] > summary::before { transform: rotate(90deg); }
 .think-stream .ts-title { color: var(--text-2); font-weight: 600; }
-.think-stream .ts-meta { margin-left: auto; color: var(--text-3); }
+.think-stream .ts-meta {
+  margin-left: auto; color: var(--text-3); opacity: .8;
+  font-variant-numeric: tabular-nums;
+}
 .think-stream .ts-body {
-  margin: 0; padding: 0 12px 9px; max-height: 190px; overflow: auto;
-  font-family: inherit; font-size: var(--f-xs); line-height: 1.7;
+  margin: 0; padding: 0 var(--s3) var(--s3); max-height: 190px; overflow: auto;
+  font-family: inherit; font-size: var(--f-sm); line-height: 1.6;
   color: var(--text-2); white-space: pre-wrap; word-break: break-word;
   background: transparent; scrollbar-width: thin;
 }
 
+/* 状态行：转圈 + 当前阶段 + 已用时。整行 13px 次要文字，左对齐成一句话。
+   ⚠ 已用时**不再 margin-left:auto 顶到气泡右边缘**（用户报「位置也可以优化一下，
+   而且它会闪烁」）：右对齐时文本往左长，「已用 8 秒」→「已用 1 分 3 秒」
+   那一下整串数字会横跳；贴着阶段名排在左边，只有尾巴在动。 */
+.gen-status {
+  display: flex; align-items: center; gap: var(--s2);
+  margin-top: var(--s2); font-size: var(--f-sm); line-height: 1.35;
+  color: var(--text-2);
+}
+.gen-status .gs-phase { font-weight: 500; color: var(--text-1); }
+.gen-status .gs-elapsed { color: var(--text-3); font-variant-numeric: tabular-nums; }
+/* 中间那颗点是「已用时」自己带的：它为空时（作业已结束、或快照没有
+   created_at）点跟着消失，不会留下一个「· 」孤儿。 */
+.gen-status .gs-elapsed:not(:empty)::before { content: "·"; margin-right: var(--s2); }
+
+/* 转圈：淡轨道 + 中灰弧头 + 慢速。
+   原来弧头吃的是实墨色（--ink，主按钮那一档），转速又快，读作「一个深色方块
+   绕着圈甩」—— 用户直接报「太难看、而且闪烁特别快」。
+   现在轨道压到最淡那一档，弧头只用次级灰（跟它左边那行字同族，不是独立重色块），
+   一圈放到一秒以上。
+   ⚠ 环宽不许低于 2px：1x 屏上不足 2px 的边框会被 Chromium 舍入到 1px，
+   整个圈淡到看不见 —— 那是从「太抢眼」翻进另一个极端。 */
+.spinner {
+  width: 14px; height: 14px; flex: 0 0 auto; border-radius: 50%;
+  border: 2px solid var(--line); border-right-color: var(--text-2);
+  animation: spin 1.1s linear infinite;
+}
+
 /* 这里原本有一块「正文撰写中」实时草稿（.draft-live / .dl-title / .dl-body）。
    已删除：全项目没有任何 JS 产出 `.draft-live` —— 生成中的正文仍走
-   `.think-stream`（思考过程）与 `#gen-hint`，没有第二个"边写边显示正文"的面板。
+   `.think-stream`（思考过程）与状态行，没有第二个"边写边显示正文"的面板。
    留着会让下一个人以为存在实时草稿流。 */
 
 /* 小标签/胶囊（指标、状态徽标共用同一套基础样式） */
 .m-chip, .acc-badge {
-  font-size: var(--f-xs); padding: 2px 9px; border-radius: var(--r-pill);
+  font-size: var(--f-xs); padding: 2px var(--s2); border-radius: var(--r-pill);
   background: var(--fill); color: var(--text-2); font-weight: 500;
   display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;
 }
@@ -1491,30 +1579,31 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 /* 结果头部 */
 .res-head { margin-bottom: var(--s3); }
 .res-top { display: flex; align-items: flex-start; gap: var(--s4); flex-wrap: wrap; }
-.res-title { font-size: var(--f-lg); font-weight: 600; letter-spacing: -.2px; min-width: 0; margin-right: auto; }
-.res-tools { display: flex; gap: 5px; flex-wrap: wrap; }
-.res-tools button { height: 26px; font-size: var(--f-xs); padding: 0 10px; }
-.res-metric-list { display: flex; gap: 5px; flex-wrap: wrap; margin-top: var(--s3); }
+.res-title { font-size: var(--f-lg); font-weight: 600; letter-spacing: -.02em; min-width: 0; margin-right: auto; }
+.res-tools { display: flex; gap: var(--s2); flex-wrap: wrap; }
+.res-tools button { height: var(--h-sm); font-size: var(--f-xs); padding: 0 var(--s2); }
+.res-metric-list { display: flex; gap: var(--s2); flex-wrap: wrap; margin-top: var(--s3); }
 .res-banners { margin-bottom: var(--s2); }
 
 /* 横幅：默认中性，warn/info 只换文字与底色 */
 .banner {
-  border-radius: var(--r-md); padding: 9px 13px; font-size: var(--f-sm); margin-bottom: 10px;
-  line-height: 1.65; display: flex; align-items: flex-start; gap: 8px;
+  border-radius: var(--r-md); padding: var(--s2) var(--s3); font-size: var(--f-sm); margin-bottom: var(--s2);
+  line-height: 1.6; display: flex; align-items: flex-start; gap: 8px;
   background: var(--fill); color: var(--text-2);
   animation: fadeUp .22s var(--ease);
 }
-.fail-actions { display: flex; gap: 8px; margin-top: 9px; }
+.fail-actions { display: flex; gap: 8px; margin-top: var(--s2); }
 .fail-actions button { height: 28px; font-size: var(--f-xs); padding: 0 12px; }
 
 .banner.warn { background: var(--warn-soft); color: var(--warn); }
 .banner.info { background: var(--sel-bg); color: var(--ink); }
-.banner::before { content: "⚠"; font-weight: 600; }
-.banner.info::before { content: "ℹ"; }
+/* 图标只由 JS 文案出一次（见 docs/UI视觉规范.md §4）。
+   这里原本有 `content:"⚠"` / `"ℹ"`，与 result.js 写进横幅的 ⚠/⛔ 叠加，
+   最醒目的几条会显示成「⚠ 」。CSS 不再注入任何字形图标。 */
 /* 这里原本有一组「占位符补齐」的内联输入行（.ph-fill-row / .ph-fill-input）。
    已删除：占位事实目前的交互是**点横幅跳到首处、让用户自己改正文**，
    没有"在横幅里直接填值"这条路 —— 全项目没有代码产出 `.ph-fill-*`。 */
-.banner.jumpable { cursor: pointer; transition: filter .15s; }
+.banner.jumpable { cursor: pointer; transition: filter var(--dur); }
 .banner.jumpable:hover { filter: brightness(.97); }
 
 /* 占位事实跳转后的闪烁高亮 */
@@ -1526,9 +1615,9 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 
 /* ══════════════ 脚本段落流（分隔线内容流，非卡片）══════════════ */
 .script-list { display: flex; flex-direction: column; gap: 0; }
-.script-card { padding: 15px 0 13px; border-bottom: 0.5px solid var(--line); }
+.script-card { padding: var(--s4) 0 var(--s3); border-bottom: 0.5px solid var(--line); }
 .script-card:last-child { border-bottom: none; }
-.card-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 7px; }
+.card-head { display: flex; align-items: baseline; gap: var(--s2); margin-bottom: var(--s2); }
 .pill, .quota { font-size: var(--f-xs); flex: 0 0 auto; }
 .pill { font-weight: 600; letter-spacing: .2px; color: var(--text-1); }
 .pill.cta { color: var(--text-2); }
@@ -1536,9 +1625,9 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 .quota.over { color: var(--bad); font-weight: 500; }
 .meta {
   font-size: var(--f-xs); color: var(--text-3); margin-left: auto;
-  text-align: right; line-height: 1.8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  text-align: right; line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.card-text { line-height: 1.92; white-space: pre-wrap; font-size: var(--f-md); color: var(--text-1); letter-spacing: .1px; }
+.card-text { line-height: 1.6; white-space: pre-wrap; font-size: var(--f-md); color: var(--text-1); letter-spacing: .1px; }
 /* 这里原本有三条「结果正文可直改」（.card-text.editable / :hover / :focus 与
    .card-text.saving，注释写的是 P0-3）。已删除：全项目没有任何代码给
    `.card-text` 加 `editable` 或 `saving` —— 正文目前**不支持就地编辑**，
@@ -1547,16 +1636,16 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 .card-text .over { color: var(--warn); background: var(--warn-soft); border-radius: var(--r-xs); padding: 0 3px; }
 .card-foot { margin-top: 8px; display: flex; gap: var(--s2); align-items: center; }
 .card-foot .rw {
-  height: 24px; font-size: var(--f-xs); padding: 0 9px; flex: 0 0 auto;
+  height: 24px; font-size: var(--f-xs); padding: 0 var(--s2); flex: 0 0 auto;
   background: transparent; color: var(--text-3); border-radius: var(--r-xs);
   /* 默认淡显而非全隐：完全看不见就等于没有这个入口，用户不知道卡片能单段重写。
      悬停/聚焦才提到全亮，平时不抢正文的注意力（与 .sess-del 同一套路）。 */
-  opacity: .45; transition: opacity .15s var(--ease), background .15s, color .15s;
+  opacity: .45; transition: opacity var(--dur) var(--ease), background var(--dur) var(--ease), color var(--dur) var(--ease);
 }
 .script-card:hover .card-foot .rw, .card-foot:focus-within .rw { opacity: 1; }
 .card-foot button:hover { background: var(--fill); color: var(--ink); }
 .card-foot input {
-  display: none; flex: 1; padding: 4px 9px; font-size: var(--f-sm); background: var(--surface);
+  display: none; flex: 1; padding: var(--s1) var(--s2); font-size: var(--f-sm); background: var(--surface);
 }
 .card-foot.editing input { display: block; }
 .card-foot.editing .rw { opacity: 1; }
@@ -1569,8 +1658,8 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 .acc summary {
   list-style: none; cursor: pointer; user-select: none;
   display: flex; align-items: center; gap: 8px;
-  padding: 11px 0; font-size: var(--f-sm); font-weight: 500; color: var(--text-1);
-  transition: color .12s;
+  padding: var(--s3) 0; font-size: var(--f-sm); font-weight: 500; color: var(--text-1);
+  transition: color var(--dur);
 }
 .acc summary::-webkit-details-marker { display: none; }
 .acc summary:hover { color: var(--ink); }
@@ -1582,16 +1671,16 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: 6px; flex: 0 0 auto;
 .acc summary::after, .log-block summary::after {
   content: ""; width: 6px; height: 6px; flex: 0 0 auto;
   border-right: 1.5px solid var(--text-3); border-bottom: 1.5px solid var(--text-3);
-  transform: rotate(45deg); transition: transform .18s var(--ease);
+  transform: rotate(45deg); transition: transform var(--dur) var(--ease);
 }
 .acc[open] summary::after { transform: rotate(225deg); }
-.acc .acc-body { padding: 4px 0 14px; overflow-x: auto; }
+.acc .acc-body { padding: var(--s1) 0 var(--s4); overflow-x: auto; }
 .acc .code { font-size: var(--f-xs); color: var(--text-2); line-height: 1.6; white-space: pre-wrap; }
 
 /* 表格 */
 .tbl-wrap { overflow: auto; }
 table { border-collapse: collapse; width: 100%; font-size: var(--f-sm); }
-th, td { border-bottom: 0.5px solid var(--line); padding: 9px 12px 9px 0; text-align: left; vertical-align: top; }
+th, td { border-bottom: 0.5px solid var(--line); padding: var(--s2) var(--s3) var(--s2) 0; text-align: left; vertical-align: top; }
 th { color: var(--text-2); font-size: var(--f-xs); font-weight: 500; }
 tr:last-child td { border-bottom: none; }
 td.ok { color: var(--ok); font-weight: 500; }
@@ -1609,13 +1698,13 @@ td.bad { color: var(--bad); font-weight: 500; }
    `.col-item`（检查项列）。留着会让下一个人以为还有张带「尺寸/角色」列的表。 */
 .log-block { border-bottom: 0.5px solid var(--line); padding: var(--s3) 0; }
 .log-block:last-child { border-bottom: none; }
-.log-block summary { cursor: pointer; color: var(--text-2); font-size: var(--f-sm); display: flex; align-items: center; gap: 6px; }
+.log-block summary { cursor: pointer; color: var(--text-2); font-size: var(--f-sm); display: flex; align-items: center; gap: var(--s2); }
 .log-block pre { font-size: var(--f-xs); white-space: pre-wrap; max-height: 300px; overflow: auto; padding-top: var(--s2); color: var(--text-2); }
 
 /* ══════════════ 空状态 ══════════════ */
 .empty {
   margin: auto; text-align: center; color: var(--text-2);
-  max-width: 500px; padding: var(--s5) var(--s5) var(--s4);
+  max-width: 500px; padding: var(--s6) var(--s6) var(--s4);
   display: flex; flex-direction: column; align-items: center;
 }
 .empty .mono {
@@ -1625,8 +1714,8 @@ td.bad { color: var(--bad); font-weight: 500; }
   box-shadow: var(--shadow-ink-lg);
 }
 .empty .mono svg { width: 24px; height: 24px; }
-.empty h3 { margin: 0 0 var(--s2); color: var(--text-1); font-size: 19px; font-weight: 600; letter-spacing: -.3px; }
-.empty .empty-sub { font-size: var(--f-sm); color: var(--text-2); line-height: 1.7; margin: 0; }
+.empty h3 { margin: 0 0 var(--s2); color: var(--text-1); font-size: var(--f-xl); font-weight: 600; letter-spacing: -.02em; }
+.empty .empty-sub { font-size: var(--f-sm); color: var(--text-2); line-height: 1.6; margin: 0; }
 .empty .hint { margin-top: 0; }
 
 /* 空状态：可点击示例卡（WorkBuddy / Trae Work 式一键起手） */
@@ -1635,23 +1724,23 @@ td.bad { color: var(--bad); font-weight: 500; }
   display: grid; grid-template-columns: 1fr 1fr; gap: var(--s2);
 }
 .sample-card {
-  height: auto; min-height: 56px; padding: 10px 13px;
-  display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
+  height: auto; min-height: 56px; padding: var(--s2) var(--s3);
+  display: flex; flex-direction: column; align-items: flex-start; gap: var(--s1);
   text-align: left; white-space: normal;
   background: var(--surface); color: var(--text-1);
   border-radius: var(--r-md); box-shadow: var(--shadow-ghost);
-  transition: background .14s var(--ease), box-shadow .14s var(--ease), transform .14s var(--ease);
+  transition: background var(--dur) var(--ease), box-shadow var(--dur) var(--ease), transform var(--dur) var(--ease);
 }
 .sample-card:hover {
   background: var(--fill-hover);
   box-shadow: 0 0 0 0.5px var(--line-strong), var(--shadow-lift);
   transform: translateY(-1px);
 }
-.sample-card .sc-t { font-size: var(--f-sm); font-weight: 500; line-height: 1.45; }
-.sample-card .sc-d { font-size: var(--f-xs); color: var(--text-3); line-height: 1.5; }
+.sample-card .sc-t { font-size: var(--f-sm); font-weight: 500; line-height: 1.35; }
+.sample-card .sc-d { font-size: var(--f-xs); color: var(--text-3); line-height: 1.6; }
 .sample-card .sc-tag {
   font-size: var(--f-min); color: var(--text-3); font-weight: 500;
-  padding: 1px 6px; border-radius: var(--r-pill); background: var(--fill);
+  padding: 1px var(--s2); border-radius: var(--r-pill); background: var(--fill);
 }
 
 /* ══════════════ 底部输入区 ══════════════ */
@@ -1677,7 +1766,7 @@ td.bad { color: var(--bad); font-weight: 500; }
   background: var(--surface);
   border-radius: var(--r-xl);
   box-shadow: 0 0 0 1px var(--line-strong);
-  transition: box-shadow .18s var(--ease);
+  transition: box-shadow var(--dur) var(--ease);
 }
 /* 聚焦时只加一层抬升（投影），面色与描边不变 —— 参考图里聚焦与未聚焦的卡片
    填充与边界几乎一样（图2 的边界 219 略深一点），差异主要来自页面那一侧的明暗。 */
@@ -1690,15 +1779,15 @@ td.bad { color: var(--bad); font-weight: 500; }
    而且通栏的线会切开卡片圆角，得再拿 overflow:hidden 去裁，越补越绕。 */
 .composer-tools {
   display: flex; align-items: center; gap: var(--s2);
-  padding: 2px 10px 10px;
+  padding: 2px var(--s2) var(--s2);
 }
 .quick-bar {
   flex: 1 1 auto; min-width: 0;
-  display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+  display: flex; gap: var(--s2); align-items: center; flex-wrap: wrap;
 }
 .composer-actions {
   flex: 0 0 auto; margin-left: auto;
-  display: flex; align-items: center; gap: 6px;
+  display: flex; align-items: center; gap: var(--s2);
 }
 /* 「更多设置」降级为参数组末尾的图标按钮。
    它原来靠 margin-left:auto 孤悬在整行最右端，与左侧那组参数没有任何视觉关系，
@@ -1714,19 +1803,30 @@ td.bad { color: var(--bad); font-weight: 500; }
 }
 .quick-bar .qp-more:hover { background: var(--fill-strong); color: var(--text-1); box-shadow: none; }
 /* 模型名是这一排里唯一「深色大字」—— 它比其他参数重得多：参数只影响这一条脚本，
-   模型影响之后所有生成。参考图里也是这么处理的（分支/权限是灰的，模型是深的）。 */
-#model-pick .select-btn {
+   模型影响之后所有生成。参考图里也是这么处理的（分支/权限是灰的，模型是深的）。
+   ⚠ 必须带那两个 :not()：这是 **id 选择器**（1,1,0），压过下面任何按 class
+   写的状态规则（.select-wrap.pill .select-btn.is-warn 只有 0,4,0）。
+   原来这里无条件写 color，于是「未配置模型」的橙字与 mock 态的绿字**全都
+   没生效**，警示只剩那颗 5px 小点 —— 正是 styles.css 上面那段注释警告过的
+   「改一次顺序就静默失效」的写法，只不过这次是被 id 顶掉而不是被顺序顶掉。
+   「模型名要比参数重」这条只在真的显示着模型名时成立，所以排除两个状态类。 */
+#model-pick .select-btn:not(.is-warn):not(.is-mock) {
   height: 30px; min-height: 30px; padding: 0 8px;
   font-size: var(--f-sm); color: var(--text-1);
 }
-#model-pick .select-btn:hover { color: var(--text-1); }
+#model-pick .select-btn:not(.is-warn):not(.is-mock):hover { color: var(--text-1); }
+/* 尺寸/内边距与上面那条同值：状态类命中时也要长一样，只是颜色跟着状态走。 */
+#model-pick .select-btn.is-warn,
+#model-pick .select-btn.is-mock {
+  height: 30px; min-height: 30px; padding: 0 8px; font-size: var(--f-sm);
+}
 /* 发送键：**实心深色圆角方块**，不是圆形。
    参考图里三个输入卡的发送键都是圆角方块（10~12px 圆角 / 34px 见方），
    圆角方块比正圆更像「按钮」、也更贴这套界面的圆角语言。 */
 #btn-generate.send {
-  width: 34px; height: 34px; flex: 0 0 auto; padding: 0;
+  width: 32px; height: 32px; flex: 0 0 auto; padding: 0;
   background: var(--grad-btn); color: var(--text-inv);
-  border-radius: var(--r-md); min-width: 34px;
+  border-radius: var(--r-ctl); min-width: 32px;
   box-shadow: var(--shadow-ink);
 }
 #btn-generate.send:hover { background: var(--grad-btn-hover); }
@@ -1736,11 +1836,10 @@ td.bad { color: var(--bad); font-weight: 500; }
 #btn-generate.send:disabled { background: var(--fill-disabled); color: var(--text-3); box-shadow: none; }
 /* 这里原本有一条 `#btn-generate.send .spinner`（深色底上的转圈）。
    它是**不可达的**：没有任何代码往这个按钮里塞 .spinner ——
-   全项目只有 progress.js 在消息区（.thinking）创建 .spinner，
+   全项目只有 progress.js 在消息区（.gen-status）创建 .spinner，
    而按钮的 innerHTML 从来只有那两个图标（index.html 里写死的）。
    留着它会让下一个人读到「生成中按钮会转圈」这个不存在的结论，已删除。
-   若以后真要在按钮里加 spinner，样式要一并加回来（别忘了 --on-ink-dim 就是
-   为深色底准备的次级线条色）。 */
+
 /* 生成中：发送键化作「停止」，**只换图标，不换底色**。
    参考图里生成中的那个键就是「实心深色方块 + 白色停止图标」—— 它此刻是界面上
    唯一还能做的动作，淡化成灰底反而读成「禁用控件」，正好读反。
@@ -1795,14 +1894,13 @@ td.bad { color: var(--bad); font-weight: 500; }
   box-shadow: var(--shadow-pop);
   animation: pop .24s var(--ease-pop);
 }
-.dialog.wide { width: 640px; }
 .dialog.small { width: 400px; }
-.dialog h3 { margin-bottom: var(--s4); font-size: var(--f-lg); font-weight: 600; letter-spacing: -.2px; }
+.dialog h3 { margin-bottom: var(--s4); font-size: var(--f-lg); font-weight: 600; letter-spacing: -.02em; }
 .dialog h3 .hint { font-weight: 400; display: inline; }
 .dialog .lbl { margin-top: var(--s4); }
-.dialog-actions { display: flex; gap: var(--s2); margin-top: var(--s5); align-items: center; }
+.dialog-actions { display: flex; gap: var(--s2); margin-top: var(--s6); align-items: center; }
 .dialog-actions .ghost, .dialog-actions .primary { width: auto; }
-.cd-msg { color: var(--text-2); line-height: 1.75; }
+.cd-msg { color: var(--text-2); line-height: 1.6; }
 pre#pg-checklist {
   white-space: pre-wrap; background: var(--fill); padding: 12px;
   border-radius: var(--r-md); font-size: var(--f-xs); max-height: 46vh; overflow: auto;
@@ -1813,7 +1911,7 @@ pre#pg-checklist {
   position: fixed; bottom: 32px; left: 50%; transform: translateX(-50%);
   background: var(--toast-bg);
   backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
-  color: var(--text-inv); padding: 9px 18px; border-radius: var(--r-pill);
+  color: var(--text-inv); padding: var(--s2) var(--s4); border-radius: var(--r-pill);
   font-size: var(--f-sm); z-index: 99; box-shadow: var(--shadow-pop);
   animation: toastUp .24s var(--ease-pop);
 }
@@ -1822,7 +1920,7 @@ pre#pg-checklist {
 @keyframes fadeIn { from { opacity: 0; } }
 @keyframes fadeUp { from { opacity: 0; transform: translateY(6px); } }
 @keyframes pop { from { transform: translateY(10px) scale(.97); opacity: 0; } }
-@keyframes toastUp { from { transform: translate(-50%, 10px); opacity: 0; } }
+@keyframes toastUp { from { transform: translate(-50%, var(--s2)); opacity: 0; } }
 
 /* ══════════════ 滚动条（macOS 式极细、贴边悬浮） ══════════════ */
 ::-webkit-scrollbar { width: 12px; height: 12px; }
@@ -1841,12 +1939,12 @@ pre#pg-checklist {
 }
 /* 窗口偏矮时收紧空状态，避免示例卡被下方的输入区顶掉 */
 @media (max-height: 720px) {
-  .empty { padding: var(--s3) var(--s5) var(--s2); }
+  .empty { padding: var(--s3) var(--s6) var(--s2); }
   .empty .mono { width: 44px; height: 44px; margin-bottom: var(--s3); }
   .empty .mono svg { width: 20px; height: 20px; }
   .empty h3 { font-size: 17px; }
   .samples { margin: var(--s3) 0 var(--s2); }
-  .sample-card { min-height: 48px; padding: 8px 11px; }
+  .sample-card { min-height: 48px; padding: var(--s2) var(--s3); }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
@@ -1876,17 +1974,17 @@ pre#pg-checklist {
 /* 后续建议：点了只预填参数、不自动提交，用户改完再发。
    （Perplexity 的 Related —— 空输入框最劝退，给三个明确的下一步） */
 .followups {
-  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap;
   margin-top: var(--s4); padding-top: var(--s3);
   border-top: 0.5px solid var(--line);
 }
 .followups.hidden { display: none; }
 .fu-label { font-size: var(--f-xs); color: var(--text-3); margin-right: 2px; }
 .fu-chip {
-  height: 26px; padding: 0 11px; border-radius: var(--r-pill);
-  border: 1px solid var(--line-strong); background: var(--surface);
+  height: 24px; padding: 0 var(--s3); border-radius: var(--r-pill);
+  border: 0.5px solid var(--line-strong); background: var(--surface);
   color: var(--text-2); font-size: var(--f-xs); cursor: pointer;
-  transition: background .15s var(--ease), color .15s, border-color .15s;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease), border-color var(--dur) var(--ease);
 }
 .fu-chip:hover { background: var(--sel-bg); color: var(--ink); border-color: var(--line-strong); }
 .fu-chip:focus-visible { outline: none; box-shadow: var(--shadow-focus); }
@@ -1902,8 +2000,8 @@ pre#pg-checklist {
   width: 32px; height: 32px; border-radius: 50%;
   display: grid; place-items: center; cursor: pointer;
   background: var(--surface); color: var(--text-2);
-  border: 1px solid var(--line); box-shadow: var(--shadow-raised);
-  transition: transform .15s var(--ease), color .15s;
+  border: 0.5px solid var(--line); box-shadow: var(--shadow-raised);
+  transition: transform var(--dur) var(--ease), color var(--dur) var(--ease);
 }
 .scroll-bottom:hover { color: var(--ink); transform: translateY(-1px); }
 .scroll-bottom.hidden { display: none; }
@@ -1915,9 +2013,9 @@ pre#pg-checklist {
 .banner.why > summary::after { content: " ▾"; font-size: var(--f-min); opacity: .6; }
 .banner.why[open] > summary::after { content: " ▴"; }
 .why-body {
-  margin: 7px 0 0; padding: 8px 10px; border-radius: var(--r-sm);
+  margin: var(--s2) 0 0; padding: var(--s2); border-radius: var(--r-sm);
   background: var(--surface); color: var(--text-2);
-  font-family: var(--mono); font-size: var(--f-min); line-height: 1.7;
+  font-family: var(--mono); font-size: var(--f-min); line-height: 1.6;
   white-space: pre-wrap; word-break: break-word;
 }
 
@@ -1930,7 +2028,7 @@ pre#pg-checklist {
 .link-btn:hover { opacity: 1; }
 
 /* 超出配额 30% 以上的段落：给整卡一个左侧强调条，颜色之外还有形状差异 */
-.script-card.over-quota { box-shadow: inset 2px 0 0 var(--warn); padding-left: 10px; }
+.script-card.over-quota { box-shadow: inset 2px 0 0 var(--warn); padding-left: var(--s2); }
 
 /* 单段重写的反馈输入：与按钮同排，编辑态才显形 */
 .card-foot .rw-feedback { display: none; }
@@ -1939,15 +2037,70 @@ pre#pg-checklist {
 /* 等宽元素统一走 --mono（原来散落着 Consolas 硬编码） */
 pre, code, .code, .why-body, kbd { font-family: var(--mono); }
 
-/* 空态主区里的「去配置」按钮（[data-when="setup"]，未配置时才显形）。
-   它替代了原来的 .setup-card —— 那张卡是**另一个居中块**，与 hero 叠在一起
-   各带一个大图标，没有主次（用户原话「太丑了」）。现在引导直接落在 hero 上，
-   页面上只剩一个居中块，所以这里只需要处理按钮与示例卡之间的间距。 */
-.empty .empty-cta { margin-top: var(--s4); }
-/* 示例卡自带 margin-top: var(--s4)，不压一下的话按钮到卡片会有 32px 的空档 */
-.empty .empty-cta + .samples { margin-top: var(--s3); }
-/* hero 底注里有两处行内代码（环境变量名 / 文件名）。只靠等宽字体在白底上太弱，
-   给一层浅底把它们和正文分开。字号**不缩**（跟 .hint 一致），否则会比正文还小。 */
-.empty .hint code {
-  background: var(--fill); padding: 1px 5px; border-radius: var(--r-xs);
+/* 这里原本有空态主区的「去配置」按钮（.empty-cta）与 hero 底注里的行内代码
+   （.empty .hint code）两组规则。它们随 [data-when="setup"] 那一态一起下线了
+   （2026-09-20，理由见 index.html 的 #empty）—— 现在 hero 只有一态，
+   底注是纯文本，没有 <code>，留着两条规则就是查不到使用者的死样式。 */
+/* ════════════ 规范 v1：控件族（docs/UI视觉规范.md）════════════
+   放在文件末尾是有意为之：上面各视图里散落着几十条按场景写的表单规则，
+   这一节把「控件的高度 / 圆角 / 边界」统一收口，靠层叠顺序覆盖它们。
+   三条口径（2026-09-19 由用户定）：边界一律 0.5px 发丝线；阴影只做到
+   "离开纸面一点点"（透明度 ≤ .10）；间距 / 圆角 / 高度一律 4 的倍数。
+   其余规范项（字阶、图标笔画、卡片、列表项、导航）已折进各自的规则原位，
+   不在这里重复一份 —— 同一信息两份表示正是本项目要防的。 */
+
+/* 表单控件：高度一档、圆角一档、边界发丝 */
+select,
+input[type="text"],
+input[type="password"],
+input[type="number"] {
+  height: var(--h-md); border-radius: var(--r-ctl); border: 0.5px solid var(--line);
 }
+/* 自绘下拉的可见按钮：与原生控件同档，边界用不占布局的发丝描边 */
+.select-btn {
+  height: var(--h-md); border-radius: var(--r-ctl); gap: var(--s2);
+  border: 0; box-shadow: var(--e1);
+}
+/* 操作区按钮：一律紧凑档（28），与 --h-sm 同名同值，不再各自写死 30/34/36 */
+.btn-row button,
+.page-actions button,
+.page-head-actions button {
+  height: var(--h-sm); font-size: var(--f-sm); border-radius: var(--r-ctl); gap: var(--s2);
+}
+.ghost.bordered { border: 0; box-shadow: var(--e1); }
+.primary { border-radius: var(--r-ctl); }
+
+/* 破坏性动作要看得出不同。`#md-delete` 一直挂着 `.danger-text`，
+   但 CSS 里从来没有这条规则 —— 「删除」与「取消 / 测试连接」长得一模一样，
+   而它是会连带删掉地址与 Key 的那个按钮。 */
+.danger-text { color: var(--bad); }
+.danger-text:hover { background: var(--bad-soft); color: var(--bad-hover); }
+
+/* 小标签（「内置默认」/「未配置 Key」）：字阶第 1 档 + 4 的倍数内边距 */
+.tag-warn, .tag-default {
+  font-size: var(--f-2xs); padding: 0 var(--s1); border-radius: var(--r-ctl);
+}
+
+/* ── 小标记一族收口：同一种信息只有一种画法 ──────────────────────
+   实测有 6 个类各写一套 font-size / padding / 圆角：结果卡的 `.m-chip`、
+   手风琴的 `.acc-badge`、tab 的 `.rt-b`、行业包分组的 `.kb-group-c`、
+   设置项的 `.tag-warn` / `.tag-default`。数值统一成左栏计数药丸那一档。
+   ⚠ 不含 `.group-lbl .count` —— 它与标签文字是一对**光学耦合**的
+   （行盒 9px 让墨顶墨底同时对齐，见那里的注释），单独改会把对齐弄散。 */
+.m-chip, .acc-badge, .rt-b, .kb-group-c {
+  font-size: var(--f-2xs);
+  font-weight: 600;
+  padding: 1px var(--s2);
+  border-radius: var(--r-pill);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 表单列限宽：设置页右列约 1130px 宽，一个只有三个选项的下拉拉到整宽后
+   「选中值在最左、箭头在最右」，视线一趟要跳 1100px。
+   ⚠ 限的是**卡片本身**，不是逐个字段 —— 给字段单独加 max-width 会造出
+   "同组字段宽窄不一"（正是断言「不留半宽孤儿」要防的），
+   而限卡片让所有字段仍然填满自己的容器，判据一个字都不用改。 */
+/* ⚠ 只限**表单卡**（生成偏好的三组 + 模型表单）。行业包面板的右列卡片里装的是
+   「文件分组 + 查看器」左右两栏（`.pi-cols`），给它限宽会把查看器挤成 192px。 */
+#gen-sec-detail .page-card,
+#pane-llm .page-card { max-width: 560px; }

@@ -1,10 +1,15 @@
-// 弹层：通用确认 + 分步选题确认。
+// 弹层：通用确认对话框。
 //
 // 场景切换时统一收口（closeOverlays）——修复前新建对话 / 切历史 / 打开设置
 // 只关设置不关浮层，确认卡会孤儿一样盖在新内容上，点哪儿都先命中它。
+//
+// 这里原本还有第二张卡：分步确认的「选题确认」弹层（openConfirmPlan /
+// editedPlan / bindOverlays 的三个 cf-* 绑定），2026-09-19 随功能整体移除
+// （理由见 app/jobs.py 顶部）。它一走，`bindOverlays` 就没有任何东西要绑了，
+// 于是连同 main.js 里的两处调用一起删掉 —— 留一个空函数只会让人以为
+// "弹层还需要初始化"。
 
-import { $, esc, toast, bindOnce } from "./util.js";
-import { abort, confirmPlan, reselect } from "./jobs.js";
+import { $ } from "./util.js";
 
 export function closeOverlays() {
   document.querySelectorAll(".overlay:not(.hidden)").forEach(o => o.classList.add("hidden"));
@@ -18,63 +23,27 @@ export function appConfirm(title, msg) {
     $("cd-title").textContent = title;
     $("cd-msg").textContent = msg;
     openOverlay("confirm-dialog");
+    // 焦点管理：打开时把焦点送进对话框（否则键盘用户还在背景上按 Tab，
+    // 看不见也按不到「确认/取消」），关闭时还给打开它的那个控件。
+    const opener = document.activeElement;
     const done = v => {
       $("confirm-dialog").classList.add("hidden");
       $("cd-yes").onclick = null;
       $("cd-no").onclick = null;
+      document.removeEventListener("keydown", onKey, true);
+      if (opener && document.contains(opener)) opener.focus();
       resolve(v);
     };
+    const onKey = e => {
+      // 只在弹层真的可见时接管 Esc。若它被别的路径关掉了（切会话、其它 openOverlay
+      // 复位），这里必须放行 —— 否则这个捕获阶段的监听会残留，把全局 Esc
+      // 吞干净（实测连带打死「Esc 关设置」那条快捷键）。
+      if ($("confirm-dialog").classList.contains("hidden")) return;
+      if (e.key === "Escape") { e.stopPropagation(); done(false); }
+    };
+    document.addEventListener("keydown", onKey, true);
     $("cd-yes").onclick = () => done(true);
     $("cd-no").onclick = () => done(false);
+    ($("cd-no") || $("cd-yes")).focus();
   });
 }
-
-/** 分步确认卡。plan 来自后端；params 用于解释「为什么是这个角度」。 */
-export function openConfirmPlan(plan, params = {}) {
-  $("cf-angle").value = plan.angle || "";
-  $("cf-hooktype").value = plan.hook_type || "";
-  $("cf-hookline").value = plan.hook_line || "";
-  $("cf-cta").value = plan.cta || "";
-  $("cf-points").value = (plan.points || []).join("\n");
-
-  // 决策可解释：把「模型按什么选的」摆出来，而不是只给一个待填空的表单
-  const bits = [];
-  if (plan.hook_type) bits.push(`钩子类型「${plan.hook_type}」来自本包钩子库`);
-  if (params.segment) bits.push(`细分「${params.segment}」`);
-  if (params.audience) bits.push(`受众「${params.audience}」`);
-  if (params.duration) bits.push(`目标 ${params.duration}s`);
-  const n = (plan.points || []).length;
-  if (n) bits.push(`${n} 个要点（超配额时模型会压缩）`);
-  $("cf-why").textContent = bits.length
-    ? `选题依据：${bits.join(" · ")}。可直接编辑下方任意字段再确认。` : "";
-
-  openOverlay("confirm-overlay");
-}
-
-export function editedPlan() {
-  return {
-    angle: $("cf-angle").value.trim(),
-    hook_type: $("cf-hooktype").value.trim(),
-    hook_line: $("cf-hookline").value.trim(),
-    points: $("cf-points").value.split("\n").map(s => s.trim()).filter(Boolean),
-    cta: $("cf-cta").value.trim(),
-  };
-}
-
-export const bindOverlays = bindOnce(function bindOverlays() {
-  $("cf-continue").onclick = async () => {
-    const plan = editedPlan();
-    if (!plan.points.length) { toast("至少保留一个要点"); return; }
-    $("confirm-overlay").classList.add("hidden");
-    await confirmPlan(plan);
-  };
-  $("cf-reselect").onclick = () => {
-    $("confirm-overlay").classList.add("hidden");
-    reselect();
-  };
-  $("cf-cancel").onclick = () => {
-    $("confirm-overlay").classList.add("hidden");
-    // 停轮询 + 解锁 + 通知后端放弃（原先只置空 currentJob，会锁死界面）
-    abort();
-  };
-});

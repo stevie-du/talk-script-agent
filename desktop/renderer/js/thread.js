@@ -48,7 +48,7 @@ export function addUserMsg(topic, { onEdit } = {}) {
   const m = el("div", "msg msg-user");
   m.innerHTML = `<div class="bub bubble user">${esc(topic)}</div>
     <button class="msg-edit" title="编辑主题并重新生成" aria-label="编辑主题">
-      <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
            stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
     </button>`;
@@ -95,7 +95,7 @@ function beginEdit(m, onEdit) {
 }
 
 const AVATAR = `<div class="avatar">
-    <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true">
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true">
       <rect x="2" y="9" width="2.6" height="6" rx="1" opacity=".55"/>
       <rect x="6.5" y="5" width="2.6" height="14" rx="1" opacity=".78"/>
       <rect x="11" y="2" width="2.6" height="20" rx="1"/>

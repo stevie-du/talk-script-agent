@@ -1,9 +1,10 @@
-// 生成进度：步骤时间线 + 流式思考过程。
+// 生成进度：步骤时间线 + 流式思考过程 + 状态行。
 //
 // 参考成熟 agent 的做法（Claude / Cursor 的 tool-use 展示）：
 //  - 每一步都可见，并给出**耗时**，用户能判断是「模型在想」还是「卡住了」
 //  - 已完成步骤紧凑展示；出错的那一步展开并带原因
 //  - 流式思考独立折叠块，默认展开、完成后自动折叠
+//  - 活体指示器（转圈 + 当前阶段 + 已用时）在思考流**下方**，跟着输出走
 //
 // 修复前这里只有一个扁平的 pstep 列表：没有耗时、没有总时长，失败时也只把
 // 错误塞进同一行，用户看不出「哪一步失败、花了多久」。
@@ -14,7 +15,6 @@ import { state } from "./store.js";
 export const STATE_LABEL = {
   queued: "排队中",
   selecting: "选题策划中",
-  paused_awaiting_confirmation: "待确认选题",
   writing: "文案撰写中",
   rewriting: "回炉改写中",
   checking: "代码校验中",
@@ -23,13 +23,6 @@ export const STATE_LABEL = {
   cancelled: "已取消",
 };
 
-const STEP_ICON = {
-  select: "选题",
-  write: "撰写",
-  check: "校验",
-  rewrite: "回写",
-  retry: "重试",
-};
 
 function stepKind(key = "") {
   if (key.startsWith("select")) return "select";
@@ -48,19 +41,25 @@ function fmtDur(ms) {
   return `${Math.floor(s / 60)}m${Math.round(s % 60)}s`;
 }
 
-/** 生成中的占位骨架（助手气泡的初始内容）。 */
+/** 生成中的占位骨架（助手气泡的初始内容）。
+ *
+ *  顺序就是时间顺序：做完的（步骤）→ 正在想的（思考流）→ 此刻在干什么（状态行）。
+ *  状态行放在思考流**下方**（2026-09-20，用户原话「转圈太难看了…可以参考其他
+ *  智能体都是在思考下方」）：活体指示器跟着输出走，而不是在气泡顶上占一个比正文
+ *  还大的标题位。原来那里同时有三处在报同一件事——顶上「正在生成…」、
+ *  步骤行「文案撰写中」、思考块标题「文案撰写 · 思考过程」。
+ *  现在只有状态行说阶段，思考块只说自己是「思考过程」。 */
 export function placeholderBody() {
-  return `<div class="thinking">
-      <span class="spinner"></span>
-      <span class="t-text">正在生成…</span>
-      <span class="t-elapsed" id="gen-elapsed"></span>
-    </div>
-    <ol class="steps" id="step-track"></ol>
+  return `<ol class="steps" id="step-track"></ol>
     <details class="think-stream hidden" id="think-stream" open>
       <summary><span class="ts-title">思考过程</span><span class="ts-meta"></span></summary>
       <pre class="ts-body"></pre>
     </details>
-    <div class="hint" id="gen-hint"></div>`;
+    <div class="gen-status" id="gen-status">
+      <span class="spinner" aria-hidden="true"></span>
+      <span class="gs-phase" id="gen-phase">正在生成…</span>
+      <span class="gs-elapsed" id="gen-elapsed"></span>
+    </div>`;
 }
 
 /** 刷新进度区。body 为助手消息节点；snap 为 /api/jobs 返回。 */
@@ -72,28 +71,25 @@ export function renderProgress(body, snap) {
   const steps = snap.steps || [];
   const terminal = snap.state === "done" || snap.state === "failed" || snap.state === "cancelled";
 
-  // 每步耗时 = 本步 ts 与下一步 ts 之差；最后一步用「现在」兜底
-  const rows = [];
+  // 每步耗时 = 本步 ts 与下一步 ts 之差。⚠ 只有**下一步已经出现**才算得出耗时：
+  // 在此之前这一步还在跑，给它显示一个每次轮询都变大一点的数字，就是用户报的
+  // 「闪烁」—— 而且它和状态行的「已用 N 秒」是同一件事，报了两遍。
+  const parts = [];
   for (let i = 0; i < steps.length; i++) {
     const cur = steps[i];
     const next = steps[i + 1];
     const t0 = cur.ts ? new Date(cur.ts).getTime() : null;
-    const t1 = next?.ts ? new Date(next.ts).getTime()
-      : (terminal ? null : Date.now());
+    const t1 = next?.ts ? new Date(next.ts).getTime() : null;
     const dur = (t0 !== null && t1 !== null && t1 >= t0) ? t1 - t0 : null;
-    rows.push({ step: cur, dur });
-  }
-
-  const parts = rows.map(r => {
-    const kind = stepKind(r.step.key);
-    const note = r.step.data?.note || "";
+    const kind = stepKind(cur.key);
+    const note = cur.data?.note || "";
     const badge = note ? `<span class="step-note">${esc(note)}</span>` : "";
-    const dur = r.dur !== null ? `<span class="step-dur">${fmtDur(r.dur)}</span>` : "";
-    return `<li class="step done k-${kind}">
+    const durHtml = dur !== null ? `<span class="step-dur">${fmtDur(dur)}</span>` : "";
+    parts.push(`<li class="step done k-${kind}">
         <span class="step-dot"></span>
-        <span class="step-t">${esc(r.step.title)}</span>${badge}${dur}
-      </li>`;
-  });
+        <span class="step-t">${esc(cur.title)}</span>${badge}${durHtml}
+      </li>`);
+  }
 
   if (snap.state === "failed") {
     parts.push(`<li class="step err"><span class="step-dot"></span>
@@ -101,19 +97,20 @@ export function renderProgress(body, snap) {
   } else if (snap.state === "cancelled") {
     parts.push(`<li class="step stopped"><span class="step-dot"></span>
         <span class="step-t">已停止</span></li>`);
-  } else if (!terminal) {
-    const cur = STATE_LABEL[snap.state];
-    if (cur && cur !== "完成") {
-      parts.push(`<li class="step active"><span class="step-dot"></span>
-          <span class="step-t">${esc(cur)}</span></li>`);
-    }
   }
-  track.innerHTML = parts.join("");
+  // 内容没变就**不重建 DOM**：轮询会一遍遍重画这块，整块重写会打掉列表里的
+  // 文字选区，并让任何 CSS 动画从头开始 —— 那半截「一闪一闪」是这么来的，不是设计。
+  const html = parts.join("");
+  if (track._html !== html) { track._html = html; track.innerHTML = html; }
 
+  // 进行中的阶段由状态行报（思考流下方那一行），不再往步骤列表里插一条
+  // `.step.active` —— 它和状态行、思考块标题三处会同时说「文案撰写中」。
+  const status = body.querySelector("#gen-status");
+  const phase = body.querySelector("#gen-phase");
   const elapsed = body.querySelector("#gen-elapsed");
-  if (elapsed) {
-    elapsed.textContent = terminal ? "" : fmtElapsed(snap);
-  }
+  if (status) status.classList.toggle("hidden", terminal);
+  if (phase) phase.textContent = STATE_LABEL[snap.state] || "正在生成…";
+  if (elapsed) elapsed.textContent = terminal ? "" : fmtElapsed(snap);
   renderThinkStream(body, snap);
 }
 
@@ -155,7 +152,9 @@ export function renderThinkStream(body, snap) {
     return;
   }
   box.classList.remove("hidden");
-  box.querySelector(".ts-title").textContent = `${st.phase || "模型"} · 思考过程`;
+  // 标题**不带阶段名**：紧挨着它下方的状态行已经在说「文案撰写中」了
+  //（原来两处各写一遍，加上步骤行一共三遍）。后端 stream.phase 与
+  // snap.state 是同一个阶段的两种写法，取 state 那份即可。
   box.querySelector(".ts-meta").textContent =
     `${st.reasoning_len ?? 0} 字` + (st.content_len ? ` · 正文 ${st.content_len} 字` : "");
   const pre = box.querySelector(".ts-body");
@@ -163,4 +162,3 @@ export function renderThinkStream(body, snap) {
   pre.scrollTop = pre.scrollHeight;
 }
 
-export { STEP_ICON };

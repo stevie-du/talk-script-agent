@@ -1,13 +1,18 @@
-// 左栏会话列表：按 今天 / 昨天 / 本周 / 更早 分组，增量更新。
+// 左栏会话列表：按天分组（可折叠），增量更新。
 //
 // 增量更新这条必须保留：修复前每次刷新都整块 innerHTML 重画，鼠标按下与松开
 // 之间只要发生一次重画，那一行连同删除按钮就被换成新 DOM，click 合成不出来 ——
 // 表现就是「删除按钮要点好几次才中」。现在同一条记录永远复用同一个节点。
 //
+// 分组之前是「今天 / 昨天 / 本周 / 更早」四档，问题出在最后一档：一周以前的
+// **全部并进「更早」**。真实数据里 78 条记录全落在同一周以前，整列只有一个
+// 标签「更早 78」—— 分组等于没做，用户原话「全部记录平铺了，有点太多了」。
+// 现在换成 `dayGroupKey()`（见 util.js）：今天 / 昨天 / MM-DD 周X / MM-DD。
+//
 // 新增：运行中的会话在副标题上带一个**进度点**，并且失败记录现在也能点开看原因
 //（后端会把 job.json 摘要返回给 /api/history/{id}）。
 
-import { $, el, esc, fmtTime, dayKey, toast, bindOnce } from "./util.js";
+import { $, el, esc, fmtTime, dayGroupKey, toast, bindOnce } from "./util.js";
 import { api } from "./api.js";
 import { state, setResult, detachJob } from "./store.js";
 import { setLeftFolded } from "./ui.js";
@@ -15,9 +20,33 @@ import { attach, openRecord } from "./jobs.js";
 import { STATE_LABEL } from "./progress.js";
 import { appConfirm } from "./overlays.js";
 
-const SESS_ORDER = ["今天", "昨天", "本周", "更早"];
 const index = new Map();      // id -> 该行最近一次数据（委托 handler 从这里取，闭包不会过期）
 let refreshTimer = null;
+
+/** 折叠状态：分组 id → 是否收起。持久化到 localStorage。
+ *
+ * ⚠ 存的键是**分组 id**（`2026-09-12` 这种），不是 label。
+ * label 会随时间推移变（今天的记录明天就成了「昨天」），拿 label 当键的话
+ * 折叠状态第二天就错位到别的分组上。
+ * ⚠ 默认**展开**：只记住用户主动折起来的那些，而不是记展开的那些 ——
+ * 否则每来一个新日期都是一个需要用户重新点开的陌生分组。
+ */
+const FOLD_KEY = "ts.sess.folded";
+let folded = new Set();
+try {
+  const raw = localStorage.getItem(FOLD_KEY);
+  if (raw) folded = new Set(JSON.parse(raw));
+} catch (_) { /* 存储不可用 / 内容损坏时退回「全展开」，不要因此让列表画不出来 */ }
+
+function saveFolded() {
+  try { localStorage.setItem(FOLD_KEY, JSON.stringify([...folded])); } catch (_) {}
+}
+
+function toggleFold(id) {
+  if (folded.has(id)) folded.delete(id); else folded.add(id);
+  saveFolded();
+  paint(allItems);
+}
 
 const DEL_SVG = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
   stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -30,7 +59,7 @@ const settled = st => st === "done" || st === "failed" || st === "cancelled";
  *  此前列表直接吐 slug，界面上出现的是「elevator」这种内部标识；而包里早就有
  *  display_name: 电梯，前端别处（ui.js 的下拉、settings.js 的包详情）也一直在用它 ——
  *  只有会话列表漏了。找不到对应包时退回 slug，不要显示空白。 */
-function packLabel(slug) {
+export function packLabel(slug) {
   if (!slug) return "";
   const p = (state.meta?.packs || []).find(x => x.name === slug);
   return (p && (p.display_name || p.name)) || slug;
@@ -83,18 +112,24 @@ function paint(items) {
     return;
   }
 
-  const groups = new Map();
+  // 分组：按天。id 用于排序 / 折叠状态，label 用于展示（见 util.dayGroupKey）。
+  // 遍历顺序就是列表顺序（后端已按 created_at 倒序），所以首次遇到某个 id
+  // 的先后天然是**新 → 旧**；用 Map 的插入顺序即可，不必再排一次。
+  // 搜索时**忽略折叠**：用户在找东西，把结果藏在折起来的分组里是纯粹的阻碍。
+  const grouping = new Map();
   for (const it of items) {
-    const k = dayKey(it.created_at);
-    if (!groups.has(k)) groups.set(k, []);
-    groups.get(k).push(it);
+    const g = dayGroupKey(it.created_at);
+    if (!grouping.has(g.id)) grouping.set(g.id, { id: g.id, label: g.label, arr: [] });
+    grouping.get(g.id).arr.push(it);
   }
+
   const specs = [];
-  for (const k of SESS_ORDER) {
-    const arr = groups.get(k);
-    if (!arr?.length) continue;
-    specs.push({ kind: "grp", key: "g:" + k, label: k, count: arr.length });
-    for (const it of arr) specs.push({ kind: "row", key: "s:" + it.id, it });
+  for (const g of grouping.values()) {
+    specs.push({ kind: "grp", key: "g:" + g.id, id: g.id, label: g.label,
+                 count: g.arr.length, isFolded: !query && folded.has(g.id) });
+    if (query || !folded.has(g.id)) {
+      for (const it of g.arr) specs.push({ kind: "row", key: "s:" + it.id, it });
+    }
   }
   index.clear();
   for (const sp of specs) if (sp.kind === "row") index.set(sp.it.id, sp.it);
@@ -118,13 +153,27 @@ function paint(items) {
   old.forEach(n => n.remove());
 }
 
-function buildGroup() { return el("div", "group-lbl"); }
+/** 分组标签：可点击折叠。
+ *  用 <button> 而不是 <div> 才有键盘可达性（Tab 能到、Enter/Space 能触发）
+ *  与读屏语义；`aria-expanded` 是这类「点一下展开收起」控件的标准信号。 */
+function buildGroup() {
+  const b = el("button", "group-lbl");
+  b.type = "button";
+  b.innerHTML = `<span class="gl-arrow" aria-hidden="true"></span><span class="gl-t"></span><span class="count"></span>`;
+  return b;
+}
 
 function updateGroup(n, sp) {
-  const sig = sp.label + "|" + sp.count;
+  const sig = sp.label + "|" + sp.count + "|" + sp.isFolded;
   if (n._sig === sig) return;
   n._sig = sig;
-  n.innerHTML = `${esc(sp.label)}<span class="count">${sp.count}</span>`;
+  n.classList.toggle("folded", sp.isFolded);
+  // aria-expanded 与视觉同源，避免「看着折了、读屏说展开了」
+  n.setAttribute("aria-expanded", sp.isFolded ? "false" : "true");
+  n.dataset.gid = sp.id;
+  n.title = sp.isFolded ? `展开「${sp.label}」的 ${sp.count} 条` : `收起「${sp.label}」`;
+  n.querySelector(".gl-t").textContent = sp.label;
+  n.querySelector(".count").textContent = sp.count;
 }
 
 function buildRow() {
@@ -226,6 +275,9 @@ export const bindSessionList = bindOnce(function bindSessionList() {
     (it.state || "done") === "done" ? openRecord(it.id) : attach(it.id);
   };
   list.addEventListener("click", ev => {
+    // 分组标签的折叠优先于行点击：两者在 DOM 上是兄弟，不会互相误判。
+    const grp = ev.target.closest(".group-lbl");
+    if (grp) { toggleFold(grp.dataset.gid); return; }
     const row = ev.target.closest(".sess-item");
     if (!row) return;
     const it = index.get(row.dataset.id);
@@ -239,6 +291,9 @@ export const bindSessionList = bindOnce(function bindSessionList() {
     activate(row);
   });
   list.addEventListener("keydown", ev => {
+    // <button> 的 Enter/Space 本来就会派发 click，这里不要再处理一遍，
+    // 否则一次按键折叠两次 = 看起来「点了没反应」。
+    if (ev.target.closest(".group-lbl")) return;
     if (ev.key !== "Enter" && ev.key !== " ") return;
     const row = ev.target.closest(".sess-item");
     if (!row) return;

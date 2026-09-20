@@ -68,7 +68,6 @@ export const api = {
   generate: (params) => request("/api/generate", { method: "POST", body: params }),
   job: (id, full = false) => request(`/api/jobs/${encodeURIComponent(id)}${full ? "?full=true" : ""}`),
   cancel: (id) => request(`/api/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST", body: {} }),
-  confirm: (id, plan) => request(`/api/jobs/${encodeURIComponent(id)}/confirm`, { method: "POST", body: { plan } }),
   rewrite: (id, index, feedback) =>
     request(`/api/jobs/${encodeURIComponent(id)}/rewrite_segment`,
       { method: "POST", body: { index, feedback: feedback || null } }),

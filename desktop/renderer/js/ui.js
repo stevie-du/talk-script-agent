@@ -7,7 +7,7 @@
 //    boot()，导致 Ctrl+\ 连翻两次等于没翻）。
 
 import { $, $$, el, esc, toast, bindOnce } from "./util.js";
-import { state, setBusy, on, emit } from "./store.js";
+import { state, setBusy, on, emit, setGenParam, resetGenParams } from "./store.js";
 import { api } from "./api.js";
 import { collectParams, updateStale, autoGrowTopic, getParam } from "./jobs.js";
 import { stopTicker } from "./progress.js";
@@ -18,12 +18,9 @@ import { anyOverlayOpen, closeOverlays } from "./overlays.js";
 // 输入区工具条常显的参数：只留「生成前必须确认」的硬约束 ——
 // 写什么（细分领域）、给谁（受众）、多长（时长）、发哪（平台）。
 // 其余的是「表达调性」（风格 / 人设 / 结尾引导）：包的默认值通常就够用、
-// 改动频率低，统一交给设置页的「生成偏好」承接（见 MORE_KEYS）。
+// 改动频率低，统一交给设置页的「生成偏好」承接。
 // 想让工具条展示别的参数，改这一个数组即可 —— 两侧会自动重新分层。
 const TOOLBAR_KEYS = ["segment", "audience", "duration", "platform"];
-// 移出工具条、由设置页「生成偏好」承接的参数。放在前面：它们是「用户主动
-// 移走」的，顺序上也更贴近生成偏好这个语义；其余自定义参数排在它们后面。
-const MORE_KEYS = ["style", "persona", "cta"];
 const KEY_FALLBACK_LABEL = {
   segment: "细分领域", audience: "受众", duration: "时长（秒）",
   style: "风格", platform: "平台", persona: "人设", cta: "结尾引导",
@@ -218,20 +215,43 @@ export function renderPackParams() {
   beautifySelects();
 }
 
+/** 同一个参数在界面上的全部控件实例：工具条胶囊（`#p-<key>`）+ 设置页参数卡
+   （`[data-key]`）。两处是**一个东西的两个视图**，不是两份设置。 */
+function paramSelects(key) {
+  return $$(`#quick-params #p-${key}, #param-front select[data-key="${key}"]`);
+}
+
+/** 把一个值同时写进该参数的所有视图，并刷新自绘下拉的可见文字。
+   程序化改 `select.value` 不会自己重画 `.select-btn`，必须显式 `_syncDropdown()`。 */
+function paintParam(key, value) {
+  for (const s of paramSelects(key)) {
+    if (s.value !== value) s.value = value;
+    s._syncDropdown?.();
+  }
+}
+
+/** 控件 → 真值 → 其它视图。两个视图共用这一条写入路径，谁改都不会只改到自己。 */
+function bindParamSync(sel, key) {
+  sel.addEventListener("change", () => {
+    setGenParam(key, sel.value);
+    paintParam(key, sel.value);
+  });
+}
+
 function paramSelect(key, def) {
   const wrap = el("div");
   wrap.appendChild(el("label", "lbl", esc(def.label || KEY_FALLBACK_LABEL[key] || key)));
   const s = el("select");
   // ⚠ 不用 id（设置页参数组是整组常驻 DOM 的视图，与工具条胶囊同 key 撞 id）。
-  // 工具条胶囊（renderQuickParams）保留 `id="p-<key>"` —— getParam / prefill / verify 都读它。
-  // 文档里 id 是唯一性契约；这里再挂一份同 id 的 select，getElementById 只会取到第一个。
+  // 真值不在 DOM 上，在 state.genParams —— 这里只挂 data-key 供视图互相同步。
   s.dataset.key = key;
   for (const opt of def.options) {
     const o = el("option", "", esc(String(opt)));
     o.value = String(opt);
     s.appendChild(o);
   }
-  s.value = String(def.default);
+  s.value = String(state.genParams[key] ?? def.default);
+  bindParamSync(s, key);
   wrap.appendChild(s);
   return wrap;
 }
@@ -259,9 +279,10 @@ function renderQuickParams() {
       o.value = String(opt);
       s.appendChild(o);
     }
-    s.value = String(def.default);
+    s.value = String(state.genParams[key] ?? def.default);
     s.title = def.label || key;
     s._audit = audit[key] || {};
+    bindParamSync(s, key);
     box.appendChild(s);
   }
   // 「更多设置」由文字按钮降级为参数组末尾的图标：它原来靠 margin-left:auto
@@ -288,6 +309,10 @@ export function beautifySelects(scope = document) {
   scope.querySelectorAll("select:not([data-beauty])").forEach(sel => {
     sel.dataset.beauty = "1";
     sel.classList.add("native-hidden");
+    // 可见的 .select-btn 已经承担了 aria-haspopup 与展开，原生 select 只是值的载体。
+    // 不摘掉它的话每个下拉在 Tab 序里有**两个**停靠点，而且焦点环画在
+    // 1px 透明的 .native-hidden 上 —— 看不见却能改值（规范 §2·5 第 5 条）。
+    sel.tabIndex = -1;
     const wrap = el("div", "select-wrap" + (sel.dataset.pill ? " pill" : ""));
     sel.parentNode.insertBefore(wrap, sel);
     wrap.appendChild(sel);
@@ -447,29 +472,8 @@ export function renderSamples() {
   }
 }
 
-/** 空态主区：未配置时整块换成配置引导。
- *
- *  安装包**不携带任何配置**（连模板都不带），所以「第一次打开该干什么」
- *  必须由界面说清楚，否则用户输入主题点发送只会拿到一句 400。
- *
- *  修复前这里额外插了一张 `.setup-card`，于是页面上叠着**两个居中块、各带一个
- *  大图标**，没有主次（用户原话「太丑了」）。现在引导直接落在 hero 上：
- *  图标 / 标题 / 副标题 / 按钮 / 底注都换成配置版，示例卡保留 ——
- *  先挑好主题、配完 Key 直接生成，这条路径不该被挡掉。
- *
- *  ⚠ 文案**全部在 index.html 里**，由 `[data-when]` 切换。不写进 JS：
- *  同一句话两个副本，改一处忘一处（本项目治理过的那类问题）。
- *  ⚠ 必须**两种态都能切**，不能只在 noKey 时改一次 —— 否则用户配好 Key 之后
- *  hero 会一直写着「先配置模型接口」。所以 boot 与 `meta` 事件都要调它。 */
-export function applyEmptyHero() {
-  const empty = $("empty");
-  if (!empty) return;
-  const setup = !state.meta?.has_api_key && !state.meta?.mock;
-  const want = setup ? "setup" : "ready";
-  empty.querySelectorAll("[data-when]").forEach(n => {
-    n.classList.toggle("hidden", n.dataset.when !== want);
-  });
-}
+// applyEmptyHero() 已删（2026-09-20）：空态 hero 不再有「配置引导」那一态，
+// 两套文案 + [data-when] 切换整块下线。理由见 index.html 的 #empty 注释。
 
 // ── 门控 ────────────────────────────────────────────────────
 export function refreshGate() {
@@ -531,9 +535,8 @@ export const bindShell = bindOnce(function bindShell() {
   if (localStorage.getItem("ts.left.folded") === "1") setLeftFolded(true);
   $("btn-toggle-left").onclick = () => setLeftFolded(!$("left").classList.contains("folded"));
   $("btn-open-settings").onclick = () => openSettings();
-  // 空态引导里的「去配置」。按钮是 index.html 里的静态节点（两种态共用一块 hero，
-  // 不动态生成），所以在这里一次性绑上即可。
-  $("btn-empty-setup").onclick = () => openSettings("llm");
+  // 「去配置」那颗按钮随空态引导一起下线了（见 index.html 的 #empty）——
+  // 入口收敛到两处：工具条那颗模型胶囊，和设置页 headbar 的一颗「添加模型」。
   $("btn-packinfo").onclick = () => setPane("packinfo");
 
   // busy / job 任一变化都刷新门控与参数锁。
@@ -550,11 +553,21 @@ export const bindShell = bindOnce(function bindShell() {
   };
   on("busy", syncGate);
   on("job", syncGate);
-  // meta 变了（保存设置 / 换包）时 hero 也要跟着切：用户刚把 Key 填好，
-  // 空态那块必须从「先配置模型接口」回到「想聊点什么？」。
-  on("meta", () => { fillPackSelect(); setCfgHint(); renderModelPicker(); applyEmptyHero(); });
+  // meta 变了（保存设置 / 换包）要重画模型胶囊：刚配好 Key 或加完模型，
+  // 工具条那颗必须立刻从「未配置模型」变成模型名，否则用户以为还没生效。
+  on("meta", () => { fillPackSelect(); setCfgHint(); renderModelPicker(); });
 
   $("topic").addEventListener("input", () => { refreshGate(); autoGrowTopic(); });
+  // Enter 发送、Shift+Enter 换行 —— placeholder、按钮 title、README 三处都这么承诺，
+  // 而之前只有 Ctrl/Cmd+Enter 能用（按 Enter 只换行，界面一声不响）。
+  // ⚠ isComposing 这层守卫不能省：这是中文输入应用，拼音/五笔选词时按的就是 Enter，
+  //   不挡的话每确认一个候选词都会把半截消息发出去。keyCode 229 是老 WebKit 的等价写法。
+  $("topic").addEventListener("keydown", e => {
+    if (e.key !== "Enter" || e.shiftKey) return;
+    if (e.isComposing || e.keyCode === 229) return;
+    e.preventDefault();
+    $("btn-generate").click();
+  });
 
   // 参数变更：检测结果过期 + 刷新侧栏摘要。
   // 不能只认 #settings-screen —— 快捷条上的时长/平台/人设才是最常被改的几个。
@@ -568,7 +581,9 @@ export const bindShell = bindOnce(function bindShell() {
   // 后果不只是"显示旧字段"：`cta` 这类参数的值域来自**包**，换了包却还留着上一个包的
   // 取值，生成时那个值在新包里不存在 → 静默降级（见 app/knowledge.py 的 param_audit），
   // 用户以为在定制、实际没生效。所以这里必须重渲染。
-  $("pack").addEventListener("change", () => renderPackParams());
+  // 换包 = 参数集与每项默认值全变，旧选择必须清空（否则新包沿用上一个包的
+  // 取值，那个值在新包里根本不存在 → 静默降级，见 app/knowledge.py param_audit）。
+  $("pack").addEventListener("change", () => { resetGenParams(); renderPackParams(); });
 
   document.addEventListener("keydown", e => {
     const mod = e.ctrlKey || e.metaKey;

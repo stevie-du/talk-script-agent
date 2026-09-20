@@ -16,7 +16,21 @@ export const state = {
   pollTimer: null,
   pollMisses: 0,
   settingsPane: "gen",
+  // 生成参数的**唯一真值**。工具条胶囊与设置页「生成参数」卡只是同一批参数的两个视图。
+  // 修前两处各存各的：胶囊带 id、卡片只有 data-key，于是卡片改了没有任何代码去读；
+  // 而 style / persona / cta 只在卡片里出现 —— 界面上能选、看起来也生效，
+  // 生成时永远送 null 走包默认值。这是最坏的一种静默降级。
+  genParams: {},
 };
+
+/** 写一个生成参数。空串/null 视为"不覆盖"，删掉键以退回包默认。 */
+export function setGenParam(key, value) {
+  if (value === null || value === undefined || value === "") delete state.genParams[key];
+  else state.genParams[key] = String(value);
+}
+
+/** 换行业包 = 参数集与每项默认值全变，旧选择必须整体清空。 */
+export function resetGenParams() { state.genParams = {}; }
 
 const handlers = new Map();
 

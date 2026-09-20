@@ -16,6 +16,7 @@
 import { $, el, esc, fmtText, sec, copyText, download, toast } from "./util.js";
 import { api } from "./api.js";
 import { state } from "./store.js";
+import { packLabel } from "./sessions.js";
 
 export const TYPE_LABEL = { hook: "开场钩子", point: "要点", cta: "结尾引导" };
 
@@ -26,9 +27,6 @@ const ICONS = {
   log: `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4h9l5 5v11a1 1 0 01-1 1H5a1 1 0 01-1-1V5a1 1 0 011-1z"/><path d="M14 4v5h5M8 13h8M8 17h5"/></svg>`,
 };
 
-export function nPoints(r) {
-  return Math.max((r.sections || []).filter(s => s.type === "point").length, 1);
-}
 
 /** 该段在后端的字数 / 配额。后端没给就退回空串——**绝不**在前端重算，
  *  否则又会和 checker 的口径分叉。 */
@@ -56,7 +54,9 @@ export function renderResult(r, body, opts = {}) {
 
   setHead(
     r.params?.topic || "生成结果",
-    `${r.pack || ""} · ${r.params?.duration ?? "-"}s · ${r.params?.platform || ""}`,
+    // 用显示名而不是 slug：左栏早就显示「电梯」，这里却吐 `elevator` ——
+    // 同一个包在同一个窗口的两处叫法不一致，用户会以为是两个东西。
+    `${packLabel(r.pack)} · ${r.params?.duration ?? "-"}s · ${r.params?.platform || ""}`,
     passed && hardN === 0 ? "✓ 合格" : `✗ ${hardN ? hardN + " 处硬伤" : "需人工确认"}`,
     passed && hardN === 0 ? "ok" : "bad"
   );
@@ -238,27 +238,55 @@ function renderResultTabs(r, ch, hardN, opts) {
     btn.type = "button";
     btn.dataset.tab = d.id;
     btn.setAttribute("role", "tab");
+    // role=tab 光有 aria-selected 不够：读屏要能说出"这个 tab 控制哪块内容"，
+    // 键盘要能用 ←/→ 在一组 tab 间移动（WAI-ARIA Tabs 模式）。
+    // 原来这些都没做，tab 对键盘和读屏基本等于不存在。
+    btn.id = `rtab-${d.id}`;
+    btn.setAttribute("aria-controls", `rpane-${d.id}`);
+    btn.tabIndex = i === 0 ? 0 : -1;          // roving tabindex：Tab 键只停在选中项
     btn.setAttribute("aria-selected", i === 0 ? "true" : "false");
     btn.innerHTML = `<span class="rt-t">${esc(d.label)}</span>`
       + (d.badge ? `<span class="rt-b">${esc(d.badge)}</span>` : "");
-    btn.onclick = () => {
-      bar.querySelectorAll(".res-tab").forEach(n => {
-        const on = n === btn;
-        n.classList.toggle("on", on);
-        n.setAttribute("aria-selected", on ? "true" : "false");
-      });
-      panes.querySelectorAll(".res-pane").forEach(p =>
-        p.classList.toggle("hidden", p.dataset.tab !== d.id));
-    };
+    btn.onclick = () => selectTab(d.id);
     bar.appendChild(btn);
 
     const pane = el("div", "res-pane" + (i === 0 ? "" : " hidden"));
     pane.dataset.tab = d.id;
+    pane.id = `rpane-${d.id}`;
     pane.setAttribute("role", "tabpanel");
+    pane.setAttribute("aria-labelledby", `rtab-${d.id}`);
+    pane.tabIndex = 0;                        // 面板可聚焦，读屏才能从 tab 跳进内容
     const content = d.render();
     if (typeof content === "string") pane.innerHTML = content;
     else if (content) pane.appendChild(content);
     panes.appendChild(pane);
+  });
+
+  const tabs = () => Array.from(bar.querySelectorAll(".res-tab"));
+  function selectTab(id) {
+    for (const n of tabs()) {
+      const on = n.dataset.tab === id;
+      n.classList.toggle("on", on);
+      n.setAttribute("aria-selected", on ? "true" : "false");
+      n.tabIndex = on ? 0 : -1;
+      if (on) n.focus();
+    }
+    panes.querySelectorAll(".res-pane").forEach(p =>
+      p.classList.toggle("hidden", p.dataset.tab !== id));
+  }
+  // ←/→ 循环，Home/End 跳首尾 —— 与系统原生 tablist 行为一致
+  bar.addEventListener("keydown", e => {
+    const list = tabs();
+    const cur = list.findIndex(n => n === document.activeElement);
+    if (cur < 0) return;
+    const map = { ArrowRight: 1, ArrowLeft: -1 };
+    let next = null;
+    if (e.key in map) next = (cur + map[e.key] + list.length) % list.length;
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = list.length - 1;
+    if (next === null) return;
+    e.preventDefault();
+    selectTab(list[next].dataset.tab);
   });
 
   wrap.appendChild(bar);

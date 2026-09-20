@@ -247,18 +247,55 @@ window.__addCount = 0;
   var calls = { gen:0, job:0, cancel:0, rewrite:0 };
   var ELEVATOR_DRAFT = true;   // 有状态：转正后变 false，才能验证按钮消失
   window.__calls = calls;
-  // 空态 hero 的两套文案**都在 DOM 里**（由 [data-when] 切换），
-  // 直接读 h3.textContent 会把两态拼在一起（「想聊点什么？先配置模型接口」）——
-  // 那样不管哪种状态，两个正则都能匹配上，断言等于没写。
-  // 所以要取**当前可见的那一份**。
-  window.__shown = function(root){
-    if (!root) return '';
-    var n = Array.prototype.find.call(root.children,
-      function(c){ return c.nodeType === 1 && !c.classList.contains('hidden'); });
-    return n ? n.textContent.trim() : '';
-  };
+  // window.__shown 已删：它存在的唯一理由是「hero 两套文案都在 DOM 里，读
+  // textContent 会把两态拼在一起，两个正则都匹配得上」。[data-when] 那一态
+  // 下线后 #empty h3 只剩一份文案，textContent 本身就是无歧义的。
   function mk(o){ return Promise.resolve(new Response(JSON.stringify(o),
     { status:200, headers:{'Content-Type':'application/json'} })); }
+
+  // 会话历史桩：跨 5 天，日期相对「今天」实算（见调用处注释说明为何不能写死）。
+  // 覆盖 dayGroupKey 的三个分支：
+  //   今天      → 相对词「今天」
+  //   昨天      → 相对词「昨天」
+  //   3 天前    → 落在「近一周」，label = MM-DD 周X
+  //   10/12 天前 → 更早，label = MM-DD
+  // ⚠ **必须有两天的天数都 > 7**（这里 10 与 12）。只放一天的话，旧口径的
+  //   「更早」桶里就只有一条，而「3 天前」落在「本周」—— 两天天然被分开了，
+  //   「相隔一周以上不会被并进同一组」那条断言就会**在变异态下照样绿**
+  //   （实测踩过：变异回四档粗桶时那条没红）。多这一天，新旧口径才真正分得开。
+  // ⚠ 时间要带 'T' 与秒，与后端 ISO 格式一致（'2026-09-13 10:00' 这种空格分隔的
+  //   写法在部分环境按本地时区解析、部分当 UTC，跨时区会让「今天」漂到「昨天」）。
+  // ⚠ 这段注释里**不能出现反引号**：整段桩脚本是外层模板串，
+  //   反引号会提前把它截断，症状是 Node 报「SyntaxError: Unexpected identifier」。
+  function histStub(){
+    function at(daysAgo, hh, mm){
+      var d = new Date();
+      d.setDate(d.getDate() - daysAgo);
+      d.setHours(hh, mm, 0, 0);
+      function p2(n){ return String(n).padStart(2, '0'); }
+      return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate())
+        + 'T' + p2(hh) + ':' + p2(mm) + ':00';
+    }
+    return [
+      { id:'s2', created_at: at(0, 15, 30), pack:'elevator',
+        topic:'扶梯突然停了怎么办', platform:'抖音',
+        duration:null, chars:null, passed:null, state:'writing' },
+      { id:'s1', created_at: at(0, 10, 0), pack:'elevator',
+        topic:'家用电梯怎么挑？', platform:'小红书',
+        duration:60, chars:42, passed:true, state:'done' },
+      { id:'s3', created_at: at(1, 9, 15), pack:'elevator',
+        topic:'电梯困人如何自救', platform:'抖音',
+        duration:60, chars:240, passed:true, state:'done' },
+      { id:'s4', created_at: at(3, 20, 5), pack:'elevator',
+        topic:'加装电梯一楼不同意', platform:'小红书',
+        duration:90, chars:330, passed:false, state:'done' },
+      { id:'s5', created_at: at(10, 11, 40), pack:'elevator',
+        topic:'电梯维保避坑指南', platform:'抖音',
+        duration:60, chars:238, passed:true, state:'done' },
+      { id:'s6', created_at: at(12, 8, 50), pack:'elevator',
+        topic:'电梯日常巡检要点', platform:'抖音',
+        duration:60, chars:236, passed:true, state:'done' } ];
+  }
   window.fetch = function(u, o){
     var s = String(u);
     var hdrs = (o && o.headers) || {};
@@ -364,12 +401,25 @@ window.__addCount = 0;
     }
     if (s.indexOf('/api/jobs/job1') >= 0) {
       calls.job++;
-      // 前两次是「撰写中」（带思考流与步骤），之后落到完成
-      if (calls.job <= 2) return mk({ id:'job1', state:'writing',
+      // 前两次是「正在跑」（带思考流与步骤），之后落到完成
+      // ⚠ created_at 必须给：真实后端的快照一直有它（app/jobs.py 的 snapshot），
+      //   桩漏掉会让「已用 N 秒」这一行永远渲染成空 —— 于是关于它的一切断言
+      //   都在量一个空字符串，全绿但什么都没验证（2026-09-20 实测踩过）。
+      //   要往回推一段再给，不能取 now：取 now 的话已用时永远停在起点，
+      //   量不到它换写法（分/秒）的那一步。
+      // ⚠ 本函数整体是一个模板字符串，注释里**不许出现反引号**（会提前闭合）。
+      // ⚠ 状态取 rewriting 而不是 writing：后端是**阶段完成后才记那一步**
+      //   （app/pipeline.py 里 write 步骤在 writing 结束之后才 append），
+      //   所以「已完成的文案撰写」与「文案撰写中」在真实快照里不会同时出现。
+      //   桩原来两个都给，界面照它画就会多出一行重复的阶段名 —— 拿一个
+      //   后端根本产不出的组合去截图和断言，量到的都是假东西。
+      //   rewriting（第 2 轮回炉）才是「已有 select + write 两步、仍在跑」的合法形态。
+      if (calls.job <= 2) return mk({ id:'job1', state:'rewriting',
+        created_at: new Date(Date.now() - 8000).toISOString(),
         params:{ topic:'家用电梯怎么挑？', pack:'elevator', duration:60 },
         steps:[{ key:'select', title:'选题策划', ts:'2026-09-13T10:00:01', data:{} },
                { key:'write_r1', title:'文案撰写', ts:'2026-09-13T10:00:05', data:{} }],
-        stream:{ phase:'文案撰写', reasoning_tail:'正在斟酌开场钩子……',
+        stream:{ phase:'回炉改写', reasoning_tail:'正在斟酌开场钩子……',
                  reasoning_len:136, content_len:12 } });
       return mk({ id:'job1', state:'done',
         params:{ topic:'家用电梯怎么挑？', pack:'elevator', duration:60 },
@@ -385,13 +435,12 @@ window.__addCount = 0;
     // 未配置 Key 的模式要模拟「真·首次运行」：没有 Key **也没有历史记录**，
     // 否则 boot() 会按设计跳过自动打开设置（有历史说明不是第一次用）。
     if (s.indexOf('/api/history') >= 0 && NOKEY) return mk([]);
-    if (s.indexOf('/api/history') >= 0) return mk([
-      { id:'s1', created_at:'2026-09-13 10:00', pack:'elevator',
-        topic:'家用电梯怎么挑？', platform:'小红书',
-        duration:60, chars:42, passed:true, state:'done' },
-      { id:'s2', created_at:'2026-09-13 15:30', pack:'elevator',
-        topic:'扶梯突然停了怎么办', platform:'抖音',
-        duration:null, chars:null, passed:null, state:'writing' } ]);
+    // 会话桩：**跨 4 天**，且日子是相对「今天」实算的。
+    // ⚠ 不能写死日期（如 2026-09-13）：分组口径是相对时间（今天 / 昨天 / MM-DD），
+    // 写死的那天过几天就从「今天」滑到「MM-DD」，断言随日期漂。
+    // 这里按「今天 / 昨天 / 3 天前 / 10 天前」各造一条，覆盖 dayGroupKey 的
+    // 三个分支（相对词、带星期的近一周、只留日期的更早）。
+    if (s.indexOf('/api/history') >= 0) return mk(histStub());
     if (s.indexOf('/api/config/test') >= 0) return mk({ ok:true, model:'glm-4.7', detail:'延迟 320ms' });
     // 必须在 /api/config 的通用匹配之前：indexOf('/api/config') 也会命中 reset
     if (s.indexOf('/api/config/reset') >= 0) return mk({ ok:true, fields:['base_url'] });
@@ -604,7 +653,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("meta 载入且行业包下拉已填充", boot.meta && boot.packs === 2, `packs=${boot.packs}`);
   check("工具条渲染出参数胶囊", boot.quickPills >= 3, `pills=${boot.quickPills}`);
   check("空状态示例卡渲染", boot.samples === 4, `samples=${boot.samples}`);
-  check("会话列表渲染 2 条并分组", boot.sessions === 2 && boot.groups >= 1,
+  check("会话列表渲染 6 条并分组", boot.sessions === 6 && boot.groups >= 4,
     `rows=${boot.sessions} groups=${boot.groups}`);
   check("请求带上了访问令牌", await evalIn("return window.__sawToken === true;"), "");
 
@@ -636,11 +685,66 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       const bs = getComputedStyle(b);
       return { stopping: b.classList.contains('stopping'),
                img: bs.backgroundImage, bg: bs.backgroundColor }; })(),
+    // ── 生成中状态行的位置与转圈（2026-09-20 用户报「转圈太难看、闪烁特别快，
+    //    可以参考其他智能体都是在思考下方；右上角的用时也会闪烁、位置可以优化」）
+    // ⚠ 必须与上面同一个 evalIn 一起量：桩的 running 快照只覆盖前两次轮询，
+    //   另起一次 evalIn 时第 3 次轮询已经把气泡换成结果，
+    //   #gen-elapsed 早就不在了 —— 实测那样量到的是 elapsed=""，假红。
+    // ⚠ 转圈时长读**样式表里写下的值**而不是 getComputedStyle：无头 Chrome
+    //   默认按 prefers-reduced-motion: reduce 报告，styles.css 里那条全局
+    //   animation-duration 覆盖会把计算值压成近乎零，量到的永远是
+    //   「无障碍降级后的结果」，不是设计值。
+    genStatus: (function(){
+      var st = document.getElementById('gen-status');
+      var think = document.getElementById('think-stream');
+      var el = document.getElementById('gen-elapsed');
+      var sp = st.querySelector('.spinner');
+      var body = st.closest('.msg-body').getBoundingClientRect();
+      var sr = st.getBoundingClientRect(), tr = think.getBoundingClientRect();
+      var er = el.getBoundingClientRect(), cs = getComputedStyle(sp);
+      var rule = null;
+      for (var i = 0; i < document.styleSheets.length && !rule; i++) {
+        var rules = null;
+        try { rules = document.styleSheets[i].cssRules; } catch (_) { continue; }
+        for (var j = 0; j < (rules || []).length; j++) {
+          if (rules[j].selectorText === '.spinner') { rule = rules[j]; break; }
+        }
+      }
+      return {
+        belowThink: Math.round(sr.top - tr.bottom),
+        gapToRightEdge: Math.round(body.right - er.right),
+        phase: document.getElementById('gen-phase').textContent,
+        elapsed: el.textContent,
+        spinDur: rule ? parseFloat(rule.style.animationDuration) : null,
+        // 环的粗细取**计算值**：CSSOM 里带 var() 的简写（border: 1.5px solid
+        // var(--line-strong)）不往长写法展开，style.borderWidth 与 .border 都是
+        // 空串 —— 实测量到 NaN，JSON 序列化成 null，把这条判据变成永久假红。
+        spinW: parseFloat(cs.borderTopWidth),
+        // 轨道必须是**半透明**的淡色（它是背景轨道，不是第二根实心弧）。
+        // 不用正则取 alpha：本函数在模板字符串里，反斜杠会被模板串吃掉。
+        trackAlpha: cs.borderTopColor.indexOf("rgba") === 0
+          ? parseFloat(cs.borderTopColor.split(",").pop()) : 1,
+        spinHead: cs.borderRightColor, spinTrack: cs.borderTopColor,
+      };
+    })(),
   };`);
   check("发送后进入生成态（用户气泡 + 助手气泡）",
     running.busy && running.jobId === "job1" && running.userMsg, JSON.stringify(running));
   check("步骤时间线渲染出已完成步骤", running.steps >= 2, `steps=${running.steps}`);
   check("生成中展示流式思考过程", running.thinkShown, "");
+
+  // ── 3·b) 生成中状态行：位置与转圈（取法见上面 running.genStatus）
+  const gs = running.genStatus;
+  check("生成中：状态行在思考流下方、已用时贴着阶段名（不再顶到气泡右边缘）",
+    gs.belowThink >= 0 && gs.belowThink <= 16
+      && gs.gapToRightEdge > 40
+      && gs.phase === "回炉改写中"
+      && /^已用 [0-9]+ 秒$/.test(gs.elapsed),
+    JSON.stringify(gs));
+  check("转圈：慢速（>=1s 一圈）+ 细环（<=2px）+ 淡轨道与深色弧头分得开",
+    gs.spinDur >= 1 && gs.spinW > 0 && gs.spinW <= 2
+      && gs.trackAlpha < 0.25 && gs.spinHead !== gs.spinTrack,
+    JSON.stringify(gs));
   check("生成中发送键变为「停止」", /停止/.test(running.btnTitle), running.btnTitle);
   // 停止键必须是**实心按钮**，不能是淡底。判据看 backgroundImage 而不是
   // backgroundColor：--grad-btn 是 linear-gradient，它落在 background-image 上，
@@ -1074,7 +1178,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
         && k.borderRadius === p.borderRadius
         && k.fontSize === p.fontSize
         && firstCol(k.gridTemplateColumns) === firstCol(p.gridTemplateColumns)
-        && firstCol(k.gridTemplateColumns) === 30
+        // 原本硬要求 firstCol === 30：钉的是某一档绝对值，档位一调就得回来改断言。
+        // 换成规范 v1 的硬约束「图标盒必须是 4 的倍数」（docs/UI视觉规范.md 第 2 节）：
+        // 既不许两族分叉（上面已比过相等），也不许回到 30 这种非 4 倍数值。
+        && firstCol(k.gridTemplateColumns) % 4 === 0
         && bg(k.backgroundColor) === 0
         && bg(p.backgroundColor) === 0,
       kb: { padding: k.padding, radius: k.borderRadius,
@@ -1619,11 +1726,17 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   const fsSet = new Set(Object.values(rcTitle).filter(p => p.fs).map(p => p.fs));
   const fwSet = new Set(Object.values(rcTitle).filter(p => p.fw).map(p => p.fw));
   const lsSet = new Set(Object.values(rcTitle).filter(p => p.ls).map(p => p.ls));
+  // 原本硬要求 `=== '16px'`：钉的是某一档绝对值，档位一调就得回来改断言。
+  // 现在改成「三者相等 **且** 落在 :root 的字阶表里」—— 字阶表**从 CSS 变量现场读**，
+  // 不在测试里重抄一遍数字（同一信息两份表示正是本项目要防的）。
+  const typeScale = await evalIn(`var cs = getComputedStyle(document.documentElement);
+    return ['--f-2xs','--f-sm','--f-md','--f-xl'].map(function(k){
+      return cs.getPropertyValue(k).trim(); });`);
   check("三个右列顶部 h3 字号字重字距一致（同角色 h3 不分家）",
-    fsSet.size === 1 && [...fsSet][0] === '16px'
+    fsSet.size === 1 && typeScale.indexOf([...fsSet][0]) >= 0
       && fwSet.size === 1 && [...fwSet][0] === '600'
       && lsSet.size === 1,
-    JSON.stringify(rcTitle));
+    JSON.stringify(rcTitle) + ' scale=' + JSON.stringify(typeScale));
 
   // 「一屏一个保存」（2026-09-17 二改）：独立的高级配置保存按钮**整段删掉**，
   // 高级配置改由模型表单的「保存」一并存掉（settings.js 的 saveAdvancedConfig）。
@@ -1766,10 +1879,18 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   const genWidths = await evalIn(`window.__ts.setPane('gen');
     const pane = document.getElementById('pane-gen');
     // 三列化后「内容宽」不再是 pane 整体内宽，而是 **pane-detail 的内宽**
-    // （pane-list + gap + pane-detail 才是真正的列）。page-card 的 padding
-    // 是 var(--s5) 0（只有上下），左右不缩，所以 pane-detail 的 width 即字段容器宽。
+    // （pane-list + gap + pane-detail 才是真正的列）。
+    // ⚠ 规范 v1 试点给 .page-card 加了**左右**内边距（发丝边卡片必须有留白，
+    //   否则文字贴边）。原来"padding 只有上下、左右不缩"的前提不再成立，
+    //   所以这里从"字段真正的容器"量：卡片内容宽 = 卡片宽 − 左右 padding。
+    //   判据强度没变（仍是 ±0.6 的精确填满），只是参照物从列宽改成了它的子容器宽。
     const detail = pane.querySelector('.pane-detail');
-    const inner = +(detail.getBoundingClientRect().width).toFixed(2);
+    const cardEl = pane.querySelector('.page-card:not(.hidden)');
+    const inner = +(cardEl
+      ? cardEl.getBoundingClientRect().width
+        - parseFloat(getComputedStyle(cardEl).paddingLeft)
+        - parseFloat(getComputedStyle(cardEl).paddingRight)
+      : detail.getBoundingClientRect().width).toFixed(2);
     // 生成偏好三列化后，「生成参数」「进阶」「行业包」三个分组各自藏在独立
     // .page-card 里，默认只显示一个。原来的断言靠默认可见的字段测全，
     // 现在要**逐个切换分组、把每个分组的字段都量一遍**，否则 hidden 卡片里的字段
@@ -1990,7 +2111,9 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   // 合并吗？」）—— 4 项都在用（后端 pipeline.py 的 voice/format/mode 白名单 +
   // knowledge.py 的 private_facts），**一项都不能删**；问题只在**名字太泛**：
   // 听起来像"高级 / 不常用"，而「输出内容」「补充资料」其实常用。
-  // 判据：中列条目与右列卡片标题都必须是新名字，且旧名不残留在任何可见文本里。
+  // 判据：中列条目与右列卡片标题必须同名，且两个旧名都不残留在可见文本里。
+  // 「生成方式与输出」在 2026-09-19 也变成旧名了 —— 分步确认移除后这一组里
+  // 不再有"生成方式"，只剩 输出内容 / 文案人味 / 补充资料，故改名「输出与风格」。
   const advName = await evalIn(`window.__ts.setPane('gen');
     const nav = [...document.querySelectorAll('#gen-sec-list .pl-item')]
       .find(function(b){ return b.dataset.sec === 'adv'; });
@@ -1998,10 +2121,12 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
              navSub: nav.querySelector('.pl-s').textContent.trim(),
              cardTitle: document.querySelector(
                '#gen-sec-detail .page-card[data-sec="adv"] .card-title').textContent.trim(),
-             staleName: document.body.innerText.indexOf('进阶') >= 0 };`);
-  check("「进阶」已改名「生成方式与输出」（中列条目与右列卡片同步，旧名不残留）",
-    advName.navTitle === "生成方式与输出" && advName.cardTitle === "生成方式与输出"
-      && advName.navSub.length > 0 && advName.staleName === false,
+             staleName: document.body.innerText.indexOf('进阶') >= 0,
+             staleModeName: document.body.innerText.indexOf('生成方式与输出') >= 0 };`);
+  check("「输出与风格」命名同步（中列条目与右列卡片一致，旧名不残留）",
+    advName.navTitle === "输出与风格" && advName.cardTitle === "输出与风格"
+      && advName.navSub.length > 0 && advName.staleName === false
+      && advName.staleModeName === false,
     JSON.stringify(advName));
 
   // 2026-09-17（任务 1）：行业包分组现在是 .block-inner 结构（与「生成参数」「生成方式与输出」同族），
@@ -2027,7 +2152,11 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     };`);
   check("生成偏好「行业包」分组是 .block-inner 多行结构（与「生成参数」「生成方式与输出」同族）",
     packSec.cardTitle === "行业包" && packSec.blockCount >= 2
-      && packSec.fields.every(f => f.lbl && f.hasControl)
+      // 原判据要求每个 block 都有非空 .lbl。现在「操作」这个空词标签被删了
+      // （<label> 连 for 都没有，按钮自己已说明一切），按钮行没有标签是合理的。
+      // 真正要守的是结构：≥2 个 block、每个都装着控件、且没退回旧的单行 .pack-row。
+      && packSec.fields.every(f => f.hasControl)
+      && packSec.fields.some(f => f.lbl)          // 至少有一个字段是带标签的（防整组都没标签）
       && !packSec.hasLegacyPackRow,
     JSON.stringify(packSec));
 
@@ -2049,59 +2178,6 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   check("「行业包」分组高度适配窗口（不再是 ~50px 一行）",
     packH.h >= 200 && (packH.w / packH.h) <= 3.5,
     JSON.stringify(packH));
-
-  // 2026-09-17（任务 3）：一键直通 / 分步确认区别与可达性。
-  //   - 「一键直通」(mode=auto)：直接走 generation 路径，不弹确认框。
-  //   - 「分步确认」(mode=step)：触发 #confirm-overlay 让用户先校选题再撰写文案。
-  // 功能**已生效**（jobs.js / progress.js 按 mode 走不同分支），本条断言守住
-  // 这个可达性 —— 防止"DOM 里有 radio 但 mode 没真的被读"的假实现。
-  const modeRadio = await evalIn(`const radios = [...document.querySelectorAll('input[name="mode"]')];
-    const checked = radios.find(r => r.checked);
-    return {
-      count: radios.length,
-      values: radios.map(r => r.value).sort(),
-      checkedValue: checked?.value || '',
-      // radio 容器是 .choice-cards（卡片式单选，2026-09-17 取代 .segmented）
-      cardForm: !!document.querySelector('.choice-cards input[name="mode"]'),
-      cardCount: document.querySelectorAll('.choice-cards .choice-card').length,
-      // 每张卡都要有名称 + 一句说明（说明是这次换形式的主要目的：
-      // 用户之前专门问过「一键直通与分步确认的区别」）
-      cardDescs: [...document.querySelectorAll('.choice-cards .choice-card')]
-        .map(c => (c.querySelector('.cc-d')?.textContent || '').trim()),
-      // 分步确认的弹层在 DOM 上存在（jobs.js 会打开它）
-      overlayExists: !!document.getElementById('confirm-overlay'),
-      // 与"生成参数"同几何：装在 .block-inner 里、有 .lbl
-      inBlockInner: !!document.querySelector('.block-inner .choice-cards') &&
-        !!document.querySelector('.block-inner .choice-cards')?.closest('.block-inner')?.querySelector('.lbl'),
-    };`);
-  check("一键直通 / 分步确认：卡片式单选（默认 auto + step 可选 + 每卡带说明）",
-    modeRadio.count === 2 && modeRadio.values.join(',') === 'auto,step'
-      && modeRadio.checkedValue === 'auto' && modeRadio.cardForm
-      && modeRadio.cardCount === 2
-      && modeRadio.cardDescs.length === 2
-      && modeRadio.cardDescs.every(d => d.length >= 8)
-      && modeRadio.overlayExists && modeRadio.inBlockInner,
-    JSON.stringify(modeRadio));
-
-  // 选中的那张卡必须有**视觉落点**（2026-09-17）—— 这是换掉胶囊的主因之一：
-  // 原来选中是 `--surface` 白块 vs `--fill` 灰底，只差 ~10 等效灰度，
-  // 扫一眼看不出选了哪个。现在靠描边加深 + 抬起 + 图标染色。
-  // 判据取「选中 vs 未选中的描边色与底色都不同」+「选中卡有投影」。
-  const cardOn = await evalIn(`return (function(){
-    var cards = [...document.querySelectorAll('.choice-cards .choice-card')];
-    var on = cards.find(function(c){ return c.querySelector('input:checked'); });
-    var off = cards.find(function(c){ return !c.querySelector('input:checked'); });
-    if (!on || !off) return { none: true };
-    var a = getComputedStyle(on), b = getComputedStyle(off);
-    return { onBg: a.backgroundColor, offBg: b.backgroundColor,
-             onBorder: a.borderTopColor, offBorder: b.borderTopColor,
-             onShadow: a.boxShadow !== 'none',
-             onIconBg: getComputedStyle(on.querySelector('.cc-ic')).backgroundColor };
-  })()`);
-  check("选中的卡片有视觉落点（描边加深 + 抬起 + 图标染色，与未选中拉得开）",
-    !cardOn.none && cardOn.onBg !== cardOn.offBg
-      && cardOn.onBorder !== cardOn.offBorder && cardOn.onShadow,
-    JSON.stringify(cardOn));
 
   // 切到「生成参数」分组，验证任务 2（生成参数卡片展示全量参数，含 TOOLBAR_KEYS）。
   // 期望：所有 pack.params 里 options.length>0 的 key 都在 #param-front 里。
@@ -2147,6 +2223,46 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   check("param-front 参数组不带 p- 前缀 id（与工具条胶囊不撞 id）",
     fullParams.frontIds.length === 0,
     JSON.stringify(fullParams));
+  // 设置页「生成参数」卡改了要**真的进请求**。
+  // 这条是补的洞：上面两条只验 DOM 结构（全量参数、不撞 id），于是出现过
+  // 「卡片渲染正常、点了有反应、228 条断言全绿，但 collectParams() 永远送 null」——
+  // 因为 getParam 只认工具条胶囊的 `#p-<key>`，而 style/persona/cta 根本没有胶囊。
+  // 判据必须落到真值上：改卡片里的 select → collectParams() 跟着变。
+  const paramReal = await evalIn(`window.__ts.setPane('gen');
+    const secBtns = [...document.querySelectorAll('#gen-sec-list .pl-item')];
+    secBtns.find(b => b.dataset.sec === 'param').click();
+    const front = document.getElementById('param-front');
+    const pick = k => front.querySelector('select[data-key="' + k + '"]');
+    const other = s => [...s.options].map(o => o.value).find(v => v !== s.value);
+    // ① 只在设置页出现、工具条没有胶囊的参数
+    const solo = ['style','persona','cta'].map(pick).find(s => !!s);
+    const soloKey = solo.dataset.key, soloFrom = solo.value, soloTo = other(solo);
+    solo.value = soloTo; solo.dispatchEvent(new Event('change', {bubbles:true}));
+    const sentSolo = window.__ts.collectParams()[soloKey];
+    // ② 两处都有的参数：设置页改 → 工具条胶囊与真值都要跟着走
+    const dur = pick('duration'), durFrom = dur.value, durTo = other(dur);
+    dur.value = durTo; dur.dispatchEvent(new Event('change', {bubbles:true}));
+    // ⚠ 这里必须把**值**取下来，不能只存节点引用留给 return 去读：
+    // 下面还要还原，return 求值时读到的会是还原后的旧值 —— 我自己就这么被骗过一次
+    // （断言报"胶囊没同步"，实际是断言自己在还原之后才读）。
+    const pillScoped = document.querySelector('#quick-params #p-duration');
+    const pillTo = pillScoped ? pillScoped.value : null;
+    const pillCount = document.querySelectorAll('#p-duration').length;
+    const sentDur = window.__ts.collectParams().duration;
+    // 还原，别污染后面的断言
+    solo.value = soloFrom; solo.dispatchEvent(new Event('change', {bubbles:true}));
+    dur.value = durFrom; dur.dispatchEvent(new Event('change', {bubbles:true}));
+    return { soloKey, soloTo, sentSolo, durTo, durFrom, pillTo, pillCount, sentDur,
+             backTo: window.__ts.collectParams().duration };`);
+  check("设置页「生成参数」改动真的进请求（无胶囊的参数也能生效 + 双向同步工具条）",
+    paramReal.sentSolo === paramReal.soloTo
+      && paramReal.sentDur === Number(paramReal.durTo)
+      && paramReal.pillTo === paramReal.durTo
+      && paramReal.pillCount === 1
+      // 还原也要验：不还原的话这条会污染后面所有断言的基线
+      && paramReal.backTo === Number(paramReal.durFrom),
+    JSON.stringify(paramReal));
+
   // 切回默认（行业包），与 UI 一致
   await evalIn(`window.__ts.setPane('gen');
     [...document.querySelectorAll('#gen-sec-list .pl-item')]
@@ -2228,7 +2344,6 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     text: document.getElementById('session-list').textContent };`);
   check("会话搜索能过滤出匹配项",
     searched.rows === 1 && /扶梯/.test(searched.text), JSON.stringify(searched));
-
   await evalIn(`const b = document.getElementById('sess-search');
     b.value = '不存在的词'; b.dispatchEvent(new Event('input', {bubbles:true})); return true;`);
   await sleep(200);
@@ -2251,11 +2366,179 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   const cleared = await evalIn(`return {
     rows: document.querySelectorAll('#session-list .sess-item').length,
     val: document.getElementById('sess-search').value };`);
-  check("清空搜索后恢复全部会话", cleared.rows === 2 && cleared.val === "",
+  check("清空搜索后恢复全部会话", cleared.rows === 6 && cleared.val === "",
     JSON.stringify(cleared));
 
   const sessGeo = await evalIn(GEO(".sess-search"));
   check("会话搜索：图标在框内、input 无自带描边", geoOK(sessGeo), JSON.stringify(sessGeo));
+
+  // ── 会话列表的分天分组与折叠 ────────────────────────────────────
+  // 用户 2026-09-19 原话：「历史记录现在无法折叠，全部记录平铺了，有点太多了」。
+  // 根因不是「没分组」，是 **dayKey 只有四档（今天/昨天/本周/更早），
+  // 一周以前的全并进「更早」** —— 真实索引 78 条全在同一周以前，整列只剩
+  // 一个标签「更早 78」，78 行之间再无分隔。
+  //
+  // 桩数据专门跨 4 天（今天 / 昨天 / 3 天前 / 10 天前），让三个分支都被走到：
+  //   今天、昨天      → 相对词
+  //   3 天前          → 落在近一周，label = MM-DD 周X
+  //   10 天前         → 更早，label = MM-DD（**这条是旧实现会翻车的地方**：
+  //                     旧口径下它和「3 天前」会被并成同一个「更早」组）
+  const grouping = await evalIn(`const labels = [...document.querySelectorAll('#session-list .group-lbl')]
+      .map(n => ({ label: n.querySelector('.gl-t').textContent,
+                   count: +n.querySelector('.count').textContent,
+                   id: n.dataset.gid }));
+    return { labels: labels, rows: document.querySelectorAll('#session-list .sess-item').length };`);
+
+  check("列表按天分组：跨天的记录被拆成多组（不是全塞进一个「更早」）",
+    grouping.labels.length === 5, JSON.stringify(grouping.labels));
+
+  check("分组标签用相对词 + 具体日期（不再是「本周」「更早」这种粗桶）",
+    grouping.labels[0].label === "今天" && grouping.labels[1].label === "昨天"
+      && /^[0-9]{2}-[0-9]{2}/.test(grouping.labels[2].label)
+      && /^[0-9]{2}-[0-9]{2}$/.test(grouping.labels[3].label)
+      && !grouping.labels.some(g => /本周|更早/.test(g.label)),
+    JSON.stringify(grouping.labels.map(g => g.label)));
+
+  // ⚠ 这条是**旧实现会红**的关键：3 天前与 10 天前必须落在**两个不同的组**。
+  // 只断言「组数变多了」是不够的 —— 把 dayKey 的四档原样保留、只加折叠，
+  // 组数照样是 1，但那不叫修好。这里直接盯「两个不同天是否被分开」。
+  check("相隔一周以上的两天不会被并进同一个分组（旧「更早」的病灶）",
+    grouping.labels.length === 5
+      && grouping.labels[3].count === 1 && grouping.labels[4].count === 1
+      && grouping.labels[3].id !== grouping.labels[4].id,
+    JSON.stringify(grouping.labels));
+
+  // 组内计数之和 == 总行数：防止「分组分对了但漏画了行」。
+  check("各分组计数之和等于总行数（没有记录漏画）",
+    grouping.labels.reduce((a, g) => a + g.count, 0) === grouping.rows && grouping.rows === 6,
+    `sum=${grouping.labels.reduce((a, g) => a + g.count, 0)} rows=${grouping.rows}`);
+
+  // ── 折叠 ──
+  // 折叠状态先清干净再测（否则上一次跑留在 localStorage 里的状态会污染基线）。
+  await evalIn(`localStorage.removeItem('ts.sess.folded'); return true;`);
+  const foldBefore = await evalIn(`return document.querySelectorAll('#session-list .sess-item').length;`);
+
+  // 点第一个分组标签（今天）→ 该组的行应当消失、标签还在、aria 转 false。
+  // ⚠ evalIn 的包装是 `(() => { ... })()`，**不是 async** —— 想在里面 await
+  //   就必须自己再套一层 `(async () => { ... })()` 并用 return 交出去，否则报
+  //   「await is only valid in async functions」。
+  const folded = await evalIn(`return (async () => {
+    const g = document.querySelector('#session-list .group-lbl');
+    const label = g.querySelector('.gl-t').textContent;
+    const gid = g.dataset.gid;
+    g.click();
+    await new Promise(r => setTimeout(r, 60));
+    return { label: label, gid: gid,
+      rows: document.querySelectorAll('#session-list .sess-item').length,
+      groups: document.querySelectorAll('#session-list .group-lbl').length,
+      aria: document.querySelector('#session-list .group-lbl').getAttribute('aria-expanded'),
+      cls: document.querySelector('#session-list .group-lbl').classList.contains('folded'),
+      stored: localStorage.getItem('ts.sess.folded') };
+  })();`);
+
+  // 组数不写死（桩一变它就漂）：用「折叠前后组数不变」守「折的是行不是标签」，
+  // 用「恰好少了今天那组的条数」守「折对了组」。
+  const todayCount = grouping.labels[0].count;
+  check("点分组标签真的折起来：该组的行消失，标签本身还在",
+    folded.rows === foldBefore - todayCount && folded.groups === grouping.labels.length,
+    `折前=${foldBefore} 折后=${folded.rows} 该组条数=${todayCount} groups=${folded.groups}`);
+
+  check("折叠状态同步给读屏（aria-expanded 转 false）且有视觉类 .folded",
+    folded.aria === "false" && folded.cls === true, JSON.stringify(folded));
+
+  // ⚠ 存的键必须是**分组 id（日期）**而不是 label。
+  // 用 label 当键的话，「今天」这组明天就变成「昨天」，折叠状态会错位到别的组上。
+  check("折叠状态写进 localStorage，且键是日期 id 不是 label",
+    !!folded.stored && folded.stored.indexOf(folded.gid) >= 0
+      && !/今天|昨天/.test(folded.stored),
+    `stored=${folded.stored} gid=${folded.gid}`);
+
+  // 再点一次 → 展开还原（防止「只能折不能展」）。
+  const unfolded = await evalIn(`return (async () => {
+    const g = document.querySelector('#session-list .group-lbl');
+    g.click();
+    await new Promise(r => setTimeout(r, 60));
+    return { rows: document.querySelectorAll('#session-list .sess-item').length,
+             aria: document.querySelector('#session-list .group-lbl').getAttribute('aria-expanded') };
+  })();`);
+  check("再点一次能展开还原（不是单向折叠）",
+    unfolded.rows === foldBefore && unfolded.aria === "true", JSON.stringify(unfolded));
+
+  // ⚠ 搜索时**忽略折叠**：用户在找东西，把结果藏在折起来的分组里是纯阻碍。
+  await evalIn(`return (async () => {
+    const g = document.querySelector('#session-list .group-lbl'); g.click();
+    const b = document.getElementById('sess-search');
+    b.value = '电梯'; b.dispatchEvent(new Event('input', {bubbles:true}));
+    await new Promise(r => setTimeout(r, 80));
+    return true;
+  })();`);
+  const searchIgnoresFold = await evalIn(`return {
+    rows: document.querySelectorAll('#session-list .sess-item').length,
+    folded: document.querySelectorAll('#session-list .group-lbl.folded').length };`);
+  check("搜索时忽略折叠：折起的组里匹配到的记录照样显示",
+    searchIgnoresFold.rows === 6 && searchIgnoresFold.folded === 0,
+    JSON.stringify(searchIgnoresFold));
+
+  // 分组标签必须是**真按钮**（键鼠两用），不能是加了个 onclick 的 div。
+  // ⚠ 这条单列出来，是因为上面那三条「点击折叠」**抓不住这个退化**：
+  //   把 button 换成 div 后如果补一句 addEventListener('click')，点击照样管用、
+  //   aria 也能自己 setAttribute 上去 —— 三条断言全绿，但标签从此
+  //   **Tab 不可达、Enter/Space 不响应、读屏读不出这是个控件**。
+  //   所以直接查标签本身，而不是查它的行为。
+  const lblA11y = await evalIn(`const g = document.querySelector('#session-list .group-lbl');
+    return { tag: g.tagName, type: g.getAttribute('type'),
+             tabbable: g.tabIndex >= 0 || g.tagName === 'BUTTON',
+             expanded: g.getAttribute('aria-expanded') };`);
+  check("分组标签是 <button>（Tab 可达、Enter/Space 可触发）而不是 div",
+    lblA11y.tag === "BUTTON" && lblA11y.type === "button"
+      && lblA11y.tabbable && lblA11y.expanded !== null,
+    JSON.stringify(lblA11y));
+
+  // 标签必须**靠左**：三角贴左内边距、文字紧随其后、计数跟在文字后面。
+  // ⚠ 这条是「断言只测行为、漏掉视觉」的典型补丁 —— 我把标签从 <div> 改成
+  //   <button> 之后，全局 `button { justify-content: center; padding: 0 13px }`
+  //   把它接管了：点击、折叠、aria、localStorage **四条断言全绿**，
+  //   但肉眼上整行是居中的（实测三角距左 80px、计数右边距 80px），
+  //   看起来像浮在行中间的一行小字，完全不像分组标题。
+  //   行为对 ≠ 长得对，所以这里单量几何。
+  const lblAlign = await evalIn(`const g = document.querySelector('#session-list .group-lbl');
+    const b = g.getBoundingClientRect();
+    const a = g.querySelector('.gl-arrow').getBoundingClientRect();
+    const t = g.querySelector('.gl-t').getBoundingClientRect();
+    const c = g.querySelector('.count').getBoundingClientRect();
+    const cs = getComputedStyle(g);
+    return { 三角左: Math.round(a.left - b.left), 文字左: Math.round(t.left - b.left),
+             计数左: Math.round(c.left - b.left), 高: Math.round(b.height),
+             jc: cs.justifyContent };`);
+  check("分组标签内容靠左排（三角→文字→计数，不被 button 的居中规则接管）",
+    lblAlign.jc === "flex-start"
+      && lblAlign.三角左 <= 10                      // 贴自身的 padding-left(8)
+      && lblAlign.文字左 > lblAlign.三角左          // 文字在三角右边
+      && lblAlign.计数左 > lblAlign.文字左,         // 计数在文字右边
+    JSON.stringify(lblAlign));
+
+  // 收尾：清搜索 + **把折叠状态复位**。
+  // ⚠ 只 `localStorage.removeItem` 是不够的：`folded` 这个 Set 是在模块加载时
+  //   从 localStorage 读进内存的，删了存储它也不会自己变空 —— 后面那些
+  //   「按 data-id 取某一行」的断言会因为在场的组还是折着的而抓到 null。
+  //   必须**再点一次**那个标签，让它真的展开（走的是用户的真实路径）。
+  await evalIn(`return (async () => {
+    document.getElementById('sess-search-clear').click();
+    const g = document.querySelector('#session-list .group-lbl.folded');
+    if (g) g.click();
+    await new Promise(r => setTimeout(r, 80));
+    return true;
+  })();`);
+  const afterFoldCleanup = await evalIn(`return {
+    rows: document.querySelectorAll('#session-list .sess-item').length,
+    folded: document.querySelectorAll('#session-list .group-lbl.folded').length,
+    q: document.getElementById('sess-search').value };`);
+  // 这条同时是后面所有「按 data-id 取行」断言的前置：列表必须是完整 5 条。
+  check("测试收尾：搜索清空 + 折叠复位，列表回到完整 5 条",
+    afterFoldCleanup.rows === 6 && afterFoldCleanup.folded === 0
+      && afterFoldCleanup.q === "",
+    JSON.stringify(afterFoldCleanup));
+  await evalIn(`localStorage.removeItem('ts.sess.folded'); return true;`);
 
   // 左栏头部顺序：新建对话在上、搜索在下。
   // 搜索过滤的对象就是会话列表，两者应相邻；中间夹一个「新建对话」会把
@@ -2313,7 +2596,10 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     const sc = document.querySelector('.left-scroll');
     const lbl = document.querySelector('.group-lbl');
     const pill = lbl.querySelector('.count');
-    const tn = [...lbl.childNodes].find(n => n.nodeType === 3 && n.textContent.trim());
+    // 文字在 .gl-t 这个 span 里（标签改成折叠按钮后，文字不能再是裸文本节点 ——
+    // 三角、文字、计数三者要各占一个 flex 项）。
+    const glt = lbl.querySelector('.gl-t');
+    const tn = [...glt.childNodes].find(n => n.nodeType === 3 && n.textContent.trim());
     const rg = document.createRange(); rg.selectNodeContents(tn);
     const c = document.createElement('canvas').getContext('2d');
     const cs = getComputedStyle(lbl);
@@ -2348,10 +2634,11 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     };
     const lbl = document.querySelector('.group-lbl');
     const pill = lbl.querySelector('.count');
-    const tn = [...lbl.childNodes].find(n => n.nodeType === 3 && n.textContent.trim());
+    // 文字在 .gl-t 里（见上方说明：标签改了折叠按钮，文字不再是裸文本节点）
+    const tn = [...lbl.querySelector('.gl-t').childNodes].find(n => n.nodeType === 3 && n.textContent.trim());
     const pn = [...pill.childNodes].find(n => n.nodeType === 3 && n.textContent.trim());
     return { 文字: tn.textContent.trim(), 药丸: pn.textContent.trim(),
-             文字墨底: +inkBottom(lbl, tn).toFixed(2),
+             文字墨底: +inkBottom(lbl.querySelector('.gl-t'), tn).toFixed(2),
              药丸墨底: +inkBottom(pill, pn).toFixed(2) };`);
   check("「本周」与计数药丸的墨底齐平（行高改动的连带检查点）",
     Math.abs(inkPair.文字墨底 - inkPair.药丸墨底) <= 0.6,
@@ -2369,7 +2656,9 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     const row = list.querySelector('.sess-item');
     const clone = lbl.cloneNode(true);
     row.after(clone);
-    const tn = [...clone.childNodes].find(n => n.nodeType === 3 && n.textContent.trim());
+    // 文字在 .gl-t 里（标签改成折叠按钮后不再是裸文本节点）
+    const glt = clone.querySelector('.gl-t');
+    const tn = [...glt.childNodes].find(n => n.nodeType === 3 && n.textContent.trim());
     const rg = document.createRange(); rg.selectNodeContents(tn);
     const c = document.createElement('canvas').getContext('2d');
     const cs = getComputedStyle(clone);
@@ -2493,13 +2782,17 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   //
   // ⚠ 断言要盯住「挪走了什么」，不能只盯「平台出现了」：只测 `/小红书/` 的话，
   // 把 duration/chars/passed 再塞回去照样全绿 —— 而用户告的就是那几个字段。
-  const subFields = await evalIn(`const r = document.querySelector('#session-list .sess-item');
+  // ⚠ 取行要**按 data-id 点名**（s1 = 已完成的小红书稿），
+  // 不要用 `querySelector('.sess-item')` 拿第一条 —— 桩的顺序一变
+  // （比如今天的那条恰好是 writing），断言就会指着另一条行报错。
+  const subFields = await evalIn(`const r = document.querySelector('#session-list .sess-item[data-id="s1"]');
     return r ? { text: r.querySelector('.sess-sub').textContent,
                  segs: r.querySelector('.sess-sub').textContent.split(' · ') } : null;`);
+  // 今天的记录时刻是 HH:MM（fmtTime 对「今天」不带日期前缀），所以这里两种都接受。
   check("会话行副标题只留行业 · 时间 · 平台（不再有秒数/字数/合格）",
     subFields && subFields.segs.length === 3
       && /电梯行业包/.test(subFields.segs[0])
-      && /^[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}$/.test(subFields.segs[1])
+      && /^([0-9]{2}-[0-9]{2} )?[0-9]{2}:[0-9]{2}$/.test(subFields.segs[1])
       && subFields.segs[2] === "小红书"
       && !/[0-9]+s\b/.test(subFields.text) && !/字/.test(subFields.text)
       && !/合格/.test(subFields.text),
@@ -2516,7 +2809,8 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     JSON.stringify(subState));
 
   // 挪走的时长/字数/校验结果要能在悬浮提示里找回来（否则「想看还得点进去」）。
-  const rowTip = await evalIn(`const r = document.querySelector('#session-list .sess-item');
+  // 同样按 data-id 点名（s1 就是桩里那条「已完成 + 有完整数字」的记录）。
+  const rowTip = await evalIn(`const r = document.querySelector('#session-list .sess-item[data-id="s1"]');
     return r ? r.title : '';`);
   check("悬浮提示补回了被挪走的时长/字数/校验结果",
     /60s/.test(rowTip) && /42 字/.test(rowTip) && /已通过校验/.test(rowTip), rowTip);
@@ -2707,37 +3001,44 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   check("保存设置后仍保持选中的行业包（不再跳回默认包）",
     kept.pack === "fitment" && kept.options === 2, JSON.stringify(kept));
 
-  // ── 12c) 未配置模型时的首启引导 ──────────────────────────
-  // 引导**长在空态主区上**（hero 整块换文案），不再另起一张卡片。
-  // 曾经是「引导卡 + hero」两个居中块叠着、各带一个大图标，没有主次。
+  // ── 12c) 未配置模型时的入口 ──────────────────────────────
+  // 2026-09-20：空态 hero 的「配置引导」那一态整块下线（用户原话「太难看，直接
+  // 去掉吧」）。留下来的两件事必须仍然成立：① 首启自动落到设置里的「模型接口」；
+  // ② 工具条那颗胶囊真的看得出是警示态（它现在是唯一的常驻提示）。
   await cdp.send("Page.navigate",
     { url: `http://127.0.0.1:${PORT}/?token=stubtoken&nokey=1` });
   await sleep(1800);
   const firstRun = await evalIn(`return (function(){
+    var empty = document.getElementById('empty');
     var h3 = document.querySelector('#empty h3');
-    var sub = document.querySelector('#empty .empty-sub');
-    // ⚠ 状态挂在 .empty-cta 这个**外层**上（[data-when] 是它的属性），
-    // 按钮自己永远不会带 .hidden —— 查按钮本身的话这条断言恒为真。
-    var cta = document.querySelector('#empty .empty-cta');
+    var pill = document.querySelector('#model-pick .select-btn');
+    var cs = pill ? getComputedStyle(pill) : null;
     return {
-      setupTitle: window.__shown(h3),
-      setupSub: window.__shown(sub),
-      setupBtn: !!cta && !cta.classList.contains('hidden')
-        && !!document.getElementById('btn-empty-setup'),
+      // hero 只该有一态：标题永远是「想聊点什么？」，[data-when] 那套整体拿掉
+      heroTitle: (h3.textContent || '').trim(),
+      whenNodes: empty.querySelectorAll('[data-when]').length,
+      setupBtn: !!document.getElementById('btn-empty-setup'),
       cards: document.querySelectorAll('#empty .setup-card').length,
+      samples: document.querySelectorAll('#empty-samples .sample-card').length,
       settingsOpen: !document.getElementById('settings-screen').classList.contains('hidden'),
       paneLlm: !document.getElementById('pane-llm').classList.contains('hidden'),
-      samples: document.querySelectorAll('#empty-samples .sample-card').length,
+      // ⚠ 量**计算色**，不查 class：#model-pick .select-btn 是 id 选择器，
+      //   历史上它无条件写 color，把按 class 写的 .is-warn / .is-mock 整个顶掉
+      //   —— class 挂上了、颜色一点没变，只看 class 的断言会假绿。
+      pillWarn: pill ? pill.classList.contains('is-warn') : null,
+      pillColor: cs ? cs.color : null,
+      pillText: pill ? pill.querySelector('.sel-text').textContent : null,
     }; })()`);
-  check("未配置 Key 时空态主区换成配置引导（含「去配置」）",
-    /先配置模型接口/.test(firstRun.setupTitle) && firstRun.setupBtn
-    && /OpenAI 兼容/.test(firstRun.setupSub), JSON.stringify(firstRun));
-  check("引导与「想聊点什么？」是同一块 hero 的两态（不是两块叠着）",
-    firstRun.cards === 0, JSON.stringify(firstRun));
   check("首启自动打开设置并落在「模型接口」分区",
     firstRun.settingsOpen && firstRun.paneLlm, JSON.stringify(firstRun));
-  check("引导态仍保留示例卡（先挑主题再配 Key 这条路不能被挡掉）",
-    firstRun.samples === 4, JSON.stringify(firstRun));
+  check("空态 hero 只有一态（引导态与 [data-when] 切换已下线，示例卡保留）",
+    /想聊点什么/.test(firstRun.heroTitle)
+      && firstRun.whenNodes === 0 && firstRun.setupBtn === false
+      && firstRun.cards === 0 && firstRun.samples === 4,
+    JSON.stringify(firstRun));
+  check("未配置时工具条那颗胶囊确实是警示橙（不是只挂个 class）",
+    firstRun.pillWarn === true && firstRun.pillColor === "rgb(178, 94, 0)",
+    JSON.stringify(firstRun));
   // 「没配过」必须看得出来。后端会把没写的字段静默兜底成内置默认值
   // （config.py 的 _effective：空 base_url → DEFAULT_MODEL），界面若不标，
   // 未配置状态和已配置状态长得一模一样：列表里那行写着 glm-4.7、
@@ -2860,10 +3161,12 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
         .map(function(t){ return (t.dataset.field || '').split(',').filter(Boolean); }));
     }
     var row = document.querySelector('#llm-list .pl-item.on');
-    var h3 = document.querySelector('#empty h3');
+    // hero 的引导态已下线，这里改量**工具条那颗胶囊**：它是「配没配好」这件事
+    // 现在唯一的常驻显示位。查计算色而不是 class（原因见 12c 那段注释）。
+    var pill = document.querySelector('#model-pick .select-btn');
     return { fields: fields(row).concat(fields(document.getElementById('st-adv'))).sort().join(),
-             heroTitle: window.__shown(h3),
-             heroBtn: !document.querySelector('#empty .empty-cta').classList.contains('hidden') };
+             pillColor: pill ? getComputedStyle(pill).color : null,
+             pillWarn: pill ? pill.classList.contains('is-warn') : null };
   })()`);
   // 走**用户真实的路径**：打开这条模型的编辑弹窗 → 填地址与模型名 → 保存。
   // 不能绕过界面直接调接口 —— 那样测的是后端，不是「界面会不会把标记摘掉」。
@@ -2890,7 +3193,6 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     var row = document.querySelector('#llm-list .pl-item.on');
     var s = document.getElementById('p-model');
     var b = s && s.parentNode.querySelector('.select-btn');
-    var h3 = document.querySelector('#empty h3');
     return { fields: fields(row).concat(fields(document.getElementById('st-adv'))).sort().join(),
              rowTags: row.querySelectorAll('.tag-default').length,
              // 三列化后编辑表单**常驻右列、不再隐藏** —— 所以不再查 dlgHidden。
@@ -2898,8 +3200,8 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
              mdId: document.getElementById('md-id').value,
              rowId: row ? row.dataset.id : null,
              pickerText: b ? b.querySelector('.sel-text').textContent : '',
-             heroTitle: window.__shown(h3),
-             heroBtn: !document.querySelector('#empty .empty-cta').classList.contains('hidden') };
+             pillColor: b ? getComputedStyle(b).color : null,
+             pillWarn: b ? b.classList.contains('is-warn') : null };
   })()`);
   // 连接信息配好之后：
   //  · 模型行本来就没挂过「内置默认」标（任务 5）；
@@ -2947,12 +3249,13 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   check("保存后高级配置两项的小标也消失（markDefault 不是只增不减）",
     afterAdv.fields === "" && afterAdv.advSub === "",
     JSON.stringify(afterAdv));
-  // hero 也必须跟着切回来。只在 noKey 时改一次的实现在这里会露馅：
-  // 引导是「一次性的」，用户配好 Key 之后空态还写着「先配置模型接口」。
-  check("保存后空态主区切回「想聊点什么？」（引导不是一次性的）",
-    beforeSave.heroBtn === true && /先配置模型接口/.test(beforeSave.heroTitle)
-    && afterSave.heroBtn === false && /想聊点什么/.test(afterSave.heroTitle),
-    JSON.stringify({ before: beforeSave.heroTitle, after: afterSave.heroTitle }));
+  // 配好 Key 之后胶囊必须从警示橙落回正文色 —— 原来这里守的是「hero 引导态
+  // 会不会跟着切回『想聊点什么？』」（一次性引导的 bug）。引导态已下线，
+  // 同一个 bug 换了个显示位：配好了还橙着，这个警示就彻底失去可信度。
+  check("保存后工具条模型胶囊从警示橙回到正文色（配好了不再误报）",
+    beforeSave.pillWarn === true && beforeSave.pillColor === "rgb(178, 94, 0)"
+      && afterSave.pillWarn === false && afterSave.pillColor === "rgb(29, 29, 31)",
+    JSON.stringify({ before: beforeSave, after: afterSave }));
   await evalIn(`document.getElementById('btn-close-settings').click(); return true;`);
   await sleep(200);
 
@@ -3023,12 +3326,11 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     var row = document.querySelector('#llm-list .pl-item.on');
     var s = document.getElementById('p-model');
     var b = s && s.parentNode.querySelector('.select-btn');
-    var h3 = document.querySelector('#empty h3');
     return { fields: fields(row).concat(fields(document.getElementById('st-adv'))).join(),
              rowTags: row.querySelectorAll('.tag-default').length,
              warnTags: row.querySelectorAll('.tag-warn').length,
-             heroTitle: window.__shown(h3),
-             heroBtn: !document.querySelector('#empty .empty-cta').classList.contains('hidden'),
+             pillColor: b ? getComputedStyle(b).color : null,
+             pillWarn: b ? b.classList.contains('is-warn') : null,
              pickerText: b ? b.querySelector('.sel-text').textContent : '' };
   })()`);
   check("已配置时「内置默认」小标全部消失（不误报）",
@@ -3200,23 +3502,46 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   await evalIn(`document.getElementById('btn-open-settings').click();
     window.__ts.setPane('llm'); return true;`);
   await sleep(700);
-  const emptyList = await evalIn(`return {
-    rows: document.querySelectorAll('#llm-list .pl-item').length,
-    hint: document.querySelector('#llm-list .hint')?.textContent || '',
-    // 2026-09-17：空列表时右列只显示**空态**，不摆「添加模型」表单与高级配置
-    //（用户原话「没有模型的时候不应该显示添加啊，还有高级配置」）。
-    // ⚠ 判据必须查**可见性**，不能只查 DOM 文本 —— 表单隐藏了 textContent
-    //   还在，旧断言因此全绿放过（实测）。
-    emptyShown: !document.getElementById('llm-empty').classList.contains('hidden'),
-    formHidden: document.getElementById('md-form-card').classList.contains('hidden'),
-    advHidden: document.getElementById('st-adv').classList.contains('hidden'),
-    statusText: document.getElementById('st-status').textContent,
-    pickerText: (function(){ var s = document.getElementById('p-model');
-      var b = s && s.parentNode.querySelector('.select-btn');
-      return b ? b.querySelector('.sel-text').textContent : ''; })(),
-  };`);
-  check("一条模型都没有时：中列给空引导、右列只显示空态（隐藏表单与高级配置、状态行留空）",
-    emptyList.rows === 0 && /还没有模型/.test(emptyList.hint)
+  const emptyList = await evalIn(`
+    var pane = document.getElementById('pane-llm');
+    var card = document.getElementById('llm-empty');
+    var lr = document.getElementById('llm-list').getBoundingClientRect();
+    var cr = card.getBoundingClientRect();
+    // 参照盒用 .stg-cols（内容区），**不是** .pane-detail —— 后者自己就被
+    // 限宽居中了，拿它当基准量卡片永远是 0，等于什么都没断言。
+    var sr = pane.querySelector('.stg-cols').getBoundingClientRect();
+    return {
+      rows: document.querySelectorAll('#llm-list .pl-item').length,
+      // 2026-09-20：空列表时中列**整列收起**，空引导改由居中的空态卡承担
+      //（用户报「模型空态时的布局样式」：一句「还没有模型。」顶着一张贴在
+      //  左上角的卡，两列在演一个还不存在的层级关系）。
+      // 判据因此从「中列有那句文本」换成「中列不可见 + 卡片真的居中」。
+      // ⚠ 必须量几何不能量 DOM 文本 —— 文本恰恰是那种查得到却看不见的东西，
+      //   上一版断言就是这么假绿的。
+      listHidden: lr.width === 0 && lr.height === 0,
+      noModelsCls: pane.classList.contains('no-models'),
+      cardTitle: (card.querySelector('.pg-empty-t') || {}).textContent || '',
+      cardW: Math.round(cr.width), cardH: Math.round(cr.height),
+      // 水平 + 垂直居中偏差（卡片中心 − 内容区中心）
+      offX: Math.round(cr.left + cr.width / 2 - (sr.left + sr.width / 2)),
+      offY: Math.round(cr.top + cr.height / 2 - (sr.top + sr.height / 2)),
+      // 2026-09-17：空列表时右列只显示**空态**，不摆「添加模型」表单与高级配置
+      //（用户原话「没有模型的时候不应该显示添加啊，还有高级配置」）。
+      // ⚠ 判据必须查**可见性**，不能只查 DOM 文本 —— 表单隐藏了 textContent
+      //   还在，旧断言因此全绿放过（实测）。
+      emptyShown: !card.classList.contains('hidden'),
+      formHidden: document.getElementById('md-form-card').classList.contains('hidden'),
+      advHidden: document.getElementById('st-adv').classList.contains('hidden'),
+      statusText: document.getElementById('st-status').textContent,
+      pickerText: (function(){ var s = document.getElementById('p-model');
+        var b = s && s.parentNode.querySelector('.select-btn');
+        return b ? b.querySelector('.sel-text').textContent : ''; })(),
+    };`);
+  check("一条模型都没有时：中列收起、空态卡在内容区居中（隐藏表单与高级配置、状态行留空）",
+    emptyList.rows === 0 && emptyList.listHidden && emptyList.noModelsCls
+      && /还没有配置模型/.test(emptyList.cardTitle)
+      && emptyList.cardW > 0 && emptyList.cardH > 0
+      && Math.abs(emptyList.offX) <= 2 && Math.abs(emptyList.offY) <= 2
       && emptyList.emptyShown && emptyList.formHidden && emptyList.advHidden
       && emptyList.statusText === ""
       && emptyList.pickerText === "未配置模型",
@@ -3286,22 +3611,29 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   await sleep(300);
   await evalIn(`document.getElementById('cd-yes').click(); return true;`);
   await sleep(800);
-  const backToEmpty = await evalIn(`return {
-    rows: document.querySelectorAll('#llm-list .pl-item').length,
-    hint: document.querySelector('#llm-list .hint')?.textContent || '',
-    mdTitle: document.getElementById('md-title').textContent };`);
-  check("删掉最后一条 → 回到空引导（允许删到空，不再强制「至少保留一条」）",
-    backToEmpty.rows === 0 && /还没有模型/.test(backToEmpty.hint)
+  const backToEmpty = await evalIn(`
+    var lr = document.getElementById('llm-list').getBoundingClientRect();
+    return {
+      rows: document.querySelectorAll('#llm-list .pl-item').length,
+      // 删到空要**整个回到空态布局**（中列收起），不是只把列表清空留个孤列。
+      // 这里不查空态卡：删除流程停在 addingNew，右列显示的是「添加模型」表单。
+      listHidden: lr.width === 0 && lr.height === 0,
+      noModelsCls: document.getElementById('pane-llm').classList.contains('no-models'),
+      mdTitle: document.getElementById('md-title').textContent };`);
+  check("删掉最后一条 → 回到空态布局（中列收起；允许删到空，不再强制「至少保留一条」）",
+    backToEmpty.rows === 0 && backToEmpty.listHidden && backToEmpty.noModelsCls
       && backToEmpty.mdTitle === "添加模型",
     JSON.stringify(backToEmpty));
   await evalIn(`document.getElementById('btn-close-settings').click(); return true;`);
   await sleep(200);
   await evalIn(`document.getElementById('btn-close-settings').click(); return true;`);
   await sleep(200);
-  // 冷启动就配好的情形（老用户）：hero 不该停在配置引导上
-  check("已配置时冷启动空态就是「想聊点什么？」（不误报）",
-    /想聊点什么/.test(cfgd.heroTitle) && cfgd.heroBtn === false,
-    JSON.stringify({ t: cfgd.heroTitle, btn: cfgd.heroBtn }));
+  // 冷启动就配好的情形（老用户）：不该看到任何"还没配好"的脸色。
+  // 原来这条查的是 hero 有没有停在配置引导上；引导态下线后，同一个"不误报"
+  // 要求落在工具条那颗胶囊上 —— 配好了还挂着 is-warn / 橙色，用户会以为没存上。
+  check("已配置时冷启动模型胶囊不报警示（不误报）",
+    cfgd.pillWarn === false && cfgd.pillColor === "rgb(29, 29, 31)",
+    JSON.stringify({ color: cfgd.pillColor, warn: cfgd.pillWarn }));
   await evalIn(`document.getElementById('settings-screen').classList.add('hidden'); return true;`);
 
   // ── 12e) 行业包读坏时的警示 ──────────────────────────────

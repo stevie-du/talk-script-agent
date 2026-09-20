@@ -9,21 +9,20 @@ import { $, esc, toast } from "./util.js";
 import { api } from "./api.js";
 import { state, detachJob } from "./store.js";
 import * as T from "./thread.js";
-import { abort, send, autoGrowTopic } from "./jobs.js";
+import { abort, send, autoGrowTopic, collectParams } from "./jobs.js";
 import { loadSessions, bindSessionList } from "./sessions.js";
 import { bindSettings, openSettings, setPane, settingsOpen, closeSettings } from "./settings.js";
-import { bindOverlays } from "./overlays.js";
 import { setHead, resultSrt, resultMarkdown, voicePlainText,
   errorText } from "./result.js";
 import {
   bindShell, renderSamples, refreshGate, gotoView, fillPackSelect, setCfgHint,
-  applyEmptyHero, renderModelPicker,
+  renderModelPicker,
 } from "./ui.js";
 
 async function boot() {
   bindShell();
   bindSettings();
-  bindOverlays();
+
   bindSessionList();
   T.bindScrollPin();
   renderSamples();
@@ -47,10 +46,8 @@ async function boot() {
   refreshGate();
   autoGrowTopic();
 
-  // 首启引导：安装包不带任何配置，没 Key 就什么都生成不了。
-  // 空态主区换成配置引导（**无条件调**：没配过就切到引导，配过就切回「想聊点什么？」
-  // —— 只在 noKey 时切一次的话，用户配好 Key 后 hero 会一直写着「先配置模型接口」）。
-  applyEmptyHero();
+  // 空态 hero 的「配置引导」那一态已下线（见 index.html 的 #empty）：
+  // 五个居中块叠着没有主次，而且「还没配模型」这件事工具条那颗胶囊已经在说了。
   // 只在「确实没配过」（无 Key 且无历史记录）时自动弹设置，避免打扰老用户。
   const noKey = !state.meta.has_api_key && !state.meta.mock;
   if (noKey && !(sessions || []).length) openSettings("llm");
@@ -92,6 +89,9 @@ window.__ts = {
   get settingsOpen() { return settingsOpen(); },
   get settingsPane() { return state.settingsPane; },
   get msgCount() { return T.msgCount(); },
+  // 参数真值的读取口。断言要靠它证明「设置页改的选项真的进了请求」——
+  // 只看 DOM 是假的：这个 bug 的全部要害就是「DOM 变了但没人读」。
+  collectParams,
   // 导出是纯函数，挂出来才能在验证脚本里断言**内容** ——
   // 只断言「点了不报错」是没用的：错误的字幕照样能顺利导出。
   exportSrt: resultSrt,
@@ -112,7 +112,7 @@ window.__ts = {
   // `_verify/verify.js` 会先数一遍监听器，调这里，再数一遍 —— 必须一个都没多。
   // 这条断言**同时**覆盖五个绑定函数：漏掉任何一个的 bindOnce 包装都会报红。
   rebind: () => {
-    bindShell(); bindSettings(); bindOverlays(); bindSessionList(); T.bindScrollPin();
+    bindShell(); bindSettings(); bindSessionList(); T.bindScrollPin();
   },
 };
 

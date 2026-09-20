@@ -118,6 +118,44 @@ export function dayKey(d) {
   return "更早";
 }
 
-export function escapeReg(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+const WEEKDAY = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+
+/** 会话列表的分组键：`{ id, label }`。
+ *
+ * 为什么要有它 —— `dayKey()` 只分四档（今天/昨天/本周/更早），一周以前的
+ * **全部并进「更早」**。真实索引里 78 条记录全落在 9-06~09-12，于是整列只有
+ * 一个标签「更早 78」，78 行之间再无分隔 —— 用户原话「全部记录平铺了，
+ * 有点太多了」。**分组不是没做，是粒度太粗。**
+ *
+ * 规则：
+ *   今天 / 昨天      → 沿用相对词（这两天用户是按"刚刚/昨天"记的，不是按日期）
+ *   2~6 天前         → `MM-DD 周X`（还带星期，因为人对最近这周有星期感）
+ *   7 天及以上       → `MM-DD`（再远的只认日期）
+ *   ⚠ 这里**不再有「本周」和「更早」**：那两个桶正是问题所在。
+ *
+ * `id` 与 `label` 分开，是因为两者用途不同、且**不能让 id 参与展示**：
+ *   - id 要能**跨天稳定排序**（`2026-09-12` 这种可字典序排），也要当
+ *     localStorage 里折叠状态的键 —— 用 label 当键的话，明天「今天」变成
+ *     「昨天」、折叠状态就跟着错位了；
+ *   - label 只给人看，允许随「今天」推移而变化。
+ * 因此 id 用完整日期（不带星期，星期会变），label 才带星期。
+ */
+export function dayGroupKey(d) {
+  const x = new Date(d);
+  if (isNaN(x)) return { id: "unknown", label: "时间未知" };
+  const now = new Date();
+  const day = new Date(x.getFullYear(), x.getMonth(), x.getDate());
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const diff = Math.round((today - day) / 86400000);
+  if (diff <= 0) return { id: "today", label: "今天" };
+  if (diff === 1) return { id: "yesterday", label: "昨天" };
+  const md = `${pad2(x.getMonth() + 1)}-${pad2(x.getDate())}`;
+  // 排序用的 id 一定带年份：跨年时「12-31」和「01-02」按 MM-DD 排会反过来。
+  const id = `${x.getFullYear()}-${md}`;
+  if (diff < 7) return { id, label: `${md} ${WEEKDAY[x.getDay()]}` };
+  return { id, label: md };
+}
+
+
 
 export const sleep = ms => new Promise(r => setTimeout(r, ms));

@@ -186,6 +186,11 @@ function renderLlmEmpty(c) {
   // 高级配置：**空列表时始终隐藏**（进了添加表单也不显示）——
   // 还没有任何模型，重试 / 超时没有对象可调。
   $("st-adv").classList.toggle("hidden", empty);
+  // 三列骨架在「一条模型都没有」时是空转的：中列只剩一句「还没有模型。」，
+  // 右列那张卡被推到它右边，看着像浮在左上角。收掉中列，让空态（以及第一条
+  // 的添加表单）在内容区居中。判据是**有没有模型**而不是 showEmpty —— 否则
+  // 点「添加模型」会让中列又冒出来，表单在两种状态间横向跳一格。
+  $("pane-llm").classList.toggle("no-models", empty);
 }
 
 // ── 模型列表 ────────────────────────────────────────────────
@@ -231,10 +236,10 @@ function renderModelList(c) {
   if (!list) return;
   const models = c.models || [];
   list.innerHTML = "";
-  if (!models.length) {
-    list.appendChild(el("p", "hint", "还没有模型 —— 点右上角「添加模型」。"));
-    return;
-  }
+  // 空列表时中列**不留任何东西**：`renderLlmEmpty()` 会把整列收掉（`.no-models`），
+  // 原来那句「还没有模型。」因此永远不可见 —— 而空态卡已经说了同一件事。
+  // 写一段只有 display:none 才出现的文案，是在给断言造一个查得到却看不见的靶子。
+  if (!models.length) return;
   for (const m of models) list.appendChild(modelItem(m, models.length, c));
   // 列表是整块重建的，重建后要把「右列正在编辑那条」的 .sel 补回去 ——
   // 否则一保存/一刷新，中列就再也看不出选中了谁。
@@ -246,8 +251,14 @@ function renderModelList(c) {
 
 function modelItem(m, total, c) {
   const prov = providerOf(m.base_url);
-  const item = el("button", "pl-item");
-  item.type = "button";
+  // ⚠ 这一行是 `<div role=button>` 而**不是** `<button>`：行里嵌着启用开关
+  // （下面那个 `button.mdl-switch`），而 `<button>` 里不许再放可交互元素 ——
+  // 嵌套按钮既是非法 HTML，也是键盘陷阱（Tab 停在里层，外层永远聚焦不到，
+  // 而 Enter 会同时触发两层）。行业包分组那一行（renderPackGroups）没有内嵌
+  // 控件，仍然是原生 `<button>`，这是有意的差别，不是漏改。
+  const item = el("div", "pl-item");
+  item.setAttribute("role", "button");
+  item.tabIndex = 0;
   item.dataset.id = m.id;
   // 当前启用的那条要有视觉落点：不然开关看着都一样
   if (m.active) item.classList.add("on");
@@ -288,6 +299,15 @@ function modelItem(m, total, c) {
 
 // 点条目 = 选中，右列加载它的编辑表单（原来是「编辑」按钮开弹窗）
   item.onclick = () => selectModel(m.id);
+  // 原生 <button> 免费给的键盘激活，div 要自己补：Enter 与 Space 等同点击。
+  // Space 必须 preventDefault，否则页面先滚一行再触发（键盘用户能立刻感觉到）。
+  item.onkeydown = e => {
+    if (e.target !== item) return;               // 里层开关自己处理自己的按键
+    if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
+      e.preventDefault();
+      selectModel(m.id);
+    }
+  };
   return item;
 }
 
@@ -359,7 +379,9 @@ function selectModel(id) {
   $("md-title").textContent = m ? "编辑模型" : "添加模型";
   $("md-sub").textContent = m
     ? "改完点保存即生效；API Key 留空表示不改动已存的那把。"
-    : "填好保存后，可以在左列随时启用它。";
+    // 不写「左列」：一条模型都没有时中列是收起来的（见 renderLlmEmpty），
+    // 指着一个不在 screen 上的方位，用户只会回头找。
+    : "填好保存后，随时可以在模型列表里启用它。";
   // ⚠ 回填的是**文件里存着的值**，不是生效值。
   // 一条没配过地址的模型，生效值里那个地址是内置默认兜出来的 —— 填进框里
   // 就变成了「你填的」，用户没动过手却看到一串地址，而且保存一次它就真的成了
@@ -933,7 +955,7 @@ async function openPackInfo(name) {
   // 用户切到 fitment 包会以为 elevator 还在生效。
   $("pi-file-title").textContent = "未选择文件";
   $("pi-file-size").textContent = "";
-  $("pi-file-body").textContent = "从上方文件分组选择一个文件查看内容。";
+  $("pi-file-body").textContent = "从左侧文件分组选择一个文件查看内容。";
   // 2026-09-17 合并：原 #pi-files 的扁平表格换成与原知识/技能面板同型的
   // 角色分组列表（.kb-groups）。一个行业一份知识+技能+合规+私有，
   // 整个组的视觉语言见 styles.css 的 .kb-group 系列。

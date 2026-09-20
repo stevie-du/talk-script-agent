@@ -15,20 +15,31 @@ import { placeholderBody, renderProgress, startTicker, stopTicker, STATE_LABEL }
 import { renderResult, renderFailure, renderStopped, setHead, jumpToFirstPlaceholder } from "./result.js";
 import { loadSessions } from "./sessions.js";
 import { openSettings } from "./settings.js";
-import { closeOverlays, openConfirmPlan } from "./overlays.js";
+import { closeOverlays } from "./overlays.js";
 
 const POLL_MS = 900;
 const POLL_MAX_MISSES = 3;
 const REWRITE_TIMEOUT_MS = 180000;
 
 // ── 参数 ────────────────────────────────────────────────────
+/** 读一个生成参数的真值。
+ *  ⚠ 以前这里是 `$("p-" + key)` —— 只认工具条胶囊那个 select。而
+ *  `style / persona / cta` 只在设置页「生成参数」卡里出现（工具条放不下），
+ *  于是这三项**在界面上能选、生成时永远是 null**，静默走包默认值；
+ *  在设置页改 segment/duration 同样不生效，`updateStale` 也不报「参数已改」。
+ *  真值改放 state.genParams，两个视图都往那里写（见 ui.js bindParamSync）。 */
 export function getParam(key) {
+  const v = state.genParams[key];
+  if (v !== undefined && v !== "") return v;
+  // 没人动过 → 回退到控件当前值（= 包默认），与改动前的行为逐字等价。
+  // 不这么做的话首屏的段落标题、"参数已改"检测会凭空变空 —— 那是另一个 bug。
+  // style / persona / cta 没有胶囊，仍然返回 null（后端取包默认），
+  // 但用户在设置页选过之后就会走上面那条分支 —— 这才是这次修的东西。
   const s = $("p-" + key);
   return s ? (s.value || null) : null;
 }
 
 export function collectParams() {
-  const mode = document.querySelector("input[name=mode]:checked");
   return {
     pack: $("pack").value,
     topic: $("topic").value.trim(),
@@ -37,7 +48,6 @@ export function collectParams() {
     style: getParam("style"), platform: getParam("platform"),
     persona: getParam("persona"), cta: getParam("cta"),
     facts: $("facts").value.trim() || null,
-    mode: mode ? mode.value : "auto",
     voice: $("voice") ? $("voice").value : "strong",
     format: $("format") ? $("format").value : "both",
   };
@@ -140,12 +150,9 @@ export function poll() {
     state.job.state = snap.state;
     renderProgress(body, snap);
 
-    if (snap.state === "paused_awaiting_confirmation") {
-      setBusy(false);
-      stopTicker();
-      setHead(state.sentTopic, "待确认选题", "待确认", "warn");
-      openConfirmPlan((snap.result || {}).plan || {}, snap.params || {});
-    } else if (snap.state === "done") {
+    // 分步确认（paused_awaiting_confirmation）已于 2026-09-19 整体移除，
+    // 这里少一个分支：轮询只可能遇到活跃态、done、failed、cancelled。
+    if (snap.state === "done") {
       onDone(snap, body, jobId);
     } else if (snap.state === "failed") {
       onFailed(snap, body, jobId);
@@ -201,6 +208,10 @@ function renderVersion(body) {
     T.renderVersionBar(body, renderVersion);
     return;
   }
+  // 翻版本必须同步 state.result —— 它不只是"当前结果"的缓存，
+  // `rwOk`（能不能局部重写）、「按此修改」等都读它。
+  // 漏掉的话界面显示 v1、state 里还是 v2，两者悄悄分叉。
+  setResult(v.result);
   // 顺序不能反：renderResult 会 body.innerHTML = "" 清空容器，
   // 若先画版本导航条，它会被这一步直接删掉（表现为「换一版」后看不到 2/2）。
   renderResult(v.result, body, resultOpts(body));
@@ -348,16 +359,12 @@ export async function attach(id) {
   state.activeBody = body;
   renderProgress(body, snap);
   T.scrollBottom();
-  if (snap.state === "paused_awaiting_confirmation") {
-    setBusy(false);
-    setHead(topic, "待确认选题", "待确认", "warn");
-    openConfirmPlan((snap.result || {}).plan || {}, snap.params || {});
-  } else {
-    setBusy(true, true);
-    setHead(topic, "生成中", STATE_LABEL[snap.state] || "生成中", "warn");
-    startTicker(() => state.job);
-    poll();
-  }
+  // attach() 只会被非终态记录调到（会话列表里 done 走 openRecord），
+  // 所以这里不再分支 —— 原来那个 `if (paused)` 随分步确认一起删了。
+  setBusy(true, true);
+  setHead(topic, "生成中", STATE_LABEL[snap.state] || "生成中", "warn");
+  startTicker(() => state.job);
+  poll();
   loadSessions();
 }
 
@@ -415,12 +422,20 @@ export async function rewriteSegment(index, feedback) {
   const body = state.job.body || state.activeBody;
   if (!body) { toast("当前会话已切换，无法原地重写", 3000); return; }
 
+  // ⚠ 重写的是**正在看的那一版**，不是「最新那一版的作业」。
+  // 修前这里恒用 state.job.id —— 而 state.job 永远是最近一次生成，
+  // 于是在「版本 1/2」里翻回 v1 点重写：请求打到 v2 的作业上，
+  // 结果却写回 v1 的槽位，v1 显示成 v2 被改过的内容。
+  // 「换一版不覆盖上一版」这个承诺当场被破坏，而且没有任何报错。
+  let vi = body._vi;
+  if (vi < 0) vi = T.pushVersion(body, { id: state.job.id });
+  const jid = body._versions[vi]?.id || state.job.id;
+
   setBusy(true, true);
   toast("正在重写这一段…");
-  const jid = state.job.id;
   try {
     await api.rewrite(jid, index, feedback);
-    await waitRewriteDone(jid, body);
+    await waitRewriteDone(jid, body, vi);
     toast("已重写并复检");
   } catch (e) {
     toast("重写失败：" + e.message, 4000);
@@ -430,17 +445,21 @@ export async function rewriteSegment(index, feedback) {
 }
 
 /** 等待单段重写结束。
- *  修复前：没有空值守卫（切走就 TypeError）、不认 cancelled（点了停止会空转 180s）。 */
-async function waitRewriteDone(jid, body) {
+ *  修复前：没有空值守卫（切走就 TypeError）、不认 cancelled（点了停止会空转 180s）。
+ *  ⚠ 槽位 `vi` 必须由调用方传进来、不能在这里现取 `body._vi`：等结果的这几秒里
+ *     用户可能已经翻了版本，现取会把重写结果写进他**正在看**的那一版 ——
+ *     正是这次要修的同一个 bug 的另一种发生方式。 */
+async function waitRewriteDone(jid, body, vi) {
   const deadline = Date.now() + REWRITE_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    if (!state.job || state.job.id !== jid) return;     // 已切走：静默放弃
+    if (!document.contains(body)) return;              // 会话已切换：静默放弃
     const snap = await api.job(jid, true);
     if (snap.state === "done" && snap.result) {
-      setResult(snap.result);
-      const vi = body._vi >= 0 ? body._vi : T.pushVersion(body, { id: jid });
+      // 只有还在看这一版时才换全局结果 —— 否则会把用户翻走的视图抢回来
+      const viewing = body._vi === vi;
+      if (viewing) setResult(snap.result);
       body._versions[vi] = { id: jid, result: snap.result, state: "done", params: snap.params };
-      renderVersion(body);
+      if (viewing) renderVersion(body);
       loadSessions();
       return;
     }
@@ -449,25 +468,6 @@ async function waitRewriteDone(jid, body) {
     await new Promise(r => setTimeout(r, 700));
   }
   throw new Error("重写超时（超过 3 分钟），可稍后回看该记录");
-}
-
-// ── 分步确认 ────────────────────────────────────────────────
-export async function confirmPlan(plan) {
-  if (!state.job) { toast("作业已释放，无法继续；请重新发起生成"); return; }
-  setBusy(true, true);
-  try {
-    await api.confirm(state.job.id, plan);
-    startTicker(() => state.job);
-    poll();
-  } catch (e) {
-    setBusy(false);
-    toast("确认失败：" + e.message, 4000);
-  }
-}
-
-export function reselect() {
-  send({ topic: state.sentTopic, mode: "step" });
-  toast("正在换个角度重选…");
 }
 
 export function autoGrowTopic() {
