@@ -34,7 +34,8 @@ sys.path.insert(0, str(ROOT))
 from app.config import load_config                                    # noqa: E402
 from app.knowledge import Pack, param_audit                           # noqa: E402
 from app.pipeline import (PARAMS_DROPPED, PARAMS_ELSEWHERE,           # noqa: E402
-                          PERSISTED_PARAMS, Pipeline, check_contract_complete,
+                          PERSISTED_PARAMS, RUNTIME_PARAMS, Pipeline,
+                          check_contract_complete,
                           wait_job)
 from app.schemas import (GenerateRequest, RewriteSegmentRequest,      # noqa: E402
                          ScriptResult)
@@ -177,18 +178,22 @@ def test_unknown_key_is_silently_dropped_by_the_contract(degraded):
 
 # ── 第 3 组：`_normalize` 的每个键都要表态去哪 ───────────────
 # 变异：往 `_normalize` 的 out 里加一个键 → 报红（逼作者表态）。
+# P3-14：model/max_tokens/temperature 由 _run_generate 运行期附加（RUNTIME_PARAMS），
+# 不进 _normalize（它是纯参数归一、不读 self.llm）—— 断言里并入 RUNTIME_PARAMS。
 
 def test_normalize_keys_are_all_accounted_for(degraded):
     pack = Pack(degraded["tmp"], "elevator")
     out = degraded["pl"]._normalize(pack, {"topic": TOPIC})
-    accounted = set(PERSISTED_PARAMS) | set(PARAMS_ELSEWHERE) | set(PARAMS_DROPPED)
-    assert set(out) == accounted, (
-        "`_normalize` 产出的键与三张表对不上。新增键必须在 pipeline.py 里表态：\n"
+    accounted = (set(PERSISTED_PARAMS) | set(PARAMS_ELSEWHERE) | set(PARAMS_DROPPED)
+                 | set(RUNTIME_PARAMS))
+    assert set(out) | set(RUNTIME_PARAMS) == accounted, (
+        "`_normalize` 产出 + 运行期附加键与三张表对不上。新增键必须在 pipeline.py 里表态：\n"
         f"  落进 params → PERSISTED_PARAMS\n"
         f"  另有落点     → PARAMS_ELSEWHERE\n"
         f"  确实不要     → PARAMS_DROPPED（附理由）\n"
-        f"  没表态的键：{sorted(set(out) - accounted)}\n"
-        f"  表里有但产出没有：{sorted(accounted - set(out))}"
+        f"  运行期附加   → RUNTIME_PARAMS（_run_generate 注入，不进 _normalize）\n"
+        f"  没表态的键：{sorted((set(out) | set(RUNTIME_PARAMS)) - accounted)}\n"
+        f"  表里有但产出没有：{sorted(accounted - (set(out) | set(RUNTIME_PARAMS)))}"
     )
     # 三张表互不重叠，否则「表态」是假的
     assert not (set(PERSISTED_PARAMS) & set(PARAMS_ELSEWHERE))

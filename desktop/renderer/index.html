@@ -373,10 +373,22 @@
                 生成
               </button>
             </div>
+            <!-- 生成中的说明：同步长请求只有计时器，用户不知道模型在干什么。
+                 一行固定文案告诉它"在生成什么、通常多久"，作为分阶段进度的过渡。 -->
+            <p id="pg-working" class="pg-working hint hidden">模型正在生成行业结构：细分领域、受众、选题库、红线与核实清单，通常 1~2 分钟。</p>
+            <!-- 生成失败常驻横幅：失败只有一条几秒的 toast，走开就看不见，
+                 这里把原因留在表单下方（表单与输入值都保留，改完一键重试）。 -->
+            <div id="pg-error" class="pg-error hidden" role="alert"></div>
           </div>
           <div id="pg-result" class="pg-result hidden">
-            <pre id="pg-checklist"></pre>
+            <!-- 产物摘要：知道"生成了什么"，而不是只有一份待核实的清单 -->
+            <div id="pg-summary" class="pg-summary"></div>
+            <details class="pg-more" id="pg-more">
+              <summary>校对清单（生成后需人工核实）</summary>
+              <pre id="pg-checklist"></pre>
+            </details>
             <div class="pg-empty-actions">
+              <button class="ghost" id="pg-back">返回</button>
               <button class="primary slim" id="pg-done">完成</button>
             </div>
           </div>

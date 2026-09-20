@@ -4,7 +4,7 @@
 //  - 每一步都可见，并给出**耗时**，用户能判断是「模型在想」还是「卡住了」
 //  - 已完成步骤紧凑展示；出错的那一步展开并带原因
 //  - 流式思考独立折叠块，默认展开、完成后自动折叠
-//  - 活体指示器（转圈 + 当前阶段 + 已用时）在思考流**下方**，跟着输出走
+//  - 活体指示器（三点 + 当前阶段 + 已用时）在思考流**下方**，跟着输出走
 //
 // 修复前这里只有一个扁平的 pstep 列表：没有耗时、没有总时长，失败时也只把
 // 错误塞进同一行，用户看不出「哪一步失败、花了多久」。
@@ -22,6 +22,20 @@ export const STATE_LABEL = {
   failed: "失败",
   cancelled: "已取消",
 };
+
+/** 还在跑的状态集合 —— 「要不要继续轮询」的唯一判据。
+ *
+ *  必须与后端 `app/jobs.py` 的 `BUSY_STATES` 逐项相等，
+ *  由 `tests/test_job_state_vocabulary_consistency.py` 读两个文件比对守着
+ *  （两种语言没法共享代码，同一个口径只能写两遍，那就得有人检查它们没走散）。
+ *
+ *  ⚠ 写成**白名单**而不是「不是终态就是在跑」。历史索引里会留着已经删掉的
+ *  状态：`paused_awaiting_confirmation` 随分步确认在 2026-09-19 整体移除，
+ *  但磁盘上的 `job.json` 还写着它。按「非终态 = 在跑」解释，这么一条记录
+ *  会让左栏每 3 秒空转刷新一次、永不停止，行上还挂一颗呼吸点。 */
+export const BUSY_STATES = new Set([
+  "queued", "selecting", "writing", "checking", "rewriting",
+]);
 
 
 function stepKind(key = "") {
@@ -56,7 +70,7 @@ export function placeholderBody() {
       <pre class="ts-body"></pre>
     </details>
     <div class="gen-status" id="gen-status">
-      <span class="spinner" aria-hidden="true"></span>
+      <span class="gs-live" aria-hidden="true"><i></i><i></i><i></i></span>
       <span class="gs-phase" id="gen-phase">正在生成…</span>
       <span class="gs-elapsed" id="gen-elapsed"></span>
     </div>`;
@@ -147,7 +161,9 @@ export function renderThinkStream(body, snap) {
   const box = body.querySelector("#think-stream");
   if (!box) return;
   const st = snap.stream;
-  if (!st || (!st.reasoning_tail && !st.content_len)) {
+  // P1-7：只要有 stream 键（阶段已开始）就显示 —— 修复前要求「有内容才显示」，
+  // 而 select 首字节前静默几十秒，思考块被藏起来，界面只剩「已用 N 秒」。
+  if (!st) {
     box.classList.add("hidden");
     return;
   }
@@ -158,7 +174,7 @@ export function renderThinkStream(body, snap) {
   box.querySelector(".ts-meta").textContent =
     `${st.reasoning_len ?? 0} 字` + (st.content_len ? ` · 正文 ${st.content_len} 字` : "");
   const pre = box.querySelector(".ts-body");
-  pre.textContent = st.reasoning_tail || "（本阶段没有可展示的思考内容）";
+  pre.textContent = st.reasoning_tail || "等待模型首个 token…";
   pre.scrollTop = pre.scrollHeight;
 }
 

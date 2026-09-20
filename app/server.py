@@ -518,9 +518,10 @@ def create_app(root: Path, token: str | None = None,
         """全部会话：已落盘的摘要（含失败）+ 内存中正在跑的作业。
 
         修复前这里每次都要 glob 出所有 result.json 并**完整解析**每一份
-        （前端生成期间每 3 秒调一次），而且失败作业没有 result.json、
-        只写了 job.json 却从未被读取 —— 重启后从历史里彻底消失。
-        现在摘要来自 store 的索引（只有几个字段），失败记录也在里面。
+        （前端生成期间每 900ms 调一次 —— 轮询间隔见 jobs.js 的 POLL_MS），
+        而且失败作业没有 result.json、只写了 job.json 却从未被读取 ——
+        重启后从历史里彻底消失。现在摘要来自 store 的索引（只有几个字段），
+        失败记录也在里面。
         """
         items = pipeline.store.history(limit=100)
         known = {x["id"] for x in items}

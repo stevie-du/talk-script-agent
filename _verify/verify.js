@@ -402,6 +402,8 @@ window.__addCount = 0;
     if (s.indexOf('/api/jobs/job1') >= 0) {
       calls.job++;
       // 前两次是「正在跑」（带思考流与步骤），之后落到完成
+      // ⚠ 窗口不能再长：后面「配额降级提示」那一段按固定时长等 done，
+      //   多给一拍它就抢在 done 之前读 DOM（实测整段假红）。
       // ⚠ created_at 必须给：真实后端的快照一直有它（app/jobs.py 的 snapshot），
       //   桩漏掉会让「已用 N 秒」这一行永远渲染成空 —— 于是关于它的一切断言
       //   都在量一个空字符串，全绿但什么都没验证（2026-09-20 实测踩过）。
@@ -474,6 +476,20 @@ window.__addCount = 0;
       }
       return mk(configBody());
     }
+    // packgen 结果页断言用的建包夹具：必须带摘要字段（segments/audiences/personas/ideas），
+    // 否则摘要渲染拿不到数据 —— 桩贫瘠会让「结果页有摘要」的断言测到空白实现。
+    if (s.indexOf('/api/packs/create') >= 0) return mk({
+      name: 'fitment', display_name: '全屋定制/装修', dir: 'C:/packs/fitment', draft: true,
+      checklist: '1. 核对细分领域 / 2. 核对禁用词',
+      verify_list: ['人造板甲醛释放量分级标准现行编号'],
+      segments: ['板材环保', '空间规划', '预算报价'],
+      audiences: ['装修业主', '二手房翻新业主'],
+      personas: ['从业老师傅', '定制设计师'],
+      ideas: ['全屋定制报价单，先看这三行', '板材环保等级，一条视频说清', '定制柜安装当天盯住这四处'],
+      redlines: ['不承诺绝对零甲醛'],
+      banwords_extra_hard: ['绝对零甲醛'],
+      banwords_extra_soft: ['最环保'],
+    });
     if (s.indexOf('/api/packs/') >= 0) return mk({ display_name:'电梯行业包', description:'电梯行业口播脚本包',
       draft:ELEVATOR_DRAFT, checklist:'1. 核对参数 / 2. 核对禁用词',
       // ⚠ 2026-09-17：桩里的文件清单必须**覆盖全部角色**。桩只有 3 个文件时，
@@ -685,46 +701,70 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       const bs = getComputedStyle(b);
       return { stopping: b.classList.contains('stopping'),
                img: bs.backgroundImage, bg: bs.backgroundColor }; })(),
-    // ── 生成中状态行的位置与转圈（2026-09-20 用户报「转圈太难看、闪烁特别快，
-    //    可以参考其他智能体都是在思考下方；右上角的用时也会闪烁、位置可以优化」）
-    // ⚠ 必须与上面同一个 evalIn 一起量：桩的 running 快照只覆盖前两次轮询，
-    //   另起一次 evalIn 时第 3 次轮询已经把气泡换成结果，
+    // ── 生成中状态行的位置与活体指示器（第三轮：边框环 →「太难看、闪」；
+    //    SVG 描边弧线把一圈放到很慢 →「还是太快」；整枚一起明暗 →
+    //    「读成卡住 / 闪」。这轮是三点起伏，两条硬要求来自上面三次退回，
+    //    逐条根因写在 styles.css 的 .gs-live 那段注释里）
+    // ⚠ 必须与上面同一个 evalIn 一起量：桩的 running 快照只覆盖前几次轮询，
+    //   另起一次 evalIn 时后一次轮询已经把气泡换成结果，
     //   #gen-elapsed 早就不在了 —— 实测那样量到的是 elapsed=""，假红。
-    // ⚠ 转圈时长读**样式表里写下的值**而不是 getComputedStyle：无头 Chrome
+    // ⚠ 动效时长/延迟读**样式表里写下的值**而不是 getComputedStyle：无头 Chrome
     //   默认按 prefers-reduced-motion: reduce 报告，styles.css 里那条全局
     //   animation-duration 覆盖会把计算值压成近乎零，量到的永远是
     //   「无障碍降级后的结果」，不是设计值。
+    //   ⚠ 本函数在模板字符串里，注释**不许出现反引号**（会提前闭合整个文件）。
     genStatus: (function(){
       var st = document.getElementById('gen-status');
       var think = document.getElementById('think-stream');
       var el = document.getElementById('gen-elapsed');
-      var sp = st.querySelector('.spinner');
+      var live = st.querySelector('.gs-live');
+      var dots = live ? live.querySelectorAll('i') : [];
       var body = st.closest('.msg-body').getBoundingClientRect();
       var sr = st.getBoundingClientRect(), tr = think.getBoundingClientRect();
-      var er = el.getBoundingClientRect(), cs = getComputedStyle(sp);
-      var rule = null;
-      for (var i = 0; i < document.styleSheets.length && !rule; i++) {
+      var er = el.getBoundingClientRect();
+      var d0 = dots.length ? getComputedStyle(dots[0]) : null;
+      var cRule = null, iRule = null, d2 = null, d3 = null, kf = null;
+      for (var i = 0; i < document.styleSheets.length; i++) {
         var rules = null;
         try { rules = document.styleSheets[i].cssRules; } catch (_) { continue; }
         for (var j = 0; j < (rules || []).length; j++) {
-          if (rules[j].selectorText === '.spinner') { rule = rules[j]; break; }
+          var ru = rules[j], sel = ru.selectorText;
+          if (sel === '.gs-live') cRule = ru;
+          if (sel === '.gs-live i') iRule = ru;
+          if (sel === '.gs-live i:nth-child(2)') d2 = ru;
+          if (sel === '.gs-live i:nth-child(3)') d3 = ru;
+          if (ru.type === 7 && ru.name === 'gs-live') kf = ru;
         }
+        if (cRule && iRule && d2 && d3 && kf) break;
       }
+      var frames = {};
+      if (kf) for (var m = 0; m < kf.cssRules.length; m++) {
+        var fr = kf.cssRules[m], op = parseFloat(fr.style.opacity);
+        var ks = fr.keyText.split(",");
+        for (var q = 0; q < ks.length; q++) frames[ks[q].trim()] = op;
+      }
+      var sec = function (v) { return v ? parseFloat(v) : null; };
       return {
         belowThink: Math.round(sr.top - tr.bottom),
         gapToRightEdge: Math.round(body.right - er.right),
         phase: document.getElementById('gen-phase').textContent,
         elapsed: el.textContent,
-        spinDur: rule ? parseFloat(rule.style.animationDuration) : null,
-        // 环的粗细取**计算值**：CSSOM 里带 var() 的简写（border: 1.5px solid
-        // var(--line-strong)）不往长写法展开，style.borderWidth 与 .border 都是
-        // 空串 —— 实测量到 NaN，JSON 序列化成 null，把这条判据变成永久假红。
-        spinW: parseFloat(cs.borderTopWidth),
-        // 轨道必须是**半透明**的淡色（它是背景轨道，不是第二根实心弧）。
-        // 不用正则取 alpha：本函数在模板字符串里，反斜杠会被模板串吃掉。
-        trackAlpha: cs.borderTopColor.indexOf("rgba") === 0
-          ? parseFloat(cs.borderTopColor.split(",").pop()) : 1,
-        spinHead: cs.borderRightColor, spinTrack: cs.borderTopColor,
+        // 形状：三颗点，4px，间距 4px（规范 §1 的 4 倍数刻度），吃 --text-2。
+        dotCount: dots.length,
+        dotW: d0 ? sec(d0.width) : null,
+        dotH: d0 ? sec(d0.height) : null,
+        dotColor: d0 ? d0.backgroundColor : "",
+        dotGap: live ? sec(getComputedStyle(live).columnGap) : null,
+        // 这一行里不许再有「环」：三种环的画法都被按观感退回过。
+        noRing: !st.querySelector('.spinner, svg'),
+        // 容器自己不许带动画（转 = 有方向 = 眼睛追得到，那正是第二轮的坑）
+        liveAnim: cRule && cRule.style.animationName ? cRule.style.animationName : "none",
+        dotDur: sec(iRule && iRule.style.animationDuration),
+        delay2: sec(d2 && d2.style.animationDelay),
+        delay3: sec(d3 && d3.style.animationDelay),
+        // 关键帧必须改 opacity，而且**起止要全亮**：无障碍降级时界面停在
+        // 100% 那一帧，那一帧若是暗的那头，降级用户看到的是三颗看不见的灰点。
+        opStart: frames["0%"], opMid: frames["25%"], opEnd: frames["100%"],
       };
     })(),
   };`);
@@ -741,10 +781,49 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       && gs.phase === "回炉改写中"
       && /^已用 [0-9]+ 秒$/.test(gs.elapsed),
     JSON.stringify(gs));
-  check("转圈：慢速（>=1s 一圈）+ 细环（<=2px）+ 淡轨道与深色弧头分得开",
-    gs.spinDur >= 1 && gs.spinW > 0 && gs.spinW <= 2
-      && gs.trackAlpha < 0.25 && gs.spinHead !== gs.spinTrack,
+  check("活体指示器：三颗 4px 点 + 4px 间距 + 吃次级灰 + 这一行里没有环",
+    gs.dotCount === 3 && gs.dotW === 4 && gs.dotH === 4 && gs.dotGap === 4
+      && gs.dotColor === "rgb(110, 110, 115)" && gs.noRing,
     JSON.stringify(gs));
+  // 这两条钉的是**三轮退回换来的东西**：
+  // ① 不转（第二轮：只要还在转，眼睛就追得到方向，「太快」只能靠速度治，
+  //    而调速度已经被退回过一次）；
+  // ② 动必须分先后（第三轮：整枚一起明暗，暗下去那半秒整行没有任何东西在变，
+  //    读起来像卡住 —— 所以三颗点各自的延迟必须严格错开，看到的才是一趟波）；
+  // ③ 无障碍降级停住的那一帧（100%）必须全亮。
+  check("活体指示器：不旋转、三颗点依次错开成一趟波、降级停住那帧全亮",
+    gs.liveAnim === "none" && gs.dotDur >= 1.2
+      && gs.delay2 > 0 && gs.delay3 > gs.delay2 && gs.delay3 < gs.dotDur
+      && gs.opStart === 1 && gs.opEnd === 1 && gs.opMid > 0 && gs.opMid <= 0.4,
+    JSON.stringify(gs));
+  // 状态行留一张特写：断言守的是「几颗点、多大、错开多少」，守不住
+  // 「13px 那行字旁边读起来静不静」—— 这一态已经按观感被退回来三轮，图得留下。
+  // 和 composer-stopping 同一个道理：必须在这里拍，末尾截图区那边生成早结束了。
+  const gsBox = await evalIn(`const r = document.getElementById('gen-status').getBoundingClientRect();
+    return { x: Math.max(0, r.left - 10), y: Math.max(0, r.top - 8),
+             width: r.width + 20, height: r.height + 16, scale: 3 };`);
+  const gsShot = await cdp.send("Page.captureScreenshot", { format: "png", clip: gsBox });
+  fs.writeFileSync(path.join(SHOT_DIR, "gen-status.png"),
+    Buffer.from(gsShot.data, "base64"));
+  // 「已用时」跨 tick 不抹空：轮询写一次，之后由本地计时器每秒续写。
+  // 计时器读的是 state.job 那份快照 —— 它一旦缺 created_at，fmtElapsed 就返回
+  // 空串，界面变成「显示一下、下一秒又被抹掉」。上面那次取值只覆盖了轮询刚
+  // 回来的瞬间；这里跨过计时器的那一拍再取一次，漏挂 created_at 必然落空。
+  // ⚠ 采样点必须落在「计时器已经走过一拍」与「桩落到 done」之间：
+  //   计时器在发送后开始、逐秒一拍，done 在第三次轮询 —— 上面 400ms + 这里
+  //   900ms 取到的是中间那段。跑长会读到 done 之后的 DOM（气泡已整块换掉），
+  //   跑短则根本没跨过那一拍，两种都是假绿。
+  await sleep(900);
+  const afterTick = await evalIn(`return {
+    elapsed: document.getElementById('gen-elapsed')?.textContent || '',
+    jobCreatedAt: window.__ts.job?.created_at || '',
+    stillRunning: window.__ts.busy === true,
+  };`);
+  check("生成中跨过计时器的一拍：已用时不会被抹空（state.job 带着 created_at）",
+    afterTick.stillRunning && /^已用 [0-9]+ 秒$/.test(afterTick.elapsed)
+      && Number(afterTick.elapsed.replace(/[^0-9]/g, "")) >= 8
+      && !!afterTick.jobCreatedAt,
+    JSON.stringify(afterTick));
   check("生成中发送键变为「停止」", /停止/.test(running.btnTitle), running.btnTitle);
   // 停止键必须是**实心按钮**，不能是淡底。判据看 backgroundImage 而不是
   // backgroundColor：--grad-btn 是 linear-gradient，它落在 background-image 上，
@@ -990,6 +1069,38 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     .find(p => !p.classList.contains('hidden'))?.id;`);
   check("packgen 从行业包进入时，「取消」回到行业包（不绕回生成偏好）",
     afterCancel === 'pane-packinfo', afterCancel);
+
+  // packgen 结果页：产物摘要 + 双出口。从 packinfo 入口走完整生成流程，
+  // 断言 ①结果页可见且摘要已渲染（含细分/受众/选题） ②双出口齐备
+  // ③「返回」回来源面板（与「取消」同语义，不强制跳去工作台）。
+  await evalIn(`window.__ts.setPane('packinfo'); return true;`);
+  await sleep(200);
+  await evalIn(`document.getElementById('pi-newpack').click(); return true;`);
+  await sleep(200);
+  await evalIn(`document.getElementById('pg-industry').value = '全屋定制/装修';
+    document.getElementById('pg-desc').value = '全屋定制家居品牌，面向新房装修业主获客';
+    document.getElementById('pg-run').click(); return true;`);
+  await sleep(500);
+  const pgDone = await evalIn(`return {
+    resultVisible: !document.getElementById('pg-result').classList.contains('hidden'),
+    summaryText: document.getElementById('pg-summary').textContent.trim(),
+    hasBack: !!document.getElementById('pg-back'),
+    hasDone: !!document.getElementById('pg-done'),
+    checklistInDetails: !!document.getElementById('pg-more')
+      && document.getElementById('pg-more').querySelector('#pg-checklist') !== null };`);
+  check("packgen 生成成功：结果页展示产物摘要（细分/受众/人设/选题）",
+    pgDone.resultVisible && pgDone.summaryText.indexOf('全屋定制/装修') >= 0
+      && pgDone.summaryText.indexOf('板材环保') >= 0 && pgDone.summaryText.indexOf('选题') >= 0,
+    JSON.stringify(pgDone));
+  check("packgen 结果页双出口齐备：返回（回来源）+ 完成（去工作台），清单在折叠块内",
+    pgDone.hasBack && pgDone.hasDone && pgDone.checklistInDetails,
+    JSON.stringify(pgDone));
+  await evalIn(`document.getElementById('pg-back').click(); return true;`);
+  await sleep(200);
+  const afterPgBack = await evalIn(`return [...document.getElementById('settings-screen').querySelectorAll('.stg-pane')]
+    .find(p => !p.classList.contains('hidden'))?.id;`);
+  check("packgen 结果页「返回」回到来源面板（packinfo，与「取消」一致）",
+    afterPgBack === 'pane-packinfo', afterPgBack);
 
   // 滚动容器上提到 .stg-main 后的两条守护。修复前滚动容器是 .stg-pane 自身，
   // 它带 max-width + margin-inline:auto（限宽居中），于是滚动条出现在**居中盒子**
@@ -2017,10 +2128,42 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     window.__ts.setPane('gen');
     return out;
   })()`);
-  check("三个三列面板的右列都撑满可见高度（除边距外占满）",
+  // ⚠ 判据只查「**不许在下方留死白**」（gapToBottom <= 48），不查「右列底边必须
+  //   落在视口内」。原来还带一条 gapToBottom >= 0，等于把「内容比视口高」判成
+  //   缺陷 —— 而撑满可见高度本来就是**下限**不是上限：模型接口展开「高级配置」
+  //   后右列就该长过视口、交给 .stg-main 滚（2026-09-20 用户报底部状态行被遮挡，
+  //   根因正是旧写法把列钳死、内容从盒子底下漏出去）。
+  //   「长出去的部分必须够得着」由下面那条断言直接量，不在这里含糊带过。
+  check("三个三列面板的右列都撑满可见高度（内容短时下方不留死白）",
     ['gen','packinfo','llm'].every(p => detailFill[p]
-      && detailFill[p].gapToBottom >= 0 && detailFill[p].gapToBottom <= 48),
+      && detailFill[p].gapToBottom <= 48),
     JSON.stringify(detailFill));
+
+  // 内容比视口高的面板（模型接口展开高级配置）：滚到底时最后一块要**完整可见**
+  // 并且离底边还留有下边距。修复前右列被钳成视口高，内容从盒子底下漏出去，
+  // 漏出去的部分不计进 scrollHeight —— 滚到底状态行正好压在底边上，
+  // .stg-pane 那 32px 下边距永远够不着，用户看到的就是「被遮挡」。
+  const bottomReach = await evalIn(`return (function(){
+    var main = document.querySelector('#settings-screen .stg-main');
+    window.__ts.setPane('llm');
+    document.getElementById('st-adv').open = true;
+    var pane = document.getElementById('pane-llm');
+    var detail = pane.querySelector('.pane-detail');
+    var kids = Array.prototype.filter.call(detail.children, function(c){
+      return !c.classList.contains('hidden'); });
+    var last = kids[kids.length - 1];
+    main.scrollTop = main.scrollHeight;
+    var mb = main.getBoundingClientRect(), lb = last.getBoundingClientRect();
+    var out = { id: last.id || last.className.split(' ')[0],
+      text: (last.textContent || '').trim().slice(0, 12),
+      below: Math.round(lb.bottom - mb.bottom),
+      clipped: lb.bottom > mb.bottom + 1 };
+    window.__ts.setPane('gen');
+    return out;
+  })()`);
+  check("展开高级配置后滚到底：最后一行完整可见且离底边留有不小于 16px 的下边距",
+    bottomReach.clipped === false && bottomReach.below <= -16,
+    JSON.stringify(bottomReach));
 
   // 2026-09-17（用户报「headbar 按钮不齐」）：两个「列表型」面板的 headbar
   // 同构 —— 次级动作 ghost bordered（刷新）+ 主操作 primary slim（新建 / 添加）。
@@ -2583,45 +2726,67 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   check("搜索框下方间距统一 16px（滚动态与非滚动态一致）",
     headOrder.gapToScroll === headOrder.gapToLbl && headOrder.gapToScroll === 16,
     `滚动态=${headOrder.gapToScroll} 非滚动态=${headOrder.gapToLbl}`);
-  // 但「量到盒子顶边」还不够 —— 肉眼看到的是**字墨**顶边。
-  // 文字在行盒里天生比盒顶低（11px 字号下字体 ascent 12 / 墨迹 ascent 9，
-  // 再叠上半行距），回归时这一项实测 20.8px：盒子边 16、看到的 20.8，
-  // 而滚动态看到的仍是容器边 16 —— 同一个位置两个间距。
-  // 所以这里必须用 canvas 的 TextMetrics 把 em 盒换算到墨迹，量那条真正看得见的边。
-  // （药丸的顶边也一并量：它不能被滚动容器裁掉，否则「59」会缺一角。）
-  // 容差 1 → 0.6：**这条曾经是 <= 1，于是字墨顶 17 也判绿**，是用户肉眼抓出来的。
-  // 根因在 line-height:1 —— 行盒(11px)比内容区(15px)矮，内容区溢出、字墨顶下沉 1px。
-  // 改成 line-height:9px 后字墨顶与盒顶/药丸顶/容器顶四者重合，才敢把容差收紧。
-  const inkGeo = await evalIn(`const sea = document.querySelector('.sess-search');
+  // 悬浮胶囊的尺寸必须**处处相等**（用户抓的正是这个：「最上面那个鼠标悬浮态的
+  // 背景胶囊尺寸都不对」）。根因是同一个盒子兼着两件事 —— 既画 hover 底色、
+  // 又用上下 padding 撑分组间距，而 :first-child 为了「搜索框→列表」只有一个
+  // 间距来源把 padding-top 归零，于是第一个分组 16 高、其余 28、会话行 32。
+  // 现在：底色 = 32 的胶囊（与行同档），间距 = margin（盒子外）。
+  // ⚠ 桩里只有 1 个分组，「处处相等」光量第一个是空判 —— 必须像下面这样
+  //   克隆一个**非 first-child** 的标签插进行间来量（它拿到的是真实的
+  //   margin-top 路径）。这条同时钉住三件事：胶囊等高、盒子里不许再有上下
+  //   padding、以及墨迹在胶囊里居中（旧那条「字墨顶 = 盒顶 = 16」是给
+  //   flex-start + line-height 魔数时代的写法配的，盒子等高之后基准回到
+  //   胶囊本身：胶囊顶 = 容器顶 = 搜索框下 16，两态同一个数）。
+  const pillGeo = await evalIn(`const sea = document.querySelector('.sess-search');
     const sc = document.querySelector('.left-scroll');
-    const lbl = document.querySelector('.group-lbl');
-    const pill = lbl.querySelector('.count');
+    const list = document.getElementById('session-list');
+    const lbl = list.querySelector('.group-lbl');
+    const row = list.querySelector('.sess-item');
+    const clone = lbl.cloneNode(true);
+    row.after(clone);
+    const cs = getComputedStyle(lbl);
+    const c = document.createElement('canvas').getContext('2d');
+    c.font = cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily;
     // 文字在 .gl-t 这个 span 里（标签改成折叠按钮后，文字不能再是裸文本节点 ——
     // 三角、文字、计数三者要各占一个 flex 项）。
     const glt = lbl.querySelector('.gl-t');
     const tn = [...glt.childNodes].find(n => n.nodeType === 3 && n.textContent.trim());
     const rg = document.createRange(); rg.selectNodeContents(tn);
-    const c = document.createElement('canvas').getContext('2d');
-    const cs = getComputedStyle(lbl);
-    c.font = cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily;
     const m = c.measureText(tn.textContent.trim());
-    const ink = rg.getBoundingClientRect().top
+    const lb = lbl.getBoundingClientRect();
+    const inkTop = rg.getBoundingClientRect().top
       + (m.fontBoundingBoxAscent - m.actualBoundingBoxAscent);
+    const inkBot = inkTop + m.actualBoundingBoxAscent + m.actualBoundingBoxDescent;
+    const cnt = lbl.querySelector('.count').getBoundingClientRect();
     const seaB = sea.getBoundingClientRect().bottom;
-    return { 字墨: +(ink - seaB).toFixed(2),
-             药丸: +(pill.getBoundingClientRect().top - seaB).toFixed(2),
-             容器: +(sc.getBoundingClientRect().top - seaB).toFixed(2),
-             药丸被裁: pill.getBoundingClientRect().top < sc.getBoundingClientRect().top - 0.01 };`);
-  check("搜索框到「本周」字墨顶边 = 16px（字墨/药丸/容器三者都落在 16，且药丸没被裁）",
-    Math.abs(inkGeo.字墨 - 16) <= 0.6 && Math.abs(inkGeo.药丸 - 16) <= 0.6
-    && Math.abs(inkGeo.容器 - 16) <= 0.6 && inkGeo.药丸被裁 === false,
-    JSON.stringify(inkGeo));
+    const out = {
+      胶囊高: Math.round(lb.height), 克隆高: Math.round(clone.getBoundingClientRect().height),
+      行高: Math.round(row.getBoundingClientRect().height),
+      上下内边距: cs.paddingTop + '/' + cs.paddingBottom,
+      胶囊顶: +(lb.top - seaB).toFixed(2),
+      容器顶: +(sc.getBoundingClientRect().top - seaB).toFixed(2),
+      墨上隙: +(inkTop - lb.top).toFixed(2), 墨下隙: +(lb.bottom - inkBot).toFixed(2),
+      计数被裁: cnt.top < sc.getBoundingClientRect().top - 0.01 };
+    clone.remove();
+    return out;`);
+  check("分组标签的悬浮胶囊与行等高、含非首个分组处处相等，且盒子里不再藏上下间距",
+    pillGeo.胶囊高 === pillGeo.行高 && pillGeo.胶囊高 === pillGeo.克隆高
+      && pillGeo.行高 === 32 && pillGeo.上下内边距 === "0px/0px",
+    JSON.stringify(pillGeo));
+  check("第一个分组胶囊顶 = 容器顶 = 搜索框下 16（两态同一基准），墨迹在胶囊内居中",
+    pillGeo.胶囊顶 === 16 && pillGeo.容器顶 === 16
+      && pillGeo.墨上隙 >= 6 && Math.abs(pillGeo.墨上隙 - pillGeo.墨下隙) <= 1.5
+      && pillGeo.计数被裁 === false,
+    JSON.stringify(pillGeo));
 
-  // 「本周」与计数药丸的**墨底**必须齐平。并排的两个字形，肉眼对齐看的是墨迹下边缘，
-  // 不是抽象基线 —— 中文与数字的「基线→墨底」关系不同（「本周」墨底比基线低 1px，
-  // 「54」墨底就在基线上），拿基线比会得出反的结论（实测基线差 +1 但墨底完全重合）。
-  // 这条是 `.group-lbl` 行盒 11px→9px 的连带检查点：文字上移 1px 后墨底 187.5→186.5，
-  // 正好与药丸重合（改前是药丸比文字高 1px）。只改行高、不动药丸就会再次错开。
+  // 「今天」与计数必须是**同一条基线**上的同一族字：同字号、同字重、同行高、同盒顶。
+  // 演进：计数原本是灰底药丸，肉眼看到的是那个矩形，所以要拿**墨底**去对齐它 ——
+  // 当时靠 `padding-top: 1px` 补偿（中文「今天」的墨底比基线低 1px，数字就在基线上）。
+  // 现在计数是裸数字，矩形没了，可见的对齐关系回到基线本身；
+  // 两者盒顶相同 + 度量相同 ⇒ 基线恒等，而那 1px 的**墨底差是字形自带的**，
+  // 不该再用 padding 去抹（抹了会把数字的墨顶压低，变成另一种不齐）。
+  // 所以这里量的是「同源」而不是「墨底重合」：盒顶差必须为 0，字号/字重/行高逐项相等，
+  // 墨底差只允许是字形自带的那点（≤1.2px）—— 谁再把计数挪位就会红。
   const inkPair = await evalIn(`const c = document.createElement('canvas').getContext('2d');
     const inkBottom = (el, node) => {
       const rg = document.createRange(); rg.selectNodeContents(node);
@@ -2633,15 +2798,22 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       return top + m.actualBoundingBoxAscent + m.actualBoundingBoxDescent;
     };
     const lbl = document.querySelector('.group-lbl');
-    const pill = lbl.querySelector('.count');
-    // 文字在 .gl-t 里（见上方说明：标签改了折叠按钮，文字不再是裸文本节点）
-    const tn = [...lbl.querySelector('.gl-t').childNodes].find(n => n.nodeType === 3 && n.textContent.trim());
-    const pn = [...pill.childNodes].find(n => n.nodeType === 3 && n.textContent.trim());
-    return { 文字: tn.textContent.trim(), 药丸: pn.textContent.trim(),
-             文字墨底: +inkBottom(lbl.querySelector('.gl-t'), tn).toFixed(2),
-             药丸墨底: +inkBottom(pill, pn).toFixed(2) };`);
-  check("「本周」与计数药丸的墨底齐平（行高改动的连带检查点）",
-    Math.abs(inkPair.文字墨底 - inkPair.药丸墨底) <= 0.6,
+    const cnt = lbl.querySelector('.count');
+    const glt = lbl.querySelector('.gl-t');
+    // 文字在 .gl-t 里（标签改了折叠按钮，文字不再是裸文本节点）
+    const tn = [...glt.childNodes].find(n => n.nodeType === 3 && n.textContent.trim());
+    const pn = [...cnt.childNodes].find(n => n.nodeType === 3 && n.textContent.trim());
+    const a = getComputedStyle(glt), b = getComputedStyle(cnt);
+    return { 文字: tn.textContent.trim(), 计数: pn.textContent.trim(),
+             盒顶差: +(cnt.getBoundingClientRect().top - glt.getBoundingClientRect().top).toFixed(2),
+             度量: [a.fontSize, a.fontWeight, a.lineHeight].join('/') === [b.fontSize, b.fontWeight, b.lineHeight].join('/'),
+             背景: b.backgroundColor,
+             文字墨底: +inkBottom(glt, tn).toFixed(2),
+             计数墨底: +inkBottom(cnt, pn).toFixed(2) };`);
+  check("「今天」与计数同基线（盒顶零差 + 字号/字重/行高逐项相等），墨底只差字形自带的那点",
+    inkPair.度量 === true && inkPair.盒顶差 === 0
+      && Math.abs(inkPair.文字墨底 - inkPair.计数墨底) <= 1.2
+      && /rgba?\([^)]*,\s*0\)$/.test(inkPair.背景),
     JSON.stringify(inkPair));
 
   // 后续分组标签（更早…）的竖向节奏。桩里只有 1 个分组，硬编码第二个会让测试
@@ -2766,54 +2938,246 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   check("搜索框与新建对话同高同圆角（输入控件走 --h-ctl / --r-ctl）",
     headSize.sh === headSize.nh && headSize.sr === headSize.nr, JSON.stringify(headSize));
 
-  // 会话行副标题显示行业包的 display_name，不是 slug。
-  // 回归的 bug：sessions.js 直接吐 it.pack，界面上出现「elevator」这种内部标识，
-  // 而 pack.yaml 里早就有 display_name（ui.js / settings.js 也一直在用）。
-  const rowSub = await evalIn(`const r = document.querySelector('#session-list .sess-item');
-    return r ? r.querySelector('.sess-sub').textContent : '';`);
-  check("会话行副标题用行业包显示名而非 slug",
-    /电梯行业包/.test(rowSub) && !/elevator/.test(rowSub), rowSub);
+  // ── 会话行：单行制 + 只标异常 ─────────────────────────────────
+  // 用户 2026-09-20 两轮反馈：先是「历史记录优化一下布局样式」，改完再说
+  // 「更不好看了」。实测旧版一行 49px，103 条要滚 5303px（侧栏可视区 587px），
+  // 而副标题那四项里行业 103/103 恒定、平台 93/103 恒定、日期与分组标签重复。
+  // 第二轮的病灶是**行上的状态字**：它在标题与时刻之间插出一栏，
+  // 每行标题的截断点随之左右跳，红/灰字散在中间读成一片噪声。
+  // 现在：状态记号 | 标题 | 时刻，**只有异常才落记号**（对照 Claude / Linear）。
+  // ⚠ 取行按 data-id 点名（s1 = 已完成且校验通过），
+  //   不要 `querySelector('.sess-item')` 拿第一条 —— 桩的顺序一变就指着另一条报错。
+  const rowStruct = await evalIn(`const r = document.querySelector('#session-list .sess-item[data-id="s1"]');
+    const d = r.querySelector('.dot'), db = d.getBoundingClientRect();
+    return { sub: r.querySelector('.sess-sub'), state: r.querySelector('.sess-state'),
+             anyState: document.querySelectorAll('#session-list .sess-state').length,
+             time: r.querySelector('.sess-time').textContent,
+             topic: r.querySelector('.sess-topic').textContent,
+             dotCls: d.className, dotVis: getComputedStyle(d).visibility,
+             dotW: +db.width.toFixed(1), dotL: +db.left.toFixed(1),
+             tip: r.title.split(String.fromCharCode(10)).join(' | ') };`);
+  check("会话行单行制：副标题与状态字整块没了，时刻只剩 HH:MM（不重复分组给的日期）",
+    rowStruct.sub === null && rowStruct.state === null
+      && rowStruct.anyState === 0
+      && /^[0-9]{2}:[0-9]{2}$/.test(rowStruct.time)
+      && rowStruct.topic === "家用电梯怎么挑？", JSON.stringify(rowStruct));
+  // 正常完成的记录**不画点**，但 14px 图标盒必须还在原位 ——
+  // 用 visibility 不用 display：后者会让整格塌掉，标题左边缘随记录状态左右跳，
+  // 而「标题与分组标签文字同列」正是这一版立起来的对齐。
+  check("正常完成的记录不画状态记号，但 14px 图标盒仍占位（标题不左右跳）",
+    /dot ok/.test(rowStruct.dotCls) && rowStruct.dotVis === "hidden"
+      && rowStruct.dotW === 14, JSON.stringify(rowStruct));
+  // 从行上撤走 ≠ 丢掉：行业包显示名 / 平台 / 完整时间戳 / 状态词都要能在提示里找到。
+  // ⚠ 行业包要盯「不是 slug」—— 这是上一轮的真实回归（列表曾直接吐 elevator）。
+  check("悬浮提示补回行业包显示名（非 slug）+ 平台 + 完整时间戳 + 状态词",
+    /电梯行业包/.test(rowStruct.tip) && !/elevator/.test(rowStruct.tip)
+      && /小红书/.test(rowStruct.tip)
+      && /[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}/.test(rowStruct.tip)
+      && /已通过校验/.test(rowStruct.tip), rowStruct.tip);
+  check("悬浮提示补回了被挪走的时长与字数",
+    /60s/.test(rowStruct.tip) && /42 字/.test(rowStruct.tip), rowStruct.tip);
 
-  // 副标题的信息结构：**只留「行业 · 时间 · 平台」**。
-  // 用户 2026-09-18 的原话：「不用展示时间和字数还有合格，只需要展示行业、时间
-  // 还有平台」。此前那三项是跟在时间后面的（「电梯 · 时刻 · 时长 · 字数 · 合格」）
-  // —— 时长与字数在同一个包里基本恒定、「合格」几乎每条都是，一列同值词只有噪声；
-  // 而真正区分记录的**平台**（同选题的抖音稿/小红书稿是两个产物）压根没显示。
-  //
-  // ⚠ 断言要盯住「挪走了什么」，不能只盯「平台出现了」：只测 `/小红书/` 的话，
-  // 把 duration/chars/passed 再塞回去照样全绿 —— 而用户告的就是那几个字段。
-  // ⚠ 取行要**按 data-id 点名**（s1 = 已完成的小红书稿），
-  // 不要用 `querySelector('.sess-item')` 拿第一条 —— 桩的顺序一变
-  // （比如今天的那条恰好是 writing），断言就会指着另一条行报错。
-  const subFields = await evalIn(`const r = document.querySelector('#session-list .sess-item[data-id="s1"]');
-    return r ? { text: r.querySelector('.sess-sub').textContent,
-                 segs: r.querySelector('.sess-sub').textContent.split(' · ') } : null;`);
-  // 今天的记录时刻是 HH:MM（fmtTime 对「今天」不带日期前缀），所以这里两种都接受。
-  check("会话行副标题只留行业 · 时间 · 平台（不再有秒数/字数/合格）",
-    subFields && subFields.segs.length === 3
-      && /电梯行业包/.test(subFields.segs[0])
-      && /^([0-9]{2}-[0-9]{2} )?[0-9]{2}:[0-9]{2}$/.test(subFields.segs[1])
-      && subFields.segs[2] === "小红书"
-      && !/[0-9]+s\b/.test(subFields.text) && !/字/.test(subFields.text)
-      && !/合格/.test(subFields.text),
-    JSON.stringify(subFields));
+  // 记号三档：ok 无记号 / no 红点 / run 灰点呼吸。
+  // 色弱可用性靠「有没有记号」而不是「红还是绿」—— 这一栏只有异常才落东西。
+  // s2 = 在跑（writing），s4 = 完成但校验未通过（passed:false）。
+  const marks = await evalIn(`const g = id => {
+      const r = document.querySelector('#session-list .sess-item[data-id="' + id + '"]');
+      if (!r) return null;
+      const d = r.querySelector('.dot');
+      const before = getComputedStyle(d, '::before');
+      return { dot: d.className, vis: getComputedStyle(d).visibility,
+               bg: before.backgroundColor, w: before.width, h: before.height,
+               anim: before.animationName,
+               time: r.querySelector('.sess-time').textContent,
+               aria: r.getAttribute('aria-label') }; };
+    return { run: g('s2'), no: g('s4'), ok: g('s1') };`);
+  check("在跑记录 = 灰点呼吸，时刻仍不带日期",
+    marks.run && /dot run/.test(marks.run.dot) && marks.run.vis === "visible"
+      && marks.run.anim === "dotPulse"
+      && /^[0-9]{2}:[0-9]{2}$/.test(marks.run.time), JSON.stringify(marks.run));
+  // 「未通过校验」与「失败」共用一个红点：两者都是「这一条没有可用产物」，
+  // 区别（产物不合格 / 根本没跑完）由提示与 aria 的文字承担，不在点上再分一档。
+  check("完成但未通过校验的记录落 6px 红点（--bad），且整格可见",
+    marks.no && /dot no/.test(marks.no.dot) && marks.no.vis === "visible"
+      && marks.no.bg === "rgb(215, 0, 21)"
+      && marks.no.w === "6px" && marks.no.h === "6px",
+    JSON.stringify(marks.no));
+  check("读屏标签带完整状态词（行上不写字，这一层只能靠 aria 与提示）",
+    /未通过校验$/.test(marks.no.aria) && /已通过校验$/.test(marks.ok.aria)
+      && /文案撰写中$/.test(marks.run.aria),
+    JSON.stringify([marks.ok.aria, marks.no.aria, marks.run.aria]));
 
-  // 失败/在跑的记录仍要把状态摆进副标题 —— 状态不能只靠状态点的颜色表达
-  //（色弱与读屏用户拿不到颜色信息）。
-  // 用 data-id 精确取那条 writing 记录（s2）：按文案猜行会随桩数据变动而选错。
-  const subState = await evalIn(`const r = document.querySelector('#session-list .sess-item[data-id="s2"]');
-    return r ? { sub: r.querySelector('.sess-sub').textContent,
-                 dot: r.querySelector('.dot').className } : null;`);
-  check("未完成记录的副标题带文字状态，不只靠状态点颜色",
-    subState && / · /.test(subState.sub) && subState.sub.split(' · ').length === 4,
-    JSON.stringify(subState));
+  // 行与分组标签必须**同一列**。两行制时副标题从 20px 起、标题从 34px 起，
+  // 同一行里两个左边缘 —— 用户报的「边距不统一」有一半是这个。
+  // 现在状态点占 14px 图标盒（与分组箭头同宽），标题左边缘 == 标签文字左边缘。
+  const rowGeo = await evalIn(`const lbl = document.querySelector('#session-list .group-lbl');
+    const row = document.querySelector('#session-list .sess-item[data-id="s1"]');
+    const rb = row.getBoundingClientRect();
+    const del = row.querySelector('.sess-del').getBoundingClientRect();
+    const dot = row.querySelector('.dot').getBoundingClientRect();
+    return { 标题左: +row.querySelector('.sess-topic').getBoundingClientRect().left.toFixed(1),
+             标签文字左: +lbl.querySelector('.gl-t').getBoundingClientRect().left.toFixed(1),
+             点盒宽: +dot.width.toFixed(1), 箭头盒宽: +lbl.querySelector('.gl-arrow').getBoundingClientRect().width.toFixed(1),
+             行高: +rb.height.toFixed(1),
+             时刻右距: +(rb.right - row.querySelector('.sess-time').getBoundingClientRect().right).toFixed(1),
+             删除右距: +(rb.right - del.right).toFixed(1) };`);
+  check("会话行标题与分组标签文字左边缘对齐，状态点盒与箭头盒同宽(14)、行高 32",
+    rowGeo.标题左 === rowGeo.标签文字左 && rowGeo.点盒宽 === 14
+      && rowGeo.箭头盒宽 === 14 && rowGeo.行高 === 32, JSON.stringify(rowGeo));
+  // 悬停时时刻让位给删除按钮（两者抢同一个右上角）：不挡行底、不叠字。
+  const timeFade = await evalIn(`const row = document.querySelector('#session-list .sess-item[data-id="s1"]');
+    row.scrollIntoView({ block: 'center' });
+    const b = row.getBoundingClientRect();
+    return { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) };`);
+  await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: timeFade.x, y: timeFade.y });
+  await sleep(250);
+  const hovered = await evalIn(`const row = document.querySelector('#session-list .sess-item[data-id="s1"]');
+    return { timeOp: getComputedStyle(row.querySelector('.sess-time')).opacity,
+             delOp: getComputedStyle(row.querySelector('.sess-del')).opacity,
+             bg: getComputedStyle(row).backgroundColor };`);
+  check("悬停会话行：时刻淡出、删除按钮淡入（同一个位置不叠字）",
+    hovered.timeOp === "0" && hovered.delOp === "1", JSON.stringify(hovered));
+  await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 5, y: 5 });
+  await sleep(200);
 
-  // 挪走的时长/字数/校验结果要能在悬浮提示里找回来（否则「想看还得点进去」）。
-  // 同样按 data-id 点名（s1 就是桩里那条「已完成 + 有完整数字」的记录）。
-  const rowTip = await evalIn(`const r = document.querySelector('#session-list .sess-item[data-id="s1"]');
-    return r ? r.title : '';`);
-  check("悬浮提示补回了被挪走的时长/字数/校验结果",
-    /60s/.test(rowTip) && /42 字/.test(rowTip) && /已通过校验/.test(rowTip), rowTip);
+  // 折叠箭头：内联 SVG（规范 §4 禁止文本字形当图标），且方向必须是
+  // **展开朝下 / 折起朝右**。旧实现用 CSS 边框画三角，静止态是朝右的 ▶、
+  // 折叠时 rotate(90deg) 转成朝下 ▼ —— 与所有分组列表的惯例相反，
+  // 收起的那一组看着像「点我展开」，展开着的反而像收起。
+  const arrow = await evalIn(`return (async () => {
+    const g = document.querySelector('#session-list .group-lbl');
+    const tf = () => { const a = g.querySelector('.gl-arrow');
+      return { tag: a.tagName, t: getComputedStyle(a).transform }; };
+    const open = tf();
+    g.click(); await new Promise(r => setTimeout(r, 80));
+    const shut = tf();
+    g.click(); await new Promise(r => setTimeout(r, 80));
+    return { open: open, shut: shut, back: tf(),
+             stored: localStorage.getItem('ts.sess.folded') };
+  })();`);
+  check("折叠箭头是内联 SVG；展开不旋转、折起 rotate(-90deg) 朝右、再展开复位",
+    arrow.open.tag === "svg" && arrow.open.t === "none"
+      && arrow.shut.t === "matrix(0, -1, 1, 0, 0, 0)" && arrow.back.t === "none"
+      && arrow.stored === "[]", JSON.stringify(arrow));
+
+  // 分组标签悬停必须有落点。此前是 `.group-lbl:hover{color:var(--text-2)}` ——
+  // 与常态**同一个值**的一条空规则：标签看着就是一行普通文字，
+  // 用户不知道它能点（「历史记录无法折叠」有一半是这个原因）。
+  // ⚠ 用真悬停（dispatchMouseEvent），加 class 的假悬停抓不到写错的伪类。
+  const lblPt = await evalIn(`const g = document.querySelector('#session-list .group-lbl');
+    const b = g.getBoundingClientRect();
+    return { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) };`);
+  await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: lblPt.x, y: lblPt.y });
+  await sleep(250);
+  const lblHover = await evalIn(`const g = document.querySelector('#session-list .group-lbl');
+    const s = getComputedStyle(g);
+    const c = getComputedStyle(g.querySelector('.count'));
+    return { bg: s.backgroundColor, color: s.color,
+             pillBg: c.backgroundColor, pillColor: c.color,
+             idle: getComputedStyle(document.querySelectorAll('#session-list .group-lbl')[1]).color };`);
+  check("悬停分组标签给落点：底色 --fill + 标签与计数一起提亮",
+    lblHover.bg === "rgba(0, 0, 0, 0.04)" && lblHover.color === "rgb(29, 29, 31)"
+      && lblHover.idle === "rgb(110, 110, 115)"
+      && lblHover.pillColor === "rgb(110, 110, 115)", JSON.stringify(lblHover));
+  // 计数是**裸数字**，不许再描背景：药丸在 11px 小字里凭空多出一块面积，
+  // 读起来比标签本身还重（「今天 17」里眼睛先看到 17）。
+  // 设置页 `.kb-group-c` 抄的是同一画法，但它只在行业包面板渲染，
+  // 此刻多半不在 DOM 里 —— 跨页比对交给 styles.css 那条注释与人工走查。
+  const countStyle = await evalIn(`const c = getComputedStyle(
+      document.querySelector('#session-list .group-lbl .count'));
+    return { bg: c.backgroundColor, pad: c.padding, radius: c.borderRadius,
+             fs: c.fontSize, fw: c.fontWeight, color: c.color };`);
+  check("分组计数不描背景（裸数字：透明底 / 无内边距 / 无圆角）",
+    /rgba?\([^)]*,\s*0\)$/.test(countStyle.bg) && countStyle.pad === "0px"
+      && countStyle.radius === "0px" && countStyle.fs === "11px"
+      && countStyle.fw === "600" && countStyle.color === "rgb(110, 110, 115)",
+    JSON.stringify(countStyle));
+  await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 5, y: 5 });
+  await sleep(200);
+
+  // 折叠态**只由箭头表达**，文字不换色：试过把折起的标签提亮到 --text-1，
+  // 真机上「今天(折)」比「昨天(开)」更黑，读成「选中 / 鼠标停着」而不是「收着」。
+  const foldColor = await evalIn(`return (async () => {
+    const gs = document.querySelectorAll('#session-list .group-lbl');
+    const before = getComputedStyle(gs[0]).color;
+    gs[0].click(); await new Promise(r => setTimeout(r, 80));
+    const after = getComputedStyle(gs[0]).color;
+    gs[0].click(); await new Promise(r => setTimeout(r, 80));
+    return { before: before, after: after };
+  })();`);
+  check("折叠不改文字色（箭头方向才是状态信号）",
+    foldColor.before === foldColor.after && foldColor.before === "rgb(110, 110, 115)",
+    JSON.stringify(foldColor));
+
+  // ── 认不出来的状态必须落回「已结束」，不许让左栏永远轮询 ──────────
+  // 分步确认（paused_awaiting_confirmation）2026-09-19 整体移除，但磁盘上的
+  // 旧记录还在：`generated/index.json` 里就有一条，而 `store.py` 的
+  // `_summary_from_job()` 把 job.json 的 state 原样透传出来。
+  // 修复前 `settled` 是一份**抄来的终态清单**，这个值不在里面 → 读成「还没跑完」：
+  //   · loadSessions 按固定周期再拉一次 /api/history，永不停止；
+  //   · 行上一颗永远呼吸的状态点；
+  //   · 删除按钮写着「放弃这次生成」，其实没有任何作业可放弃。
+  // 同一形状的第二处是 cancelled 记录：旧的点色三元表达式落到 else，
+  // 于是「已取消」也挂着一颗呼吸点。
+  // ⚠ 桩里换列表要**先存回原 fetch**，否则后面所有取行的断言都指着这两条。
+  const legacy = await evalIn(`return (async () => {
+    const pad = n => String(n).padStart(2, '0');
+    const d = new Date(); d.setDate(d.getDate() - 4);
+    const iso = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + 'T09:00:00';
+    const base = { id: '', created_at: iso, pack: 'elevator', platform: '抖音',
+                   duration: null, chars: null, passed: null, error: null };
+    window.__legacyHist = [
+      Object.assign({}, base, { id: 'legacy1', topic: '分步确认时代的旧记录',
+                                state: 'paused_awaiting_confirmation' }),
+      Object.assign({}, base, { id: 'legacy2', topic: '被取消的那次生成',
+                                state: 'cancelled' }),
+    ];
+    const orig = window.fetch;
+    window.__histCalls = 0;
+    window.fetch = function (u, o) {
+      const s = String(u).split('?')[0];
+      if (s.slice(-12) === '/api/history') { window.__histCalls += 1;
+        return Promise.resolve(new Response(JSON.stringify(window.__legacyHist),
+          { status: 200, headers: { 'Content-Type': 'application/json' } })); }
+      return orig.call(window, u, o);
+    };
+    await window.__ts.loadSessions();
+    const read = id => {
+      const r = document.querySelector('#session-list .sess-item[data-id="' + id + '"]');
+      if (!r) return null;
+      const dot = r.querySelector('.dot');
+      return { dot: dot.className, vis: getComputedStyle(dot).visibility,
+               anim: getComputedStyle(dot, '::before').animationName,
+               act: r.querySelector('.sess-del').dataset.act,
+               delTip: r.querySelector('.sess-del').title,
+               aria: r.getAttribute('aria-label'),
+               tip: r.title.split(String.fromCharCode(10)).join(' | ') };
+    };
+    const rows = { old: read('legacy1'), cancel: read('legacy2') };
+    const before = window.__histCalls;
+    await new Promise(r => setTimeout(r, 3400));
+    const after = window.__histCalls;
+    window.fetch = orig;
+    await window.__ts.loadSessions();
+    return { rows: rows, polls: after - before, restored:
+      document.querySelectorAll('#session-list .sess-item').length };
+  })();`);
+  check("已删除的旧状态读成「已结束」：落红点不呼吸、删除键是删除不是放弃",
+    legacy.rows.old && /dot no/.test(legacy.rows.old.dot)
+      && legacy.rows.old.vis === "visible" && legacy.rows.old.anim === "none"
+      && legacy.rows.old.act === "del" && /删除这条记录/.test(legacy.rows.old.delTip)
+      && /已中断/.test(legacy.rows.old.aria)
+      && !/paused_awaiting_confirmation/.test(legacy.rows.old.tip),
+    JSON.stringify(legacy.rows.old));
+  check("已取消的记录不再挂呼吸点（旧点色三元表达式落到 else 的病灶）",
+    legacy.rows.cancel && /dot no/.test(legacy.rows.cancel.dot)
+      && legacy.rows.cancel.anim === "none"
+      && legacy.rows.cancel.act === "del"
+      && /已取消/.test(legacy.rows.cancel.aria), JSON.stringify(legacy.rows.cancel));
+  check("列表里只剩这类记录时不轮询（修复前每 3 秒空转一次、永不停止）",
+    legacy.polls === 0, `3.4 秒内 /api/history 被打了 ${legacy.polls} 次`);
+  check("换完列表要还原（后面的断言仍指着桩里那 6 条）",
+    legacy.restored === 6, `还原后行数=${legacy.restored}`);
 
   // 删除按钮悬停态：**只把图标由灰转红，背景保持透明**。
   // 用户 2026-09-18 两句话，第二句是对第一句实现的否决：
@@ -3433,14 +3797,19 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     status: document.getElementById('st-status').textContent,
     // 输入区那个选择器也要跟上：**不能** fallback 显示第一条的名字
     //（显示与状态不一致 —— 用户以为还有模型在用，点生成才发现被拒）。
+    // 标签统一是占位语「选择模型」，「为什么不能用」挪到悬停说明里。
     pickerText: (function(){ var s = document.getElementById('p-model');
       var b = s && s.parentNode.querySelector('.select-btn');
       return b ? b.querySelector('.sel-text').textContent : ''; })(),
+    pickerTitle: (function(){ var s = document.getElementById('p-model');
+      var b = s && s.parentNode.querySelector('.select-btn');
+      return b ? b.title : ''; })(),
     pickerValue: (document.getElementById('p-model') || {}).value };`);
   check("再点一次当前启用的开关 → 真的关掉（都不启用），状态行与输入区选择器都跟上",
     off.called === "" && off.onRows === 0 && off.onSwitches === 0
     && /都没有启用/.test(off.status)
-    && off.pickerText === "未启用模型" && off.pickerValue === "",
+    && off.pickerText === "选择模型" && off.pickerValue === ""
+    && /没有启用任何模型/.test(off.pickerTitle),
     JSON.stringify(off));
   // 复原：重新启用 **m1**（它是第 2 条）—— 后面那条断言期望「输入区选择器
   // 跟着变成 m1」。⚠ 别点第一条（m-default），那会把状态复原错。
@@ -3536,6 +3905,9 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       pickerText: (function(){ var s = document.getElementById('p-model');
         var b = s && s.parentNode.querySelector('.select-btn');
         return b ? b.querySelector('.sel-text').textContent : ''; })(),
+      pickerTitle: (function(){ var s = document.getElementById('p-model');
+        var b = s && s.parentNode.querySelector('.select-btn');
+        return b ? b.title : ''; })(),
     };`);
   check("一条模型都没有时：中列收起、空态卡在内容区居中（隐藏表单与高级配置、状态行留空）",
     emptyList.rows === 0 && emptyList.listHidden && emptyList.noModelsCls
@@ -3544,8 +3916,27 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       && Math.abs(emptyList.offX) <= 2 && Math.abs(emptyList.offY) <= 2
       && emptyList.emptyShown && emptyList.formHidden && emptyList.advHidden
       && emptyList.statusText === ""
-      && emptyList.pickerText === "未配置模型",
+      && emptyList.pickerText === "选择模型"
+      && /还没有配置模型/.test(emptyList.pickerTitle),
     JSON.stringify(emptyList));
+
+  // ── 12g·b) 输入区那一排控件必须逐项等尺寸（规范 §2·5.6「同层级同呼吸」）
+  // 2026-09-20 用户报「字号是不是不协调」：模型胶囊 30px 高 / 13px 字，
+  // 邻居是 24px / 11px —— 并排两个控件差 6px 高。判据量**计算值**，
+  // 因为这条规则历史上就是被一条 id 选择器悄悄顶掉的。
+  const pillRow = await evalIn(`return (function(){
+    var bs = document.querySelectorAll('#composer .select-btn');
+    var seen = {};
+    Array.prototype.forEach.call(bs, function(b){
+      var cs = getComputedStyle(b);
+      seen[Math.round(b.getBoundingClientRect().height) + "/" + cs.fontSize] = 1;
+    });
+    var kinds = Object.keys(seen);
+    return { count: bs.length, kinds: kinds, size: kinds.join(",") };
+  })()`);
+  check("输入区那一排下拉控件高度与字号完全一致（模型胶囊不再比参数胶囊大一档）",
+    pillRow.count >= 5 && pillRow.kinds.length === 1
+      && pillRow.size === "24/13px", JSON.stringify(pillRow));
 
   // 2026-09-17 二改：空态里**不放按钮**了（用户问「没有配置的时候有两个
   // 添加模型入口，你觉得需要优化吗？」）—— 入口统一留给 headbar 那一颗，

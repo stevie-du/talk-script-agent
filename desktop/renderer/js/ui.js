@@ -87,6 +87,11 @@ export function fillPackSelect({ selectLast = false, prefer = null } = {}) {
 // 选中一个根本调不通的模型，报错还发生在生成时，那时用户早已忘了自己是从哪选的。
 const ADD_MODEL = "__add__";
 
+/** 没有可用模型时胶囊与菜单顶部那一项的占位语。
+ *  用常量而不是两处各写一遍：按钮上的文字取自这个 option，改一处就会和
+ *  renderModelPicker 里算出的 cur 分叉。 */
+const PICKER_PLACEHOLDER = "选择模型";
+
 export function renderModelPicker() {
   const m = state.meta;
   const box = $("model-pick");
@@ -103,9 +108,13 @@ export function renderModelPicker() {
   // 原来的兜底会让「都没启用」时选择器仍显示第一条的名字 —— 显示与状态不一致：
   // 用户以为还有模型在用，点生成才发现被拒。
   const active = models.find(x => x.id === m.active_model) || null;
+  // 没有可用模型时显示**占位语**，不显示「未配置模型」/「未启用模型」：
+  // 这一排里其他控件摆的都是**值**（维保 / 业主乘客 / 60s / 抖音），一个五位字的
+  // 诊断句挤在值的位置上，读起来像报错而不像控件。三种「现在生成会被拒」的原因
+  // 一条都没丢 —— 它们挪到了悬停说明（下面的 _warnNote）和菜单里。
   const cur = m.mock ? "mock 模式"
     : active ? (active.label || active.model)
-      : (models.length ? "未启用模型" : "未配置模型");
+      : PICKER_PLACEHOLDER;
   // 2026-09-17（任务 5）：「默认模型」整个下线 —— 工具条 picker 上不再附
   // 「（默认）」后缀。区分"未配置 vs 已配置"的职责完全交给 sel._warnNote
   // （未配 Key 时显式告知「生成会被拒绝」+ warn 色）+ 模型接口的"未配置 Key"
@@ -118,11 +127,11 @@ export function renderModelPicker() {
     o.value = x.id;
     sel.appendChild(o);
   }
-  // 占位项：一条都没有 → 「未配置模型」；有但都没启用 → 「未启用模型」。
-  // 两者都不该让选择器**空着** —— 空 select 会被浏览器显示成第一个 option，
-  // 那又变成"看起来有个模型在用"。
+  // 占位项：没有可用模型时下拉**不能空着** —— 空 select 会被浏览器显示成第一个
+  // option，那又变成「看起来有个模型在用」。原因（一条都没有 / 有但没启用）
+  // 不写在这里，写在下面的 _warnNote 里。
   if (!m.mock && !active) {
-    const o = el("option", "", models.length ? "未启用模型" : "未配置模型");
+    const o = el("option", "", PICKER_PLACEHOLDER);
     o.value = "";
     sel.insertBefore(o, sel.firstChild);
   }

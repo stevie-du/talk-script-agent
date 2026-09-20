@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import re
 import shutil
+import threading
 from pathlib import Path
 
 import yaml
@@ -26,9 +27,15 @@ from pydantic import BaseModel, Field
 
 from .fileio import rmtree_resilient, write_atomic
 from .knowledge import Pack
+from .llm import LLMClient
+
+# P2-46：同名 slug 并发建包的 TOCTOU —— `d.exists()` 检查与写入分两段，
+# 两个请求可双双通过、后者原子覆盖前者（双份 token、前者产物被静默替换）。
+# 用「正在创建」集合做 slug 级互斥：后者直接 409（与 FileExistsError 同语义）。
+_creating_lock = threading.Lock()
+_creating: set[str] = set()
 
 log = logging.getLogger(__name__)
-from .llm import LLMClient
 
 GENERIC_FILES = [
     "skill.yaml",
@@ -128,33 +135,82 @@ def create_pack(root: Path, llm: LLMClient, industry: str, description: str) -> 
             "模型返回的行业结构不完整（细分领域/受众/人设存在空项）。"
             "请补充描述后重试，或换一个模型。")
 
-    slug = slugify(out.display_name or industry)
-    d = root / "packs" / slug
-    if d.exists():
-        raise FileExistsError(f"行业包已存在：{slug}")
-
+    # P2-51：目录名必须跟**用户输入**走（slugify 保留中文、把 / 等转成 -）。
+    # 修复前取模型返回的 display_name —— 模型自由发挥时（实测 mock 返回
+    # 「全屋定制/装修」），用户输「门窗定制」却得到目录「全屋定制-装修」，
+    # 找不到自己刚建的包，重试还必撞「行业包已存在」。
+    slug = slugify(industry.strip()) or slugify(out.display_name or industry)
+    with _creating_lock:
+        if slug in _creating:
+            raise FileExistsError(f"行业包正在创建中：{slug}")
+        _creating.add(slug)
     try:
-        _materialize(d, base, out, slug, industry, description,
-                     segments, audiences, personas)
-    except Exception:
-        # 中途失败就把半成品收走：否则重试会被上面的 FileExistsError 挡成 409，
-        # 用户只能自己去文件管理器里删目录。
-        #
-        # 用 rmtree_resilient 而不是 `ignore_errors=True`：后者会把「没删掉」
-        # 当成成功，于是半成品目录留在那儿，下次建包照样被 409 挡住，
-        # 而我们已经把成功当成既定事实，连日志都不会有 —— 用户看到的现象
-        # 永远是「重试一直失败」，却查不出为什么。
-        if not rmtree_resilient(d):
-            log.warning("半成品目录未能清除，下次建包同名行业会被挡：%s", d)
-        raise
+        d = root / "packs" / slug
+        if d.exists():
+            raise FileExistsError(f"行业包已存在：{slug}")
 
-    checklist = _checklist(out, slug)
-    write_atomic(d / "校对清单.md", checklist)
+        try:
+            _materialize(d, base, out, slug, industry, description,
+                         segments, audiences, personas)
+        except Exception:
+            # 中途失败就把半成品收走：否则重试会被上面的 FileExistsError 挡成 409，
+            # 用户只能自己去文件管理器里删目录。
+            #
+            # 用 rmtree_resilient 而不是 `ignore_errors=True`：后者会把「没删掉」
+            # 当成成功，于是半成品目录留在那儿，下次建包照样被 409 挡住，
+            # 而我们已经把成功当成既定事实，连日志都不会有 —— 用户看到的现象
+            # 永远是「重试一直失败」，却查不出为什么。
+            if not rmtree_resilient(d):
+                log.warning("半成品目录未能清除，下次建包同名行业会被挡：%s", d)
+            raise
 
-    return {"name": slug, "display_name": out.display_name,
-            "dir": str(d), "draft": True,
-            "checklist": checklist,
-            "verify_list": out.verify_list}
+        checklist = _checklist(out, slug)
+        # P1-44：生成完必须体检 —— 模型输出的包能不能用，不能等用户第一次
+        # 生成才发现（生成时已付过费）。加载 Pack(slug)（结构坏 → 抛）+ 
+        # param_audit 全量（切片/配额/词表降级逐项列出），体检结果并进校对清单。
+        audit_notes = _pack_audit(root, slug)
+        if audit_notes:
+            checklist += ("\n\n## 引擎体检发现（生成时自动检测，逐项核实后重跑或用前确认）\n"
+                          + "\n".join(f"- [ ] {t}" for t in audit_notes))
+        write_atomic(d / "校对清单.md", checklist)
+
+        # 产物摘要随返回下发：结果页据此渲染「生成了什么」（细分/受众/人设/选题），
+        # 而不是只给一份待核实的校对清单 —— 用户此前「不知道生成了啥」。
+        # ⚠ 只回短字符串列表，不回 topics 全文（body 里没有消费方）。
+        return {"name": slug, "display_name": out.display_name,
+                "dir": str(d), "draft": True,
+                "checklist": checklist,
+                "verify_list": out.verify_list,
+                "segments": [str(x) for x in segments],
+                "audiences": [str(x) for x in audiences],
+                "personas": [str(x) for x in personas],
+                "topic_count": len(out.topics or []),
+                "ideas": [str(x) for x in (out.ideas or [])],
+                "redlines": [str(x) for x in (out.redlines or [])],
+                "banwords_extra_hard": [str(x) for x in (out.banwords_extra_hard or [])],
+                "banwords_extra_soft": [str(x) for x in (out.banwords_extra_soft or [])]}
+    finally:
+        with _creating_lock:
+            _creating.discard(slug)
+
+
+def _pack_audit(root: Path, slug: str) -> list[str]:
+    """生成包的自体检（P1-44）：加载 + param_audit 全量，返回人话说明列表。
+
+    返回空列表 = 体检通过。模型输出的包常有「segment 与 topics 章节标题对不上」
+    「风格没配语速」「平台没配词表」这类静默降级 —— param_audit 把它们逐项列出；
+    结构坏（YAML 解析不了等）则 Pack 直接抛，捕捉后给一句指向性的说明。
+    """
+    from .knowledge import Pack, param_audit
+    notes: list[str] = []
+    try:
+        pk = Pack(root, slug)
+    except Exception as e:                       # noqa: BLE001
+        return [f"行业包加载失败：{e} —— 请检查生成的文件结构"]
+    for key, mapping in (param_audit(pk.dir, pk.data) or {}).items():
+        for value, text in mapping.items():
+            notes.append(f"参数「{key}={value}」：{text}")
+    return notes
 
 
 def _materialize(d: Path, base: Pack, out: PackGenOut, slug: str, industry: str,
@@ -250,15 +306,10 @@ def _materialize(d: Path, base: Pack, out: PackGenOut, slug: str, industry: str,
         "points_by_duration": base.data.get("points_by_duration"),
         "topics_map": identity,
         "audience_map": {x: x for x in audiences},
+        # P0-18/19：files.select/write/compliance/facts 是引擎永不消费的孤儿
+        # （注入由 skill.yaml 的 stages.<阶段>.files 决定，模板已随 GENERIC_FILES
+        # 复制并带 redlines 引用）。这里只留引擎真读的 private。
         "files": {
-            "select": ["knowledge/topics.md", "knowledge/audience.md", "knowledge/ideas.md",
-                       "patterns/hooks.md"],
-            "write": ["patterns/hooks.md", "patterns/growth.md", "knowledge/voice.md",
-                      "patterns/anti-ai-smell.md", "rules/duration.md",
-                      "rules/output-template.md"],
-            "compliance": ["compliance/ad-law.md", "compliance/platform.md",
-                           "compliance/industry.md"],
-            "facts": ["knowledge/standards.md"],
             "private": ["private/products.yaml", "private/service.yaml",
                         "private/cases.yaml", "private/faq.yaml"],
         },

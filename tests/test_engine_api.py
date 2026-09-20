@@ -322,6 +322,7 @@ def test_failed_job_visible_after_restart(tmp_path):
         class cfg:                                     # noqa: N801
             temperature = 0.7
             max_tokens = 100
+            model = 'fake-model'
         def chat_json(self, *a, **kw):
             raise RuntimeError("模拟接口故障")
     pl.llm = Boom()
@@ -355,10 +356,12 @@ def test_cancel_does_not_write_artifact(tmp_path):
         class cfg:                                     # noqa: N801
             temperature = 0.7
             max_tokens = 100
+            model = 'fake-model'
         def __init__(self):
             self.started = threading.Event()
         def chat_json(self, task, system, user, model_cls, max_retries=1,
-                      on_retry=None, temperature=None, on_delta=None):
+                      on_retry=None, temperature=None, on_delta=None,
+                      max_tokens=None):
             if task == "select":
                 from app.schemas import TopicPlan
                 return TopicPlan(angle="a", hook_type="h", hook_line="l",
@@ -433,6 +436,7 @@ def test_concurrency_cap(tmp_path):
         class cfg:                                     # noqa: N801
             temperature = 0.7
             max_tokens = 100
+            model = 'fake-model'
         def chat_json(self, *a, **kw):
             time.sleep(30)
     pl.llm = Hang()
@@ -510,12 +514,14 @@ def test_cancelled_job_stays_cancelled_even_if_worker_raises(tmp_path):
         class cfg:                                     # noqa: N801
             temperature = 0.7
             max_tokens = 100
+            model = 'fake-model'
 
         def __init__(self):
             self.started = _t.Event()
 
         def chat_json(self, task, system, user, model_cls, max_retries=1,
-                      on_retry=None, temperature=None, on_delta=None):
+                      on_retry=None, temperature=None, on_delta=None,
+                      max_tokens=None):
             if task == "select":
                 return TopicPlan(angle="a", hook_type="h", hook_line="l",
                                  points=["p"], cta="c")

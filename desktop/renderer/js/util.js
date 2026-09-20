@@ -94,35 +94,32 @@ export function sec(v) {
 
 export function pad2(n) { return String(n).padStart(2, "0"); }
 
-/** 时间显示：今天 HH:MM / 昨天 HH:MM / MM-DD HH:MM */
-export function fmtTime(d) {
+/** 时刻 HH:MM。
+ *
+ *  会话行只到「时分」为止，不带日期前缀 —— 行已经被分组标签按天归好类了，
+ *  在「昨天」这一组里再写一遍「昨天 15:36」是把分组键重复进每一条记录。
+ *  完整时间戳仍在行的 title 里（见 sessions.js 的 updateRow）。
+ *
+ *  取代原来的 `fmtTime()` + `dayKey()`：那两个函数只有会话行一个调用点，
+ *  改成不带日期的时刻后一起删掉，不留「导出了但没人用」。 */
+export function fmtClock(d) {
   const x = new Date(d);
   if (isNaN(x)) return "";
-  const hm = `${pad2(x.getHours())}:${pad2(x.getMinutes())}`;
-  const k = dayKey(d);
-  if (k === "今天") return hm;
-  if (k === "昨天") return "昨天 " + hm;
-  return `${pad2(x.getMonth() + 1)}-${pad2(x.getDate())} ${hm}`;
+  return `${pad2(x.getHours())}:${pad2(x.getMinutes())}`;
 }
 
-export function dayKey(d) {
+/** 完整时间戳 `YYYY-MM-DD HH:MM` —— 列表行只放时刻，完整值收进悬浮提示。 */
+export function fmtStamp(d) {
   const x = new Date(d);
-  if (isNaN(x)) return "更早";
-  const now = new Date();
-  const day = new Date(x.getFullYear(), x.getMonth(), x.getDate());
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const diff = Math.round((today - day) / 86400000);
-  if (diff <= 0) return "今天";
-  if (diff === 1) return "昨天";
-  if (diff < 7) return "本周";
-  return "更早";
+  if (isNaN(x)) return "";
+  return `${x.getFullYear()}-${pad2(x.getMonth() + 1)}-${pad2(x.getDate())} ${fmtClock(x)}`;
 }
 
 const WEEKDAY = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
 
 /** 会话列表的分组键：`{ id, label }`。
  *
- * 为什么要有它 —— `dayKey()` 只分四档（今天/昨天/本周/更早），一周以前的
+ * 为什么要有它 —— 早先的 `dayKey()` 只分四档（今天/昨天/本周/更早），一周以前的
  * **全部并进「更早」**。真实索引里 78 条记录全落在 9-06~09-12，于是整列只有
  * 一个标签「更早 78」，78 行之间再无分隔 —— 用户原话「全部记录平铺了，
  * 有点太多了」。**分组不是没做，是粒度太粗。**

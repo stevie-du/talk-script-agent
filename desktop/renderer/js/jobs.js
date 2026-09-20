@@ -11,7 +11,7 @@ import { $, toast, esc } from "./util.js";
 import { api, ApiError } from "./api.js";
 import { state, setJob, setResult, setBusy, detachJob, stopPolling } from "./store.js";
 import * as T from "./thread.js";
-import { placeholderBody, renderProgress, startTicker, stopTicker, STATE_LABEL } from "./progress.js";
+import { placeholderBody, renderProgress, startTicker, stopTicker, STATE_LABEL, BUSY_STATES } from "./progress.js";
 import { renderResult, renderFailure, renderStopped, setHead, jumpToFirstPlaceholder } from "./result.js";
 import { loadSessions } from "./sessions.js";
 import { openSettings } from "./settings.js";
@@ -19,7 +19,9 @@ import { closeOverlays } from "./overlays.js";
 
 const POLL_MS = 900;
 const POLL_MAX_MISSES = 3;
-const REWRITE_TIMEOUT_MS = 180000;
+// P2-9：180s 对「82~130s 起步 + 校验」太紧 —— 重写是另一轮完整生成，
+// 给足 4 分钟；真正的超时语义由后端作业状态给出，这里只是兜底。
+const REWRITE_TIMEOUT_MS = 240000;
 
 // ── 参数 ────────────────────────────────────────────────────
 /** 读一个生成参数的真值。
@@ -148,18 +150,28 @@ export function poll() {
     if (!state.job || state.job.id !== jobId) return;      // 过期响应，丢弃
     state.pollMisses = 0;
     state.job.state = snap.state;
+    // created_at 必须一并挂到 state.job 上：每秒刷新的「已用 N 秒」读的是
+    // state.job（startTicker(() => state.job)），而 setJob 建的那份对象里没有它。
+    // 漏掉时 fmtElapsed 返回空串，于是轮询把它写出来、下一次 tick 又抹掉 ——
+    // 用户报的「秒数显示一下、隐藏一下」就是这个（2026-09-20）。
+    if (snap.created_at) state.job.created_at = snap.created_at;
     renderProgress(body, snap);
 
     // 分步确认（paused_awaiting_confirmation）已于 2026-09-19 整体移除，
-    // 这里少一个分支：轮询只可能遇到活跃态、done、failed、cancelled。
+    // 那个「停在中间等人点确认」的分支跟着没了。
     if (snap.state === "done") {
       onDone(snap, body, jobId);
     } else if (snap.state === "failed") {
       onFailed(snap, body, jobId);
     } else if (snap.state === "cancelled") {
       onCancelled(body);
-    } else {
+    } else if (BUSY_STATES.has(snap.state)) {
       state.pollTimer = setTimeout(poll, POLL_MS);
+    } else {
+      // 认不出来的状态：按「这一趟已经不在跑了」处理，把界面解锁还给用户。
+      // 修复前这里是无条件 `else { 继续轮询 }`，一个不在 BUSY_STATES 里的值
+      // 就能让作业永远停在「生成中」—— 发送键不恢复、用户只能刷新窗口。
+      onCancelled(body);
     }
   }).catch(e => {
     if (!state.job || state.job.id !== jobId) return;
@@ -332,7 +344,7 @@ export async function attach(id) {
   stopPolling();
   setResult(null);
   state.pollMisses = 0;
-  setJob({ id, state: snap.state, params: snap.params || null });
+  setJob({ id, state: snap.state, params: snap.params || null, created_at: snap.created_at });
   state.paramsSnapshot = null;                 // 切了场景，过期提示的基准要重置
   T.clearThread();
   $("empty").classList.add("hidden");
@@ -453,12 +465,18 @@ async function waitRewriteDone(jid, body, vi) {
   const deadline = Date.now() + REWRITE_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (!document.contains(body)) return;              // 会话已切换：静默放弃
-    const snap = await api.job(jid, true);
-    if (snap.state === "done" && snap.result) {
+    // P2-9：轮询用轻量快照（不含 result 的几十 KB 产物），并每轮刷新进度。
+    // 修复前 api.job(jid, true) 每 700ms 序列化整份产物，且 waitRewriteDone
+    // 全程不调 renderProgress —— 唯一的反馈是 2.2s 就消失的 toast；后端还在跑、
+    // 前端却已抛「重写超时」，两边相反。
+    const snap = await api.job(jid);
+    renderProgress(body, snap);
+    if (snap.state === "done") {
+      const full = await api.job(jid, true);           // done 后再拉一次含结果的
       // 只有还在看这一版时才换全局结果 —— 否则会把用户翻走的视图抢回来
       const viewing = body._vi === vi;
-      if (viewing) setResult(snap.result);
-      body._versions[vi] = { id: jid, result: snap.result, state: "done", params: snap.params };
+      if (viewing) setResult(full.result);
+      body._versions[vi] = { id: jid, result: full.result, state: "done", params: full.params };
       if (viewing) renderVersion(body);
       loadSessions();
       return;
@@ -467,7 +485,7 @@ async function waitRewriteDone(jid, body, vi) {
     if (snap.state === "failed") throw new Error(snap.error || "重写失败");
     await new Promise(r => setTimeout(r, 700));
   }
-  throw new Error("重写超时（超过 3 分钟），可稍后回看该记录");
+  throw new Error("重写超时（超过 4 分钟），可稍后回看该记录");
 }
 
 export function autoGrowTopic() {

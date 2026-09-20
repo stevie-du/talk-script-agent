@@ -52,7 +52,7 @@ stages:
       1. angle：一句话角度，不站队、不说教
       2. hook_type：从钩子库 10 类中选，hook_line 是可直接念的开场句
       3. points：恰好 $points 条，每条一句可展开的核心观点
-      4. cta：结尾引导，动作唯一
+      4. cta：结尾引导，动作唯一，**用户指定的动作是「$cta」**，不得自换别的动作
       5. 不出现绝对化承诺、权威背书、行业红线表述
       输出 JSON 字段：angle, hook_type, hook_line, points, cta
     files:
@@ -78,10 +78,13 @@ stages:
       $plan_json
 
       【平台】$platform　【风格】$style　【人设】$persona
+      【结尾引导动作】$cta（cta 段就按这个动作写，不自换）
       【字数配额（硬性）】总计≈$quota_total 字：开场钩子≈$quota_hook 字；正文 $points 个要点、每个≈$quota_body_per 字；结尾引导≈$quota_cta 字
       $facts_block
       $growth
       $voice_block
+      【行业红线（必须遵守，不得违反；涉及救援/术语/敏感话题时优先按此口径）】
+      $redlines
       【输出结构】JSON：
       {
         "sections": [
@@ -102,6 +105,10 @@ stages:
     # 撰写阶段额外注入的知识文件（占位符 → 文件路径；缺失自动跳过）
     files:
       growth: patterns/growth.md
+      # 行业红线（P0-18）：统一救援口径 / 禁演清单 / 术语规范 / 敏感话题。
+      # 曾经只存在于 compliance/industry.md 而引擎从不注入 —— 模型手里没有这份，
+      # 最要命的救援话术自由发挥（回炉也救不回来）。挂到 write 阶段每轮都带。
+      redlines: compliance/industry.md
     # 人味（去 AI 味）档位：界面可选，引擎按档位组装 $anti_ai_rule 与 $voice_block
     anti_ai:
       rule: |

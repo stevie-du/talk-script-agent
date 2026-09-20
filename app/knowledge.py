@@ -401,8 +401,13 @@ class Pack:
     def audience_slice(self, audience: str | None) -> str:
         mapping = self.data.get("audience_map", {}) or {}
         key = mapping.get(audience or "", "")
-        return (self.slice_heading("knowledge/audience.md", key) if key
-                else self.file_text("knowledge/audience.md"))
+        if not key:
+            # P1-22：未知受众**不注入整份文件** —— 整份含 5 个别的受众章节，
+            # 会把模型注意力拉向"物业/开发商"话术（实测 2167 字符整份注入 vs
+            # 正常切片 181~392）。param_audit 已在设置页标出「未配 audience_map」
+            # 的降级，这里把伤害降到零：宁缺毋滥，比误导强。
+            return ""
+        return self.slice_heading("knowledge/audience.md", key)
 
     # ── 配额与词表 ──────────────────────────────────────────
     def rate_for_style(self, style: str | None) -> float:

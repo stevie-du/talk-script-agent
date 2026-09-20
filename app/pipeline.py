@@ -101,6 +101,9 @@ MAX_CONCURRENT_JOBS = 4
 PERSISTED_PARAMS: tuple[str, ...] = (
     "topic", "segment", "audience", "duration", "style",
     "platform", "persona", "cta", "rate", "voice", "format",
+    # P3-14：当时用的模型与预算 —— 事后要解释「这条为什么慢 / 为什么这样」
+    # 只能靠这些落盘值，不能靠「现在的 config.yaml」（它今天就被改过两次）。
+    "model", "max_tokens", "temperature",
 )
 # 2) 不进 params，但在 result.json 顶层另有落点
 PARAMS_ELSEWHERE: dict[str, str] = {
@@ -114,6 +117,10 @@ PARAMS_DROPPED: dict[str, str] = {
     "reroll": "本次「换一版」的开关，不属于产物属性",
     "points": "已由提示词占位符 $points 消费；产物里的要点数看 len(plan.points)",
 }
+# 4) 运行期由 `_run_generate` 附加（P3-14），**不进 `_normalize`** ——
+#    `_normalize` 是纯参数归一，不读 self.llm（测试直接调它时会没有客户端）。
+#    它们最终仍落进 result.json 的 params（PERSISTED_PARAMS 已含）。
+RUNTIME_PARAMS: tuple[str, ...] = ("model", "max_tokens", "temperature")
 
 
 class Pipeline:
@@ -204,8 +211,10 @@ class Pipeline:
         pack = Pack(self.root, result["pack"])
         # 同上：原子迁移到 rewriting，避免并发发起多次单段重写同时改同一份 sections
         job.transition_or_raise("rewriting", error=None)
+        # P1-6：单段重写也把 client 抓成局部变量（与生成主流程同口径）。
+        client = self.llm
         self._spawn(job, lambda: self._run_rewrite_segment(
-            job, pack, req.index, req.feedback or ""))
+            job, pack, req.index, req.feedback or "", client))
         return job.snapshot()
 
     def cancel(self, jid: str) -> dict:
@@ -238,21 +247,31 @@ class Pipeline:
             if not skill:
                 raise ValueError(f"行业包缺少 skill.yaml（生成技能定义）：{pack.name}")
             p = self._normalize(pack, job.params)
+            # P1-6：client 在作业开始时一次抓取，后续全程用局部变量 ——
+            # 不这样做的话，作业 A 跑到回炉时 B 作业 reload_llm() 会换掉 self.llm
+            # （用户在设置里改了 Key/模型），A 中途换模型/换预算继续烧。
+            client = self.llm
+            # P3-14：产物参数记下「当时用的什么配置」，事后才能解释
+            # 「这条为什么慢 / 为什么长这样」—— 之前排查只能靠当前 config 倒推。
+            p["model"] = client.cfg.model
+            p["max_tokens"] = client.cfg.max_tokens
+            p["temperature"] = client.cfg.temperature
             job.transition_or_raise("selecting", params=p)
-            plan = self._select(job, pack, skill, p)
+            plan = self._select(job, pack, skill, p, client)
             self._step(job, "select", "选题策划", {"plan": plan.model_dump()})
             self._abort_if_cancelled(job)
-            self._continue_write(job, pack, skill, plan)
+            self._continue_write(job, pack, skill, plan, client)
         except JobCancelled:
             pass                              # 已由 request_cancel 置 cancelled，别再写回
         except Exception as e:  # noqa: BLE001
             self._fail(job, e)
 
-    def _continue_write(self, job: Job, pack: Pack, skill: dict, plan: TopicPlan):
+    def _continue_write(self, job: Job, pack: Pack, skill: dict, plan: TopicPlan,
+                        client: LLMClient):
         try:
             self._abort_if_cancelled(job)
             p = job.params
-            draft, revisions = self._write_with_recheck(job, pack, skill, p, plan)
+            draft, revisions = self._write_with_recheck(job, pack, skill, p, plan, client)
             self._finalize(job, pack, p, plan, draft, revisions)
         except JobCancelled:
             pass                              # 已由 request_cancel 置 cancelled，别再写回
@@ -314,16 +333,25 @@ class Pipeline:
                         "hint": "skill.yaml 的 stages.<阶段>.files 的 key 必须与占位符同名"})
         return system, user
 
-    def _select(self, job: Job, pack: Pack, skill: dict, p: dict) -> TopicPlan:
+    def _select(self, job: Job, pack: Pack, skill: dict, p: dict,
+                client: LLMClient) -> TopicPlan:
         pr = PromptRenderer(pack)
         ctx = pr.select_ctx(p)
         system, user = self._render_stage(job, pr, "select", ctx)
-        return self.llm.chat_json("select", system, user, TopicPlan,
-                                  on_retry=self._retry_logger(job),
-                                  on_delta=self._delta_handler(job, "选题策划"))
+        # P0-3：选题只产出 400~650 字正文 + 少量思考，与 write 共用 16000 全额
+        # 预算会让思考量被预算反向推高（主报告 R1）。分阶段预算：select 4000。
+        # P1-8：「换一版」的提温原来只作用于 write —— 于是「换一版」重掷出的
+        # plan 与上一版几乎一样，白白花 74~173s。select 同样提温。
+        temp = (min(1.0, float(client.cfg.temperature) + 0.25)
+                if p.get("reroll") else None)
+        return client.chat_json("select", system, user, TopicPlan,
+                                on_retry=self._retry_logger(job),
+                                on_delta=self._delta_handler(job, "选题策划"),
+                                max_tokens=4000, temperature=temp)
 
     def _write_with_recheck(self, job: Job, pack: Pack, skill: dict,
-                            p: dict, plan: TopicPlan) -> tuple[dict, list[dict]]:
+                            p: dict, plan: TopicPlan,
+                            client: LLMClient) -> tuple[dict, list[dict]]:
         ban = Banwords(pack.banwords_data())
         quota = Quota.from_pack(pack.data)
         rounds = 1 + int((skill.get("limits") or {}).get("recheck_rounds", 2))
@@ -340,8 +368,8 @@ class Pipeline:
             # 「换一版」：同主题同参数重掷，小幅提温换取不同表达（仍受校验约束）
             temp = None
             if p.get("reroll"):
-                temp = min(1.0, float(self.llm.cfg.temperature) + 0.25)
-            draft = self.llm.chat_json(
+                temp = min(1.0, float(client.cfg.temperature) + 0.25)
+            draft = client.chat_json(
                 "write", system, user, ScriptDraft,
                 on_retry=self._retry_logger(job), temperature=temp,
                 on_delta=self._delta_handler(
@@ -440,6 +468,7 @@ class Pipeline:
         raw = {
             "id": job.id, "created_at": job.created_at,
             "pack": pack.name, "pack_draft": pack.draft,
+            "mock": self.mock,
             "params": {k: p[k] for k in PERSISTED_PARAMS},
             "quota": p["quota"],
             # 字数配额是「按 时长×语速 估算」而不是查表得来的 —— 必须随产物一起
@@ -491,7 +520,8 @@ class Pipeline:
             return
         self.registry.prune()
 
-    def _run_rewrite_segment(self, job: Job, pack: Pack, index: int, feedback: str) -> None:
+    def _run_rewrite_segment(self, job: Job, pack: Pack, index: int, feedback: str,
+                             client: LLMClient) -> None:
         try:
             self._abort_if_cancelled(job)
             result = job.result
@@ -507,9 +537,11 @@ class Pipeline:
             pr = PromptRenderer(pack)
             ctx = pr.rewrite_ctx(sections, index, seg_quota, feedback)
             system, user = self._render_stage(job, pr, "rewrite_segment", ctx)
-            new = self.llm.chat_json("rewrite_segment", system, user, SegmentRewrite,
-                                     on_retry=self._retry_logger(job),
-                                     on_delta=self._delta_handler(job, "单段重写"))
+            # P0-3：单段重写输出一段口播，3000 预算足够，不占 write 的全额预算。
+            new = client.chat_json("rewrite_segment", system, user, SegmentRewrite,
+                                   on_retry=self._retry_logger(job),
+                                   on_delta=self._delta_handler(job, "单段重写"),
+                                   max_tokens=3000)
             old = seg["text"]
             sections[index] = {**seg, "text": new.text,
                                **({"subtitle": new.subtitle} if new.subtitle else {})}
@@ -574,19 +606,19 @@ class Pipeline:
     def _delta_handler(job: Job, phase: str):
         """返回流式回调：把模型增量写进 job，界面据此实时显示思考过程。
 
-        每次调用都新建一个，首次收到增量时才 begin_stream —— 这样每进入一个
-        阶段（含每次重试）都会清空缓冲，上一阶段/上一轮的思考不会串过来。
+        P1-7 修复前「收到第一个增量才 begin_stream」：select 首字节前静默几十秒，
+        快照没有 stream 键，思考块被 progress.js 隐藏，界面只剩「已用 N 秒」，
+        用户以为卡死。现在**构造时就 begin_stream** —— 阶段一开始思考块就显示
+        「等待模型首个 token…」；同时每进入一个阶段（含每次重试）都会清空缓冲，
+        上一阶段/上一轮的思考不会串过来（P2-13 的计数污染一并缓解）。
         """
-        state = {"started": False}
+        job.begin_stream(phase)
 
         def cb(kind: str, text: str):
             # 停止要在「收包过程中」就生效：等整段创建完再取消，钱已经花完了。
             # 抛出去会顺着 httpx 的流式迭代一路冒到工作线程的 except JobCancelled。
             if job.is_cancelled():
                 raise JobCancelled()
-            if not state["started"]:
-                job.begin_stream(phase)
-                state["started"] = True
             job.push_delta(kind, text)
 
         return cb

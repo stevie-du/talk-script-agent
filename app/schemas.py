@@ -54,7 +54,10 @@ class TopicPlan(BaseModel):
     angle: str                        # 一句话角度
     hook_type: str                    # 钩子类型（来自钩子库 10 类）
     hook_line: str                    # 钩子句
-    points: list[str]                 # 要点（1~4 条，每条一句）
+    # P3-29：模型会给出远超包配置的条数（主题写「5 个坑」却给 8 条 point），
+    # 而 write 提示词按 pack 的 points 数告知 —— 无上限时两处口径漂移。
+    # 6 条是 pack 配置上限（180s→4 点）的 1.5 倍余量，超了触发解析重试。
+    points: list[str] = Field(max_length=6)
     cta: str                          # 结尾引导
 
 
@@ -109,6 +112,10 @@ class ScriptResult(BaseModel):
     created_at: str
     pack: str
     pack_draft: bool = False
+    # P1-23：True = mock 模式产物（夹具）。86/87 份历史产物是 mock 却没有标记，
+    # 任何「回炉到底因为什么」的统计都被夹具污染（hard_hits 79 次命中绝大多数
+    # 来自夹具）。落盘标记后，统计与排查能把夹具排掉。
+    mock: bool = False
     params: dict
     quota: dict                       # {total, hook, body, cta}
     # True = 这个 quota **不是**查 quota_table 得来的，而是按「时长×语速×0.95」

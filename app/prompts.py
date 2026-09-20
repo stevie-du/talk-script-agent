@@ -81,6 +81,7 @@ class PromptRenderer:
             "industry": self.pack.info.display_name,
             "topic": p["topic"], "segment": p["segment"], "audience": p["audience"],
             "platform": p["platform"], "style": p["style"], "persona": p["persona"],
+            "cta": p["cta"],
             "duration": str(int(p["duration"])), "points": str(p["points"]),
             "rate": str(p["rate"]),
             "quota_total": str(q.get("total", "")), "quota_hook": str(q.get("hook", "")),

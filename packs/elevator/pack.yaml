@@ -83,12 +83,10 @@ audience_map:
   开发商总包: 开发商 / 总包
   经销商渠道: 经销商 / 渠道
 
-# 各阶段加载的文件（相对包目录）
+# 各阶段注入文件由 skill.yaml 的 stages.<阶段>.files 决定（P0-18：
+# 引擎只消费 private，files.select/write/compliance/facts 曾是永不注入的孤儿）。
+# 这里只声明引擎真正读取的 private。
 files:
-  select: [knowledge/topics.md, knowledge/audience.md, knowledge/ideas.md, patterns/hooks.md]
-  write: [patterns/hooks.md, patterns/growth.md, knowledge/voice.md, patterns/anti-ai-smell.md, rules/duration.md, rules/output-template.md]
-  compliance: [compliance/ad-law.md, compliance/platform.md, compliance/industry.md]
-  facts: [knowledge/standards.md]
   private: [private/products.yaml, private/service.yaml, private/cases.yaml, private/faq.yaml]
 
 banwords: banwords.yaml

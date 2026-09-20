@@ -149,7 +149,9 @@ def test_empty_table_is_exactly_the_silent_pass(tmp_path):
 
     assert [h["word"] for h in hits_real["hard"]] == [
         "全网最低价", "包过检", "绝对安全", "零事故"]
-    assert len(hits_real["soft"]) == 1
+    # P1-21 修复后：soft 与 hard 位置重叠的表述不再双计 ——
+    # 「绝对」与 hard 的「绝对安全」重叠，只算 hard 一次，soft 应为 0。
+    assert len(hits_real["soft"]) == 0
     assert len(real.dropped_short) == 1
     assert hits_empty == {"hard": [], "soft": [], "dropped_short": []}
     # 报告结构一致 —— 这正是「看不出来」的原因

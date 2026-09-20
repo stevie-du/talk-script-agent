@@ -136,16 +136,22 @@ class Banwords:
 
         hard_hits: dict[str, int] = {}
         soft_hits: dict[str, int] = {}
+        covered: list[tuple[int, int]] = []
         if p_hard:
             for m in p_hard.finditer(text):
                 w = m.group(0)
                 hard_hits[w] = hard_hits.get(w, 0) + 1
+                covered.append((m.start(), m.end()))
         if p_soft:
             for m in p_soft.finditer(text):
                 w = m.group(0)
-                # hard 命中的词不再重复算 soft（长词优先已保证同表内不重叠）
-                if w not in hard_hits:
-                    soft_hits[w] = soft_hits.get(w, 0) + 1
+                # 与任何 hard 命中**位置重叠** → 同一处违规的两个表述，只报 hard。
+                # 修复前只判「同词」，跨表时「绝对安全」(hard) 与「绝对」(soft)
+                # 在同一位置双计 —— 一处违规报两遍，回炉反馈也把重复词喂给模型
+                # （P1-21）。长词优先只保证同表内不重叠，管不了跨表。
+                if any(s < m.end() and m.start() < e for s, e in covered):
+                    continue
+                soft_hits[w] = soft_hits.get(w, 0) + 1
 
         def fmt(d: dict[str, int]) -> list[dict]:
             return [{"word": w, "count": c}
@@ -220,11 +226,17 @@ def check_script(
     banwords: Banwords,
     platform: str | None = None,
     quota: Quota | None = None,
+    tolerance: float | None = None,
 ) -> dict:
     """校验分段脚本。
 
     sections: [{"type": "hook"|"point"|"cta", "text": "...", ...}, ...]
-    判定门槛：硬禁用词 0 处 且 时长偏差 ≤±10%。
+    判定门槛：硬禁用词 0 处 且 时长偏差 ≤±容差。
+
+    tolerance（百分比）：传入则按它判定；不传走 P2-27 的时长自适应 ——
+    短时长物理上装不下绝对容差（15s 档合格区间仅 56~70 字，±7 字），
+    按 `max(10, 3.0/duration*100)` 放宽：15s→±20%、30s→±10%（3.0/30*100=10）、
+    60s 及以上→±10%。
 
     每段配额按**要点数均分**正文配额。修复前这里直接给每段「整个正文配额」，
     于是一个 2 要点、134 字的段落在 60s/4.5 配置下（body=171）永远够不到
@@ -256,7 +268,9 @@ def check_script(
 
     dev = (sec - duration) / duration * 100 if duration else 0.0
     ok_hard = not hits["hard"]
-    ok_time = abs(dev) <= 10
+    limit = (tolerance if tolerance is not None
+             else max(10.0, 3.0 / duration * 100 if duration else 10.0))
+    ok_time = abs(dev) <= limit
     report = {
         "chars_total": total,
         "target_total": target.get("total"),
@@ -272,7 +286,7 @@ def check_script(
         "points": n_points,
         "passed": ok_hard and ok_time,
         "blockers": ([] + (["硬禁用词 %d 处" % sum(h["count"] for h in hits["hard"])] if not ok_hard else [])
-                     + (["时长偏差 %.1f%% 超 ±10%%" % dev] if not ok_time else [])),
+                     + (["时长偏差 %.1f%% 超 ±%.0f%%" % (dev, limit)] if not ok_time else [])),
     }
     return report
 

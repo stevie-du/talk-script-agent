@@ -1,6 +1,7 @@
 # 重试、空内容诊断与配置保持测试
 # 跑法：python tests/test_llm_retry.py   或   pytest tests/test_llm_retry.py
 import json
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -110,6 +111,87 @@ def test_429_retried():
     assert out.ok is True and calls["n"] == 3
 
 
+def test_429_honors_retry_after():
+    """429 且带 Retry-After 头 → 按它等（而不是无视头做限流退避）。"""
+    cfg = _cfg(retries=2)
+    client = LLMClient(cfg.llm)
+    calls = {"n": 0}
+    sleeps = []
+
+    def handler(req):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, text="slow down",
+                                  headers={"Retry-After": "3"})
+        return _resp(200, '{"ok": true}')
+
+    with patch("app.llm.time.sleep", side_effect=lambda s: sleeps.append(s)):
+        out = _run(handler, lambda: client.chat_json("t", "s", "u", Out))
+    assert out.ok is True and calls["n"] == 2, (out, calls)
+    # Retry-After=3 + 抖动 → 等 [3.0, 3.4)；不能退化成限流退避的 1.5s 档
+    assert len(sleeps) == 1 and 3.0 <= sleeps[0] < 3.5, sleeps
+
+
+def test_429_retry_after_capped():
+    """Retry-After 给超大值 → 封顶 RETRY_AFTER_WAIT_MAX，不当陪等。"""
+    cfg = _cfg(retries=2)
+    client = LLMClient(cfg.llm)
+    sleeps = []
+
+    def handler(req):
+        return httpx.Response(429, text="slow down",
+                              headers={"Retry-After": "9999"})
+
+    with patch("app.llm.time.sleep", side_effect=lambda s: sleeps.append(s)):
+        try:
+            _run(handler, lambda: client.chat_json("t", "s", "u", Out))
+            raise AssertionError("多次 429 应抛错")
+        except LLMError:
+            pass
+    assert sleeps, "没有发生任何等待"
+    assert all(60.0 <= s < 60.5 for s in sleeps), sleeps
+    assert len(sleeps) == 2, f"retries=2 → 只应等 2 次，实际 {len(sleeps)} 次"
+
+
+def test_429_without_retry_after_uses_rate_limit_backoff():
+    """429 且无 Retry-After → 限流专用更长的退避（1.5s 起），不是普通 1s 档。"""
+    cfg = _cfg(retries=2)
+    client = LLMClient(cfg.llm)
+    calls = {"n": 0}
+    sleeps = []
+
+    def handler(req):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return _resp(429, "slow down")
+        return _resp(200, '{"ok": true}')
+
+    with patch("app.llm.time.sleep", side_effect=lambda s: sleeps.append(s)):
+        out = _run(handler, lambda: client.chat_json("t", "s", "u", Out))
+    assert out.ok is True and calls["n"] == 3
+    # 1.5s×2^n + 抖动：第 1 次 ∈[1.5,1.9)，第 2 次 ∈[3.0,3.4)
+    assert len(sleeps) == 2, sleeps
+    assert 1.5 <= sleeps[0] < 2.0, sleeps
+    assert 3.0 <= sleeps[1] < 3.5, sleeps
+
+
+def test_429_note_mentions_wait():
+    """429 的 on_retry 通知要带上等待时长 —— 界面日志里能看出「在等限流」。"""
+    cfg = _cfg(retries=2)
+    notes = []
+    client = LLMClient(cfg.llm, on_retry=lambda n, a, t: notes.append(n))
+
+    def handler(req):
+        return _resp(429, "slow down")
+
+    with patch("app.llm.time.sleep", lambda s: None):
+        try:
+            _run(handler, lambda: client.chat_json("t", "s", "u", Out))
+        except LLMError:
+            pass
+    assert notes and notes[0].startswith("上游限流(429)") and "后重试" in notes[0], notes
+
+
 def test_retries_exhausted_reports_count():
     cfg = _cfg(retries=2)
     client = LLMClient(cfg.llm)
@@ -149,7 +231,10 @@ def test_streaming_empty_content_gives_actionable_error():
             "t", "s", "u", Out, on_delta=lambda k, t: seen.append((k, t))))
         raise AssertionError("空内容应抛 EmptyContentError")
     except EmptyContentError as e:
-        assert "max_tokens" in str(e) and "1234" in str(e), str(e)
+        # P0-2 后空内容先升级预算重试（1234 → 1851），重试仍空才抛；
+        # 文案必须体现「是预算问题」且带**本次实际预算**数字（不写死位数）。
+        assert "max_tokens" in str(e) and "预算" in str(e), str(e)
+        assert re.search(r"\d{3,}", str(e)), str(e)
     assert seen and seen[0][0] == "reasoning", seen
 
 

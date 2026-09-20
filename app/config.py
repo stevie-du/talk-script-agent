@@ -233,9 +233,30 @@ def _env_num(name: str, fallback, cast):
     if raw is None or raw == "":
         return fallback
     try:
-        return cast(raw)
+        v = cast(raw)
     except (TypeError, ValueError):
         return fallback
+    # P2-11：环境变量路径绕过了 server.set_config 的 NUMERIC_BOUNDS 那道闸，
+    # TALKSCRIPT_MAX_TOKENS=100 / TALKSCRIPT_RETRIES=999 会静默生效
+    #（每次生成必然空内容 / attempts=1000）。夹逼到合法区间并留日志——
+    # 抛错会让引擎起不来，夹逼 + 可见警告更符合本项目「别静默」的取向。
+    bounds = _ENV_NUM_BOUNDS.get(name)
+    if bounds and not (bounds[0] <= v <= bounds[1]):
+        log.warning("环境变量 %s=%r 超出合法区间 [%s, %s]，已夹逼为 %s",
+                    name, raw, bounds[0], bounds[1],
+                    max(bounds[0], min(bounds[1], v)))
+        return max(bounds[0], min(bounds[1], v))
+    return v
+
+
+# 环境变量数值项的合法区间（P2-11）。与 server.set_config 的 NUMERIC_BOUNDS
+# 同口径 —— 那一边管 HTTP 保存，这一边管环境变量，两处都夹，不能只收一头。
+_ENV_NUM_BOUNDS: dict[str, tuple[float, float]] = {
+    "temperature": (0.0, 2.0),
+    "retries": (0, 20),
+    "timeout": (1.0, 600.0),
+    "max_tokens": (256, 100000),
+}
 
 
 def _truthy(v) -> bool:

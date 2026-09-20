@@ -84,6 +84,17 @@ export function openSettings(pane) {
 
 export function closeSettings() {
   if (settingsOpen()) $("settings-screen").classList.add("hidden");
+  // P3-49：结果页直接关设置（没点「完成」）时，主界面行业包下拉要能看到新包。
+  // 只刷新、**不切包**：用户没点「完成」，没有「去用新包」的意图，当前包保持不变。
+  // 切包是 onPackDone 的职责（fillPackSelect({prefer})）—— 这里若也 prefer，
+  // 会把用户正在用的包悄悄换掉（verify.js 实测过这一干扰）。
+  if (state.lastCreatedPack) {
+    state.lastCreatedPack = null;
+    api.meta().then(m => {
+      state.meta = m;
+      emit("meta", m);          // on('meta') 的 fillPackSelect() 无参调用保留当前选中
+    }).catch(() => {});
+  }
 }
 
 export function setPane(pane) {
@@ -222,6 +233,23 @@ export function providerOf(baseUrl) {
   return host;
 }
 
+// 列表缩略图标统一为「28×28 圆角块 + 16×16 描边 SVG」，与生成偏好左侧
+// 三个导航项同一规格（fill=none / stroke=currentColor / stroke-width=1.8）。
+// 图标按语义给：行业包行 = 打包盒，模型行 = 芯片；不渲染文字首字 ——
+// 取首字既要有信息量又不能撞车（IP 首字符是 "1"、外部模型名首字符是
+// 服务商前缀），取错了就像坏字。
+function svgIcon(paths) {
+  return `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
+}
+
+// 打包盒：与生成偏好左侧「行业包」导航项同一组路径
+const ICON_PACK = svgIcon(
+  '<path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/>');
+// 芯片：四条引脚的 CPU，表「模型 / 算力」
+const ICON_MODEL = svgIcon(
+  '<rect x="6" y="6" width="12" height="12" rx="2"/>'
+  + '<path d="M12 2v4M12 18v4M2 12h4M18 12h4"/>');
+
 const FIELD_LABEL = { base_url: "请求地址", model: "模型 ID" };
 
 /**
@@ -263,8 +291,9 @@ function modelItem(m, total, c) {
   // 当前启用的那条要有视觉落点：不然开关看着都一样
   if (m.active) item.classList.add("on");
 
-  // 图标：服务商首字（条目窄，放不下完整名字）
-  item.appendChild(el("span", "pl-ic", prov.slice(0, 1)));
+  // 图标：芯片标记（与生成偏好左侧导航同一套 SVG 规格）；服务商与地址
+  // 在副标题上，不以文字首字做图标。
+  item.appendChild(el("span", "pl-ic", ICON_MODEL));
 
   const txt = el("span", "pl-txt");
   txt.appendChild(el("span", "pl-t mdl-label", esc(m.label || m.model || m.id)));
@@ -613,6 +642,8 @@ export const bindSettings = bindOnce(function bindSettings() {
   };
   $("pg-close").onclick = () => setPane(packgenFrom);
   $("pg-run").onclick = runPackgen;
+  // 结果页双出口：返回回来源面板（与表单页「取消」一致），完成去工作台用新包。
+  $("pg-back").onclick = () => setPane(packgenFrom);
   $("pg-done").onclick = onPackDone;
 
   // 「保存高级配置」按钮已删（2026-09-17）：高级配置改由模型表单的「保存」
@@ -827,20 +858,99 @@ async function runPackgen() {
   const desc = $("pg-desc").value.trim();
   if (!industry || !desc) { toast("请填写行业名称和业务描述"); return; }
   const btn = $("pg-run");
+  const errBox = $("pg-error");
+  // textContent 会把按钮里的 spark 图标冲掉：先留个引用，结束时把它放回去，
+  // 否则每生成（或失败）一次，按钮就永久少一颗图标。
+  const spark = btn.querySelector(".ic-spark");
+  // 生成期间「取消」也必须禁用：同步长请求中途退出，结果会悄悄写进隐藏面板，
+  // 再次进入再点生成就成了两个并发请求、后完成者覆盖前者的视图（P3-48）。
+  const backBtn = $("pg-close");
+  const working = $("pg-working");
   btn.disabled = true;
-  btn.textContent = "生成中（约 1-2 分钟）…";
+  if (backBtn) backBtn.disabled = true;
+  if (working) working.classList.remove("hidden");
+  errBox.classList.add("hidden");
+  errBox.textContent = "";
+  const t0 = Date.now();
+  // 生成是同步长请求，期间没有任何进度反馈：按钮一直停在「约 1-2 分钟」，
+  // 上游一慢就像卡死（用户原话「等了一会后就没有后续了」）。加计时器，
+  // 让等待有脉搏 —— 「还在跑」和「卡死了」一眼可分。
+  const timer = setInterval(() => {
+    btn.textContent = `生成中 · ${Math.round((Date.now() - t0) / 1000)}s…`;
+  }, 1000);
   try {
     const out = await api.createPack(industry, desc);
     state.lastCreatedPack = out.name;
     $("pg-form").classList.add("hidden");
     $("pg-result").classList.remove("hidden");
+    renderPackgenSummary(out);
     $("pg-checklist").textContent = out.checklist;
     toast(`行业包「${out.display_name}」已生成（草稿）`);
   } catch (e) {
+    // 失败不能只靠一条几秒的 toast：用户走开一下回来就是「生成完没有后续」。
+    // 原因常驻在表单下方，表单与输入值都保留，改完字段一键重试。
+    errBox.textContent = `生成失败：${e.message}`;
+    errBox.classList.remove("hidden");
     toast("生成失败：" + e.message, 6000);
+  } finally {
+    clearInterval(timer);
+    btn.disabled = false;
+    if (backBtn) backBtn.disabled = false;
+    if (working) working.classList.add("hidden");
+    btn.textContent = "";
+    if (spark) btn.appendChild(spark);
+    btn.append("生成");
   }
-  btn.disabled = false;
-  btn.textContent = "生成";
+}
+
+/** 结果页「生成了什么」：细分/受众/人设/选题摘要。
+ *  ⚠ 内容全部来自模型输出，一律 textContent，绝不 innerHTML 拼接。 */
+function renderPackgenSummary(out) {
+  const box = $("pg-summary");
+  box.innerHTML = "";
+  const title = el("div", "pg-summary-t");
+  title.textContent = `已生成「${out.display_name}」行业包（草稿）`;
+  box.appendChild(title);
+  const stats = el("div", "pg-summary-stats");
+  [["细分领域", out.segments], ["受众", out.audiences], ["人设", out.personas]]
+    .forEach(([label, list]) => {
+      if (!Array.isArray(list)) return;
+      const s = el("span", "pg-stat");
+      const n = el("b"); n.textContent = String(list.length);
+      const l = el("span"); l.textContent = label;
+      s.appendChild(n); s.appendChild(l);
+      stats.appendChild(s);
+    });
+  const ideaN = el("span", "pg-stat");
+  const ni = el("b"); ni.textContent = String((out.ideas || []).length);
+  const li = el("span"); li.textContent = "选题";
+  ideaN.appendChild(ni); ideaN.appendChild(li);
+  stats.appendChild(ideaN);
+  box.appendChild(stats);
+  [["细分领域", out.segments], ["受众", out.audiences], ["人设", out.personas]]
+    .forEach(([label, list]) => {
+      if (!Array.isArray(list) || !list.length) return;
+      const row = el("div", "pg-summary-row");
+      row.appendChild(el("span", "pg-summary-k", label));
+      const v = el("span", "pg-summary-v");
+      v.textContent = list.join("、");
+      row.appendChild(v);
+      box.appendChild(row);
+    });
+  const ideas = out.ideas || [];
+  if (ideas.length) {
+    const row = el("div", "pg-summary-row");
+    row.appendChild(el("span", "pg-summary-k", "选题示例"));
+    const v = el("div", "pg-summary-v");
+    ideas.slice(0, 5).forEach((t, i) => {
+      const line = el("div", "pg-idea");
+      line.textContent = `${i + 1}. ${t}`;
+      v.appendChild(line);
+    });
+    if (ideas.length > 5) v.appendChild(el("div", "pg-idea-more", `…共 ${ideas.length} 条`));
+    row.appendChild(v);
+    box.appendChild(row);
+  }
 }
 
 async function onPackDone() {
@@ -907,9 +1017,8 @@ function packItem(p) {
   item.dataset.id = p.name;
   if (p.draft) item.classList.add("on");        // 草稿态有视觉落点（待校对）
 
-  // 图标：包名首字
-  item.appendChild(el("span", "pl-ic",
-    (p.display_name || p.name || "?").slice(0, 1)));
+  // 图标：打包盒标记（与生成偏好左侧「行业包」同一枚图标、同一套 SVG 规格）
+  item.appendChild(el("span", "pl-ic", ICON_PACK));
 
   const txt = el("span", "pl-txt");
   txt.appendChild(el("span", "pl-t", esc(p.display_name || p.name)));

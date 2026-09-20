@@ -9,15 +9,15 @@ cases:
   - project: "示例：XX花园加装电梯"
     city: ""
     district: ""               # 区/县，可选
-    year: 2025
+    year:                      # 完工年份
     type: "加装"                # 加装 / 新装 / 整机更新 / 改造 / 维保托管
-    units: 12                  # 台量
+    units:                     # 台量
     floors: ""                 # 楼层
     model: ""                  # 使用型号
     challenge: ""              # 难点，例：底坑受限、管线复杂、一二楼协调
     solution: ""               # 怎么解决的
     result: ""                 # 结果，尽量量化，例：三个月完成，一次验收通过
-    public: true               # 是否可对外提及真实项目名称
+    public: false              # 是否可对外提及真实项目名称（无真实项目时默认 false）
     source: ""
     verified: ""
 

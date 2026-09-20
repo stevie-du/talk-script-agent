@@ -9,15 +9,19 @@
 // 标签「更早 78」—— 分组等于没做，用户原话「全部记录平铺了，有点太多了」。
 // 现在换成 `dayGroupKey()`（见 util.js）：今天 / 昨天 / MM-DD 周X / MM-DD。
 //
-// 新增：运行中的会话在副标题上带一个**进度点**，并且失败记录现在也能点开看原因
-//（后端会把 job.json 摘要返回给 /api/history/{id}）。
+// 行是**单行制**（状态记号 + 标题 + 时刻）：一屏能看的条数翻倍，
+// 而行业 / 平台 / 时长 / 字数 / 完整状态这些行上放不下的，全部进 title 悬浮提示，
+// 点开记录后右栏头部也照样给全（result.js）。
+// 记号只标异常：正常完成的记录不画点 —— 一列里绝大多数都是「正常完成」，
+// 每条都落的记号等于没有记号（对照 Claude / Linear 的侧栏）。
+// 失败记录能点开看原因 —— 后端会把 job.json 摘要返回给 /api/history/{id}。
 
-import { $, el, esc, fmtTime, dayGroupKey, toast, bindOnce } from "./util.js";
+import { $, el, fmtClock, fmtStamp, dayGroupKey, toast, bindOnce } from "./util.js";
 import { api } from "./api.js";
 import { state, setResult, detachJob } from "./store.js";
 import { setLeftFolded } from "./ui.js";
 import { attach, openRecord } from "./jobs.js";
-import { STATE_LABEL } from "./progress.js";
+import { STATE_LABEL, BUSY_STATES } from "./progress.js";
 import { appConfirm } from "./overlays.js";
 
 const index = new Map();      // id -> 该行最近一次数据（委托 handler 从这里取，闭包不会过期）
@@ -48,12 +52,24 @@ function toggleFold(id) {
   paint(allItems);
 }
 
+/* 折叠箭头：内联 SVG，14px（规范 §4 的「行内符号 / 箭头」档）。
+   ⚠ 方向必须是**展开朝下、收起朝右** —— 此前用 CSS 边框画三角，
+   静止态画出来是朝右的 ▶、折叠时 rotate(90deg) 转成朝下 ▼，
+   与所有文件树 / 分组列表的惯例正好相反：收起的那组看起来像可以展开。 */
+const CHEVRON = `<svg class="gl-arrow" viewBox="0 0 24 24" width="14" height="14" fill="none"
+  stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"
+  aria-hidden="true"><path d="M6.5 9.5 12 15l5.5-5.5"/></svg>`;
+
 const DEL_SVG = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
   stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
   <path d="M4 7h16M9.5 7V5.2A1.2 1.2 0 0 1 10.7 4h2.6a1.2 1.2 0 0 1 1.2 1.2V7M6.5 7l.8 12.1a1.2 1.2 0 0 0 1.2 1.1h7a1.2 1.2 0 0 0 1.2-1.1L17.5 7"/>
   <path d="M10.5 11v5.5M13.5 11v5.5"/></svg>`;
 
-const settled = st => st === "done" || st === "failed" || st === "cancelled";
+/** 「这一趟结束了吗」= 不在跑。
+ *  取 `BUSY_STATES` 的**补集**，而不是自己抄一份终态清单 ——
+ *  抄终态会把认不出来的状态（索引里残留的已删除状态）读成「还在跑」，
+ *  于是每 3 秒空转刷新永不停止。判据的出处与理由见 progress.js。 */
+const settled = st => !BUSY_STATES.has(st);
 
 /** 行业包 slug → 界面显示名（取自 pack.yaml 的 display_name）。
  *  此前列表直接吐 slug，界面上出现的是「elevator」这种内部标识；而包里早就有
@@ -86,8 +102,9 @@ export async function loadSessions() {
   allItems = items;
   paint(items);
   clearTimeout(refreshTimer);
-  // 还有会话没结束就定期刷新；结束后自动变成普通记录。
-  // failed / cancelled 不算「没结束」，否则失败后这条会一直触发空转刷新。
+  // 只有**在跑**的作业才值得继续轮询（判据是 BUSY_STATES 白名单，
+  // 终态与认不出来的状态都不算）。写成「非终态就轮询」的话，
+  // 索引里一条残留的已删除状态就能让这里每 3 秒空转一次、永不停止。
   if (items.some(it => !settled(it.state || "done"))) {
     refreshTimer = setTimeout(loadSessions, 3000);
   }
@@ -159,7 +176,7 @@ function paint(items) {
 function buildGroup() {
   const b = el("button", "group-lbl");
   b.type = "button";
-  b.innerHTML = `<span class="gl-arrow" aria-hidden="true"></span><span class="gl-t"></span><span class="count"></span>`;
+  b.innerHTML = `${CHEVRON}<span class="gl-t"></span><span class="count"></span>`;
   return b;
 }
 
@@ -176,14 +193,30 @@ function updateGroup(n, sp) {
   n.querySelector(".count").textContent = sp.count;
 }
 
+/** 一行 = 状态记号 + 标题 + 时刻，三项排在同一条基线上。
+ *  状态点占一个 14px 图标盒（与分组箭头的 14px 同宽），于是标题文字的左边缘
+ *  与分组标签文字的左边缘落在同一个 x —— 旧的「标题 + 副标题」两行式里，
+ *  副标题从 20px 起、标题从 34px 起，同一行内两个左边缘，读起来就是「没对齐」。
+ *  行上没有状态字：只有异常才落记号，理由见 updateRow 里那张三档表。 */
 function buildRow() {
   const row = el("div", "sess-item");
   row.tabIndex = 0;
   row.setAttribute("role", "button");
-  row.innerHTML = `<div class="sess-top"><span class="dot"></span><span class="sess-topic"></span></div>
-    <div class="sess-sub"></div>`;
+  row.innerHTML = `<span class="dot"></span><span class="sess-topic"></span>`
+    + `<span class="sess-time"></span>`;
   row.appendChild(el("button", "sess-del", DEL_SVG));
   return row;
+}
+
+/** 完整状态词 —— 只进 `aria-label` 与悬浮提示，行上不写字。
+ *  （行上为什么一个字都不写，见 styles.css `.dot.ok` 那段说明：只有异常才落记号。）
+ *  认不出来的状态（历史索引里残留的、已经删掉的枚举值）说「已中断」：
+ *  它不在 BUSY_STATES 里，没有在跑，说「进行中」是假的；
+ *  而直接把 `paused_awaiting_confirmation` 这种内部标识吐给用户看，
+ *  与「列表曾经直接显示 slug」是同一类毛病。 */
+function stateText(it, st) {
+  if (st === "done") return it.passed === false ? "未通过校验" : "已通过校验";
+  return STATE_LABEL[st] || "已中断";
 }
 
 function updateRow(row, it) {
@@ -195,37 +228,39 @@ function updateRow(row, it) {
   row.dataset.id = it.id;
   row.classList.toggle("active", isCur);
 
-  const packName = packLabel(it.pack);
-  // 副标题只留「行业 · 时间 · 平台」：时长 / 字数 / 合格三项从列表里撤掉，
-  // 它们既占宽又互相压字，而列表这一层的用途只是「认哪条是哪条」。
-  // 撤掉的信息不丢 —— 全部并进 row.title 的悬浮提示（见下方）。
-  // 未完成的记录另把文字状态插在行业之后（只有色点会让读屏与色弱用户丢信息）。
-  const parts = [packName, fmtTime(it.created_at)];
-  if (it.platform) parts.push(it.platform);
-  if (st !== "done") parts.splice(1, 0, STATE_LABEL[st] || st);
-  const sub = parts.join(" · ");
-  const sig = [isCur, st, it.topic, sub].join("\u0001");
+  const clock = fmtClock(it.created_at);
+  // sig 要覆盖行上**看得见**的每一项，漏一项就是「数据变了但那一格不重画」。
+  const sig = [isCur, st, it.topic, it.passed, clock, it.duration, it.chars].join("\u0001");
   if (row._sig === sig) return;
   row._sig = sig;
 
-  // 状态点三态：已完成看是否通过校验；失败也算未通过；在跑用呼吸点。
-  // 不能只靠颜色：title 与 aria-label 都带上文字，读屏与色弱可用。
-  const dotCls = st === "done" ? (it.passed ? "ok" : "no") : st === "failed" ? "no" : "run";
-  const dot = row.querySelector(".dot");
-  dot.className = "dot " + dotCls;
-  const stateText = st === "done" ? (it.passed ? "已通过校验" : "未通过校验")
-    : (STATE_LABEL[st] || st);
-  row.setAttribute("aria-label", `${it.topic || "未命名"}，${stateText}`);
+  // 状态点 = **异常记号**：正常完成的记录不画点（.dot.ok 整格不可见，
+  // 但仍占 14px 图标盒，标题左边缘不动）。三档：
+  //   ok  = 无记号（默认状态不该每行喊一遍）
+  //   no  = 红点（失败 / 完成但校验未通过 / 已中断）
+  //   run = 灰点呼吸（真在跑）
+  // ⚠ 呼吸只给 `BUSY_STATES` 里的状态。此前写的是
+  //   `st === "done" ? … : st === "failed" ? "no" : "run"` —— 落到 else 的
+  //   除了真正在跑的，还有 **cancelled** 与一切认不出来的旧枚举值，
+  //   于是「已取消」的记录挂着一颗永远在呼吸的点，读成「还活着」。
+  const dotCls = BUSY_STATES.has(st) ? "run"
+    : (st === "done" && it.passed) ? "ok" : "no";
+  row.querySelector(".dot").className = "dot " + dotCls;
+  const aria = stateText(it, st);
+  row.setAttribute("aria-label", `${it.topic || "未命名"}，${aria}`);
   row.querySelector(".sess-topic").textContent = it.topic || "";
-  row.querySelector(".sess-sub").textContent = sub;
-  // 列表里撤掉的三项在这里补回：副标题只是「窄」，不是「没有」。
+  row.querySelector(".sess-time").textContent = clock;
+  // 从行上撤掉的字段全部收进悬浮提示：列表这一层只负责「认哪条是哪条」。
+  // 行业与平台在这份历史里 100 条恒等（单包 + 九成同平台），摆在行上是噪声，
+  // 但换多包 / 多平台时仍然要看得到，所以是**挪走**不是删掉。
+  const meta = [packLabel(it.pack), it.platform, fmtStamp(it.created_at), aria]
+    .filter(Boolean).join(" · ");
   // 每项都先判 null —— 后端对在跑的作业不给 duration/chars/passed，
   // 硬拼会印出 undefined；filter(Boolean) 把空项整段丢掉，不留空行。
-  const tip = [it.topic || "", sub];
+  const tip = [it.topic || "", meta];
   if (done) {
     if (it.duration != null) tip.push(`${it.duration}s`);
     if (it.chars != null) tip.push(`${it.chars} 字`);
-    if (it.passed != null) tip.push(it.passed ? "已通过校验" : "未通过校验");
   }
   row.title = tip.filter(Boolean).join("\n");
   const del = row.querySelector(".sess-del");

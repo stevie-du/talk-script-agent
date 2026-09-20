@@ -111,7 +111,7 @@ def export_agent_skill(root: Path, pack_name: str, out_dir: Path | None = None,
         "\n### 前置：加载私有资料（持久化知识库）\n\n"
         "`private/` 是持久化的底层知识库，写入一次之后每次生成都自动使用。按需读取：\n"
         "products.yaml（型号参数，产品推介必读）/ service.yaml（服务承诺，转化类必读）/\n"
-        "cases.yaml（案例背书）/ faq.yaml（异议应答）。`private/raw/` 有未处理文件时先提示用户。\n"
+        "cases.yaml（案例背书）/ faq.yaml（异议应答）。\n"
         "**已填部分优先作为事实来源；未填部分用 `{{待补：xxx}}` 占位，绝不估算。**\n"
     ) if include_private else (
         "\n### 前置：私有资料\n\n"

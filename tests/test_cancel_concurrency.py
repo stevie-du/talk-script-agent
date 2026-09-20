@@ -35,6 +35,7 @@ class SlowLLM:
     class _Cfg:
         temperature = 0.7
         max_tokens = 4096
+        model = "fake-model"
 
     def __init__(self):
         self.cfg = self._Cfg()
@@ -42,7 +43,8 @@ class SlowLLM:
         self.finished_write = False       # 被取消时必须仍是 False
 
     def chat_json(self, task, system, user, model_cls, max_retries=1,
-                  on_retry=None, temperature=None, on_delta=None):
+                  on_retry=None, temperature=None, on_delta=None,
+                  max_tokens=None):
         if task == "select":
             return TopicPlan(angle="被困别慌", hook_type="反常识",
                              hook_line="电梯里最危险的动作是扒门。",
