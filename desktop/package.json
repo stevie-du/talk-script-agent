@@ -30,7 +30,8 @@
     "beforePack": "scripts/before-pack.js",
     "extraResources": [
       { "from": "../app", "to": "engine/app", "filter": ["**/*", "!__pycache__/**"] },
-      { "from": "../packs", "to": "engine/packs" },
+      { "from": "../packs", "to": "engine/packs",
+        "filter": ["**/*", "!**/private/**"] },
       { "from": "renderer", "to": "engine/renderer" },
       { "from": "vendor/py", "to": "engine/py" }
     ],

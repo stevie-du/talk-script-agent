@@ -127,6 +127,21 @@ def test_before_pack_hook_is_wired(pkg):
         "钩子没有真的去调构建脚本"
 
 
+def test_packs_private_dir_is_not_shipped(pkg):
+    """`packs/*/private/` 不能进安装包。
+
+    README 承诺私有资料（未公开型号参数、客户案例）不外带，而守住这句话的
+    只是 extraResources 里一个 glob 元素 —— 删掉它构建照样成功、一句提示都没有，
+    泄露要等安装包被别人解压才发现。所以结构在这里拦，
+    匹配行为由 `desktop/packaging.test.js` 用真匹配器对着磁盘上的文件钉。
+    """
+    entry = next((e for e in pkg["build"]["extraResources"] if e.get("from") == "../packs"), None)
+    assert entry, "extraResources 里没有 ../packs 条目"
+    negatives = [g for g in entry.get("filter") or [] if str(g).startswith("!")]
+    assert any("private" in g for g in negatives), \
+        f"../packs 没有排除 private/ 的规则，安装包会带出私有资料：{entry.get('filter')}"
+
+
 def test_packaged_files_include_the_engine_path_module(pkg):
     """`engine-path.js` 必须进 asar。
 
