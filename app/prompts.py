@@ -56,10 +56,13 @@ class PromptRenderer:
         return out
 
     def stage_files(self, stage: str, ctx: dict) -> None:
-        """把 stage.files 声明的知识文件内容填进对应占位符（缺失文件→空串）。"""
+        """把 stage.files 声明的知识文件内容填进对应占位符（缺失文件→空串）。
+
+        取值支持 `路径` 与 `路径#章节关键词`（后者只注入那一节，见 `Pack.file_slice`）。
+        """
         files = (self.skill.get("stages", {}).get(stage, {}).get("files") or {})
         for key, rel in files.items():
-            ctx[key] = self.pack.file_text(rel)
+            ctx[key] = self.pack.file_slice(rel)
 
     def voice_parts(self, level: str) -> tuple[str, str]:
         """按人味档位组装 (anti_ai_rule, voice_block)。"""
@@ -68,7 +71,7 @@ class PromptRenderer:
             return "", ""
         rule = (cfg.get("rule") or "").strip()
         lv = (cfg.get("levels") or {}).get(level) or {}
-        parts = [self.pack.file_text(rel) for rel in lv.get("files", []) or []]
+        parts = [self.pack.file_slice(rel) for rel in lv.get("files", []) or []]
         parts = [t for t in parts if t.strip()]
         heading = lv.get("heading") or ""
         block = (heading + "\n" + "\n\n".join(parts)).strip()
@@ -94,6 +97,10 @@ class PromptRenderer:
         self.stage_files("select", ctx)
         ctx["topics_slice"] = self.pack.topics_slice(p["segment"])
         ctx["audience_slice"] = self.pack.audience_slice(p["audience"])
+        # 钩子库按风格切片（一份文件 5 套语气模板，每轮只用 1 套）。
+        # 引擎负责切，所以 skill.yaml 的 select.files 里**不该**再声明 hooks ——
+        # 声明了也会被这里覆盖成切片。
+        ctx["hooks"] = self.pack.hooks_slice(p["style"])
         return ctx
 
     def write_ctx(self, p: dict, plan_dump: dict, feedback: str) -> dict:
@@ -115,10 +122,33 @@ class PromptRenderer:
         ctx["facts_block"] = facts_block
         return ctx
 
+    def storyboard_ctx(self, sections: list[dict], timings: list[dict]) -> dict:
+        """分镜阶段上下文：行业名（系统提示用）+ 带时间轴的段落。
+
+        时间轴由 `pipeline._compute_timings` 算（口播字数/语速），模型不碰算术
+        —— 与字数配额同口径：模型只做创意，不做计算。
+
+        这里**不**走 `base_ctx`：单段重写路径拿到的 params 是产物里回读的
+        `result["params"]`，只有 PERSISTED_PARAMS 那几项（没有 quota/points），
+        拼全量上下文会在这里 KeyError —— 而分镜模板本来也不需要配额。
+        模板若引用了别的占位符，`unfilled()` 会把它记进日志。
+        """
+        rows = []
+        for i, (s, tm) in enumerate(zip(sections, timings)):
+            rows.append(
+                f"[{i + 1}] {s.get('type', '')}段 · "
+                f"{tm.get('start', 0)}-{tm.get('end', 0)}s\n{s.get('text', '')}")
+        ctx = {
+            "industry": self.pack.info.display_name,
+            "segments_with_time": "\n\n".join(rows),
+        }
+        self.stage_files("storyboard", ctx)
+        return ctx
+
     def rewrite_ctx(self, sections: list[dict], index: int, seg_quota: int,
                     feedback: str) -> dict:
         seg = sections[index]
-        return {
+        ctx = {
             "industry": self.pack.info.display_name,
             "context": "\n".join(f"[{s['type']}] {s['text'][:40]}…"
                                  for i, s in enumerate(sections) if i != index),
@@ -126,3 +156,5 @@ class PromptRenderer:
             "seg_quota": str(seg_quota),
             "seg_feedback": feedback or "按合规与口语化要求优化",
         }
+        self.stage_files("rewrite_segment", ctx)
+        return ctx

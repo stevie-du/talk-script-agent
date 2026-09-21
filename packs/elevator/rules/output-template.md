@@ -1,5 +1,15 @@
 # 输出模板
 
+> **本文件面向「成品排版」与「导出的 Agent 技能」**：`export_skill.py` 生成的
+> SKILL.md 会要求 agent 按下面的 ①~⑤ 输出，人工交付也照这个版式。
+>
+> **模型输出的结构契约不在这里** —— 撰写阶段返回什么由 `skill.yaml` 的
+> `stages.write` / `stages.storyboard` 模板规定，落盘字段由 `app/schemas.py`
+> （`ScriptResult`：`sections` / `storyboard` / `scenes` / `timings` / `check` / `quota`）
+> 规定，引擎自己的 `脚本.md` 由 `app/store.py` 渲染。这里**不再重复一份 JSON schema**：
+> 第三份结构必然与前两份漂移（此前就是它同时给了 `audio`+`sfx` 两个字段，
+> 而契约里只有一个 `sfx`）。
+
 ## 输出结构（按顺序）
 
 ```
@@ -42,7 +52,8 @@
 **【要点二】** {起始}-{结束} 秒 · {n} 字
 {文案}
 
-**【要点三】** {起始}-{结束} 秒 · {n} 字（仅 60s 及以上保留）
+**【要点三】** {起始}-{结束} 秒 · {n} 字
+{文案}
 
 **【结尾引导】** {起始}-{结束} 秒 · {c} 字
 {文案}
@@ -57,6 +68,8 @@
 - 需要重读的词用 **加粗**
 - 需要画面配合处用 `[画面：xxx]` 内联标注
 - 占位事实统一用 `{{待补：xxx}}`
+- 上面示例固定摆了三条要点，**实际要点数按 `pack.yaml` 的 `points_by_duration`**
+  （15s→1、30s→2、60/90s→3、180s→4）
 
 ---
 
@@ -69,6 +82,9 @@
 | ... | | | | | | |
 
 ### 分镜填写要求
+- 列与字段的对应：时长=`time`、画面/景别=`shot`、口播文案=`voiceover`、
+  字幕关键词=`subtitle`、音效/BGM=`sfx`、拍摄提示=`note`。
+  **音频只有 `sfx` 一个字段**（BGM 建议写进同一格），不另起 `audio` 列/字段
 - **画面**必须可实拍，写清景别（特写 / 中景 / 全景 / 跟拍 / 俯拍）
 - **字幕关键词**不是口播原文，是放大的重点，每屏 ≤ 12 字
 - **拍摄提示**写清场地、道具、安全注意事项
@@ -115,37 +131,3 @@
 - 评论区预设：{引导评论的关键词}
 ```
 
----
-
-## 结构化 JSON（如需二次加工）
-
-```json
-{
-  "meta": {
-    "topic": "",
-    "segment": "",
-    "audience": "",
-    "duration_target": 60,
-    "duration_estimated": 0,
-    "platform": "",
-    "style": "",
-    "persona": ""
-  },
-  "quota": { "total": 290, "hook": 45, "body": 190, "cta": 55 },
-  "sections": [
-    { "type": "hook", "time": "0-3s", "text": "", "words": 0, "subtitle": "" },
-    { "type": "point", "index": 1, "time": "", "text": "", "words": 0, "subtitle": "" }
-  ],
-  "storyboard": [
-    { "id": 1, "time": "0-3s", "shot": "", "audio": "", "subtitle": "", "sfx": "", "note": "" }
-  ],
-  "compliance": {
-    "ad_law": "pass",
-    "platform": "pass",
-    "industry": "pass",
-    "revisions": [{ "from": "", "to": "", "reason": "" }],
-    "placeholders": ["待补：额定载重"]
-  },
-  "publish": { "titles": [], "hashtags": [], "label_required": "" }
-}
-```

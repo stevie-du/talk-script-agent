@@ -5,7 +5,7 @@
 // 是散落的全局变量（busyNow / currentJob / setSettingsPane…），没有边界也没有
 // 文档；现在收敛成一个带注释的接口，顺便让「测试依赖什么」变得可审阅。
 
-import { $, esc, toast } from "./util.js";
+import { $, esc, toast, dayGroupKey } from "./util.js";
 import { api } from "./api.js";
 import { state, detachJob } from "./store.js";
 import * as T from "./thread.js";
@@ -16,7 +16,7 @@ import { setHead, resultSrt, resultMarkdown, voicePlainText,
   errorText } from "./result.js";
 import {
   bindShell, renderSamples, refreshGate, gotoView, fillPackSelect, setCfgHint,
-  renderModelPicker,
+  renderModelPicker, setLanding,
 } from "./ui.js";
 
 async function boot() {
@@ -26,6 +26,8 @@ async function boot() {
   bindSessionList();
   T.bindScrollPin();
   renderSamples();
+  // 问候语按当前时刻落档（HTML 里那句是兜底文案，不参与展示）。
+  setLanding(true);
 
   $("btn-generate").onclick = () => (state.busy ? abort() : send());
   $("btn-new-chat").onclick = () => { closeSettings(); gotoView("chat"); newChat(); };
@@ -46,8 +48,8 @@ async function boot() {
   refreshGate();
   autoGrowTopic();
 
-  // 空态 hero 的「配置引导」那一态已下线（见 index.html 的 #empty）：
-  // 五个居中块叠着没有主次，而且「还没配模型」这件事工具条那颗胶囊已经在说了。
+  // 空态 hero 的「配置引导」那一态已下线：五个居中块叠着没有主次，
+  // 而且「还没配模型」这件事工具条那颗胶囊已经在说了。
   // 只在「确实没配过」（无 Key 且无历史记录）时自动弹设置，避免打扰老用户。
   const noKey = !state.meta.has_api_key && !state.meta.mock;
   if (noKey && !(sessions || []).length) openSettings("llm");
@@ -58,7 +60,7 @@ function newChat() {
   // 但**不取消后端作业**：它照常跑，左栏「生成中」里留着入口，点回去即可接着看。
   if (state.busy) detachJob();
   T.clearThread();
-  $("empty").classList.remove("hidden");
+  setLanding(true);
   $("stale-banner").classList.add("hidden");
   state.result = null;
   state.paramsSnapshot = null;
@@ -104,6 +106,9 @@ window.__ts = {
   openSettings,
   closeSettings,
   setPane,
+  // 分组标签的日期读法 —— 纯函数，挂出来才能直接喂日期去断言格式
+  // （只看 DOM 是空的：桩里的记录全是今天/昨天，永远量不到数字日期那一支）。
+  dayGroupKey,
   gotoView,
   newChat,
   // 把全部绑定函数**再跑一遍**。幂等守卫的验证入口：

@@ -26,6 +26,13 @@ const NAV_OF_PANE = { packgen: "packinfo" };
 // 决定了「返回」按钮回到哪里。设成模块状态是因为 packgen 同一会话内
 // 可能从两个入口先后进，记录最后一次的来源。
 let packgenFrom = "gen";
+// 正在跑的建包作业 id（P1-43）。作业在服务端跑，所以：切面板、关设置页再回来，
+// 进度都还在；「取消」是一等动作而不是丢弃返回值；引擎重启后作业随内存释放，
+// 轮询会拿到 404 —— 那时按「没建成」处理，让人重来一遍（不会留下半个包）。
+let packgenJob = null;
+// 取消已发出、作业还没落到 cancelled 的那 ≤0.9 秒。按钮文案靠它，
+// 不能只靠一次性 textContent 赋值 —— 秒表每 1s 会重写一次按钮（实测覆盖）。
+let packgenCanceling = false;
 const dirty = new Set();
 // 最近一次 /api/config 的结果。模型列表、弹窗回填、「恢复默认」都读它 ——
 // 每次要一个字段就现发一次请求的话，弹窗里的默认值可能与列表不是同一时刻的。
@@ -552,9 +559,12 @@ async function refreshAll() {
  *  不能叠出第二个。`field` 写进 data-field，让「标了哪些字段」可被断言核对。
  *
  *  2026-09-17：模型行不再调它（任务 5 —— 移除默认模型，改为需用户自行配置）。
- *  高级配置的数值项（retries / timeout / max_tokens）仍用它：这些是「兜底值」，
- *  不是「默认模型」，告诉用户「这个值不是你自己存的」仍是有用的（点
- *  「保存高级配置」就能变成自己的）。
+ *  高级配置里仍打这个标的只有「重试次数 / 单次超时」：这些是「兜底值」，
+ *  不是「默认模型」，告诉用户「这个值不是你自己存的」仍是有用的
+ *  （点模型表单的「保存」会连同这两项一起存 —— 「保存高级配置」那颗按钮 2026-09-17 已删，
+ *  一屏两个保存按钮会让人不知道该点哪个）。
+ *  采样温度与输出预算（max_tokens）同日按用户要求移出设置页，界面上改不到，
+ *  只能改数据目录的 config.yaml 或环境变量；后端仍校验区间、也仍在使用。
  *  fillDefault() 同步删除：模型上的「恢复默认」按钮已下线（任务 6）。 */
 function markDefault(inputId, on, field) {
   const input = $(inputId);
@@ -640,7 +650,20 @@ export const bindSettings = bindOnce(function bindSettings() {
     renderPackList();
     openPackInfo().catch(e => toast("刷新失败：" + e.message, 3500));
   };
-  $("pg-close").onclick = () => setPane(packgenFrom);
+  // 生成中这一枚就是「取消生成」（P1-43）：取消检查点在模型返回之后、写盘之前，
+  // 所以通常不会留下目录。**边界**：取消来得太晚（写盘已完成）时包会完整落盘、
+  // 作业状态记 cancelled（见 pipeline 的 _run_packgen 二次检查）—— 那时它就在 packs/ 里，
+  // 下次建同名会 409，不是"什么都没发生"。
+  // 修复前它在生成期间被禁用 —— 因为那是个同步长请求，中途退出后结果会悄悄
+  // 落进隐藏面板（P3-48）；现在取消有真实语义，禁用它的理由也随之消失。
+  $("pg-close").onclick = () => {
+    if (!packgenJob) { setPane(packgenFrom); return; }
+    // 乐观反馈：作业要到下一拍轮询（≤0.9s）才落到 cancelled，
+    // 按钮一直写着「生成中 · Ns…」会让人以为没点上而再点一次。
+    packgenCanceling = true;
+    $("pg-run").textContent = "取消中…";
+    api.cancel(packgenJob).catch(e => toast("取消失败：" + e.message));
+  };
   $("pg-run").onclick = runPackgen;
   // 结果页双出口：返回回来源面板（与表单页「取消」一致），完成去工作台用新包。
   $("pg-back").onclick = () => setPane(packgenFrom);
@@ -853,7 +876,25 @@ async function showPackFile(name, rel, row) {
   }
 }
 
+const PACKGEN_HINT = "模型正在生成行业结构：细分领域、受众、选题库、红线与核实清单。";
+
+/** 轮询建包作业直到终态；每轮把作业上的过程信息搬到界面（思考字数 / 接口重试）。
+ *  `api.job` 抛错就往外抛：404 = 引擎重启、作业随内存释放，由调用方落到错误横幅。 */
+async function pollPackgen(jid, onTick) {
+  for (;;) {
+    await new Promise(r => setTimeout(r, 900));
+    const s = await api.job(jid);
+    if (s.state === "packing" || s.state === "queued") {
+      const retry = (s.steps || []).filter(x => x.key === "retry").pop();
+      const think = s.stream && s.stream.reasoning_len ? `已思考 ${s.stream.reasoning_len} 字` : "";
+      onTick([PACKGEN_HINT, think, retry ? retry.title : ""].filter(Boolean).join(" · "));
+    }
+    if (s.state === "done" || s.state === "failed" || s.state === "cancelled") return s;
+  }
+}
+
 async function runPackgen() {
+  if (packgenJob) return;                       // 已经有一个在跑（按钮此时是禁用态）
   const industry = $("pg-industry").value.trim();
   const desc = $("pg-desc").value.trim();
   if (!industry || !desc) { toast("请填写行业名称和业务描述"); return; }
@@ -862,45 +903,59 @@ async function runPackgen() {
   // textContent 会把按钮里的 spark 图标冲掉：先留个引用，结束时把它放回去，
   // 否则每生成（或失败）一次，按钮就永久少一颗图标。
   const spark = btn.querySelector(".ic-spark");
-  // 生成期间「取消」也必须禁用：同步长请求中途退出，结果会悄悄写进隐藏面板，
-  // 再次进入再点生成就成了两个并发请求、后完成者覆盖前者的视图（P3-48）。
-  const backBtn = $("pg-close");
   const working = $("pg-working");
-  btn.disabled = true;
-  if (backBtn) backBtn.disabled = true;
-  if (working) working.classList.remove("hidden");
-  errBox.classList.add("hidden");
-  errBox.textContent = "";
   const t0 = Date.now();
-  // 生成是同步长请求，期间没有任何进度反馈：按钮一直停在「约 1-2 分钟」，
-  // 上游一慢就像卡死（用户原话「等了一会后就没有后续了」）。加计时器，
-  // 让等待有脉搏 —— 「还在跑」和「卡死了」一眼可分。
-  const timer = setInterval(() => {
-    btn.textContent = `生成中 · ${Math.round((Date.now() - t0) / 1000)}s…`;
-  }, 1000);
-  try {
-    const out = await api.createPack(industry, desc);
-    state.lastCreatedPack = out.name;
-    $("pg-form").classList.add("hidden");
-    $("pg-result").classList.remove("hidden");
-    renderPackgenSummary(out);
-    $("pg-checklist").textContent = out.checklist;
-    toast(`行业包「${out.display_name}」已生成（草稿）`);
-  } catch (e) {
-    // 失败不能只靠一条几秒的 toast：用户走开一下回来就是「生成完没有后续」。
-    // 原因常驻在表单下方，表单与输入值都保留，改完字段一键重试。
-    errBox.textContent = `生成失败：${e.message}`;
-    errBox.classList.remove("hidden");
-    toast("生成失败：" + e.message, 6000);
-  } finally {
+  let timer = null;
+  let note = "";
+  const tick = (n) => {
+    // 计时器解决的是「还在跑 vs 卡死了」；作业上的思考字数与重试提示
+    // 进一步回答「它在干什么」（原来这里只有一行写死的「约 1-2 分钟」）。
+    // note 必须留着：秒表每秒重写一次这一行，不带 note 就会把上一拍的进度冲掉。
+    if (n !== undefined) note = n;
+    btn.textContent = packgenCanceling ? "取消中…"
+      : `生成中 · ${Math.round((Date.now() - t0) / 1000)}s…`;
+    if (working) working.textContent = note || PACKGEN_HINT;
+  };
+  const finish = () => {
     clearInterval(timer);
+    packgenJob = null;
+    packgenCanceling = false;
     btn.disabled = false;
-    if (backBtn) backBtn.disabled = false;
     if (working) working.classList.add("hidden");
     btn.textContent = "";
     if (spark) btn.appendChild(spark);
     btn.append("生成");
+  };
+  // 失败不能只靠一条几秒的 toast：用户走开一下回来就是「生成完没有后续」。
+  // 原因常驻在表单下方，表单与输入值都保留，改完字段一键重试。
+  const fail = (msg) => { errBox.textContent = msg; errBox.classList.remove("hidden"); toast(msg, 6000); };
+  errBox.classList.add("hidden");
+  errBox.textContent = "";
+  btn.disabled = true;
+  if (working) { working.textContent = PACKGEN_HINT; working.classList.remove("hidden"); }
+  tick();
+  timer = setInterval(() => tick(), 1000);
+  let snap;
+  try {
+    // P1-43：起作业 + 轮询，而不是把 1~2 分钟的模型调用挂在 HTTP 请求上。
+    const started = await api.createPack(industry, desc);
+    packgenJob = started.job_id;
+    snap = await pollPackgen(packgenJob, tick);
+  } catch (e) {
+    finish();
+    fail(`生成失败：${e.message}`);
+    return;
   }
+  finish();
+  if (snap.state === "cancelled") { toast("已取消生成"); return; }
+  if (snap.state === "failed") { fail(`生成失败：${snap.error || "未知错误"}`); return; }
+  const out = snap.result || {};
+  state.lastCreatedPack = out.name;
+  $("pg-form").classList.add("hidden");
+  $("pg-result").classList.remove("hidden");
+  renderPackgenSummary(out);
+  $("pg-checklist").textContent = out.checklist;
+  toast(`行业包「${out.display_name}」已生成（草稿）`);
 }
 
 /** 结果页「生成了什么」：细分/受众/人设/选题摘要。

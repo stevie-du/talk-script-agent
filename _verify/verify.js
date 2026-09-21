@@ -244,7 +244,22 @@ window.__addCount = 0;
                ? "config.yaml 语法有误（mapping values are not allowed here，第 2 行第 44 列）"
                : "" };
   }
-  var calls = { gen:0, job:0, cancel:0, rewrite:0 };
+  var calls = { gen:0, job:0, cancel:0, rewrite:0, pg:0 };
+  // 建包作业（P1-43）的桩：POST /api/packs/create 只回 job_id，
+  // 结果挂在 GET /api/jobs/jobpg 上。第一拍必须是 packing ——
+  // 若桩一上来就 done，界面里那段轮询/进度代码永远不会被执行（空转）。
+  var PG_RESULT = {
+    name: 'fitment', display_name: '全屋定制/装修', dir: 'C:/packs/fitment', draft: true,
+    checklist: '1. 核对细分领域 / 2. 核对禁用词',
+    verify_list: ['人造板甲醛释放量分级标准现行编号'],
+    segments: ['板材环保', '空间规划', '预算报价'],
+    audiences: ['装修业主', '二手房翻新业主'],
+    personas: ['从业老师傅', '定制设计师'],
+    ideas: ['全屋定制报价单，先看这三行', '板材环保等级，一条视频说清', '定制柜安装当天盯住这四处'],
+    redlines: ['不承诺绝对零甲醛'],
+    banwords_extra_hard: ['绝对零甲醛'],
+    banwords_extra_soft: ['最环保'],
+  };
   var ELEVATOR_DRAFT = true;   // 有状态：转正后变 false，才能验证按钮消失
   window.__calls = calls;
   // window.__shown 已删：它存在的唯一理由是「hero 两套文案都在 DOM 里，读
@@ -433,6 +448,13 @@ window.__addCount = 0;
     if (s.indexOf('/api/jobs/jobfail') >= 0) return mk({ id:'jobfail', state:'failed',
       error:'模型接口连接失败（已重试 3 次）：Server disconnected',
       params:{ topic:'会失败的作业', pack:'elevator', duration:60 }, steps:[] });
+    // 删记录：DELETE 必须排在下面那条「/api/history/{id} → 返回产物」之前 ——
+    // 两个分支的 URL 形状一样，靠 method 分开。桩记下被删的 id，
+    // 让「删整组到底发了哪几条 DELETE」能在断言里数得出来。
+    if (s.indexOf('/api/history/') >= 0 && o && o.method === 'DELETE') {
+      (window.__delIds || (window.__delIds = [])).push(decodeURIComponent(s.split('/').pop()));
+      return mk({ ok: true, id: s.split('/').pop() });
+    }
     if (s.indexOf('/api/history/') >= 0) return mk(RESULT);
     // 未配置 Key 的模式要模拟「真·首次运行」：没有 Key **也没有历史记录**，
     // 否则 boot() 会按设计跳过自动打开设置（有历史说明不是第一次用）。
@@ -476,20 +498,24 @@ window.__addCount = 0;
       }
       return mk(configBody());
     }
-    // packgen 结果页断言用的建包夹具：必须带摘要字段（segments/audiences/personas/ideas），
-    // 否则摘要渲染拿不到数据 —— 桩贫瘠会让「结果页有摘要」的断言测到空白实现。
-    if (s.indexOf('/api/packs/create') >= 0) return mk({
-      name: 'fitment', display_name: '全屋定制/装修', dir: 'C:/packs/fitment', draft: true,
-      checklist: '1. 核对细分领域 / 2. 核对禁用词',
-      verify_list: ['人造板甲醛释放量分级标准现行编号'],
-      segments: ['板材环保', '空间规划', '预算报价'],
-      audiences: ['装修业主', '二手房翻新业主'],
-      personas: ['从业老师傅', '定制设计师'],
-      ideas: ['全屋定制报价单，先看这三行', '板材环保等级，一条视频说清', '定制柜安装当天盯住这四处'],
-      redlines: ['不承诺绝对零甲醛'],
-      banwords_extra_hard: ['绝对零甲醛'],
-      banwords_extra_soft: ['最环保'],
-    });
+    // 建包 = 后台作业（P1-43）：只回 job_id，摘要在 /api/jobs/jobpg 的 result 里。
+    if (s.indexOf('/api/packs/create') >= 0) { calls.pg = 0; return mk({ job_id: 'jobpg' }); }
+    if (s.indexOf('/api/jobs/jobpg/cancel') >= 0) {
+      calls.cancel++;
+      return mk({ id: 'jobpg', state: 'cancelled', kind: 'packgen', params: {} });
+    }
+    if (s.indexOf('/api/jobs/jobpg') >= 0) {
+      calls.pg++;
+      if (calls.pg <= 2) {
+        return mk({ id: 'jobpg', kind: 'packgen', state: 'packing',
+          params: { industry: '全屋定制/装修' },
+          steps: [{ key: 'retry', title: '接口自动重试·第 1/2 次',
+                    ts: '2026-09-20T10:00:05', data: { note: '模型返回空内容' } }],
+          stream: { phase: '行业包生成', reasoning_tail: '先想这个行业的细分领域……',
+                    reasoning_len: 512, content_len: 0 } });
+      }
+      return mk({ id: 'jobpg', kind: 'packgen', state: 'done', result: PG_RESULT });
+    }
     if (s.indexOf('/api/packs/') >= 0) return mk({ display_name:'电梯行业包', description:'电梯行业口播脚本包',
       draft:ELEVATOR_DRAFT, checklist:'1. 核对参数 / 2. 核对禁用词',
       // ⚠ 2026-09-17：桩里的文件清单必须**覆盖全部角色**。桩只有 3 个文件时，
@@ -673,6 +699,184 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     `rows=${boot.sessions} groups=${boot.groups}`);
   check("请求带上了访问令牌", await evalIn("return window.__sawToken === true;"), "");
 
+  // ── 1b) 首页（landing）：合成器就是 hero ──────────────────
+  // 2026-09-20 参考 ZCode 重排。改前 hero 是五个居中块（深色图标砖 / 标题 / 副标题 /
+  // 2×2 白卡 / 底注）飘在中上部，输入卡钉在底部，两者之间实测一大片空白 ——
+  // 最该被看见的输入框离视觉中心最远。
+  // 这一组量的是**结构关系**不是像素值，而且**两态都要量**：首页与对话态的差别
+  // 只有 #view-chat 上那一个类，只量首页会漏掉「发送后没落回底部」这一整类回归
+  // （胶囊留在原地 / 玻璃底挂回去 / 居中没收掉，都是看得见却没人守的）。
+  // ── 1b) 规范 §2 刻度表：静态扫 styles.css，刻度外的值只许白名单那几处 ──
+  // 为什么是「快照 + 白名单」而不是「一律禁止」：表外的值今天有十处，每一处都
+  // 重新论证一遍不现实；但**新增**一处会立刻红，而**修好一处不删条目**也会红 ——
+  // 于是名单只会被写短，不会像注释那样越写越长。
+  // 注释在这里必须剥掉：规范允许 ≤2px 的光学补偿、理由写在注释里，如果扫描看得见
+  // 注释，那"补一句注释"就成了绕过这条断言的后门。
+  const cssNoCmt = (() => {
+    const lines = fs.readFileSync(path.join(REPO_ROOT, "desktop", "renderer", "styles.css"), "utf8")
+      .split(/\r?\n/);
+    let inC = false;
+    return lines.map(line => {
+      let out = "";
+      for (let i = 0; i < line.length; i++) {
+        const two = line.slice(i, i + 2);
+        if (inC) { if (two === "*/") { inC = false; i++; } out += "  "; }
+        else if (two === "/*") { inC = true; out += "  "; i++; }
+        else out += line[i];
+      }
+      return out;
+    }).join("\n");
+  })();
+  const SPACE_RE = /^(gap|row-gap|column-gap|margin(-\w+)?|padding(-\w+)?)$/;
+  const RADIUS_RE = /^border(-top|-bottom)?(-left|-right)?-radius$/;
+  const LADDER_OF = {
+    space: [0, 4, 8, 12, 16, 24, 32, 999],      // --s1..--s8（§2 间距行）
+    radius: [0, 8, 12, 16, 999],                // --r-ctl / --r-card / --r-pop / --r-pill
+  };
+  const offLadder = [];
+  for (const block of cssNoCmt.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    const sel = block[1].trim().replace(/\s+/g, " ");
+    if (!sel || sel.startsWith("@") || sel.startsWith("--")) continue;
+    // 名单按**第一个选择器**记，不按整串：给一族加一个成员是收口，不是新增破例，
+    // 用整串当键会让每次收口都先把这条断言弄红一遍（实测踩过）。
+    const key0 = sel.split(",")[0].trim();
+    for (const decl of block[2].split(";")) {
+      const d = /^\s*([a-z-]+)\s*:\s*([^]*)$/.exec(decl);
+      if (!d) continue;
+      const kind = SPACE_RE.test(d[1]) ? "space" : RADIUS_RE.test(d[1]) ? "radius" : null;
+      if (!kind) continue;
+      for (const n of d[2].matchAll(/(-?\d*\.?\d+)px/g)) {
+        const v = Math.abs(parseFloat(n[1]));
+        if (LADDER_OF[kind].includes(v) || v === 0.5) continue;   // 0.5 = 发丝线
+        offLadder.push(`${key0} { ${d[1]}: ${d[2].trim()} }`);
+      }
+    }
+  }
+  const found = [...new Set(offLadder)].sort();
+  const LADDER_ALLOW = [...new Set([
+    // —— 光学补偿（§2 例外一，注释里写明了补的是什么）——
+    ".linkbtn { margin: -2px 0 -2px var(--s2) }",        // 把 inline-block 的行盒压回 16
+    ".linkbtn { padding: 2px var(--s2) }",               // 同上：可点区域 20，行盒仍是 16
+    ".m-chip { padding: 1px var(--s2) }",                       // 小标记一族的墨底补偿
+    ".nav-item kbd { padding: 1px var(--s1) }",          // 键帽的墨底补偿，与上面同一写法
+    ".msg-assistant .avatar { margin-top: 2px }",        // 24 的头像盒对齐 15/1.6 首行
+    ".res-tab { margin-bottom: -1px }",                  // 选中态的黑线压在容器分隔线上
+    "#session-list { gap: 1px }",                        // 相邻涂底行之间的缝（§2 例外三）
+    // —— 容器尺度，不是节奏 ——
+    "select { padding: var(--s2) 28px var(--s2) var(--s3) }",   // 给自绘箭头留位
+    "#left.folded ~ #right .right-head { padding-left: 56px }", // 折叠栏宽度 + 图标列
+    ".msg-user { padding-left: 60px }",                        // 气泡让开左侧内容列
+  ])].sort();
+  const ladderExtra = found.filter(k => !LADDER_ALLOW.includes(k));
+  const ladderStale = LADDER_ALLOW.filter(k => !found.includes(k));
+  check("styles.css 刻度外的间距/圆角只有名单里那几处（新增必须先写明补的是什么）",
+    ladderExtra.length === 0 && ladderStale.length === 0,
+    `新增=${JSON.stringify(ladderExtra)} 已修好却没从名单里删=${JSON.stringify(ladderStale)}`);
+
+  // ── 1c) 首页 landing 的几何 ────────────────────────────────
+  const GREET_RE = /^(早上好|中午好|下午好|晚上好|夜深了)，今天想讲点什么？$/;
+  const landing = await evalIn(`return (() => {
+    const view = document.getElementById('view-chat');
+    const card = document.getElementById('composer-body');
+    const comp = document.getElementById('composer');
+    const chips = Array.from(document.querySelectorAll('#empty-samples .sample-card'));
+    const r = (n) => n.getBoundingClientRect();
+    const vr = r(view);
+    const one = (a) => Array.from(new Set(a));
+    return {
+      isLanding: view.classList.contains('is-landing'),
+      emptyShown: !document.getElementById('empty').classList.contains('hidden'),
+      chipsShown: !document.getElementById('empty-samples').classList.contains('hidden'),
+      greet: (document.getElementById('empty-greet').textContent || '').trim(),
+      // hero 只该剩「标识 + 一句话」两件事，副标题与底注是原来那五个居中块里的三个
+      heroKids: document.getElementById('empty').children.length,
+      extraLines: document.querySelectorAll('#empty .empty-sub, #empty .hint').length,
+      markShown: getComputedStyle(document.querySelector('.empty-mark')).display !== 'none',
+      // 深色图标砖（52px 渐变 + 阴影）不该回来：它是「实心深色」用在非主 CTA 上
+      inkTile: !!document.querySelector('#empty .mono'),
+      cardCenterOff: Math.round((r(card).top + r(card).height / 2) - (vr.top + vr.height / 2)),
+      // 居中的**主体**是整列（问候语 + 输入卡 + 起手示例），不是输入卡单独一个。
+      // auto 边距把这三块的外接框顶到正中，所以判据量这个框 —— 输入卡自己的中心
+      // 偏离多少由「上面有多少 / 下面有多少」决定，它不是一个契约值。
+      groupCenterOff: Math.round(((r(document.getElementById('chat-stream')).top
+        + r(document.querySelector('.samples')).bottom) / 2) - (vr.top + vr.height / 2)),
+      cardBottomGap: Math.round(vr.bottom - r(card).bottom),
+      chipsBelowCard: chips.length > 0 && chips.every(c => r(c).top >= r(card).bottom - 1),
+      chipRows: one(chips.map(c => Math.round(r(c).top))).length,
+      chipHeights: one(chips.map(c => Math.round(r(c).height))),
+      chipRowCenterOff: Math.round(
+        (Math.min.apply(null, chips.map(c => r(c).left))
+         + Math.max.apply(null, chips.map(c => r(c).right))) / 2 - (vr.left + vr.width / 2)),
+      chipTransition: getComputedStyle(chips[0]).transitionProperty.split(/\\s*,\\s*/),
+      // ── 胶囊一族与输入卡的两条边界（2026-09-21 用户报「字号、粗细、颜色、胶囊
+      //    大小高度、间距都不统一」）─────────────────────────────
+      // 卡内参数胶囊 / 模型胶囊逐项同档：高 / 字号 / 字重
+      pillGeo: one(Array.from(document.querySelectorAll('#composer .select-btn'))
+        .map(b => { const c = getComputedStyle(b);
+          return Math.round(r(b).height) + "/" + c.fontSize + "/" + c.fontWeight; })),
+      moreBox: (() => { const m = document.querySelector('.qp-more');
+        return { w: Math.round(r(m).width), h: Math.round(r(m).height) }; })(),
+      // 输入文字左沿 = textarea 盒左 + 它的左内边距；胶囊盒左沿必须落在同一条竖线上
+      textLeft: (() => { const t = document.getElementById('topic'), c = getComputedStyle(t);
+        return +(r(t).left + parseFloat(c.paddingLeft)).toFixed(1); })(),
+      textRight: (() => { const t = document.getElementById('topic'), c = getComputedStyle(t);
+        return +(r(t).right - parseFloat(c.paddingRight)).toFixed(1); })(),
+      pillLeft: +(r(document.querySelector('#quick-params .select-btn')).left).toFixed(1),
+      actRight: +(r(document.querySelector('#btn-generate')).right).toFixed(1),
+      // 卡 → 起手示例：#composer 的下内边距与 .samples 的上内边距只能有一份
+      chipsGap: Math.round(r(chips[0]).top - r(card).bottom),
+      greetGap: Math.round(r(card).top - (document.querySelector('.empty').getBoundingClientRect().bottom)),
+      // 首页没有「浮在滚动内容之上」的固定层语义 —— 输入区不该再挂玻璃底
+      glass: getComputedStyle(comp).backdropFilter,
+    }; })()`);
+  check("首页为 landing 态：问候语与起手胶囊同时在场",
+    landing.isLanding && landing.emptyShown && landing.chipsShown, JSON.stringify(landing));
+  check("hero 只剩标识 + 一句问候（副标题、底注、深色图标砖都下线了）",
+    landing.heroKids === 2 && landing.extraLines === 0
+      && landing.markShown && !landing.inkTile, JSON.stringify(landing));
+  check("问候语按时段落五档之一（不是写死的一句）",
+    GREET_RE.test(landing.greet), landing.greet);
+  // 居中的主体是**整列**（问候语 + 输入卡 + 起手示例），auto 边距把这三块的外接框
+  // 顶到正中 —— 判据量那个框（≤2px 就是几何居中），而不是量输入卡自己的中心：
+  // 卡心偏多少由「上面挂了多少、下面挂了多少」决定，改任何一块都会让它动，那不是一个契约。
+  // 「不再钉在底部」这一半仍单独守：卡底到视口底必须留出成段的空白。
+  check("首页整列几何居中，且输入卡不钉底（离视口底留成段空白）",
+    Math.abs(landing.groupCenterOff) <= 2 && landing.cardBottomGap > 200,
+    JSON.stringify({ groupOff: landing.groupCenterOff, cardOff: landing.cardCenterOff,
+      bottomGap: landing.cardBottomGap }));
+  check("起手胶囊在输入卡下方、排成一行、整行居中、高度同一档",
+    landing.chipsBelowCard && landing.chipRows === 1
+      && Math.abs(landing.chipRowCenterOff) <= 2 && landing.chipHeights.join() === "28",
+    JSON.stringify(landing));
+  // 胶囊一族在这一列里只许一种尺寸。规范 §2 的控件高度只有 28/32/40 三档，
+  // 卡内参数胶囊原来是刻度外的 24，与卡下 28 的起手示例同列并存 —— 用户量的
+  // 「胶囊大小高度不统一」就是这一条。字重一并量：结果卡段标签的 `.pill` 与胶囊
+  // 变体 `.select-wrap.pill` 撞名时，600 会顺着继承落进这一排（`.select-btn` 写的是
+  // `font: inherit`，挡不住权重）—— 规范 §2 字重表里控件那一档是 500。
+  check("卡内胶囊与起手示例同档：高/字号/字重逐项相等，且落在 --h-sm 28 + 控件字重 500",
+    landing.pillGeo.length === 1 && landing.pillGeo[0] === "28/13px/500"
+      && landing.chipHeights.join() === "28"
+      && landing.moreBox.h === 28 && landing.moreBox.w === 28,
+    JSON.stringify({ pillGeo: landing.pillGeo, chipHeights: landing.chipHeights,
+      moreBox: landing.moreBox }));
+  // 一张卡里不许有两条左边界（与左栏「一个行内两个左边界」同一类缺陷）：
+  // 工具条的左内边距必须等于 textarea 的左内边距，右端发送键同理。
+  check("输入卡内只有一条左边界、一条右边界（胶囊与输入文字左沿 / 发送键与文字右沿对齐）",
+    landing.pillLeft === landing.textLeft && landing.actRight === landing.textRight,
+    JSON.stringify({ pillLeft: landing.pillLeft, textLeft: landing.textLeft,
+      actRight: landing.actRight, textRight: landing.textRight }));
+  // 竖向节奏：标识→问候 12、问候→卡 24、卡→示例 16。最后这一档曾被 `#composer`
+  // 的下内边距与 `.samples` 的上内边距各算一份而叠成 32（比"问候→卡"还宽，
+  // 附属物离主人的距离反而大于段落间的距离）。
+  check("首页节奏三档：问候语→卡 24、卡→起手示例 16（下边距只算一份）",
+    landing.greetGap === 24 && landing.chipsGap === 16,
+    JSON.stringify({ greetGap: landing.greetGap, chipsGap: landing.chipsGap }));
+  check("胶囊 hover 只用一种手法（过渡项只有一列，且就是底色，规范 §2·5.4）",
+    landing.chipTransition.length === 1 && /^background(-color)?$/.test(landing.chipTransition[0]),
+    JSON.stringify(landing.chipTransition));
+  check("首页输入区不挂玻璃底（规范 §3：玻璃只给浮在滚动内容上的固定层）",
+    landing.glass === "none", landing.glass);
+
   // ── 2) 状态点三态 ────────────────────────────────────────
   const dots = await evalIn(`return Array.from(document.querySelectorAll('#session-list .sess-item'))
     .map(r => ({ dot: r.querySelector('.dot').className, aria: r.getAttribute('aria-label') || '' }));`);
@@ -701,6 +905,19 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       const bs = getComputedStyle(b);
       return { stopping: b.classList.contains('stopping'),
                img: bs.backgroundImage, bg: bs.backgroundColor }; })(),
+    // 发送后必须**整块**落回对话态：landing 类收掉、胶囊隐藏、输入卡回到底部。
+    // 只查 is-landing 不够 —— 胶囊的可见性走的是 setLanding 里另一条 classList，
+    // 两处各写一半才是这个改动真正的风险点（改前三处 hide 各写各的）。
+    // gap 的上界不是 #composer 的下内边距：生成中那行「参数已锁定」提示占在卡片
+    // 下方（composer-foot），所以这里是「内边距 + 一行提示」的量级而不是内边距本身。
+    // 判据要的是「贴回底部」，与首页那个 >200 的偏离量对照才成立 —— 单看这一条
+    // 把阈值写死成任何一个具体值都是在猜实现，留 64 是给提示行换行留余量。
+    leftLanding: (() => { const v = document.getElementById('view-chat');
+      const cb = document.getElementById('composer-body');
+      return { off: !v.classList.contains('is-landing'),
+               chips: getComputedStyle(document.getElementById('empty-samples')).display,
+               empty: document.getElementById('empty').classList.contains('hidden'),
+               gap: Math.round(v.getBoundingClientRect().bottom - cb.getBoundingClientRect().bottom) }; })(),
     // ── 生成中状态行的位置与活体指示器（第三轮：边框环 →「太难看、闪」；
     //    SVG 描边弧线把一圈放到很慢 →「还是太快」；整枚一起明暗 →
     //    「读成卡住 / 闪」。这轮是三点起伏，两条硬要求来自上面三次退回，
@@ -843,6 +1060,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   fs.writeFileSync(path.join(SHOT_DIR, "composer-stopping.png"),
     Buffer.from(stopShot.data, "base64"));
   check("发送后清空输入框", running.topicCleared, "");
+  check("发送后整块落回对话态（landing 收掉、胶囊隐藏、输入卡回到底部）",
+    running.leftLanding.off && running.leftLanding.empty
+      && running.leftLanding.chips === "none" && running.leftLanding.gap <= 64,
+    JSON.stringify(running.leftLanding));
   // 生成中参数胶囊会被 lockParams 锁住（变灰、点不动）。「为什么点不动」全靠
   // 这一句解释 —— 它和 lockParams 是一对：锁了却不说原因，用户只会看到参数
   // 莫名其妙失效。所以断言要同时覆盖「信号写进去了」和「它真的到得了眼睛」
@@ -914,6 +1135,85 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("正常包不出现配额降级提示", !done.quotaDegBanner, JSON.stringify(done.quotaDegBanner));
   check("后续建议 chips 出现", done.followups >= 2, `chips=${done.followups}`);
   check("单版本时不显示版本导航", done.verBar === 0, "");
+  // 「建议胶囊」一族只许一种画法：首页卡下的 `.sample-card` 与结果区的 `.fu-chip`
+  // 是同一个东西（点了只往输入区填一句话），曾经一个是 28/13px/正文色/--e1 描边环、
+  // 另一个是 24/11px/次级灰/0.5px 实描边。这里比**计算值**而不是盒子 ——
+  // 断言跑在对话态，起手示例此刻被 `setLanding` 收掉了，没有盒子可量。
+  const chipTwin = await evalIn(`return (function(){
+    var a = document.querySelector('.fu-chip'), b = document.querySelector('.sample-card');
+    if (!a || !b) return { missing: true };
+    var props = ['fontSize','fontWeight','color','backgroundColor','borderTopLeftRadius',
+                 'paddingTop','paddingRight','paddingBottom','paddingLeft','lineHeight',
+                 'boxShadow','whiteSpace','transitionProperty'];
+    var ca = getComputedStyle(a), cb = getComputedStyle(b), diff = [];
+    props.forEach(function(p){ if (ca[p] !== cb[p]) diff.push(p + ': ' + ca[p] + ' vs ' + cb[p]); });
+    return { diff: diff, h: Math.round(a.getBoundingClientRect().height) };
+  })()`);
+  check("结果区建议胶囊与首页起手胶囊逐项同型（一族只有一种画法）",
+    !chipTwin.missing && chipTwin.diff.length === 0 && chipTwin.h === 28,
+    JSON.stringify(chipTwin));
+  // 「有底色小标记」一族（规范 §2 + styles.css 末尾的收口那条）：八个类此刻在页面上
+  // 存在几个就比几个，字号 / 字重 / 内边距 / 圆角必须逐项相等。
+  // 这一族原来分五种画法，其中两份 padding 与 radius 是被更靠后的同特异性规则
+  // 静默盖掉的**死声明** —— 只看 CSS 源码看不出来，只能量计算值。
+  const badgeFam = await evalIn(`return (function(){
+    var sels = ['.m-chip', '.acc-badge', '.rt-b', '.kb-group-c', '.badge',
+                '.tag-warn', '.tag-default', '.rh-state'];
+    var seen = {}, who = {};
+    sels.forEach(function(s){
+      var el = document.querySelector(s); if (!el) return;
+      var c = getComputedStyle(el);
+      var k = [c.fontSize, c.fontWeight, c.paddingTop, c.paddingRight,
+               c.paddingBottom, c.paddingLeft, c.borderTopLeftRadius].join('/');
+      seen[k] = (seen[k] || 0) + 1;
+      (who[k] = who[k] || []).push(s);
+    });
+    var ks = Object.keys(seen);
+    return { n: ks.length, kinds: ks.map(function(k){ return { v: k, 成员: who[k] }; }) };
+  })()`);
+  check("有底色小标记一族八个类字号/字重/内边距/圆角完全同档",
+    badgeFam.n === 1, JSON.stringify(badgeFam));
+
+  // ── 弹层里的「一行」：参数下拉 vs 分组「…」菜单（用户报「删除的弹层不统一」）
+  // 改前实测同屏并排：行高 31 vs 28、内边距 8 全边 vs 0 8、字号 11 vs 13、
+  // 过渡 all vs 四项。容器那层本来就一样，差的全在行上 —— 所以两态都要打开量。
+  const closeAllMenus = closeMenus + `
+    document.querySelectorAll('.grp-menu:not(.hidden)').forEach(function(m){ m.classList.add('hidden'); });
+    document.querySelectorAll('.grp-more[aria-expanded]').forEach(function(b){ b.setAttribute('aria-expanded','false'); });`;
+  await evalIn(closeAllMenus + `document.body.click(); return true;`);
+  await sleep(200);
+  await evalIn(`document.querySelector('#quick-params .select-btn').click(); return true;`);
+  await sleep(320);
+  const ROW_METRICS = `var o = document.querySelector(SELECTOR); if (!o) return { missing: true };
+      var c = getComputedStyle(o), r = o.getBoundingClientRect(), m = o.parentElement;
+      var mc = getComputedStyle(m);
+      return { h: Math.round(r.height), fs: c.fontSize, lh: c.lineHeight, pad: c.padding,
+        radius: c.borderTopLeftRadius, trans: c.transitionProperty, bg: c.backgroundColor,
+        menuPad: mc.padding, menuRadius: mc.borderTopLeftRadius, menuBg: mc.backgroundColor };`;
+  // 取**未选中**的那一行比：`.select-opt.on` 会换底色与字重，拿它比会误报成"不同型"。
+  const menuRowA = await evalIn(`return (function(){ ${ROW_METRICS.replace("SELECTOR", "' .select-menu:not(.hidden) .select-opt:not(.on)'")} })()`);
+  await evalIn(closeAllMenus + `document.body.click(); return true;`);
+  await sleep(200);
+  await evalIn(`document.querySelector('.grp-more').click(); return true;`);
+  await sleep(320);
+  const menuRowB = await evalIn(`return (function(){ ${ROW_METRICS.replace("SELECTOR", "'.grp-menu:not(.hidden) .grp-menu-item'")} })()`);
+  await evalIn(closeAllMenus + `document.body.click(); return true;`);
+  await sleep(200);
+  const rowDiff = Object.keys(menuRowA || {}).filter(k =>
+    k !== "missing" && JSON.stringify(menuRowA[k]) !== JSON.stringify((menuRowB || {})[k]));
+  // 同心判据（不写死数字）：容器圆角 = 行圆角 + 容器内边距。
+  // 外圈比内圈更圆时四角"包不住"行；单一项的菜单还会被画成一颗胶囊。
+  const concentric = (row) => {
+    const num = (v) => parseFloat(String(v));
+    return Math.abs(num(row.menuRadius) - (num(row.radius) + num(row.menuPad))) < 0.01;
+  };
+  check("两种弹层里的「一行」逐项同型（行高/字号/行高值/内边距/圆角/过渡 + 容器内边距与圆角）",
+    !menuRowA.missing && !menuRowB.missing && rowDiff.length === 0
+      && menuRowA.h === 28 && menuRowA.fs === "13px",
+    `差异=${JSON.stringify(rowDiff)} 参数下拉=${JSON.stringify(menuRowA)} 分组菜单=${JSON.stringify(menuRowB)}`);
+  check("弹层圆角与里面的行同心（容器圆角 = 行圆角 + 容器内边距），两类弹层都成立",
+    concentric(menuRowA) && concentric(menuRowB),
+    `下拉=${menuRowA.menuRadius}/${menuRowA.radius}+${menuRowA.menuPad} 分组=${menuRowB.menuRadius}/${menuRowB.radius}+${menuRowB.menuPad}`);
 
   // 真实导出走的是 `a.href = URL.createObjectURL(blob)` + `a.click()`。
   // 这条路径**没被任何纯函数断言覆盖**（exportSrt/exportMd 是直接调用的），
@@ -1077,10 +1377,40 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await sleep(200);
   await evalIn(`document.getElementById('pi-newpack').click(); return true;`);
   await sleep(200);
+
+  // ── 建包走后台作业（P1-43）：生成中看得见进度、取消是真取消、跑完才出结果页 ──
   await evalIn(`document.getElementById('pg-industry').value = '全屋定制/装修';
     document.getElementById('pg-desc').value = '全屋定制家居品牌，面向新房装修业主获客';
     document.getElementById('pg-run').click(); return true;`);
+  await sleep(1000);
+  const pgRun = await evalIn(`return {
+    btn: document.getElementById('pg-run').textContent.trim(),
+    disabled: document.getElementById('pg-run').disabled,
+    closeDisabled: document.getElementById('pg-close').disabled,
+    working: !document.getElementById('pg-working').classList.contains('hidden'),
+    resultHidden: document.getElementById('pg-result').classList.contains('hidden') };`);
+  check("建包生成中：按钮报「已用 N 秒」、结果页在作业结束前不出现",
+    /生成中 · [0-9]+s/.test(pgRun.btn) && pgRun.disabled && pgRun.resultHidden,
+    JSON.stringify(pgRun));
+  check("建包生成中「取消」可用（同步长请求时代它被禁用以躲 P3-48 的竞态，作业化后理由消失）",
+    pgRun.closeDisabled === false && pgRun.working, JSON.stringify(pgRun));
+  await sleep(700);
+  const pgHint = await evalIn(`return document.getElementById('pg-working').textContent.trim();`);
+  check("生成中的说明行搬的是作业上的真实进度（思考字数 + 接口重试），不是一行写死的文案",
+    pgHint.indexOf('已思考 512 字') >= 0 && pgHint.indexOf('接口自动重试') >= 0, pgHint);
+  const cancelBefore = await evalIn(`return window.__calls.cancel || 0;`);
+  await evalIn(`document.getElementById('pg-close').click(); return true;`);
   await sleep(500);
+  const pgCancel = await evalIn(`return {
+    resultHidden: document.getElementById('pg-result').classList.contains('hidden'),
+    btn: document.getElementById('pg-run').textContent.trim() };`);
+  pgCancel.n = (await evalIn(`return window.__calls.cancel || 0;`)) - cancelBefore;
+  check("点「取消」真的发出 cancel 请求，取消后不显示结果页、按钮恢复可点",
+    pgCancel.n === 1 && pgCancel.resultHidden && !/生成中/.test(pgCancel.btn),
+    JSON.stringify(pgCancel));
+
+  await evalIn(`document.getElementById('pg-run').click(); return true;`);
+  await sleep(3200);          // 桩里第 3 拍才 done（前 2 拍是 packing）
   const pgDone = await evalIn(`return {
     resultVisible: !document.getElementById('pg-result').classList.contains('hidden'),
     summaryText: document.getElementById('pg-summary').textContent.trim(),
@@ -2523,8 +2853,8 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   //
   // 桩数据专门跨 4 天（今天 / 昨天 / 3 天前 / 10 天前），让三个分支都被走到：
   //   今天、昨天      → 相对词
-  //   3 天前          → 落在近一周，label = MM-DD 周X
-  //   10 天前         → 更早，label = MM-DD（**这条是旧实现会翻车的地方**：
+  //   3 天前          → label = M月D日（星期不进标签，挪到悬浮提示）
+  //   10 天前         → label = M月D日（**这条是旧实现会翻车的地方**：
   //                     旧口径下它和「3 天前」会被并成同一个「更早」组）
   const grouping = await evalIn(`const labels = [...document.querySelectorAll('#session-list .group-lbl')]
       .map(n => ({ label: n.querySelector('.gl-t').textContent,
@@ -2535,10 +2865,14 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   check("列表按天分组：跨天的记录被拆成多组（不是全塞进一个「更早」）",
     grouping.labels.length === 5, JSON.stringify(grouping.labels));
 
-  check("分组标签用相对词 + 具体日期（不再是「本周」「更早」这种粗桶）",
+  // 日期必须写成**中文读法**：`09-17` 这种两段裸数字后面紧跟计数
+  // （`09-17 26`），用户读不出哪个是日期、哪个是条数（原话「区分不出来
+  // 日期和后面的数字」）。`9月17日` 由「日」字收尾，怎么轻都粘不上去。
+  // 旧判据要求的是 `^[0-9]{2}-[0-9]{2}$` —— 那正是这轮要改掉的形状，
+  // 所以这里不是放宽：从「必须是 MM-DD」换成「必须是 M月D日 且不是粗桶」。
+  check("分组标签用相对词 + 中文日期（不是「本周」「更早」粗桶，也不是两段裸数字）",
     grouping.labels[0].label === "今天" && grouping.labels[1].label === "昨天"
-      && /^[0-9]{2}-[0-9]{2}/.test(grouping.labels[2].label)
-      && /^[0-9]{2}-[0-9]{2}$/.test(grouping.labels[3].label)
+      && grouping.labels.slice(2).every(g => /^[0-9]{1,2}月[0-9]{1,2}日$/.test(g.label))
       && !grouping.labels.some(g => /本周|更早/.test(g.label)),
     JSON.stringify(grouping.labels.map(g => g.label)));
 
@@ -2646,17 +2980,21 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   //   行为对 ≠ 长得对，所以这里单量几何。
   const lblAlign = await evalIn(`const g = document.querySelector('#session-list .group-lbl');
     const b = g.getBoundingClientRect();
-    const a = g.querySelector('.gl-arrow').getBoundingClientRect();
+    const a = g.querySelector('.gl-folder').getBoundingClientRect();
     const t = g.querySelector('.gl-t').getBoundingClientRect();
     const c = g.querySelector('.count').getBoundingClientRect();
     const cs = getComputedStyle(g);
-    return { 三角左: Math.round(a.left - b.left), 文字左: Math.round(t.left - b.left),
+    return { 图标左: Math.round(a.left - b.left), 文字左: Math.round(t.left - b.left),
              计数左: Math.round(c.left - b.left), 高: Math.round(b.height),
-             jc: cs.justifyContent };`);
-  check("分组标签内容靠左排（三角→文字→计数，不被 button 的居中规则接管）",
+             内边距左: Math.round(parseFloat(cs.paddingLeft)), jc: cs.justifyContent };`);
+  // 「三角贴自身的 padding-left」写成**与 padding 相等**，不写成某个绝对值：
+  // 原来这里是 `三角左 <= 10`，那个 10 其实是「padding 8 + 一点余量」的魔数，
+  // 左栏把内边距从 8 统一成 12 之后它就假红了。判据要守的是「贴左、不居中」，
+  // 具体贴到哪由 token 说。
+  check("分组标签内容靠左排（图标→文字→计数，不被 button 的居中规则接管）",
     lblAlign.jc === "flex-start"
-      && lblAlign.三角左 <= 10                      // 贴自身的 padding-left(8)
-      && lblAlign.文字左 > lblAlign.三角左          // 文字在三角右边
+      && lblAlign.图标左 === lblAlign.内边距左          // 图标就贴在自身内边距上
+      && lblAlign.文字左 > lblAlign.图标左          // 文字在图标右边
       && lblAlign.计数左 > lblAlign.文字左,         // 计数在文字右边
     JSON.stringify(lblAlign));
 
@@ -2742,7 +3080,7 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     const list = document.getElementById('session-list');
     const lbl = list.querySelector('.group-lbl');
     const row = list.querySelector('.sess-item');
-    const clone = lbl.cloneNode(true);
+    const clone = lbl.closest('.grp-row').cloneNode(true);
     row.after(clone);
     const cs = getComputedStyle(lbl);
     const c = document.createElement('canvas').getContext('2d');
@@ -2760,7 +3098,8 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     const cnt = lbl.querySelector('.count').getBoundingClientRect();
     const seaB = sea.getBoundingClientRect().bottom;
     const out = {
-      胶囊高: Math.round(lb.height), 克隆高: Math.round(clone.getBoundingClientRect().height),
+      胶囊高: Math.round(lb.height),
+      克隆高: Math.round(clone.querySelector('.group-lbl').getBoundingClientRect().height),
       行高: Math.round(row.getBoundingClientRect().height),
       上下内边距: cs.paddingTop + '/' + cs.paddingBottom,
       胶囊顶: +(lb.top - seaB).toFixed(2),
@@ -2806,15 +3145,72 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     const a = getComputedStyle(glt), b = getComputedStyle(cnt);
     return { 文字: tn.textContent.trim(), 计数: pn.textContent.trim(),
              盒顶差: +(cnt.getBoundingClientRect().top - glt.getBoundingClientRect().top).toFixed(2),
-             度量: [a.fontSize, a.fontWeight, a.lineHeight].join('/') === [b.fontSize, b.fontWeight, b.lineHeight].join('/'),
+             字号同: a.fontSize === b.fontSize, 行高同: a.lineHeight === b.lineHeight,
+             标签字重: +a.fontWeight, 计数字重: +b.fontWeight,
              背景: b.backgroundColor,
              文字墨底: +inkBottom(glt, tn).toFixed(2),
              计数墨底: +inkBottom(cnt, pn).toFixed(2) };`);
-  check("「今天」与计数同基线（盒顶零差 + 字号/字重/行高逐项相等），墨底只差字形自带的那点",
-    inkPair.度量 === true && inkPair.盒顶差 === 0
+  // 计数与标签：同字号、同行高、同盒顶（= 同一条基线），**只有字重低一档**。
+  // 原来这里断言的是「字号/字重/行高逐项相等」—— 那一版计数与标签长得一样重，
+  // 用户读不出哪个是条数（「区分不出来日期和后面的数字」）。现在刻意让计数 400、
+  // 标签 600，所以判据从「三项全等」改成「字号与行高等 + 字重必须不等且更低」：
+  // 维度少了一个、多了一个，不是放宽。墨底仍要贴在同一条基线上（≤1.2px 是
+  // 中文与数字自带的差别），谁再拿 padding 去挪字形就会红。
+  check("计数与标签同基线（字号/行高/盒顶相等），但字重低一档、背景透明",
+    inkPair.字号同 && inkPair.行高同 && inkPair.盒顶差 === 0
+      && inkPair.标签字重 === 600 && inkPair.计数字重 === 400
       && Math.abs(inkPair.文字墨底 - inkPair.计数墨底) <= 1.2
       && /rgba?\([^)]*,\s*0\)$/.test(inkPair.背景),
     JSON.stringify(inkPair));
+
+  // 分组标签的日期读法。⚠ 必须直接喂日期调用这个纯函数，不能只看 DOM：
+  // 桩里的记录全落在今天/昨天两支，数字日期那一支永远渲染不出来 ——
+  // 而「09-12 26」读不出哪个是计数，恰恰只在数字日期那一支出问题。
+  const dayFmt = await evalIn(`const k = window.__ts.dayGroupKey;
+    const at = (d) => { const x = new Date(); x.setDate(x.getDate() - d);
+      x.setHours(12, 0, 0, 0); return k(x.toISOString()); };
+    const fixed = (s) => k(s);
+    return { 今天: at(0).label, 昨天: at(1).label, 三天前: at(3).label,
+      六天前: at(6).label, 去年今日: fixed('2025-09-20T04:00:00').label,
+      跨年id: [fixed('2025-12-31T04:00:00').id, fixed('2026-01-02T04:00:00').id],
+      星期: at(3).weekday, 坏值: k('不是日期').label };`);
+  check("分组日期用中文读法（「9月17日」而非「09-17」），计数才不会粘成一段数字",
+    dayFmt.今天 === "今天" && dayFmt.昨天 === "昨天"
+      && /^[0-9]{1,2}月[0-9]{1,2}日$/.test(dayFmt.三天前)
+      && /^[0-9]{1,2}月[0-9]{1,2}日$/.test(dayFmt.六天前)
+      && dayFmt.坏值 === "时间未知",
+    JSON.stringify(dayFmt));
+  // 星期不进标签（一行三段太挤），但必须还在 —— 挪进了悬浮提示（updateGroup）。
+  // id 仍带年份且不参与展示：跨年时「12-31 / 01-02」按 MM-DD 排会反过来。
+  check("星期从标签挪到提示但不丢失，排序 id 仍带年份",
+    /^周[一二三四五六日]$/.test(dayFmt.星期) && !/周/.test(dayFmt.三天前)
+      && /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(dayFmt.跨年id[0])
+      && dayFmt.跨年id[0] < dayFmt.跨年id[1],
+    JSON.stringify(dayFmt));
+
+  // 折叠态的档距：折起的分组不渲染任何行，于是标签直接相邻。
+  // 判据是「与展开时行与行的档距同一个数」—— 全部折起时这一列该读作一份
+  // 普通密集列表，而不是一堆浮在空中的标题（用户：「每个分组的间距过大了」）。
+  // ⚠ 不能改胶囊高度去收紧：那正是上一轮修掉的「同一列几种尺寸的悬浮盒」。
+  const foldPitch = await evalIn(`const list = document.getElementById('session-list');
+    const lbl = list.querySelector('.group-lbl');
+    const row = list.querySelector('.sess-item');
+    const rowPitch = () => { const rs = list.querySelectorAll('.sess-item');
+      return +(rs[1].getBoundingClientRect().top - rs[0].getBoundingClientRect().top).toFixed(1); };
+    const wrap = lbl.closest('.grp-row');
+    const a = wrap.cloneNode(true), b = wrap.cloneNode(true);
+    wrap.after(a); a.after(b);
+    const pill = n => +n.querySelector('.group-lbl').getBoundingClientRect().height.toFixed(1);
+    const top = n => n.getBoundingClientRect().top;
+    const out = { 折档距: +(top(b) - top(a)).toFixed(1),
+      行档距: rowPitch(), 胶囊高: +lbl.getBoundingClientRect().height.toFixed(1),
+      折胶囊高: pill(b), 行高: +row.getBoundingClientRect().height.toFixed(1) };
+    a.remove(); b.remove();
+    return out;`);
+  check("折叠分组之间的档距 == 展开时行与行的档距，且胶囊高度不因此变化",
+    foldPitch.折档距 === foldPitch.行档距 && foldPitch.胶囊高 === foldPitch.行高
+      && foldPitch.折胶囊高 === foldPitch.胶囊高 && foldPitch.胶囊高 === 32,
+    JSON.stringify(foldPitch));
 
   // 后续分组标签（更早…）的竖向节奏。桩里只有 1 个分组，硬编码第二个会让测试
   // 依赖运行日期（今天跑是「昨天」、过几天就并进「更早」），所以**克隆现有的标签**
@@ -2826,17 +3222,18 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   const rhythm = await evalIn(`const list = document.getElementById('session-list');
     const lbl = list.querySelector('.group-lbl');
     const row = list.querySelector('.sess-item');
-    const clone = lbl.cloneNode(true);
+    const clone = lbl.closest('.grp-row').cloneNode(true);
     row.after(clone);
+    const box0 = clone.querySelector('.group-lbl');
     // 文字在 .gl-t 里（标签改成折叠按钮后不再是裸文本节点）
     const glt = clone.querySelector('.gl-t');
     const tn = [...glt.childNodes].find(n => n.nodeType === 3 && n.textContent.trim());
     const rg = document.createRange(); rg.selectNodeContents(tn);
     const c = document.createElement('canvas').getContext('2d');
-    const cs = getComputedStyle(clone);
+    const cs = getComputedStyle(box0);
     c.font = cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily;
     const m = c.measureText(tn.textContent.trim());
-    const box = clone.getBoundingClientRect();
+    const box = box0.getBoundingClientRect();
     const ink = rg.getBoundingClientRect().top
       + (m.fontBoundingBoxAscent - m.actualBoundingBoxAscent);
     const next = clone.nextElementSibling;
@@ -2961,12 +3358,12 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       && rowStruct.anyState === 0
       && /^[0-9]{2}:[0-9]{2}$/.test(rowStruct.time)
       && rowStruct.topic === "家用电梯怎么挑？", JSON.stringify(rowStruct));
-  // 正常完成的记录**不画点**，但 14px 图标盒必须还在原位 ——
+  // 正常完成的记录**不画点**，但 16px 图标盒必须还在原位 ——
   // 用 visibility 不用 display：后者会让整格塌掉，标题左边缘随记录状态左右跳，
   // 而「标题与分组标签文字同列」正是这一版立起来的对齐。
-  check("正常完成的记录不画状态记号，但 14px 图标盒仍占位（标题不左右跳）",
+  check("正常完成的记录不画状态记号，但 16px 图标盒仍占位（标题不左右跳）",
     /dot ok/.test(rowStruct.dotCls) && rowStruct.dotVis === "hidden"
-      && rowStruct.dotW === 14, JSON.stringify(rowStruct));
+      && rowStruct.dotW === 16, JSON.stringify(rowStruct));
   // 从行上撤走 ≠ 丢掉：行业包显示名 / 平台 / 完整时间戳 / 状态词都要能在提示里找到。
   // ⚠ 行业包要盯「不是 slug」—— 这是上一轮的真实回归（列表曾直接吐 elevator）。
   check("悬浮提示补回行业包显示名（非 slug）+ 平台 + 完整时间戳 + 状态词",
@@ -3009,21 +3406,154 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
 
   // 行与分组标签必须**同一列**。两行制时副标题从 20px 起、标题从 34px 起，
   // 同一行里两个左边缘 —— 用户报的「边距不统一」有一半是这个。
-  // 现在状态点占 14px 图标盒（与分组箭头同宽），标题左边缘 == 标签文字左边缘。
+  // 现在状态点占 16px 图标盒（与分组文件夹盒同宽），标题左边缘 == 标签文字左边缘。
   const rowGeo = await evalIn(`const lbl = document.querySelector('#session-list .group-lbl');
     const row = document.querySelector('#session-list .sess-item[data-id="s1"]');
     const rb = row.getBoundingClientRect();
-    const del = row.querySelector('.sess-del').getBoundingClientRect();
     const dot = row.querySelector('.dot').getBoundingClientRect();
     return { 标题左: +row.querySelector('.sess-topic').getBoundingClientRect().left.toFixed(1),
              标签文字左: +lbl.querySelector('.gl-t').getBoundingClientRect().left.toFixed(1),
-             点盒宽: +dot.width.toFixed(1), 箭头盒宽: +lbl.querySelector('.gl-arrow').getBoundingClientRect().width.toFixed(1),
+             点盒宽: +dot.width.toFixed(1), 图标盒宽: +lbl.querySelector('.gl-folder').getBoundingClientRect().width.toFixed(1),
              行高: +rb.height.toFixed(1),
              时刻右距: +(rb.right - row.querySelector('.sess-time').getBoundingClientRect().right).toFixed(1),
-             删除右距: +(rb.right - del.right).toFixed(1) };`);
-  check("会话行标题与分组标签文字左边缘对齐，状态点盒与箭头盒同宽(14)、行高 32",
-    rowGeo.标题左 === rowGeo.标签文字左 && rowGeo.点盒宽 === 14
-      && rowGeo.箭头盒宽 === 14 && rowGeo.行高 === 32, JSON.stringify(rowGeo));
+             // 量**图标**的右边，不量按钮盒：删除按钮是 28px 的命中区，
+             // 里面 14px 的图标居中，按钮盒右距 4 而图标右距 11 —— 眼睛看到的是图标。
+             删除图标右距: +(rb.right - row.querySelector('.sess-del svg').getBoundingClientRect().right).toFixed(1) };`);
+  check("会话行标题与分组标签文字左边缘对齐，状态点盒与分组图标盒同宽(16)、行高 32",
+    rowGeo.标题左 === rowGeo.标签文字左 && rowGeo.点盒宽 === 16
+      && rowGeo.图标盒宽 === 16 && rowGeo.行高 === 32, JSON.stringify(rowGeo));
+  // 悬停时删除图标要**顶掉时刻原来的位置**（两者抢同一个右上角）：
+  // 右边缘错开的话，鼠标一停上去那一列就横跳。容差 1px 是规范 §2 例外 1 的
+  // 光学微调额度（28px 命中区里居中的 14px 图标，天生带半像素取整）。
+  check("悬停露出的删除图标与时刻同一个右边缘（≤1px，不让右上角横跳）",
+    Math.abs(rowGeo.时刻右距 - rowGeo.删除图标右距) <= 1, JSON.stringify(rowGeo));
+
+  // ── 左栏一整列必须只有**一套**几何（用户：「新建、搜索、历史记录等等之间的
+  //    间距保持统一，还有胶囊高度等等，都要统一」）
+  // 改前实测：五块的内边距是 8 / 8 / 8 / 8 / **12** 三档（两个按钮吃全局
+  // `button { padding: 0 var(--s3) }`），「新建对话」的图标还**居中**在 87.5 处，
+  // 文字列跑出 30 / 31 / 32 / 36 四档；搜索框更隐蔽 —— 它用真 `border: .5px`
+  // 画边界，左右各吃掉 0.5px 布局宽度，于是图标从 8.5 起、文字从 32.5 起，
+  // 半像素在 dpr=1 的屏上就是错开一列。
+  // ⚠ 判据取「五块逐项相等」而不是「等于某个魔数」：宽度随视口变，
+  //   但内边距 / 圆角 / 高度 / 图标列 / 文字列必须**一个值**。
+  const colGeo = await evalIn(`const txt = (e) => {
+      const n = [...e.childNodes].find(v => v.nodeType === 3 && v.textContent.trim());
+      if (!n) return null;
+      const rg = document.createRange(); rg.selectNodeContents(n);
+      return rg.getBoundingClientRect().left;
+    };
+    const B = (name, sel, iconSel, textSel) => {
+      const e = document.querySelector(sel);
+      if (!e) return { 名称: name, 缺: true };
+      const b = e.getBoundingClientRect(), c = getComputedStyle(e), x = b.left;
+      const i = iconSel ? e.querySelector(iconSel) : null;
+      const t = textSel ? e.querySelector(textSel) : null;
+      const tl = t ? t.getBoundingClientRect().left : txt(e);
+      return { 名称: name, h: +b.height.toFixed(1), w: +b.width.toFixed(1),
+        pad: c.paddingTop + '/' + c.paddingLeft, radius: c.borderRadius,
+        图标左: i ? +(i.getBoundingClientRect().left - x).toFixed(1) : null,
+        图标宽: i ? +i.getBoundingClientRect().width.toFixed(1) : null,
+        文字左: tl === null ? null : +(tl - x).toFixed(1) };
+    };
+    const R = s => document.querySelector(s).getBoundingClientRect();
+    const foot = R('.left-foot'), btn = R('#btn-open-settings');
+    const bt = parseFloat(getComputedStyle(document.querySelector('.left-foot')).borderTopWidth);
+    return { 块: [
+        B('新建', '#btn-new-chat', 'svg', null),
+        B('搜索', '.sess-search', 'svg', 'input'),
+        B('分组标签', '#session-list .group-lbl', '.gl-folder', '.gl-t'),
+        B('会话行', '#session-list .sess-item', '.dot', '.sess-topic'),
+        B('设置', '#btn-open-settings', 'svg', '.nav-t')],
+      竖向: { 头部线到新建: +(R('#btn-new-chat').top - R('.left-head').bottom).toFixed(1),
+        新建到搜索: +(R('.sess-search').top - R('#btn-new-chat').bottom).toFixed(1),
+        搜索到列表: +(R('.left-scroll').top - R('.sess-search').bottom).toFixed(1),
+        分隔线到设置: +(btn.top - (foot.top + bt)).toFixed(1),
+        设置到窗口底: +(innerHeight - btn.bottom).toFixed(1) } };`);
+  const same = (k) => colGeo.块.every(b => b[k] === colGeo.块[0][k]);
+  check("左栏五块（新建/搜索/分组标签/会话行/设置）胶囊几何逐项相等",
+    colGeo.块.length === 5 && colGeo.块.every(b => !b.缺)
+      && same('h') && same('w') && same('pad') && same('radius')
+      && same('图标左') && same('图标宽') && same('文字左'),
+    JSON.stringify(colGeo.块));
+  check("左栏那一套值就是：高 32 + 圆角 8 + 内边距 0/12 + 图标列 12(盒宽 16) + 文字列 36",
+    colGeo.块[0].h === 32 && colGeo.块[0].radius === "8px"
+      && colGeo.块[0].pad === "0px/12px" && colGeo.块[0].图标左 === 12
+      && colGeo.块[0].图标宽 === 16 && colGeo.块[0].文字左 === 36,
+    JSON.stringify(colGeo.块[0]));
+  // 竖向：块与块之间一律 16（= --s4），列表内部 1px 是密集行的既定节奏（另一条守）。
+  // 这里连底部「分隔线→设置」一起量 —— 它曾被 .nav-item 的 1px margin 顶成 17。
+  // 「设置→窗口底边」也钉在同一条 16 上：.left-foot 与 .left-top 是同列上下两个
+  // 固定区，必须用同一套 padding。下边曾停在 --s2，于是上 16 下 8 —— 用户报
+  // 「底部设置区域四周间距不统一」量的正是这个。左右仍是 12（图标列，见五块几何那条）。
+  check("左栏竖向节奏统一 16：头部线→新建→搜索→列表、分隔线→设置、设置→窗口底边",
+    colGeo.竖向.头部线到新建 === 16 && colGeo.竖向.新建到搜索 === 16
+      && colGeo.竖向.搜索到列表 === 16 && colGeo.竖向.分隔线到设置 === 16
+      && colGeo.竖向.设置到窗口底 === 16,
+    JSON.stringify(colGeo.竖向));
+  // ── 左栏的两处「刻度外细节」（用户：左侧只优化细节，不要大改）────────
+  // 1) 图标盒：这一列里 14px 字形配的盒子必须都是 16 —— 搜索行的清除按钮
+  //    原来是 18，是全列唯一不合档的那颗（规范 §2「4 的倍数」+ §4 图标档位）。
+  // 2) 焦点环：全站只许一种配方 --shadow-focus（规范 §2·5.5）。
+  //    改前左栏有两处自绘 outline 环，其中 .group-lbl 用的是 7% 黑的
+  //    --ring-focus —— 在侧栏浅灰上量不出来，键盘走到分组标签看不见焦点。
+  // ⚠ 焦点环读**样式表里写下的声明**，不 Tab 到元素上读计算值：
+  //    :focus-visible 要键盘态才进得去，程序 focus() 进不进得去取决于
+  //    上一次输入是鼠标还是键盘 —— 那样量会假绿。
+  const leftDetail = await evalIn(`return (() => {
+    const box = (n) => Math.round(n.getBoundingClientRect().width);
+    // 清除按钮平时 display:none（hover / 聚焦才现），没有盒子可量。
+    // 临时摘掉 hidden 量完再装回去 —— 它不参与任何状态，比读样式表里的
+    // 声明强：读到的值可能被后面某条更具体的规则盖掉（这一族踩过一次）。
+    const clr = document.querySelector('.sess-search .icon-btn');
+    let clrW = null;
+    if (clr) { clr.classList.remove('hidden'); clrW = box(clr); clr.classList.add('hidden'); }
+    const ringOf = (sel) => {
+      for (const sheet of document.styleSheets) {
+        let rules; try { rules = sheet.cssRules; } catch (_) { continue; }
+        for (const x of rules) {
+          if (!x.selectorText) continue;
+          if (x.selectorText.split(',').map(s => s.trim()).includes(sel)
+              && x.style.getPropertyValue('box-shadow')) {
+            return x.style.getPropertyValue('box-shadow');
+          }
+        }
+      }
+      return null;
+    };
+    const RING_STYLES = ['solid', 'double', 'dotted', 'dashed', 'groove', 'ridge', 'outset', 'inset', 'auto'];
+    const rings = [];
+    for (const sheet of document.styleSheets) {
+      let rules; try { rules = sheet.cssRules; } catch (_) { continue; }
+      for (const x of rules) {
+        if (!x.selectorText || !/:focus-visible/.test(x.selectorText)) continue;
+        // 只认**真的画了环**的写法。outline: none 把 outline-style 重置成 none、
+        // 把 outline-width 重置成 initial —— 那正是这一族关掉浏览器默认环的写法，
+        // 不是「第二种配方」。（第一版按 width 判，把全部 9 条都误判成了违规。）
+        if (RING_STYLES.includes(x.style.getPropertyValue('outline-style'))) {
+          rings.push(x.selectorText);
+        }
+      }
+    }
+    return {
+      清除按钮盒: clrW,
+      分组图标盒: box(document.querySelector('.gl-folder')),
+      行记号盒: box(document.querySelector('.sess-item .dot')),
+      品牌字形: box(document.querySelector('.brand .logo-wrap svg')),
+      自绘焦点环: rings,
+      分组焦点: ringOf('.group-lbl:focus-visible'),
+      删除焦点: ringOf('.sess-del:focus-visible'),
+    }; })()`);
+  check("左栏图标盒同一档：清除按钮 / 分组文件夹 / 行记号都是 16 的盒",
+    leftDetail.清除按钮盒 === 16 && leftDetail.分组图标盒 === 16
+      && leftDetail.行记号盒 === 16, JSON.stringify(leftDetail));
+  check("品牌字形回到规范 §4 的图标档位（14，不是刻度外的 13）",
+    leftDetail.品牌字形 === 14, JSON.stringify(leftDetail.品牌字形));
+  check("全站 :focus-visible 没有第二套焦点环配方（规范 §2·5.5）",
+    leftDetail.自绘焦点环.length === 0, JSON.stringify(leftDetail.自绘焦点环));
+  check("左栏那两处焦点环已落到 --shadow-focus 一族",
+    /shadow-focus/.test(leftDetail.分组焦点 || '')
+      && /shadow-focus/.test(leftDetail.删除焦点 || ''), JSON.stringify(leftDetail));
   // 悬停时时刻让位给删除按钮（两者抢同一个右上角）：不挡行底、不叠字。
   const timeFade = await evalIn(`const row = document.querySelector('#session-list .sess-item[data-id="s1"]');
     row.scrollIntoView({ block: 'center' });
@@ -3040,25 +3570,110 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 5, y: 5 });
   await sleep(200);
 
-  // 折叠箭头：内联 SVG（规范 §4 禁止文本字形当图标），且方向必须是
-  // **展开朝下 / 折起朝右**。旧实现用 CSS 边框画三角，静止态是朝右的 ▶、
-  // 折叠时 rotate(90deg) 转成朝下 ▼ —— 与所有分组列表的惯例相反，
-  // 收起的那一组看着像「点我展开」，展开着的反而像收起。
-  const arrow = await evalIn(`return (async () => {
-    const g = document.querySelector('#session-list .group-lbl');
-    const tf = () => { const a = g.querySelector('.gl-arrow');
-      return { tag: a.tagName, t: getComputedStyle(a).transform }; };
-    const open = tf();
-    g.click(); await new Promise(r => setTimeout(r, 80));
-    const shut = tf();
-    g.click(); await new Promise(r => setTimeout(r, 80));
-    return { open: open, shut: shut, back: tf(),
-             stored: localStorage.getItem('ts.sess.folded') };
+  // 分组图标 = 文件夹，**开 / 合两个字形**（参考 Qoder 侧栏）。
+  // ⚠ 折叠信号必须换得来：这一列里折叠态只由图标表达（不给文字换色 —— 另一条
+  //   断言守着），所以「换成文件夹」不能换成「同一个图标转个角度」，
+  //   必须展开时可见开口那一枚、折起时可见合口那一枚，且**任何时刻只有一枚可见**
+  //   （两枚都在 = 图标叠影；都不在 = 折叠态整列没有状态信号）。
+  // 此前这里是箭头：静止态不旋转、折起 rotate(-90deg) 朝右。更早用 CSS 边框画
+  // 三角，静止朝右、折叠转朝下，方向与所有分组列表的惯例相反。
+  const folder = await evalIn(`return (async () => {
+    const vis = () => {
+      const g = document.querySelector('#session-list .group-lbl');
+      return [...g.querySelectorAll('.gl-folder')].map(a => ({
+        tag: a.tagName, shown: getComputedStyle(a).display !== 'none',
+        w: Math.round(a.getBoundingClientRect().width) }));
+    };
+    const open = vis();
+    document.querySelector('#session-list .group-lbl').click();
+    await new Promise(r => setTimeout(r, 120));
+    const shut = vis();
+    document.querySelector('#session-list .group-lbl').click();
+    await new Promise(r => setTimeout(r, 120));
+    return { open, shut, back: vis(), stored: localStorage.getItem('ts.sess.folded') };
   })();`);
-  check("折叠箭头是内联 SVG；展开不旋转、折起 rotate(-90deg) 朝右、再展开复位",
-    arrow.open.tag === "svg" && arrow.open.t === "none"
-      && arrow.shut.t === "matrix(0, -1, 1, 0, 0, 0)" && arrow.back.t === "none"
-      && arrow.stored === "[]", JSON.stringify(arrow));
+  // 露出来的那枚必须是 16 的图标盒；藏起来的那枚 display:none，天生没有盒子
+  // （w=0）—— 那正是「只有一枚可见」的表现，不是缺陷。
+  const one = (v) => v.length === 2 && v.every(x => x.tag === "svg")
+    && v.filter(x => x.shown).length === 1 && v.find(x => x.shown).w === 16;
+  check("分组图标是两枚 16px 内联 SVG 文件夹，展开/折起各自只露一枚、再展开复位",
+    one(folder.open) && one(folder.shut) && one(folder.back)
+      && folder.open.findIndex(x => x.shown) !== folder.shut.findIndex(x => x.shown)
+      && folder.stored === "[]", JSON.stringify(folder));
+
+  // 「…」菜单：常态隐藏、点开给**一个**危险动作，且条数写在字里。
+  const grpMenu = await evalIn(`return (async () => {
+    const row = document.querySelector('#session-list .grp-row');
+    const more = row.querySelector('.grp-more'), menu = row.querySelector('.grp-menu');
+    const idle = { moreOp: +getComputedStyle(more).opacity, menuHidden: menu.classList.contains('hidden'),
+                   items: menu.querySelectorAll('.grp-menu-item').length };
+    more.click();
+    await new Promise(r => setTimeout(r, 120));
+    const open = { menuHidden: menu.classList.contains('hidden'),
+      aria: more.getAttribute('aria-expanded'),
+      text: menu.querySelector('.grp-menu-item').textContent.trim(),
+      color: getComputedStyle(menu.querySelector('.grp-menu-item')).color,
+      // 与 --bad 现算比对，不抄色值：抄一份 rgb 进断言，令牌一改就假红
+      bad: (() => { const t = document.createElement('span');
+        t.style.color = 'var(--bad)'; document.body.appendChild(t);
+        const v = getComputedStyle(t).color; t.remove(); return v; })(),
+      w: Math.round(menu.getBoundingClientRect().width),
+      under: Math.round(menu.getBoundingClientRect().top - row.getBoundingClientRect().bottom) };
+    document.body.click();
+    await new Promise(r => setTimeout(r, 120));
+    const closed = { menuHidden: menu.classList.contains('hidden'),
+      aria: more.getAttribute('aria-expanded') };
+    return { idle, open, closed };
+  })();`);
+  check("分组「…」常态隐藏，点开弹出一个红色危险项、写着条数，点别处自动收起",
+    grpMenu.idle.moreOp === 0 && grpMenu.idle.menuHidden && grpMenu.idle.items === 1
+      && grpMenu.open.menuHidden === false && grpMenu.open.aria === "true"
+      && /^删除这一组（[0-9]+ 条）$/.test(grpMenu.open.text)
+      && grpMenu.open.color === grpMenu.open.bad
+      && grpMenu.open.w >= 168 && grpMenu.open.under > 0
+      && grpMenu.closed.menuHidden && grpMenu.closed.aria === "false",
+    JSON.stringify(grpMenu));
+
+  // 删整组 = 该组每条记录各发一个 DELETE，一条不多一条不少。
+  // ⚠ 桩是**无状态**的（每次 /api/history 都重新生成同一份），所以这里能断言的
+  //   是「请求打对了」而不是「列表少了 N 行」—— 真删掉的验证走 e2e-live.js 的
+  //   真实引擎那条路。确认弹窗必须出现且取消时**一个请求都不发**：
+  //   一次抹掉整组不可恢复，误触的代价比单条删除大得多。
+  const grpDel = await evalIn(`return (async () => {
+    window.__delIds = [];
+    const row = document.querySelector('#session-list .grp-row');
+    // 这一组的行 = 从本组壳往后数、直到下一个壳或列表结尾（行不在壳里，是兄弟）。
+    const groupIds = [];
+    for (let n = row.nextElementSibling; n && !n.classList.contains('grp-row'); n = n.nextElementSibling)
+      if (n.classList.contains('sess-item')) groupIds.push(n.dataset.id);
+    const otherIds = [...document.querySelectorAll('#session-list .sess-item')]
+      .map(r => r.dataset.id).filter(x => !groupIds.includes(x));
+    row.querySelector('.grp-more').click();
+    row.querySelector('.grp-menu-item').click();
+    await new Promise(r => setTimeout(r, 150));
+    const dlg = { open: !document.getElementById('confirm-dialog').classList.contains('hidden'),
+      title: document.getElementById('cd-title').textContent,
+      msg: document.getElementById('cd-msg').textContent,
+      dels: window.__delIds.slice() };
+    document.getElementById('cd-no').click();
+    await new Promise(r => setTimeout(r, 80));
+    const afterNo = { dels: window.__delIds.slice(),
+      hidden: document.getElementById('confirm-dialog').classList.contains('hidden') };
+    row.querySelector('.grp-more').click();
+    row.querySelector('.grp-menu-item').click();
+    await new Promise(r => setTimeout(r, 150));
+    document.getElementById('cd-yes').click();
+    await new Promise(r => setTimeout(r, 400));
+    return { 该组: groupIds, 其他: otherIds, dlg, afterNo, 删完: window.__delIds.slice() };
+  })();`);
+  check("删整组先弹确认；取消一个请求都不发，确认则**只**对该组每条记录各发一次 DELETE",
+    grpDel.dlg.open && grpDel.dlg.title === "删除整个分组"
+      && /不可恢复/.test(grpDel.dlg.msg) && grpDel.dlg.dels.length === 0
+      && grpDel.afterNo.dels.length === 0 && grpDel.afterNo.hidden
+      && grpDel.该组.length === 2
+      && grpDel.删完.slice().sort().join() === grpDel.该组.slice().sort().join()
+      && !grpDel.删完.some(id => grpDel.其他.includes(id)),
+    JSON.stringify(grpDel));
 
   // 分组标签悬停必须有落点。此前是 `.group-lbl:hover{color:var(--text-2)}` ——
   // 与常态**同一个值**的一条空规则：标签看着就是一行普通文字，
@@ -3081,16 +3696,18 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       && lblHover.pillColor === "rgb(110, 110, 115)", JSON.stringify(lblHover));
   // 计数是**裸数字**，不许再描背景：药丸在 11px 小字里凭空多出一块面积，
   // 读起来比标签本身还重（「今天 17」里眼睛先看到 17）。
+  // 字重也从 600 降到 400 —— 与标签同重时，「09-12 26」两个数字是同一族字，
+  // 读不出哪个是计数（见 .count 那段注释）。
   // 设置页 `.kb-group-c` 抄的是同一画法，但它只在行业包面板渲染，
   // 此刻多半不在 DOM 里 —— 跨页比对交给 styles.css 那条注释与人工走查。
   const countStyle = await evalIn(`const c = getComputedStyle(
       document.querySelector('#session-list .group-lbl .count'));
     return { bg: c.backgroundColor, pad: c.padding, radius: c.borderRadius,
              fs: c.fontSize, fw: c.fontWeight, color: c.color };`);
-  check("分组计数不描背景（裸数字：透明底 / 无内边距 / 无圆角）",
+  check("分组计数不描背景（裸数字：透明底 / 无内边距 / 无圆角）、字重比标签轻一档",
     /rgba?\([^)]*,\s*0\)$/.test(countStyle.bg) && countStyle.pad === "0px"
       && countStyle.radius === "0px" && countStyle.fs === "11px"
-      && countStyle.fw === "600" && countStyle.color === "rgb(110, 110, 115)",
+      && countStyle.fw === "400" && countStyle.color === "rgb(110, 110, 115)",
     JSON.stringify(countStyle));
   await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 5, y: 5 });
   await sleep(200);
@@ -3105,7 +3722,7 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     gs[0].click(); await new Promise(r => setTimeout(r, 80));
     return { before: before, after: after };
   })();`);
-  check("折叠不改文字色（箭头方向才是状态信号）",
+  check("折叠不改文字色（文件夹开合才是状态信号）",
     foldColor.before === foldColor.after && foldColor.before === "rgb(110, 110, 115)",
     JSON.stringify(foldColor));
 
@@ -3378,7 +3995,8 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     var pill = document.querySelector('#model-pick .select-btn');
     var cs = pill ? getComputedStyle(pill) : null;
     return {
-      // hero 只该有一态：标题永远是「想聊点什么？」，[data-when] 那套整体拿掉
+      // hero 只该有一态：标题是**按时段落档的问候语**（五档之一，见 GREET_RE），
+      // 不再是写死的一句「想聊点什么？」；[data-when] 那套整体拿掉
       heroTitle: (h3.textContent || '').trim(),
       whenNodes: empty.querySelectorAll('[data-when]').length,
       setupBtn: !!document.getElementById('btn-empty-setup'),
@@ -3395,8 +4013,8 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     }; })()`);
   check("首启自动打开设置并落在「模型接口」分区",
     firstRun.settingsOpen && firstRun.paneLlm, JSON.stringify(firstRun));
-  check("空态 hero 只有一态（引导态与 [data-when] 切换已下线，示例卡保留）",
-    /想聊点什么/.test(firstRun.heroTitle)
+  check("空态 hero 只有一态（问候语分五档；引导态与 [data-when] 切换已下线，示例胶囊保留）",
+    GREET_RE.test(firstRun.heroTitle)
       && firstRun.whenNodes === 0 && firstRun.setupBtn === false
       && firstRun.cards === 0 && firstRun.samples === 4,
     JSON.stringify(firstRun));
@@ -3929,14 +4547,14 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     var seen = {};
     Array.prototype.forEach.call(bs, function(b){
       var cs = getComputedStyle(b);
-      seen[Math.round(b.getBoundingClientRect().height) + "/" + cs.fontSize] = 1;
+      seen[Math.round(b.getBoundingClientRect().height) + "/" + cs.fontSize + "/" + cs.fontWeight] = 1;
     });
     var kinds = Object.keys(seen);
     return { count: bs.length, kinds: kinds, size: kinds.join(",") };
   })()`);
-  check("输入区那一排下拉控件高度与字号完全一致（模型胶囊不再比参数胶囊大一档）",
+  check("输入区那一排下拉控件高度、字号与字重完全一致（模型胶囊不再比参数胶囊大一档）",
     pillRow.count >= 5 && pillRow.kinds.length === 1
-      && pillRow.size === "24/13px", JSON.stringify(pillRow));
+      && pillRow.size === "28/13px/500", JSON.stringify(pillRow));
 
   // 2026-09-17 二改：空态里**不放按钮**了（用户问「没有配置的时候有两个
   // 添加模型入口，你觉得需要优化吗？」）—— 入口统一留给 headbar 那一颗，
@@ -4168,6 +4786,13 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       topicInCard: cb.contains(topic),
       toolsBelowTopic: r(tools).top >= r(topic).bottom - 1,
       sendRight: Math.abs(r(send).right - r(tools).right),
+      // 内边距按**设它的那个值**来判，不写死像素：把工具条左右内边距从 8 改到 16
+      // 是为了让它与输入文字的左/右边界合成一条线（一张卡里不许有两条左边界），
+      // 写死 8 的下一次 token 调整会被读成回归。
+      toolsPadLeft: parseFloat(cs.paddingLeft),
+      toolsPadRight: parseFloat(cs.paddingRight),
+      topicPadLeft: parseFloat(getComputedStyle(topic).paddingLeft),
+      topicPadRight: parseFloat(getComputedStyle(topic).paddingRight),
       modelLeftOfSend: r(model).right <= r(send).left + 1,
       sameRow: Math.abs(r(model).top - r(send).top) < 8,
       toolCount: qb.querySelectorAll('.select-wrap.pill').length,
@@ -4243,7 +4868,14 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     maxShadowBlur(compose.ring) >= 16 && maxShadowBlur(composeIdle.ring) < 16,
     `focusBlur=${maxShadowBlur(compose.ring)} idleBlur=${maxShadowBlur(composeIdle.ring)}`);
   check("发送键仍在工具条右端（保持右下角）",
-    compose.sendRight < 12, `rightOffset=${compose.sendRight}`);
+    compose.sendRight === compose.toolsPadRight && compose.toolsPadRight > 0,
+    `rightOffset=${compose.sendRight} padRight=${compose.toolsPadRight}`);
+  // 一张卡只许有一条左边界、一条右边界：工具条的左右内边距必须与输入框的左右
+  // 内边距同源，否则「输入文字 415 / 第一个胶囊 407」那样在同一张卡里出现两条竖线。
+  check("工具条左右内边距与输入文字同源（卡内不再有第二条左边界与第二条右边界）",
+    compose.toolsPadLeft === compose.topicPadLeft
+      && compose.toolsPadRight === compose.topicPadRight,
+    `tools=${compose.toolsPadLeft}/${compose.toolsPadRight} topic=${compose.topicPadLeft}/${compose.topicPadRight}`);
   check("模型选择器紧邻发送键左侧、同一行",
     compose.modelLeftOfSend === true && compose.sameRow === true,
     `leftOfSend=${compose.modelLeftOfSend} sameRow=${compose.sameRow}`);

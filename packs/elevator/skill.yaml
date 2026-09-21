@@ -6,13 +6,18 @@
 # 可用占位符：
 #   公共   $industry $topic $segment $audience $platform $style $persona $duration $points $rate
 #   配额   $quota_total $quota_hook $quota_body_per $quota_cta
-#   选题   $topics_slice(按细分切片) $audience_slice(按受众切片)
+#   选题   $topics_slice(按细分切片) $audience_slice(按受众切片) $hooks(按风格切片，引擎负责)
+#   分镜   $segments_with_time(定稿段落 + 代码算好的时间轴)
 #   文件   stages.<阶段>.files 里声明的每个 key，都对应一个同名占位符：
 #          select.files.hooks → $hooks ；write.files.growth → $growth
+#          取值可写成 `路径#章节关键词`，只注入那一节（`knowledge/standards.md#核心术语`）
 #          （**必须同名**。曾经这里写成 $growth_block 而 files 的 key 是 growth，
 #            结果 growth.md 从来没被注入过，模型还收到一个字面量 "$growth_block"。
 #            引擎现在会检查未填充的占位符并记进作业日志。）
-#   撰写   $plan_json $facts_block(用户补充+私有资料) $voice_block(按人味档位组成) $feedback_block(回炉反馈)
+#   撰写   $plan_json $facts_block(用户补充+私有资料) $voice_block(按人味档位组成)
+#          $feedback_block(回炉反馈) $anti_ai_rule(反 AI 味自查清单)
+#          $redlines(write.files.redlines → compliance/industry.md，整份注入)
+#          $terms(write.files.terms → knowledge/standards.md#核心术语，只注一节)
 #   重写段 $context $seg_type $seg_text $seg_quota $seg_feedback
 #
 # 人味档位：anti_ai.levels 定义 strong/standard/off 三档分别注入的规则与文件；
@@ -20,7 +25,7 @@
 
 version: 1
 name: 通用口播流水线
-description: 参数归一 → 选题策划 → 文案撰写 → 校验回炉；口播语体 + 反 AI 味
+description: 参数归一 → 选题策划 → 文案撰写 → 校验回炉 → 分镜；口播语体 + 反 AI 味
 
 limits:
   recheck_rounds: 2        # 校验不合格时的最大回炉次数
@@ -55,8 +60,9 @@ stages:
       4. cta：结尾引导，动作唯一，**用户指定的动作是「$cta」**，不得自换别的动作
       5. 不出现绝对化承诺、权威背书、行业红线表述
       输出 JSON 字段：angle, hook_type, hook_line, points, cta
-    files:
-      hooks: patterns/hooks.md
+    # 钩子库不在这里声明：$hooks 由引擎按风格切片注入（`Pack.hooks_slice`，
+    # 整份 5 套语气模板每轮只用 1 套，其余是噪声）。
+    files: {}
 
   write:
     system: |
@@ -72,7 +78,7 @@ stages:
       $anti_ai_rule
       只输出一个 JSON 对象，不要任何多余文字。
     user_template: |
-      【任务】按已确认的选题撰写口播脚本（含分镜）。
+      【任务】按已确认的选题撰写口播脚本正文。
       $feedback_block
       【选题（照此执行，不改角度）】
       $plan_json
@@ -85,23 +91,24 @@ stages:
       $voice_block
       【行业红线（必须遵守，不得违反；涉及救援/术语/敏感话题时优先按此口径）】
       $redlines
+      【术语 → 口语解释（要用到这个术语时按右列说，别自己编类比）】
+      $terms
       【输出结构】JSON：
       {
         "sections": [
           {"type": "hook", "text": "开场钩子文案", "subtitle": "字幕关键词"},
           {"type": "point", "text": "要点文案", "subtitle": "字幕关键词"},
           {"type": "cta", "text": "结尾引导文案", "subtitle": "字幕关键词"}
-        ],
-        "storyboard": [{"time": "0-4s", "shot": "画面/景别", "subtitle": "字幕关键词", "sfx": "音效/BGM", "note": "拍摄提示"}]
+        ]
       }
 
       【要求】
       1. sections 恰好 1 个 hook + $points 个 point + 1 个 cta，顺序固定
       2. 每段 text 用 ／ 标注停顿，**重读词**加粗；口语化硬规则见系统提示
       3. subtitle 每屏 ≤ 12 字，不是口播原文照搬
-      4. storyboard 覆盖整条片子的时间线，画面必须可实拍；涉及危险区域提示"需专业单位配合"
-      5. 私有知识库已填的数字优先使用；没有的事实用 {{待补：xxx}} 占位
-      6. $platform 平台合规：不出现该平台违禁词
+      4. 私有知识库已填的数字优先使用；没有的事实用 {{待补：xxx}} 占位
+      5. $platform 平台合规：不出现该平台违禁词
+      （分镜不在这里写 —— 有单独的「分镜」阶段，正文定稿后才生成。）
     # 撰写阶段额外注入的知识文件（占位符 → 文件路径；缺失自动跳过）
     files:
       growth: patterns/growth.md
@@ -109,6 +116,9 @@ stages:
       # 曾经只存在于 compliance/industry.md 而引擎从不注入 —— 模型手里没有这份，
       # 最要命的救援话术自由发挥（回炉也救不回来）。挂到 write 阶段每轮都带。
       redlines: compliance/industry.md
+      # 只取「核心术语」那一节（`路径#章节`）：整份 standards.md 2195 字里
+      # 撰写用得上的只有这张 术语→口语解释 表，法规编号是给人工核对用的。
+      terms: knowledge/standards.md#核心术语
     # 人味（去 AI 味）档位：界面可选，引擎按档位组装 $anti_ai_rule 与 $voice_block
     anti_ai:
       rule: |
@@ -124,6 +134,25 @@ stages:
         off:
           heading: ""
           files: []
+
+  # 分镜阶段（P1-30）：正文定稿 + 校验通过后才生成 —— 与 write 分开后，
+  # write 只出 sections（实测同提示词 110~127s → 12~23s），且回炉不再
+  # 重做与校验无关的分镜；format=voice 时整个阶段被跳过。
+  storyboard:
+    system: |
+      你是$industry行业资深的短视频视觉策划。把已经定稿的口播脚本配成分镜画面。
+      只输出一个 JSON 对象，不要任何多余文字。
+    user_template: |
+      【任务】为口播脚本生成分镜，**恰好与段落一一对应**：N 段 = N 个分镜，顺序一致，不得多删少加。
+      【口播脚本（每段含预估时长）】
+      $segments_with_time
+      【要求】
+      1. shot 画面必须可实拍，写清景别（特写 / 中景 / 全景 / 跟拍 / 俯拍）
+      2. 涉及危险或专业操作（扒门、检修、井道）用示意图 / 动画替代实拍，并提示"需专业单位配合"
+      3. sfx 填音效 / BGM 建议；subtitle 每屏 ≤ 12 字，不是口播原文照搬
+      4. note 写拍摄提示（场地 / 道具 / 安全注意事项）
+      输出 JSON：{"storyboard": [{"time": "开始-结束秒", "shot": "画面/景别", "subtitle": "字幕关键词", "sfx": "音效/BGM", "note": "拍摄提示"}]}
+    files: {}
 
   rewrite_segment:
     system: |

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""流水线编排：参数归一 → 选题策划 → 文案撰写 → 校验回炉 → 组装落盘
+"""流水线编排：参数归一 → 选题策划 → 文案撰写 → 校验回炉 → 分镜 → 组装落盘
 
 生成方法（提示词、注入文件、回炉上限）不在代码里，而是每个行业包自带的 skill.yaml
 ——知识库管"写什么"，技能管"怎么写"，两者都随包配置、随包分发。
@@ -23,6 +23,7 @@ Python 没法强杀线程，取消只能协作式：把检查点放在每个耗�
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -38,6 +39,7 @@ from .jobs import (TERMINAL_STATES, Job, JobCancelled, JobRegistry,  # noqa: F40
                    StateConflict, new_job_id)
 from .knowledge import Pack, PackError  # noqa: F401
 from .llm import LLMClient
+from .packgen import create_pack, preview_slug
 from .prompts import PromptRenderer
 from .schemas import (GenerateRequest, RewriteSegmentRequest,
                       ScriptResult, ScriptSection, StoryboardShot, TopicPlan)
@@ -45,8 +47,16 @@ from .store import ArtifactStore
 
 
 class ScriptDraft(BaseModel):
-    """模型在「撰写」阶段要返回的结构。"""
+    """模型在「撰写」阶段要返回的结构。
+
+    P1-30：只出 sections —— 分镜拆成了独立阶段（见 `_storyboard`），
+    正文定稿并校验通过后才生成（实测拆分后 write 从 110~127s 降到 12~23s）。
+    """
     sections: list[ScriptSection]
+
+
+class StoryboardDraft(BaseModel):
+    """模型在「分镜」阶段要返回的结构：与 sections 一一对应的分镜列表。"""
     storyboard: list[StoryboardShot]
 
 
@@ -135,6 +145,9 @@ class Pipeline:
         self.store = ArtifactStore(root, data_dir=self.data_dir)
         self._llm_lock = threading.Lock()
         self._llm: LLMClient | None = None
+        # 选题复用缓存（见 `_select` 与 `PLAN_CACHE_MAX` 的注释）
+        self._plan_lock = threading.Lock()
+        self._plan_cache: dict[str, TopicPlan] = {}
 
     # ── 兼容旧调用点的薄封装 ────────────────────────────────
     @property
@@ -203,6 +216,36 @@ class Pipeline:
         self._spawn(job, lambda: self._run_generate(job, pack))
         return jid
 
+    def start_packgen(self, industry: str, description: str) -> str:
+        """P1-43：新建行业包走后台作业 —— 它原来是唯一一个同步长 HTTP 请求。
+
+        同步长请求留下的三个洞一次补掉：
+          - **断连即失明**：网关超时 / 机器休眠 / 用户关窗，客户端拿不到响应，
+            却无从判断「包到底建出来没有」；作业在服务端继续跑，界面回来轮询就接上。
+          - **没有取消**：点「取消」只是不要返回值了，模型的钱与 packs/ 里的目录照旧发生。
+          - **不占额度**：与生成并发时互相看不见，磁盘与令牌配额一起被超用。
+
+        能在开跑前确定的错误（名称为空 / 同名包已存在）仍然同步抛出：
+        这些结论不花一分钱，没道理让用户等 1~2 分钟才看到。
+        """
+        industry = (industry or "").strip()
+        if not industry:
+            raise ValueError("行业名称不能为空")
+        slug = preview_slug(industry)
+        if slug and (self.root / "packs" / slug).exists():
+            raise FileExistsError(f"行业包已存在：{slug}")
+        jid = new_job_id()
+        job = Job(jid, "packgen", {"industry": industry,
+                                   "description": (description or "").strip()})
+        # 建包没有产物目录：job.json 不落 generated/，不进历史索引
+        # （它不是一条脚本，出现在左栏会话列表里只会让人找不到）。
+        if not self.registry.add_if_room(job, MAX_CONCURRENT_JOBS):
+            raise StateConflict(
+                f"同时进行的任务已达上限（{MAX_CONCURRENT_JOBS} 个），请等其中一个完成后再试")
+        client = self.llm                    # P1-6：作业级抓一次，中途不换配置
+        self._spawn(job, lambda: self._run_packgen(job, client))
+        return jid
+
     def rewrite_segment(self, jid: str, req: RewriteSegmentRequest) -> dict:
         job = self.get_job(jid)
         result = job.result
@@ -258,7 +301,6 @@ class Pipeline:
             p["temperature"] = client.cfg.temperature
             job.transition_or_raise("selecting", params=p)
             plan = self._select(job, pack, skill, p, client)
-            self._step(job, "select", "选题策划", {"plan": plan.model_dump()})
             self._abort_if_cancelled(job)
             self._continue_write(job, pack, skill, plan, client)
         except JobCancelled:
@@ -272,9 +314,46 @@ class Pipeline:
             self._abort_if_cancelled(job)
             p = job.params
             draft, revisions = self._write_with_recheck(job, pack, skill, p, plan, client)
-            self._finalize(job, pack, p, plan, draft, revisions)
+            # P1-30：正文定稿 + 校验通过后，分镜单独生成（voice 模式整个跳过）。
+            # ⚠ "校验通过之后"只在**回炉还在跑**的意义上成立：最后一轮不过校验时
+            #   `_write_with_recheck` 照样 return（见该方法的 `or rnd == rounds`），
+            #   所以不合格也会走到这里画分镜 —— 那一条本来就要以 failed/不合格收场。
+            # 老包（本次改造之前建的）没有 storyboard 阶段：跳过分镜而不是让
+            # 整条已经写完的脚本以 KeyError 收场。
+            # ⚠ 反过来的不对称还在：这里 `_storyboard` 抛错会被下面的 except 接住并
+            #   `_fail(job)` —— **已通过校验的正文会因为分镜这一步而整条报废**；
+            #   单段重写路径（rewrite_segment）则包了 try、重画失败沿用旧分镜。
+            storyboard = []
+            if p.get("format") != "voice":
+                if (skill.get("stages") or {}).get("storyboard"):
+                    storyboard = self._storyboard(job, pack, draft, p, client)
+                else:
+                    self._step(job, "storyboard_skip",
+                               "行业包缺少 storyboard 阶段，本次未生成分镜", {})
+            self._finalize(job, pack, p, plan, draft, storyboard, revisions)
         except JobCancelled:
             pass                              # 已由 request_cancel 置 cancelled，别再写回
+        except Exception as e:  # noqa: BLE001
+            self._fail(job, e)
+
+    def _run_packgen(self, job: Job, client: LLMClient) -> None:
+        """建包作业的主体（进度 / 取消 / 错误都走作业这一套）。"""
+        try:
+            self._abort_if_cancelled(job)
+            job.transition_or_raise("packing")
+            info = create_pack(self.root, client, job.params["industry"],
+                               job.params["description"],
+                               on_retry=self._retry_logger(job),
+                               on_delta=self._delta_handler(job, "行业包生成"),
+                               should_abort=job.is_cancelled)
+            # 回调里已经查过一次（就在写盘之前）；这里再查一次是防它写完之后才被子线程
+            # 取消 —— 目录已经建好就不该假装失败，但状态必须是 cancelled，不能报 done。
+            self._abort_if_cancelled(job)
+            if not job.transition("done", result=info):
+                return
+            self.registry.prune()
+        except JobCancelled:
+            pass                              # 同上：取消是控制流，不是失败
         except Exception as e:  # noqa: BLE001
             self._fail(job, e)
 
@@ -338,16 +417,55 @@ class Pipeline:
         pr = PromptRenderer(pack)
         ctx = pr.select_ctx(p)
         system, user = self._render_stage(job, pr, "select", ctx)
-        # P0-3：选题只产出 400~650 字正文 + 少量思考，与 write 共用 16000 全额
-        # 预算会让思考量被预算反向推高（主报告 R1）。分阶段预算：select 4000。
         # P1-8：「换一版」的提温原来只作用于 write —— 于是「换一版」重掷出的
         # plan 与上一版几乎一样，白白花 74~173s。select 同样提温。
         temp = (min(1.0, float(client.cfg.temperature) + 0.25)
                 if p.get("reroll") else None)
-        return client.chat_json("select", system, user, TopicPlan,
+        key = None if p.get("reroll") else self._plan_key(client, system, user)
+        if key:
+            with self._plan_lock:
+                hit = self._plan_cache.get(key)
+            if hit is not None:
+                # 省下的是一次 4000 token 的调用与十几到几十秒的等待 ——
+                # 但必须在作业日志里说出来，并**占掉「选题策划」那一步的位置**：
+                # 照常记一步「选题策划」等于告诉用户"它又想了一遍"，是同一类静默。
+                self._step(job, "select_reuse", "复用上次选题（本次未调用模型）",
+                           {"plan": hit.model_dump(), "model": client.cfg.model,
+                            "hint": "主题/细分/受众/时长/风格/平台/人设/结尾引导、"
+                                    "模型或被注入的知识任一变化都会重新选题；"
+                                    "「换一版」永远重新选题"})
+                return hit
+        # P0-3：选题只产出 400~650 字正文 + 少量思考，与 write 共用 16000 全额
+        # 预算会让思考量被预算反向推高（主报告 R1）。分阶段预算：select 4000。
+        plan = client.chat_json("select", system, user, TopicPlan,
                                 on_retry=self._retry_logger(job),
                                 on_delta=self._delta_handler(job, "选题策划"),
                                 max_tokens=4000, temperature=temp)
+        self._step(job, "select", "选题策划", {"plan": plan.model_dump()})
+        if key:
+            self._remember_plan(key, plan)
+        return plan
+
+    # ── 选题复用缓存（方案 3「轻量版」）───────────────────────
+    # 指纹取「模型 + 渲染后的 system + user」，不枚举参数：改主题 / 细分 / 受众 /
+    # 时长 / 风格 / 人设 / CTA、改 skill.yaml 模板、改被注入的知识文件（切片也在
+    # 这段文本里）、换模型，都会自然改变指纹。枚举式的键表一旦漏一项，
+    # 就是"静默复用了一个不匹配的选题" —— 那正是本项目一直在整治的形态。
+    # 只在本次应用运行内有效（内存，不落盘）：跨重启的缓存要处理失效与隐私，
+    # 而产物里本来就留着 plan，收益不值那个复杂度。
+    PLAN_CACHE_MAX = 32
+
+    @staticmethod
+    def _plan_key(client: LLMClient, system: str, user: str) -> str:
+        raw = f"{client.cfg.model}\n{system}\n{user}".encode("utf-8")
+        return hashlib.sha1(raw).hexdigest()
+
+    def _remember_plan(self, key: str, plan: TopicPlan) -> None:
+        with self._plan_lock:
+            self._plan_cache[key] = plan
+            while len(self._plan_cache) > self.PLAN_CACHE_MAX:
+                # dict 保序 → 先进先出。上不封顶会让长跑的引擎攒住整段会话的选题。
+                self._plan_cache.pop(next(iter(self._plan_cache)))
 
     def _write_with_recheck(self, job: Job, pack: Pack, skill: dict,
                             p: dict, plan: TopicPlan,
@@ -410,13 +528,48 @@ class Pipeline:
                              f"（配额≈{q}），请压缩")
         return "\n".join(lines) or "未通过校验，请按口语化与合规要求改写"
 
+    def _storyboard(self, job: Job, pack: Pack, draft: dict, p: dict,
+                    client: LLMClient) -> list[dict]:
+        """P1-30：分镜独立阶段，只在正文定稿、校验通过后跑一次。
+
+        并回 write 的代价实测是 5~10 倍输出量（画面描述与口播同等长度），
+        而且每一轮回炉都要重做一遍与校验无关的分镜。拆出来后时间轴由
+        `_compute_timings` 按字数算好喂给模型 —— 模型只出创意，不做算术。
+        """
+        self._abort_if_cancelled(job)
+        job.transition("storyboarding")
+        sections = draft["sections"]
+        timings = self._compute_timings(sections, p["rate"])
+        pr = PromptRenderer(pack)
+        ctx = pr.storyboard_ctx(sections, timings)
+        system, user = self._render_stage(job, pr, "storyboard", ctx)
+        sb = client.chat_json("storyboard", system, user, StoryboardDraft,
+                              on_retry=self._retry_logger(job),
+                              on_delta=self._delta_handler(job, "分镜生成"),
+                              max_tokens=4000)
+        self._step(job, "storyboard", "分镜生成",
+                   {"shots": len(sb.storyboard), "sections": len(sections)})
+        if len(sb.storyboard) != len(sections):
+            # 分镜与段落一一对应是 scenes 的组装前提（_build_scenes 按下标配对）。
+            # 数量对不上不报错，但必须留痕：否则界面会出现某段没有画面而没人知道为什么。
+            self._step(job, "storyboard_mismatch", "分镜段数与口播段数不一致",
+                       {"storyboard": len(sb.storyboard), "sections": len(sections)})
+        return [s.model_dump() for s in sb.storyboard]
+
     @staticmethod
     def _compute_timings(sections: list[dict], rate: float) -> list[dict]:
-        """按段落字数推算时间轴；重写/回炉后必须重算。"""
+        """按段落字数推算时间轴；重写/回炉后必须重算。
+
+        停顿算在**段落之间**（每处 0.5 秒，最后一段之后不计），与
+        `checker.estimate_seconds` 同一条公式 —— 修复前这里给首段 +0.5 秒而
+        段落间不计，于是校验说「60 秒的片子 63 秒，合格」，界面上的时间轴却
+        只排到 61.5 秒：两处口径差 1.5 秒，没人能解释为什么对不上。
+        """
         timings, t = [], 0.0
+        last = len(sections) - 1
         for i, s in enumerate(sections):
             n = count_chars(s["text"])
-            dur = n / rate + (0.5 if i else 0.0)
+            dur = n / rate + (0.5 if i < last else 0.0)
             timings.append({"start": round(t, 1), "end": round(t + dur, 1)})
             t += dur
         return timings
@@ -454,12 +607,11 @@ class Pipeline:
         return scenes
 
     def _finalize(self, job: Job, pack: Pack, p: dict, plan: TopicPlan,
-                  draft: dict, revisions: list[dict]) -> None:
+                  draft: dict, storyboard: list[dict],
+                  revisions: list[dict]) -> None:
         self._abort_if_cancelled(job)          # 关键检查点：组装前再确认一次
         sections = draft["sections"]
-        storyboard = draft["storyboard"]
-        if p.get("format") == "voice":
-            storyboard = []                    # 仅口播：分镜不进入产物
+        # P1-30：分镜来自独立阶段（voice 时 _continue_write 已传 []）。
         timings = self._compute_timings(sections, p["rate"])
         scenes = self._build_scenes(sections, storyboard, timings)
         full_text = "\n".join(s["text"] for s in sections)
@@ -551,12 +703,28 @@ class Pipeline:
             timings = self._compute_timings(sections, p["rate"])
             self._step(job, "rewrite_segment", f"重写第 {index + 1} 段", {"report": report})
 
+            # P1-30：改写过的段落要重画分镜 —— 旧分镜的时间轴是按改写前的字数
+            # 算的，画面也对不上新文案了。重画失败不报废这次改写：
+            # 正文已经通过校验，沿用旧分镜只是画面略旧。
+            storyboard = result.get("storyboard") or []
+            if p.get("format") != "voice" and \
+                    ((pack.skill() or {}).get("stages") or {}).get("storyboard"):
+                try:
+                    storyboard = self._storyboard(
+                        job, pack, {"sections": sections}, p, client)
+                except JobCancelled:
+                    raise
+                except Exception as e:  # noqa: BLE001
+                    self._step(job, "storyboard_skip", "分镜重画失败，沿用原有分镜",
+                               {"error": str(e)})
+
             updated = {
                 **result,
                 "sections": sections,
+                "storyboard": storyboard,
                 "check": report,
                 "timings": timings,
-                "scenes": self._build_scenes(sections, result["storyboard"], timings),
+                "scenes": self._build_scenes(sections, storyboard, timings),
                 "revisions": list(result.get("revisions", [])) + [
                     {"segment": index, "from": old, "to": new.text, "feedback": feedback}],
                 "logs": job.steps,
@@ -608,9 +776,17 @@ class Pipeline:
 
         P1-7 修复前「收到第一个增量才 begin_stream」：select 首字节前静默几十秒，
         快照没有 stream 键，思考块被 progress.js 隐藏，界面只剩「已用 N 秒」，
-        用户以为卡死。现在**构造时就 begin_stream** —— 阶段一开始思考块就显示
-        「等待模型首个 token…」；同时每进入一个阶段（含每次重试）都会清空缓冲，
-        上一阶段/上一轮的思考不会串过来（P2-13 的计数污染一并缓解）。
+        用户以为卡死。现在**构造时就 begin_stream**。
+        ⚠ 但界面并没有因此早点长出思考块：`Job.snapshot` 只在
+        `stream_reasoning_len || stream_content_len` 非 0 时才带 `stream` 键
+        （app/jobs.py 的 snapshot），而 begin_stream 恰恰把这两个计数器清零 ——
+        首字节前仍然没有 stream 键，progress.js 的「等待模型首个 token…」也就没有机会出现。
+        门禁改成看 `stream_phase` 才算真修掉这一条。
+
+        清空缓冲的范围：**每进入一个阶段**（每次调用 `_delta_handler`）清一次。
+        ⚠ 不含"每次重试"：`chat_json` 的解析重试与 `_complete` 的网络/429 重试都复用
+        **同一个闭包**，被丢弃的那次尝试的思考字数照样累进 `stream_reasoning_len`，
+        所以界面上的「思考 N 字」在发生过重试时可能是两遍之和（P2-13 未收口）。
         """
         job.begin_stream(phase)
 
@@ -641,7 +817,14 @@ class Pipeline:
 
         修复前这里是 `except Exception: pass` —— 磁盘满或权限不足时，
         job.json 静默不写，用户看不到任何迹象，事后也查不到原因。
+
+        **建包作业（kind=packgen）没有产物目录，也不落盘**：它不是一条脚本，
+        快照写进 `generated/<日期>/` 会在历史索引里留下一条点不开的"会话"，
+        失败记录还会被 `_upsert` 当真记录统计。它的过程与结果只活在内存注册表里，
+        界面靠 `/api/jobs/{id}` 取 —— 与服务重启后"重新填一遍再建"的语义一致。
         """
+        if job.work_dir is None:
+            return
         try:
             self.store.write_job(job.snapshot(), job.work_dir)
         except Exception as e:                  # noqa: BLE001

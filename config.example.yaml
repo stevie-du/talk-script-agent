@@ -1,24 +1,43 @@
 # TalkScript 引擎配置（模板）
 #
 # ⚠️ 一般**不需要手动复制这个文件**：引擎首次运行会在数据目录自动生成一份
-#    带同样注释的 config.yaml（打包版是 %APPDATA%\TalkScript\，开发态是项目根）。
+#    带注释的 config.yaml（打包版是 %APPDATA%\TalkScript\，开发态是项目根）。
 #    也可以在应用内「设置 → 模型接口」里填，效果相同。
 #    本文件留在仓库里，是为了让不运行程序的人也能看到配置项。
 #
 # 安装包**不携带任何 config**（连模板都不带）—— 用户自己配置。
 # config.yaml 已被 .gitignore 忽略（它含明文 API Key，不入库）。
 #
-# api_key 也可用环境变量 TALKSCRIPT_API_KEY 提供（不落盘）
-# 开发调试可设 TALKSCRIPT_MOCK=1 跑通流程（不调模型）
+# 环境变量共 9 个，清单以 app/config.py 顶部注释为准；最常碰的两个：
+#   TALKSCRIPT_API_KEY   模型 Key（不落盘）
+#   TALKSCRIPT_MOCK=1    跑夹具、不调模型（无 Key 时可用）
+#
+# 模型是**一份列表**，不是一条：每条模型自带请求地址与 Key，随时启用其中一个。
+# 老写法（只有下面 `llm:` 段那一份）读的时候会被当成一条模型，但不会被写回。
+models:
+  - id: zhipu
+    name: 智谱 GLM
+    base_url: https://open.bigmodel.cn/api/paas/v4   # 任意 OpenAI 兼容接口
+    api_key: ""                                     # ← 在这里填你的 Key
+    model: glm-4.7
+    # 请求地址与 Key 也可以留空，此时取环境变量 / 内置默认
+
+active_model: zhipu
+
+# 生成参数：与「连到哪家」无关，全局一份。
+# 界面上能改的只有 retries / timeout 两项（app/server.py 的 NUMERIC_BOUNDS 校验区间）；
+# temperature 与 max_tokens 2026-09-17 起不在设置页里，只能改这个文件或环境变量。
 llm:
-  base_url: https://open.bigmodel.cn/api/paas/v4   # 任意 OpenAI 兼容接口
-  api_key: ""                                      # ← 在这里填你的 Key
-  model: glm-4.7
-  temperature: 0.7
-  retries: 2        # 请求失败（网络/超时/429/5xx）自动重试次数；0 = 不重试
-  timeout: 180      # 单次请求超时（秒）；长输出模型可调大
-  max_tokens: 16000 # 单次输出预算。推理型模型（deepseek 系等）的「思考」token
-                    # 也计入这里，给太小会导致 content 返回空串。遇到
-                    # 「模型返回了空内容」或 JSON 解析失败，优先调大这一项。
+  temperature: 0.7     # 采样温度 0~2；「换一版」会在它基础上 +0.25（封顶 1.0）
+  retries: 2           # 请求失败（网络/超时/429/5xx）自动重试次数；0 = 不重试
+  timeout: 180         # 单次请求超时（秒）。流式下这是"两次收包之间的空闲上限"，
+                       # 引擎内部按 2 倍给流式（推理模型思考期不 flush）
+  max_tokens: 16000    # **撰写阶段**的输出预算。推理型模型（deepseek 系等）的
+                       # 「思考」token 也计入这里，给太小 → content 返回空串。
+                       # ⚠ 但它不是"越大越稳"：实测思考量随这一项单调上涨
+                       #（6000 → 思考 6.4k~9.4k，16000 → 17k~19k），
+                       # 调大只会更慢、且更容易想满预算而正文为空。
+                       # 选题与分镜固定 4000、单段重写固定 3000（app/pipeline.py），
+                       # 那几步报"空内容"时改这一项**没有用**。
 
 default_pack: elevator

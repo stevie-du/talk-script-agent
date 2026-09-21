@@ -113,29 +113,64 @@ def test_security_helpers():
     assert not origin_allowed("https://evil.example", "127.0.0.1:8765")
     assert not origin_allowed("http://127.0.0.1:8765", "")                # 无 Host 不放行
 
-# ── 错误映射：上游 LLM 失败必须显式 502，不是默认 500 ─────────
-def test_packs_create_returns_502_on_llm_error(tmp_path):
-    """POST /api/packs/create 上游 LLM 抛错时，必须得到 502 + 一句人话理由。
+# ── A2 建包作业（P1-43）：长调用改走后台作业后的新契约 ────────
+def test_packs_create_surfaces_llm_error_on_the_job(tmp_path):
+    """建包失败不再走 HTTP 状态码：它落在**作业**上，理由必须原样可见。
 
-    修复前兜底只 catch FileExistsError / ValueError —— `LLMError`（含令牌过期 /
-    连接失败 / 解析失败）一律跌成 FastAPI 默认 500、空 body。前端 toast 只看到
-    「HTTP 500」，连「令牌已过期或验证不正确」这种用户最该看到的理由都丢了。
-    修法：packs_create 显式 except LLMError → raise HTTPException(502, str(e))。
+    改作业之前这里是 `except LLMError → 502`（P0-2 那批修的）。现在模型调用发生在
+    作业线程里，HTTP 只有「作业已受理」这一种结果 —— 于是原来的 502 断言必须
+    **改指新位置**而不是删掉：`job.error` 里若只剩「HTTP 500」之类，
+    用户就再也看不到「令牌已过期」这种最该看到的理由。
     """
     from unittest.mock import patch
     from app.llm import LLMError
 
     tmp = _tmp_root()
     c = _client(tmp)
-
     fake_msg = "模型接口返回 401: {\"code\":\"401\",\"message\":\"令牌已过期\"}"
-    with patch("app.server.create_pack",
-               side_effect=LLMError(fake_msg)):
+    with patch("app.pipeline.create_pack", side_effect=LLMError(fake_msg)):
         r = c.post("/api/packs/create",
                    json={"industry": "装修", "description": "装修从基装到软装的的全流程"})
-    assert r.status_code == 502, (r.status_code, r.text)
-    # 理由必须进 body —— 否则前端 toast 还是只能看到「HTTP 502」。
-    assert "令牌已过期" in r.text, r.text
+        assert r.status_code == 200, r.text
+        jid = r.json()["job_id"]
+        snap = _wait(c, jid)
+    assert snap["state"] == "failed", snap
+    assert "令牌已过期" in (snap["error"] or ""), snap
+    # 建包作业不是一条脚本：不该出现在左栏会话列表里（它没有产物，点不开）。
+    assert jid not in {x["id"] for x in c.get("/api/history").json()}
+    # 也不该往 generated/ 里落任何东西（没有 work_dir，_persist 直接跳过）。
+    assert not (tmp / "generated").exists() or \
+        not list((tmp / "generated").glob(f"*/{jid}")), "建包作业写出了产物目录"
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_packs_create_rejects_duplicate_pack_before_spending(tmp_path):
+    """同名包必须**同步** 409：这个结论不花一分钱，没道理让人等 1~2 分钟。"""
+    tmp = _tmp_root()
+    (tmp / "packs" / "假体陀机").mkdir(parents=True)
+    (tmp / "packs" / "假体陀机" / "pack.yaml").write_text(
+        "name: dup\ndisplay_name: 假体陀机\nversion: 1\n", encoding="utf-8")
+    c = _client(tmp)
+    r = c.post("/api/packs/create",
+               json={"industry": "假体陀机", "description": "测试用行业描述"})
+    assert r.status_code == 409, (r.status_code, r.text)
+    assert "已存在" in r.json()["detail"], r.text
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_packs_create_reports_quota_conflict_as_409(tmp_path):
+    """额度满时是 409（可重试），不是把作业悄悄塞进注册表。"""
+    from unittest.mock import patch
+    from app.jobs import StateConflict
+
+    tmp = _tmp_root()
+    c = _client(tmp)
+    with patch.object(Pipeline, "start_packgen",
+                      side_effect=StateConflict("同时进行的任务已达上限（4 个）")):
+        r = c.post("/api/packs/create",
+                   json={"industry": "装修", "description": "装修从基装到软装的的全流程"})
+    assert r.status_code == 409, (r.status_code, r.text)
+    assert "上限" in r.json()["detail"], r.text
     shutil.rmtree(tmp, ignore_errors=True)
 
 
@@ -263,6 +298,32 @@ def test_split_and_estimate():
     assert estimate_seconds("你好世界", 0) == 4 / DEFAULT_RATE
     assert estimate_seconds("你好世界", -1) == 4 / DEFAULT_RATE
     assert estimate_seconds("你好世界", None) == 4 / DEFAULT_RATE
+
+
+def test_timeline_matches_checker_estimate():
+    """产物时间轴的总长 = 校验用的预估秒数 —— 同一件事两处算，就得有人对账。
+
+    修复前 `_compute_timings` 把 0.5 秒停顿加在**首段**、段落之间不加，
+    `estimate_seconds` 却是「(段落数 − 1) 处各加 0.5 秒」：5 段的片子两处差 1.5 秒，
+    于是「校验说 63 秒、合格」和「界面时间轴只排到 61.5 秒」同时成立而互相打脸，
+    而 `rules/duration.md` 一直写着两者同口径 —— 文档说的不是代码做的。
+    """
+    from app.checker import estimate_seconds
+    from app.pipeline import Pipeline
+
+    texts = ["被困电梯，第一反应多半是错的。", "电梯停了，常是在保护你。",
+             "先按警铃，再打救援电话。", "说清小区楼栋和电梯编号。",
+             "关注我，电梯的事少踩坑。"]
+    types = ["hook", "point", "point", "point", "cta"]
+    sections = [{"type": t, "text": x} for t, x in zip(types, texts)]
+    timings = Pipeline._compute_timings(sections, 4.5)
+    est = estimate_seconds("\n\n".join(texts), 4.5)
+
+    # 每段各自 round(x,1)，5 段最多累积约 0.5 秒舍入差 —— 口径一致，容许舍入
+    assert abs(timings[-1]["end"] - est) <= 0.5, (timings[-1]["end"], est)
+    assert timings[0]["start"] == 0.0
+    assert all(b["start"] >= a["end"] - 0.05 for a, b in zip(timings, timings[1:])), \
+        "时间轴必须首尾相接、不重叠"
 
 
 def test_banwords_no_double_count():

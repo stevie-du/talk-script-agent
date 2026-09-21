@@ -6,12 +6,20 @@
      429 额外尊重上游 Retry-After 头、用更长的限流专用退避（见 _backoff）
   2. 解析层（chat_json）：模型返回的 JSON 不合法时，带错误信息重试一次
 
+⚠ 已知缺陷（照这份文档写新代码前必读）：`chat_json` 里"空内容 → 提高预算重试"那条分支
+   **当前不生效** —— `_complete` 在 `try` 之外调用，而 `EmptyContentError` 只在 `_complete`
+   内部抛，所以那个 `except` 收不到它，空内容仍是一次请求、原预算、直接冒到作业层。
+   另有一条测试（test_llm_retry 的 test_streaming_empty_content）用正则断言文案里的数字，
+   看不见"只发了一次请求"，所以它是绿灯。两处都还没修，见《审查报告-20260920》P0-2。
+   同理，`finish_reason` 虽然已经从流式分支取了回来，但除错误文案外无人消费 ——
+   "非空但被 length 截断"仍会拿同样的 payload 重发一遍。
+
 支持 mock 模式（TALKSCRIPT_MOCK=1 或 config llm.mock: true），
 无 API Key 也能跑通全流程（返回固定夹具，用于开发与验收）。
 
 两处修复：
   - **连接复用**：原来每次调用都走 `httpx.post` / `httpx.stream` 顶层函数，
-    每次都新建连接（重新 TCP + TLS 握手）。一次生成 2~4 次调用、外加重试，
+    每次都新建连接（重新 TCP + TLS 握手）。一次生成正常 3~5 个调用、外加重试，
     这部分开销纯属浪费。现在共用一个线程安全的 `httpx.Client`（连接池）。
   - **流式分支的空内容诊断**：原来 `if on_delta: return self._stream_once(...)`
     直接返回，绕过了后面那段「模型返回空内容 → 请调大 max_tokens」的诊断，
@@ -293,8 +301,10 @@ class LLMClient:
         修复前只有非流式分支做这个检查，而 pipeline 全程走流式 ——
         等于这条诊断永远不触发。
 
-        budget 是**本次调用实际用的**输出预算：ping 传 16 时若按 cfg 的
+        budget 是**本次调用实际用的**输出预算：ping 传 512 时若按 cfg 的
         16000 报「请调大 max_tokens（当前 16000）」是在误导（P2-10）。
+        注意选题/分镜/单段重写用的是引擎里写死的阶段预算（4000/4000/3000），
+        那几种情况下改 `llm.max_tokens` 不影响本次调用。
         """
         if (content or "").strip():
             return content

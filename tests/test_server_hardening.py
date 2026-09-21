@@ -93,7 +93,6 @@ def _wait_state(c, jid: str, want: str, timeout=30.0):
 # ── 1 配置现读 ──────────────────────────────────────────────
 def test_config_fresh(tmp_path=None):
     tmp = _tmp_root()
-    import app.server as srv
     c = _client(tmp)
 
     before = c.get("/api/meta")
@@ -102,10 +101,16 @@ def test_config_fresh(tmp_path=None):
     assert before.json()["has_api_key"] is False, before.json()
 
     # 没有任何 Key 时，建包必须先被拦下
-    with patch.object(srv, "create_pack", lambda *a, **kw: {"name": "fake"}):
+    # （P1-43 后 create_pack 在 pipeline 里、且由后台作业调用 ——
+    #   「拦在开始之前」这件事现在只能钉 start_packgen 有没有被调到）
+    from app.pipeline import Pipeline
+    started: list[str] = []
+    with patch.object(Pipeline, "start_packgen",
+                      lambda self, industry, description: started.append(industry) or "job-fake"):
         denied = c.post("/api/packs/create",
                         json={"industry": "假体陀机", "description": "测试用行业描述"})
     assert denied.status_code == 400, (denied.status_code, denied.text)
+    assert started == [], "没配 Key 也应该已经把作业起起来了 —— _require_model 形同虚设"
     # 2026-09-17 文案调整：从「未配置模型 API Key」改成「当前模型还没配 API Key，
     # 请在「设置 → 模型接口」里填写」—— 多了「当前模型」这个主语（明确改哪一条）
     # 与下一步动作。断言只认「API Key」这个关键信息，不锁整句。
@@ -118,10 +123,14 @@ def test_config_fresh(tmp_path=None):
     assert after.json()["model"] == "saved-model", after.json()
     assert after.json()["has_api_key"] is True, after.json()
 
-    with patch.object(srv, "create_pack", lambda *a, **kw: {"name": "fake"}):
+    with patch.object(Pipeline, "start_packgen",
+                      lambda self, industry, description: started.append(industry) or "job-fake"):
         allowed = c.post("/api/packs/create",
                          json={"industry": "假体陀机", "description": "测试用行业描述"})
     assert allowed.status_code == 200, (allowed.status_code, allowed.text)
+    assert allowed.json() == {"job_id": "job-fake"}, allowed.json()
+    # 存完 Key 再建包：作业真的被起起来了（不是又被 _require_model 拦在门外）
+    assert started == ["假体陀机"], started
     shutil.rmtree(tmp, ignore_errors=True)
 
 

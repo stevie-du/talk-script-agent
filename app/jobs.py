@@ -6,10 +6,13 @@
   2. pipeline 原来一个类同时管配置、提示词、落盘、状态，646 行里真正的
      「流程编排」不到一半，读的人得先把无关细节筛掉。
 
-状态机
-------
-    queued → selecting → writing → checking(第N轮) → done / failed / cancelled
-    单段重写：done → rewriting → done / failed / cancelled
+状态机（**唯一权威是下面的 `STATES` / `TRANSITIONS`，别照这份图写代码**）
+------------------------------------------------------------------------
+    queued → selecting → writing → checking ─┬→ storyboarding → done / failed
+                                              └→ (回炉) writing …
+    单段重写：done → rewriting → storyboarding → done
+    建包作业：queued → packing → done / failed / cancelled
+    任一进行中的状态 → cancelled
 
 所有迁移都必须走 `Job.transition()`——**检查与置位在同一把锁内完成**。
 修复前的写法是「先无锁读 job.state 判断，再 job.update(state=…)」，
@@ -33,17 +36,26 @@ from datetime import datetime
 TERMINAL_STATES = frozenset({"done", "failed", "cancelled"})
 
 # 真正占用模型资源的作业状态 —— **并发额度只看这些**。
-BUSY_STATES = frozenset({"queued", "selecting", "writing", "checking", "rewriting"})
+BUSY_STATES = frozenset({"queued", "selecting", "writing", "checking", "rewriting",
+                         "storyboarding", "packing"})
 
 # 合法迁移表：from_state -> 允许去的 to_state。
 # 写成表而不是散落在各方法里的 if，是为了让「谁能到哪儿」一眼可查，
 # 也让非法迁移统一变成 409 而不是静默写坏状态。
 TRANSITIONS: dict[str, frozenset[str]] = {
-    "queued": frozenset({"selecting", "writing", "failed", "cancelled"}),
+    "queued": frozenset({"selecting", "writing", "packing", "failed", "cancelled"}),
     "selecting": frozenset({"writing", "failed", "cancelled"}),
     "writing": frozenset({"checking", "rewriting", "done", "failed", "cancelled"}),
-    "checking": frozenset({"writing", "rewriting", "done", "failed", "cancelled"}),
-    "rewriting": frozenset({"checking", "done", "failed", "cancelled"}),
+    # storyboarding：P1-30 拆出来的分镜阶段，只在校验通过后进 —— 正文没过校验时
+    # 不该为一版要重写的文案画分镜。
+    "checking": frozenset({"writing", "rewriting", "storyboarding",
+                           "done", "failed", "cancelled"}),
+    # 单段重写后重画分镜（rewriting -> storyboarding），见 pipeline._run_rewrite_segment
+    "rewriting": frozenset({"checking", "storyboarding", "done", "failed", "cancelled"}),
+    "storyboarding": frozenset({"done", "failed", "cancelled"}),
+    # packing：新建行业包（P1-43）。与生成同一套额度、取消与错误通道，
+    # 不再是「唯一一个走同步长 HTTP 请求的耗时操作」。
+    "packing": frozenset({"done", "failed", "cancelled"}),
     "done": frozenset({"rewriting", "cancelled"}),
     "failed": frozenset({"writing", "cancelled"}),      # failed 允许「重试」原作业
     "cancelled": frozenset(),

@@ -18,6 +18,8 @@ export const STATE_LABEL = {
   writing: "文案撰写中",
   rewriting: "回炉改写中",
   checking: "代码校验中",
+  storyboarding: "分镜生成中",
+  packing: "行业包生成中",
   done: "完成",
   failed: "失败",
   cancelled: "已取消",
@@ -34,7 +36,7 @@ export const STATE_LABEL = {
  *  但磁盘上的 `job.json` 还写着它。按「非终态 = 在跑」解释，这么一条记录
  *  会让左栏每 3 秒空转刷新一次、永不停止，行上还挂一颗呼吸点。 */
 export const BUSY_STATES = new Set([
-  "queued", "selecting", "writing", "checking", "rewriting",
+  "queued", "selecting", "writing", "checking", "rewriting", "storyboarding", "packing",
 ]);
 
 

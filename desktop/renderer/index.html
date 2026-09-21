@@ -38,7 +38,7 @@
         新建对话
       </button>
       <div class="sess-search">
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
              stroke-width="2" stroke-linecap="round" aria-hidden="true">
           <circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
         <input id="sess-search" type="search" placeholder="搜索会话" aria-label="搜索会话"
@@ -75,26 +75,24 @@
       </div>
     </div>
 
-    <div id="view-chat" class="view">
+    <!-- 首页（landing）布局骨架，2026-09-20 参考 ZCode 重排。
+         改前三块：居中的 hero 块（大图标 + 标题 + 副标题 + 2×2 示例卡 + 底注）飘在
+         中上部，输入卡钉在底部，两者之间实测 220px 空白 —— 最该被看见的输入框
+         反而离视觉中心最远。改后合成器就是 hero：标识 + 问候语在上、输入卡居中、
+         起手示例降为卡下一行胶囊，整块作为一列垂直居中。
+         居中用 `margin-top:auto` / `margin-bottom:auto` 而不是 `justify-content:center`
+         —— 后者在窗口压矮时会把内容顶出上边界且滚不回来，auto 边距会自动退化成 0。
+         顶部那条 48px 头部（「新对话」）保留：它是「我在哪条会话里」的常驻定位，
+         首页与对话页共用；藏掉会让首次发送时整块内容重定位 + 通栏发丝线凭空出现。 -->
+    <div id="view-chat" class="view is-landing">
       <div id="stale-banner" class="banner warn hidden"></div>
 
       <div id="chat-stream">
-        <!-- 空态主区。**只有一态**（2026-09-20，用户原话「未配置模型的空态太难看，
-             直接去掉吧」）：原来这里用 [data-when] 在「想聊点什么？」与
-             「先配置模型接口」之间整块切换，后者带着大图标 + 一段说明 + 一颗深色
-             「去配置」键压在示例卡上面 —— 五个居中块叠着，没有主次，而且那颗键与
-             发送键抢同一个深色实心档（规范 §3：实心深色只许出现在主 CTA）。
-             「还没配模型」现在只说一处：工具条那颗胶囊（ui.js 的 renderModelPicker）。
-             真正的第一次也不会没人带路 —— 无 Key 且无历史时仍会自动打开设置的
-             「模型接口」分区（main.js 的 boot）。 -->
         <div id="empty" class="empty">
-          <span class="mono">
-            <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="9" width="3" height="6" rx="1.4"/><rect x="8" y="5" width="3" height="14" rx="1.4"/><rect x="13" y="2" width="3" height="20" rx="1.4"/><rect x="18" y="7" width="3" height="10" rx="1.4"/></svg>
+          <span class="empty-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="9" width="3" height="6" rx="1.4"/><rect x="8" y="5" width="3" height="14" rx="1.4"/><rect x="13" y="2" width="3" height="20" rx="1.4"/><rect x="18" y="7" width="3" height="10" rx="1.4"/></svg>
           </span>
-          <h3>想聊点什么？</h3>
-          <p class="empty-sub">给个主题就能生成口播脚本，参数可在上方随时调整</p>
-          <div class="samples" id="empty-samples"></div>
-          <p class="hint">左侧为会话记录，点开即回看</p>
+          <h3 id="empty-greet">今天想讲点什么？</h3>
         </div>
       </div>
 
@@ -121,6 +119,12 @@
           <span class="hint gen-hint" id="composer-gen-hint"></span>
         </div>
       </div>
+
+      <!-- 起手示例：从 hero 里那 4 张白卡降为合成器下方的一行胶囊（ZCode 的
+           「周报总结 / 报错修复 / PPT 制作」那一排）。它只是「填一句话」的快捷方式，
+           原来却用白底 + 描边 + hover 抬升，视觉权重压过输入卡本身。
+           示例的「细分 · 说明」不再占版面 —— 点进去只填标题，说明进 title 悬浮。 -->
+      <div id="empty-samples" class="samples"></div>
     </div>
 
   </section>
@@ -373,9 +377,9 @@
                 生成
               </button>
             </div>
-            <!-- 生成中的说明：同步长请求只有计时器，用户不知道模型在干什么。
-                 一行固定文案告诉它"在生成什么、通常多久"，作为分阶段进度的过渡。 -->
-            <p id="pg-working" class="pg-working hint hidden">模型正在生成行业结构：细分领域、受众、选题库、红线与核实清单，通常 1~2 分钟。</p>
+            <!-- 生成中的说明：建包已改走后台作业（P1-43），这一行由作业的
+                 过程信息驱动 —— 思考字数与接口重试提示会写到这里。 -->
+            <p id="pg-working" class="pg-working hint hidden">模型正在生成行业结构：细分领域、受众、选题库、红线与核实清单。</p>
             <!-- 生成失败常驻横幅：失败只有一条几秒的 toast，走开就看不见，
                  这里把原因留在表单下方（表单与输入值都保留，改完一键重试）。 -->
             <div id="pg-error" class="pg-error hidden" role="alert"></div>

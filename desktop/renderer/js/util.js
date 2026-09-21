@@ -126,31 +126,35 @@ const WEEKDAY = ["周日", "周一", "周二", "周三", "周四", "周五", "�
  *
  * 规则：
  *   今天 / 昨天      → 沿用相对词（这两天用户是按"刚刚/昨天"记的，不是按日期）
- *   2~6 天前         → `MM-DD 周X`（还带星期，因为人对最近这周有星期感）
- *   7 天及以上       → `MM-DD`（再远的只认日期）
+ *   2 天及以上       → `M月D日`
  *   ⚠ 这里**不再有「本周」和「更早」**：那两个桶正是问题所在。
+ *   ⚠ 日期**必须带中文单位**，不能写成 `09-12`：分组标签后面紧跟的是该组的条数
+ *     （`09-12 26`），两个裸数字并排就是读不出哪个是日期、哪个是计数（用户原话）。
+ *     `9月12日 26` 里日期由「日」字收尾，计数怎么轻都不会粘上去。
+ *   ⚠ 星期（周四）**不进标签**：一行里「日期 + 星期 + 计数」是三段，正是"拥挤"的
+ *     来源；它挪进悬浮提示（见 sessions.js 的 updateGroup），要查还在。
  *
  * `id` 与 `label` 分开，是因为两者用途不同、且**不能让 id 参与展示**：
  *   - id 要能**跨天稳定排序**（`2026-09-12` 这种可字典序排），也要当
  *     localStorage 里折叠状态的键 —— 用 label 当键的话，明天「今天」变成
  *     「昨天」、折叠状态就跟着错位了；
  *   - label 只给人看，允许随「今天」推移而变化。
- * 因此 id 用完整日期（不带星期，星期会变），label 才带星期。
+ * 因此 id 用完整 ISO 日期（补零、带年份），label 用中文读法（不补零）。
  */
 export function dayGroupKey(d) {
   const x = new Date(d);
-  if (isNaN(x)) return { id: "unknown", label: "时间未知" };
+  if (isNaN(x)) return { id: "unknown", label: "时间未知", weekday: "" };
   const now = new Date();
   const day = new Date(x.getFullYear(), x.getMonth(), x.getDate());
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const diff = Math.round((today - day) / 86400000);
-  if (diff <= 0) return { id: "today", label: "今天" };
-  if (diff === 1) return { id: "yesterday", label: "昨天" };
+  const weekday = WEEKDAY[x.getDay()];
+  if (diff <= 0) return { id: "today", label: "今天", weekday };
+  if (diff === 1) return { id: "yesterday", label: "昨天", weekday };
   const md = `${pad2(x.getMonth() + 1)}-${pad2(x.getDate())}`;
   // 排序用的 id 一定带年份：跨年时「12-31」和「01-02」按 MM-DD 排会反过来。
   const id = `${x.getFullYear()}-${md}`;
-  if (diff < 7) return { id, label: `${md} ${WEEKDAY[x.getDay()]}` };
-  return { id, label: md };
+  return { id, label: `${x.getMonth() + 1}月${x.getDate()}日`, weekday };
 }
 
 

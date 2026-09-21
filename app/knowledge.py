@@ -4,9 +4,9 @@
 性能说明
 --------
 修复前 `file_text` / `private_facts` 每次调用都读盘 + `yaml.safe_load`，
-而一次生成最多要经历 3 轮回炉、每轮注入 6~8 个知识文件 —— 同一个文件被反复
-解析十几遍。这里按 (mtime, size) 做进程内缓存：内容一变 mtime 就变，无需手工
-失效；写入统一走 `fileio.write_atomic`，所以不会读到写了一半的文件。
+而一次生成最多要写 3 轮（首轮 + 2 轮回炉）、每轮都要取回同一批知识文件 ——
+同一个文件被反复解析十几遍。这里按 (mtime, size) 做进程内缓存：内容一变 mtime 就变，
+无需手工失效；写入统一走 `fileio.write_atomic`，所以不会读到写了一半的文件。
 """
 from __future__ import annotations
 
@@ -195,6 +195,25 @@ def pack_info(pack_dir: Path) -> PackInfo:
             name=dir_name, display_name=dir_name,
             pack_error=f"pack.yaml 的内容不符合约定（{brief}）",
         )
+
+
+def _heading_slice(text: str, level: int, keyword: str) -> str:
+    """取第 `level` 级标题里含 keyword 的那一节，**找不到就返回空串**。
+
+    与 `Pack.slice_heading` 的区别就是这一条：那里是「切不到就退回整份文件」
+    （宁可多注入，也不能让模型拿不到知识）；而**按参数值挑一节**时反过来才安全 ——
+    风格选了「权威科普」却把另外 4 套语气模板一起塞进去，模型拿到的是互相冲突的指令。
+    """
+    if not keyword or not text:
+        return ""
+    head = re.compile(rf"^#{{{level}}}(?!#)\s")
+    upper = re.compile(rf"^#{{1,{level}}}\s")
+    lines = text.split("\n")
+    start = next((i for i, ln in enumerate(lines) if head.match(ln) and keyword in ln), None)
+    if start is None:
+        return ""
+    end = next((j for j in range(start + 1, len(lines)) if upper.match(lines[j])), len(lines))
+    return "\n".join(lines[start:end])
 
 
 def _heading_exists(pack_dir: Path, rel: str, keyword: str) -> bool:
@@ -408,6 +427,51 @@ class Pack:
             # 的降级，这里把伤害降到零：宁缺毋滥，比误导强。
             return ""
         return self.slice_heading("knowledge/audience.md", key)
+
+    def file_slice(self, spec: str) -> str:
+        """按 `stages.<阶段>.files` 的取值取文件：`路径` 或 `路径#章节关键词`。
+
+        带 `#` 时只取那一节：整份 `standards.md` 2195 字，撰写真正要用的只是
+        「核心术语」那十几行表格；把法规编号清单一起塞进每一轮回炉，
+        挤掉的是模型对正文的注意力（P2-25 信噪比）。
+
+        **章节找不到时返回空串**，与 `slice_heading` 的「退回整份」相反，这是故意的：
+        写了 `#章节` 就是作者明确说「只要这一节」，这时把整份塞回去恰好是他不想要的
+        （新建包的 standards.md 只有一张待核实清单，整份注入等于往每轮里灌编号清单）。
+        代价是「章节被改名 → 知识静默消失」可能看不出来，所以这条由
+        `tests/test_prompt_templates.py` 的声明对账测试兜着，不靠运行期日志。
+        """
+        rel, _, kw = str(spec).partition("#")
+        if not kw.strip():
+            return self.file_text(rel.strip())
+        text = self.file_text(rel.strip())
+        # 二级（`## 五、核心术语`）与三级（`### 核心术语`）都算命中：
+        # 包作者手写的知识文件层级不统一，不该因此让一节知识静默消失。
+        for level in (2, 3):
+            body = _heading_slice(text, level, kw.strip())
+            if body:
+                return body
+        return ""
+
+    def hooks_slice(self, style: str | None) -> str:
+        """钩子库按风格切片：一份文件里 5 套语气模板，每轮只用得上当前这套。
+
+        保留「钩子库」整节（类型表 + 禁用清单 + 平台匹配）+ 所选风格那一节。
+        砍掉的两块都是重复：「风格×受众交叉建议」在风格已由用户选定时用不上，
+        「口语化硬性检查」与 `skill.yaml` 的 write.system 逐条同义（P2-25）。
+        """
+        rel = "patterns/hooks.md"
+        text = self.file_text(rel)
+        if not text:
+            return ""
+        lib = _heading_slice(text, 2, "钩子库")
+        block = _heading_slice(text, 3, style or "")
+        if not lib or not block:
+            # 该包不按「## 一、钩子库」+「### 风格名」的结构写，或风格没在
+            # pack.yaml 里配（param_audit 已把后者标成降级）：退回整份，宁多勿缺。
+            return text
+        return (lib.rstrip()
+                + f"\n\n## 风格语气模板（本次风格：{style}）\n" + block.strip() + "\n")
 
     # ── 配额与词表 ──────────────────────────────────────────
     def rate_for_style(self, style: str | None) -> float:

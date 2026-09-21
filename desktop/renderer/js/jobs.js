@@ -16,6 +16,7 @@ import { renderResult, renderFailure, renderStopped, setHead, jumpToFirstPlaceho
 import { loadSessions } from "./sessions.js";
 import { openSettings } from "./settings.js";
 import { closeOverlays } from "./overlays.js";
+import { setLanding } from "./ui.js";
 
 const POLL_MS = 900;
 const POLL_MAX_MISSES = 3;
@@ -96,7 +97,7 @@ export async function send(overrides = {}, opts = {}) {
     state.pollMisses = 0;
     state.result = null;
 
-    $("empty").classList.add("hidden");
+    setLanding(false);
     $("stale-banner").classList.add("hidden");
 
     let body;
@@ -347,7 +348,7 @@ export async function attach(id) {
   setJob({ id, state: snap.state, params: snap.params || null, created_at: snap.created_at });
   state.paramsSnapshot = null;                 // 切了场景，过期提示的基准要重置
   T.clearThread();
-  $("empty").classList.add("hidden");
+  setLanding(false);
   $("stale-banner").classList.add("hidden");
   const topic = snap.params?.topic || "";
   state.sentTopic = topic;
@@ -393,7 +394,7 @@ export async function openRecord(id) {
   detachJob();
   T.clearThread();
   closeOverlays();
-  $("empty").classList.add("hidden");
+  setLanding(false);
   $("stale-banner").classList.add("hidden");
   state.paramsSnapshot = null;                 // 历史结果没有「当时的界面参数」可比
   state.sentTopic = r.params?.topic || "";

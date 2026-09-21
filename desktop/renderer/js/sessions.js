@@ -7,7 +7,9 @@
 // 分组之前是「今天 / 昨天 / 本周 / 更早」四档，问题出在最后一档：一周以前的
 // **全部并进「更早」**。真实数据里 78 条记录全落在同一周以前，整列只有一个
 // 标签「更早 78」—— 分组等于没做，用户原话「全部记录平铺了，有点太多了」。
-// 现在换成 `dayGroupKey()`（见 util.js）：今天 / 昨天 / MM-DD 周X / MM-DD。
+// 现在换成 `dayGroupKey()`（见 util.js）：今天 / 昨天 / `9月12日`（星期进提示）。
+// 每组前面一枚文件夹图标：展开=开口、折叠=合口；行右侧另有「…」菜单，
+// 可以一次删掉整组（删前必确认，见 deleteGroup）。
 //
 // 行是**单行制**（状态记号 + 标题 + 时刻）：一屏能看的条数翻倍，
 // 而行业 / 平台 / 时长 / 字数 / 完整状态这些行上放不下的，全部进 title 悬浮提示，
@@ -25,6 +27,9 @@ import { STATE_LABEL, BUSY_STATES } from "./progress.js";
 import { appConfirm } from "./overlays.js";
 
 const index = new Map();      // id -> 该行最近一次数据（委托 handler 从这里取，闭包不会过期）
+/** gid -> { label, count, items }：分组菜单要按组删，得知道这一组是哪几条。
+ *  每次 paint() 重建 —— 与 index 同一个道理：委托事件里不能拿闭包旧数据。 */
+const groups = new Map();
 let refreshTimer = null;
 
 /** 折叠状态：分组 id → 是否收起。持久化到 localStorage。
@@ -52,13 +57,26 @@ function toggleFold(id) {
   paint(allItems);
 }
 
-/* 折叠箭头：内联 SVG，14px（规范 §4 的「行内符号 / 箭头」档）。
-   ⚠ 方向必须是**展开朝下、收起朝右** —— 此前用 CSS 边框画三角，
-   静止态画出来是朝右的 ▶、折叠时 rotate(90deg) 转成朝下 ▼，
-   与所有文件树 / 分组列表的惯例正好相反：收起的那组看起来像可以展开。 */
-const CHEVRON = `<svg class="gl-arrow" viewBox="0 0 24 24" width="14" height="14" fill="none"
-  stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"
-  aria-hidden="true"><path d="M6.5 9.5 12 15l5.5-5.5"/></svg>`;
+/* 分组图标：文件夹，**开 / 合两个字形**（参考 Qoder 侧栏的项目行）。
+   展开 = 开口，折叠 = 合口 —— 文件树里用了几十年的那套读法。
+   ⚠ 换图标不能把折叠信号换没：上一轮的结论是「折叠态只由图标表达，
+   不给文字换色」（把折起来的「今天」提亮，读成"这行被选中"而不是"这组收着"）。
+   所以这里是**两个真的不同路径**，不是同一个图标转个角度 —— 旋转一个文件夹
+   读不出开合，只会变成歪的。
+   ⚠ 尺寸：字形 14、盒子 16（CSS 的 .gl-folder 给），与左栏那一列的图标盒同宽；
+   线宽 1.6 由 styles.css 顶部那条 svg 全局规则收口（规范 §4）。
+   此前这里是折叠箭头（展开朝下、收起朝右）。更早用 CSS 边框画三角，
+   静止态朝右、折叠转成朝下，方向与所有分组列表的惯例相反。 */
+const FOLDER_BASE = `viewBox="0 0 24 24" width="14" height="14" fill="none"
+  stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"`;
+const FOLDER_CLOSED = `<svg class="gl-folder" ${FOLDER_BASE}>
+  <path d="M3.2 18.2V6.8c0-.9.7-1.6 1.6-1.6h3.9c.5 0 1 .2 1.3.6l1.2 1.5h7.9c.9 0 1.7.7 1.7 1.6v9.3c0 .9-.8 1.6-1.7 1.6H4.8c-.9 0-1.6-.7-1.6-1.6Z"/></svg>`;
+const FOLDER_OPEN = `<svg class="gl-folder" ${FOLDER_BASE}>
+  <path d="M3.2 16.4V6.8c0-.9.7-1.6 1.6-1.6h3.9c.5 0 1 .2 1.3.6l1.2 1.5h7.2c.9 0 1.6.7 1.6 1.5v1.8"/>
+  <path d="M2.4 20.4 5 13.2c.2-.6.8-1 1.5-1h14.9c1 0 1.7 1 1.3 1.9l-2.4 6.3c-.2.6-.8 1-1.5 1H3.9c-1 0-1.7-1-1.5-2Z"/></svg>`;
+/* 分组行的「更多」入口：省略号，悬停才现身（与会话行的删除键同一画法）。 */
+const MORE_SVG = `<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true">
+  <circle cx="5.5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="18.5" cy="12" r="1.6"/></svg>`;
 
 const DEL_SVG = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
   stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -136,14 +154,16 @@ function paint(items) {
   const grouping = new Map();
   for (const it of items) {
     const g = dayGroupKey(it.created_at);
-    if (!grouping.has(g.id)) grouping.set(g.id, { id: g.id, label: g.label, arr: [] });
+    if (!grouping.has(g.id)) grouping.set(g.id, { id: g.id, label: g.label, weekday: g.weekday, arr: [] });
     grouping.get(g.id).arr.push(it);
   }
 
   const specs = [];
+  groups.clear();
   for (const g of grouping.values()) {
     specs.push({ kind: "grp", key: "g:" + g.id, id: g.id, label: g.label,
-                 count: g.arr.length, isFolded: !query && folded.has(g.id) });
+                 count: g.arr.length, isFolded: !query && folded.has(g.id),
+                 weekday: g.weekday, items: g.arr });
     if (query || !folded.has(g.id)) {
       for (const it of g.arr) specs.push({ kind: "row", key: "s:" + it.id, it });
     }
@@ -170,33 +190,58 @@ function paint(items) {
   old.forEach(n => n.remove());
 }
 
-/** 分组标签：可点击折叠。
- *  用 <button> 而不是 <div> 才有键盘可达性（Tab 能到、Enter/Space 能触发）
- *  与读屏语义；`aria-expanded` 是这类「点一下展开收起」控件的标准信号。 */
+/** 分组标签：可点击折叠 + 一个「更多」菜单（删整组，以后还有重命名等）。
+ *  标签用 <button> 而不是 <div> 才有键盘可达性（Tab 能到、Enter/Space 能触发）
+ *  与读屏语义；`aria-expanded` 是这类「点一下展开收起」控件的标准信号。
+ *  ⚠ 结构必须是**外层 div 套两个按钮**：「更多」是按钮，而 HTML 不允许
+ *  按钮套按钮（嵌套的 <button> 会被解析器直接拆出去，实测点不到）。
+ *  外层 `.grp-row` 只做定位参照，胶囊底色仍然画在 `.group-lbl` 上 ——
+ *  左栏那一列的几何判据量的是胶囊，不是这层壳。 */
 function buildGroup() {
-  const b = el("button", "group-lbl");
-  b.type = "button";
-  b.innerHTML = `${CHEVRON}<span class="gl-t"></span><span class="count"></span>`;
-  return b;
+  const wrap = el("div", "grp-row");
+  wrap.innerHTML = `<button type="button" class="group-lbl" aria-expanded="true">
+      ${FOLDER_OPEN}${FOLDER_CLOSED}<span class="gl-t"></span><span class="count"></span>
+    </button>
+    <button type="button" class="grp-more" aria-haspopup="menu" aria-expanded="false"
+      title="这一组的更多操作">${MORE_SVG}</button>
+    <div class="grp-menu hidden" role="menu">
+      <button type="button" class="grp-menu-item danger" role="menuitem">
+        ${DEL_SVG}<span class="gm-t"></span></button>
+    </div>`;
+  return wrap;
 }
 
 function updateGroup(n, sp) {
-  const sig = sp.label + "|" + sp.count + "|" + sp.isFolded;
+  const lbl = n.querySelector(".group-lbl");
+  // 星期从标签上挪到这里：一行三段（日期 + 星期 + 计数）太挤，
+  // 但「上周四那次」这种查法还得走得通 —— 悬停与确认框给全名。
+  const long = sp.weekday ? `${sp.label} ${sp.weekday}` : sp.label;
+  // ⚠ 这张表必须在签名早退**之前**写：groups 每次重画都先 clear()，
+  //  放在早退之后，凡是这一轮没变化的分组就会从表里消失 —— 而 deleteGroup
+  //  的守卫是 `if (!g) return`，于是「删除这一组」会**静默什么都不做**。
+  //  轮询每 3 秒重画一次，只要有一条记录动了，其余分组就全进了那个洞。
+  groups.set(sp.id, { label: long, count: sp.count, items: sp.items });
+  const sig = sp.label + "|" + sp.count + "|" + sp.isFolded + "|" + sp.weekday;
   if (n._sig === sig) return;
   n._sig = sig;
-  n.classList.toggle("folded", sp.isFolded);
+  lbl.classList.toggle("folded", sp.isFolded);
   // aria-expanded 与视觉同源，避免「看着折了、读屏说展开了」
-  n.setAttribute("aria-expanded", sp.isFolded ? "false" : "true");
+  lbl.setAttribute("aria-expanded", sp.isFolded ? "false" : "true");
+  lbl.dataset.gid = sp.id;
   n.dataset.gid = sp.id;
-  n.title = sp.isFolded ? `展开「${sp.label}」的 ${sp.count} 条` : `收起「${sp.label}」`;
-  n.querySelector(".gl-t").textContent = sp.label;
-  n.querySelector(".count").textContent = sp.count;
+  lbl.title = sp.isFolded ? `展开「${long}」的 ${sp.count} 条` : `收起「${long}」`;
+  lbl.querySelector(".gl-t").textContent = sp.label;
+  lbl.querySelector(".count").textContent = sp.count;
+  // 菜单项把条数写进字里： destructive 操作必须让人在点之前就知道会没掉几条。
+  n.querySelector(".gm-t").textContent = `删除这一组（${sp.count} 条）`;
+  n.querySelector(".grp-more").title = `「${long}」的操作`;
 }
 
 /** 一行 = 状态记号 + 标题 + 时刻，三项排在同一条基线上。
- *  状态点占一个 14px 图标盒（与分组箭头的 14px 同宽），于是标题文字的左边缘
- *  与分组标签文字的左边缘落在同一个 x —— 旧的「标题 + 副标题」两行式里，
- *  副标题从 20px 起、标题从 34px 起，同一行内两个左边缘，读起来就是「没对齐」。
+ *  状态点占一个 16px 图标盒（与分组箭头的盒同宽，也是左栏那一列的图标盒尺寸），
+ *  于是标题文字的左边缘 = 分组标签文字的左边缘 = 搜索框/新建/设置的文字左边缘
+ *  —— 旧的「标题 + 副标题」两行式里，副标题从 20px 起、标题从 34px 起，
+ *  同一行内两个左边缘，读起来就是「没对齐」。
  *  行上没有状态字：只有异常才落记号，理由见 updateRow 里那张三档表。 */
 function buildRow() {
   const row = el("div", "sess-item");
@@ -310,6 +355,28 @@ export const bindSessionList = bindOnce(function bindSessionList() {
     (it.state || "done") === "done" ? openRecord(it.id) : attach(it.id);
   };
   list.addEventListener("click", ev => {
+    // 「更多」与它的菜单优先：两者都 stopPropagation，避免下面那句
+    // 「点别处就关菜单」把它们刚打开的菜单当场关掉（同一趟冒泡里就关了）。
+    const more = ev.target.closest(".grp-more");
+    if (more) {
+      ev.stopPropagation();
+      const menu = more.closest(".grp-row").querySelector(".grp-menu");
+      const willOpen = menu.classList.contains("hidden");
+      closeGroupMenus();
+      if (willOpen) {
+        menu.classList.remove("hidden");
+        more.setAttribute("aria-expanded", "true");
+        menu.querySelector(".grp-menu-item").focus();
+      }
+      return;
+    }
+    const item = ev.target.closest(".grp-menu-item");
+    if (item) {
+      ev.stopPropagation();
+      deleteGroup(item.closest(".grp-row").dataset.gid);
+      return;
+    }
+    closeGroupMenus();
     // 分组标签的折叠优先于行点击：两者在 DOM 上是兄弟，不会互相误判。
     const grp = ev.target.closest(".group-lbl");
     if (grp) { toggleFold(grp.dataset.gid); return; }
@@ -326,15 +393,22 @@ export const bindSessionList = bindOnce(function bindSessionList() {
     activate(row);
   });
   list.addEventListener("keydown", ev => {
+    if (ev.key === "Escape") { closeGroupMenus(); return; }
     // <button> 的 Enter/Space 本来就会派发 click，这里不要再处理一遍，
     // 否则一次按键折叠两次 = 看起来「点了没反应」。
-    if (ev.target.closest(".group-lbl")) return;
+    if (ev.target.closest(".group-lbl") || ev.target.closest(".grp-more")
+        || ev.target.closest(".grp-menu-item")) return;
     if (ev.key !== "Enter" && ev.key !== " ") return;
     const row = ev.target.closest(".sess-item");
     if (!row) return;
     ev.preventDefault();
     activate(row);
   });
+  // 菜单开着时点到列表外（正文、输入框、设置页）就该收起来 —— 与下拉菜单同一条规矩。
+  if (!window.__grpMenuOutsideBound) {
+    window.__grpMenuOutsideBound = true;
+    document.addEventListener("click", closeGroupMenus);
+  }
 });
 
 /** 删除：已结束的记录走 DELETE 删产物；进行中的走 DELETE 也会顺带停掉后台作业
@@ -359,4 +433,41 @@ async function deleteSession(it) {
   } catch (e) {
     toast("删除失败：" + e.message, 3500);
   }
+}
+
+function closeGroupMenus() {
+  document.querySelectorAll("#session-list .grp-menu:not(.hidden)").forEach(m => {
+    m.classList.add("hidden");
+    const more = m.closest(".grp-row").querySelector(".grp-more");
+    if (more) more.setAttribute("aria-expanded", "false");
+  });
+}
+
+/** 删掉整个分组：逐条走与单条删除**同一个** DELETE。
+ *  后端没有批量入口，而 `pipeline.discard` 自己会顺带停掉在跑的后台作业，
+ *  所以「这一组里有正在生成的」不需要特殊分支 —— 同一条路，只是走 N 次。
+ *  ⚠ 必须先确认：一次抹掉 N 条记录，比删一条重得多，而它不可恢复。
+ *  ⚠ 部分失败要如实报（后端对「文件正被占用」是明确报错而不是假装成功）：
+ *    报"已删除 N 条"而列表里还留着几条，等于骗用户。 */
+async function deleteGroup(gid) {
+  closeGroupMenus();
+  const g = groups.get(gid);
+  if (!g || !g.items.length) return;
+  const ok = await appConfirm("删除整个分组",
+    `「${g.label}」的 ${g.items.length} 条记录会被删除，不可恢复。`);
+  if (!ok) return;
+  const ids = g.items.map(it => it.id);
+  const failed = [];
+  for (const id of ids) {
+    try { await api.removeRecord(id); } catch (_) { failed.push(id); }
+  }
+  // 当前开着的那条 / 正在跑的那条如果被抹掉了，界面要跟着松手，
+  // 否则会留着一块指向已删记录的正文（与 deleteSession 同一套）。
+  if (state.job && ids.includes(state.job.id)) detachJob();
+  if (state.result && ids.includes(state.result.id)) setResult(null);
+  const n = ids.length - failed.length;
+  toast(failed.length
+    ? `已删除 ${n} 条，${failed.length} 条未删成（文件可能正被占用），可稍后重试`
+    : `已删除「${g.label}」的 ${n} 条记录`, 4200);
+  loadSessions();
 }

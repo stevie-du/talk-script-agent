@@ -56,6 +56,7 @@ def test_end_to_end_mock():
         jid_direct = _case_direct_and_recheck(pl, tmp)
         _case_voice_and_format(pl)
         _case_rewrite_segment(pl, tmp, jid_direct)
+        _case_pack_without_storyboard_stage(pl, tmp)
         _case_packgen(pl, tmp)
         _case_export_skill(tmp)
     finally:
@@ -82,6 +83,17 @@ def _case_direct_and_recheck(pl: Pipeline, tmp: Path):
     assert list(out.glob(f"*/{jid}/脚本.md")), "脚本.md 未落盘"
     # 落盘目录只有一个（回归「跨零点分裂成两个目录」）
     assert len(list(out.glob(f"*/{jid}"))) == 1, "产物落进了多个日期目录"
+
+    # P1-30：分镜拆成独立阶段 —— 必须在**校验通过之后**才跑（回炉轮不该重画），
+    # 且与段落一一对应（scenes 按下标配对，多一段少一段都会错位）。
+    sb = r["storyboard"]
+    assert len(sb) == len(r["sections"]), \
+        f"分镜应与段落一一对应：{len(sb)} vs {len(r['sections'])}"
+    assert all(s["shot"] for s in sb), f"分镜画面不应为空：{sb}"
+    keys = [s["key"] for s in snap["steps"]]
+    assert keys[-1] == "storyboard" and keys.index("storyboard") > keys.index(rounds[-1]), \
+        f"分镜应排在校验之后：{keys}"
+    assert all(sc["visual"]["prompt"] for sc in r["scenes"]), "scenes 应带上分镜画面"
     return jid
 
 
@@ -99,6 +111,8 @@ def _case_voice_and_format(pl: Pipeline):
     assert snap["state"] == "done", snap.get("error")
     assert snap["result"]["sections"], "仅口播仍应有分段文案"
     assert snap["result"]["storyboard"] == [], "仅口播不应有分镜"
+    assert not any(s["key"] == "storyboard" for s in snap["steps"]), \
+        "仅口播不应跑分镜阶段（这一步是真实 token 开销）"
     assert snap["result"]["params"]["format"] == "voice"
 
 
@@ -110,9 +124,11 @@ def _case_voice_and_format(pl: Pipeline):
 
 # ── 3. 单段重写（含落盘同步与时间轴重算）────────────────────
 def _case_rewrite_segment(pl: Pipeline, tmp: Path, jid: str):
-    before = pl.get_job(jid).snapshot()["result"]
+    before_snap = pl.get_job(jid).snapshot()
+    before = before_snap["result"]
     before_text = before["sections"][1]["text"]
     before_revs = len(before["revisions"])
+    sb_before = sum(1 for s in before_snap["steps"] if s["key"] == "storyboard")
 
     pl.rewrite_segment(jid, RewriteSegmentRequest(index=1, feedback="更口语化"))
     # 重写从 done 出发，要等 revisions 增加而不是等状态变化
@@ -135,14 +151,54 @@ def _case_rewrite_segment(pl: Pipeline, tmp: Path, jid: str):
     tm = snap["result"]["timings"][-1]
     assert tm["end"] > tm["start"], "时间轴应重算"
 
+    # P1-30：改写过的段落要重画分镜 —— 旧分镜的时间轴是按改写前的字数算的。
+    # 计数 +1 而不是比内容：mock 夹具的画面文案是固定的一套，比内容比不出什么。
+    sb_after = sum(1 for s in snap["steps"] if s["key"] == "storyboard")
+    assert sb_after == sb_before + 1, \
+        f"单段重写应重画分镜：{sb_before} → {sb_after}"
+    assert len(snap["result"]["storyboard"]) == len(snap["result"]["sections"]), \
+        "重画后分镜仍须与段落一一对应"
 
-# ── 4. 建包（mock 夹具）─────────────────────────────────────
+
+# ── 3b. P1-30 之前建的包没有 storyboard 阶段 ──────────────────
+# 跳过分镜，而不是让一条已经写完、已经通过校验的脚本以 KeyError 收场。
+def _case_pack_without_storyboard_stage(pl: Pipeline, tmp: Path):
+    dst = tmp / "packs" / "nostage"
+    shutil.copytree(tmp / "packs" / "elevator", dst)
+    skill = yaml.safe_load((dst / "skill.yaml").read_text(encoding="utf-8"))
+    skill["stages"].pop("storyboard")
+    (dst / "skill.yaml").write_text(
+        yaml.safe_dump(skill, allow_unicode=True), encoding="utf-8")
+
+    jid = pl.start_generate(GenerateRequest(pack="nostage", topic="被困电梯怎么办"))
+    snap = wait_job(pl, jid)
+    assert snap["state"] == "done", snap.get("error")
+    assert snap["result"]["storyboard"] == [], "缺 storyboard 阶段时不应有分镜"
+    assert snap["result"]["sections"], "正文仍应正常产出"
+    assert any(s["key"] == "storyboard_skip" for s in snap["steps"]), \
+        "跳过必须留痕，不能静默"
+
+
+# ── 4. 建包（mock 夹具，走后台作业）─────────────────────────
 def _case_packgen(pl: Pipeline, tmp: Path):
-    info = create_pack(tmp, pl.llm, "全屋定制/装修", "全屋定制家居品牌，面向新房装修业主获客")
+    # P1-43：建包与生成同一套作业通道 —— 有状态、能取消、错误落在作业上。
+    jid = pl.start_packgen("全屋定制/装修", "全屋定制家居品牌，面向新房装修业主获客")
+    snap = wait_job(pl, jid)
+    assert snap["state"] == "done", snap.get("error")
+    assert snap["kind"] == "packgen", f"作业类型不对：{snap['kind']}"
+    info = snap["result"]
+    # 同名再来一次：这种结论不花钱，必须同步 409，不该起一个必然失败的作业
+    try:
+        pl.start_packgen("全屋定制/装修", "重复一次")
+        raise AssertionError("同名行业包应当被同步挡下")
+    except FileExistsError as e:
+        assert "已存在" in str(e), str(e)
     pack_dir = tmp / "packs" / info["name"]
     assert (pack_dir / "pack.yaml").exists() and (pack_dir / "banwords.yaml").exists()
     assert (pack_dir / "knowledge/topics.md").exists()
     assert (pack_dir / "校对清单.md").exists()
+    # P2-25 口径：新包必须留出「核心术语」这一节，否则 write.files.terms 永远注入不到东西
+    assert "核心术语" in (pack_dir / "knowledge/standards.md").read_text(encoding="utf-8")
     pdata = yaml.safe_load((pack_dir / "pack.yaml").read_text(encoding="utf-8"))
     assert pdata["draft"] is True, "生成包必须为草稿"
     assert pdata.get("quota_table"), "新包必须继承模板的配额表（否则生成会降级）"
@@ -151,6 +207,19 @@ def _case_packgen(pl: Pipeline, tmp: Path):
     snap = wait_job(pl, jid)
     # mock write 夹具是电梯文案，跨行业时可能校验不过 —— 结构能走通即可
     assert snap["state"] in ("done", "failed"), snap
+
+    # 取消的检查点必须落在**写盘之前**：作业取消后不该留下半个行业包目录，
+    # 否则下一次同名建包会被 FileExistsError 永久挡住（P2-46 的清理只管异常路径）。
+    from app.jobs import JobCancelled
+    from app.packgen import preview_slug
+    try:
+        create_pack(tmp, pl.llm, "假行业取消测试", "用于验证取消检查点的描述",
+                    should_abort=lambda: True)
+        raise AssertionError("should_abort 为真时应抛 JobCancelled，不该往下写")
+    except JobCancelled:
+        pass
+    assert not (tmp / "packs" / preview_slug("假行业取消测试")).exists(), \
+        "取消后留下了半成品目录"
 
 
 # ── 5. 导出 Agent 技能 ──────────────────────────────────────

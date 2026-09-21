@@ -216,9 +216,10 @@ b, strong { font-weight: 600; }
    中性灰而不是 --warn 橙：没配过不是故障，染成警示色会让橙色贬值
    （真正会失败的「未配置 API Key」那条就没人看了）。 */
 .tag-default {
-  margin-left: var(--s2); padding: 1px var(--s2); border-radius: var(--r-xs);
+  /* 只留面色与排布：字阶 / 字重 / 内边距 / 圆角由文件末尾「小标记一族」那条统一给，
+     `display` 与 `margin-left: 0` 由下面「两个小标另起一行」那条统一给
+     （这里原来重复写了 margin-left: var(--s2)，被它静默盖掉）。 */
   background: var(--fill-strong); color: var(--text-2);
-  font-size: var(--f-2xs); font-weight: 500; letter-spacing: 0;
 }
 
 /* 标签行内的小文字按钮（「恢复默认」）：不能抢标签的视觉重量，
@@ -305,7 +306,9 @@ b, strong { font-weight: 600; }
 /* 文件名（sans）。`.kb-desc`（卡内那行角色小字）已删：卡片已经按角色分在
    `.kb-group` 里，组标题上就写着角色，卡里再写一遍是**同一信息两份表示**。
    字号 / 字重 / 颜色跟 .pl-t 一致。 */
-.kb-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.kb-meta { display: flex; flex-direction: column; gap: var(--s1); min-width: 0; }
+   /* 缝与 `.pl-item .pl-txt` 同值（见那处的全站口径）：这两族是「视觉同族」，
+      断言逐条比它们的计算值，留两份数就是留一份迟早会漂的副本。 */
 .kb-name {
   font: 500 var(--f-sm)/1.35 var(--font);
   color: var(--text-1);
@@ -459,11 +462,17 @@ main { display: flex; flex: 1; min-height: 0; }
      同理 styles.css 里另一个输入框一直是 var(--h-ctl)。 */
   /* 上下间距全部交给 .left-top 的 gap：上方是分隔线，下方直接贴列表。
      不要再给 margin —— 否则「搜索」和它过滤的列表之间会被撑开。 */
-  margin: 0; padding: 0 8px; height: var(--h-ctl);
-  border: 0.5px solid var(--line); border-radius: var(--r-ctl);
+  margin: 0; padding: 0 var(--s3); height: var(--h-ctl);
+  border-radius: var(--r-ctl);
   background: var(--fill);
+  /* 边界用 0.5px 的**阴影环**，不用真 border：border 会各吃掉左右 0.5px 的布局宽度，
+     于是这里的图标与文字比同一列其余四块整体右移半像素 —— 半像素在 dpr=1 的屏上
+     就是错开一列（实测改前：图标 12.5 / 文字 36.5，邻居是 12 / 36）。
+     输入控件这一族（input / select / .select-btn）本来就走 box-shadow 环，
+     这里跟着归队（规范 §3：同一族一种手法）。 */
+  box-shadow: var(--e1);
 }
-.sess-search:focus-within { border-color: var(--line-strong); background: var(--surface); }
+.sess-search:focus-within { box-shadow: var(--shadow-input-hover); background: var(--surface); }
 .sess-search > svg { flex: 0 0 auto; color: var(--text-3); }
 .sess-search input {
   flex: 1; min-width: 0; border: 0; background: transparent;
@@ -474,8 +483,11 @@ main { display: flex; flex: 1; min-height: 0; }
 }
 .sess-search input::placeholder { color: var(--text-3); }
 .sess-search input::-webkit-search-cancel-button { display: none; }
+/* 命中盒 16：与分组文件夹图标、会话行状态点同一个图标盒档（规范 §2「4 的倍数」
+   + §4 图标盒）。原来写 18 —— 一个 14px 字形配 18px 盒，跟同一列里
+   「14 字形 / 16 盒」的另外两处差 2px，是这一列唯一不合拍的图标盒。 */
 .sess-search .icon-btn {
-  flex: 0 0 auto; width: 18px; height: 18px; padding: 0;
+  flex: 0 0 auto; width: 16px; height: 16px; padding: 0;
   display: grid; place-items: center; color: var(--text-3);
 }
 .sess-search .icon-btn:hover { color: var(--text-1); background: var(--fill-strong); }
@@ -493,18 +505,23 @@ main { display: flex; flex: 1; min-height: 0; }
    折叠键的图标因此比左栏其它内容右移 12px。拉回**半个内边距**让它视觉对齐 ——
    写成 `--s3 / -2` 而不是 -6px：值完全相同，但按钮内边距一改它就跟着改，不会失配。 */
 .left-head #btn-toggle-left { margin-left: calc(var(--s3) / -2); }
-.brand { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
+.brand { display: flex; align-items: center; gap: var(--s2); min-width: 0; flex: 1; }
 .brand .logo-wrap {
   width: 24px; height: 24px; flex: 0 0 auto;
   display: grid; place-items: center; border-radius: var(--r-xs);
   background: var(--grad-ink); color: var(--text-inv);
   box-shadow: var(--shadow-ink);
 }
-.brand .logo-wrap svg { width: 13px; height: 13px; }
+/* 品牌字形 14：规范 §4 的图标档位只有 14 / 16 / 18 / 32。
+   原来写 13 —— 不在档上，且它是全站唯一一处 13px 图标。 */
+.brand .logo-wrap svg { width: 14px; height: 14px; }
 .brand .name { font-size: var(--f-base); font-weight: 600; color: var(--text-1); }
+/* 「草稿」标：属于文件末尾「小标记一族」那一档（11 / 600 / 1px·8 / 胶囊），
+   字号·字重·内边距·圆角由那条统一给，这里只留它自己的面色与排布。
+   原来它自己写了一套 2px·8 + 500 —— 同族五个类都在收口那条上，第六个漏在外面，
+   于是品牌行那颗标比结果卡上的指标标矮半档、字还轻一档。 */
 .badge {
-  font-size: var(--f-2xs); padding: 2px var(--s2); border-radius: var(--r-pill);
-  background: var(--warn-soft); color: var(--warn); font-weight: 500;
+  background: var(--warn-soft); color: var(--warn);
   flex: 0 0 auto;
 }
 
@@ -524,9 +541,11 @@ main { display: flex; flex: 1; min-height: 0; }
 }
 .rh-sub { font-size: var(--f-xs); color: var(--text-3); white-space: nowrap; }
 .rh-actions { display: flex; align-items: center; gap: var(--s2); flex: 0 0 auto; }
+/* 头部的「合格 / 未通过」标：也是文件末尾「小标记一族」那一档（11 / 600 / 1px 8 / 药丸），
+   与结果卡 tab 上的「1 镜」「通过」是同一类信息，原来却比它们高 6px（padding 4 8）
+   且轻一档字重 —— 同一种记号在页头与在卡里两种尺寸。这里只留面色。 */
 .rh-state {
-  font-size: var(--f-2xs); font-weight: 500; color: var(--text-3);
-  padding: var(--s1) var(--s2); border-radius: var(--r-pill); background: var(--fill);
+  color: var(--text-2); background: var(--fill);
 }
 .rh-state:empty { display: none; }
 .rh-state.ok { color: var(--ok); background: var(--ok-soft); }
@@ -656,42 +675,49 @@ select {
 
 /* 工具条内的控件（参数胶囊 / 模型选择器）一律**幽灵态**：纯文字 + 箭头，无底色。
    参考图里底部那排控件（分支 / 权限 / 模型）都是这样 —— 靠箭头表示可点，
-   而不是靠一个灰底胶囊。一排灰底胶囊会让工具条比输入区本身还重。 */
+   而不是靠一个灰底胶囊。一排灰底胶囊会让工具条比输入区本身还重。
+   高度取 --h-sm（28）：这一列里并存的另一族胶囊（卡下的起手示例、结果区的后续建议）
+   就是 28，原来这里是刻度外的 24 —— 同一列两种胶囊高（规范 §2 控件高度只有 28/32/40）。
+   字重显式写 500：规范 §2 字重表里「控件」那一档。上面通用那条 `.select-btn` 写的是
+   `font: inherit`（为了跟宿主控件同字族同字号），它把 `button { font-weight: 500 }`
+   一起重置成了继承值 —— 所以这一档必须在这里显式给回来，否则胶囊吃到 body 的 400，
+   比同排的起手示例轻一档。 */
 .select-wrap.pill { flex: 0 0 auto; }
 .select-wrap.pill .select-btn {
-  width: auto; height: 24px; min-height: 24px;
+  width: auto; height: var(--h-sm); min-height: var(--h-sm);
   padding: 0 var(--s2); gap: var(--s1); font-size: var(--f-sm);
-  border-radius: var(--r-sm);
+  font-weight: 500; line-height: 1.35;
+  border-radius: var(--r-ctl);
   background: transparent; box-shadow: none;
   color: var(--text-2);
 }
-/* hover / 展开态用 --fill-strong 而不是 --fill：卡片本身就是 --fill 面，
-   同色叠同色等于没反馈（幽灵态控件挂在灰面上时最容易踩这个）。 */
-.select-wrap.pill .select-btn:hover { background: var(--fill-strong); color: var(--text-1); box-shadow: none; }
-.select-wrap.pill.open .select-btn { background: var(--fill-strong); color: var(--text-1); box-shadow: none; }
-.select-wrap.pill .chev { margin-left: 2px; }
+/* hover 用 --fill（规范 §2·5.4 全站只有这一种手法）。原来用 --fill-strong，
+   那条规则的理由是「控件挂在 --fill 灰面上时同色叠同色」，但这一排只出现在
+   输入卡里，卡面是 --surface 白 —— 4% 在黑字旁边完全看得见，没必要比导航项更重。 */
+.select-wrap.pill .select-btn:hover { background: var(--fill); color: var(--text-1); box-shadow: none; }
+.select-wrap.pill.open .select-btn { background: var(--fill); color: var(--text-1); box-shadow: none; }
 /* 菜单宽度与位置由 JS 量取后写入（贴按钮左沿、可按内容取宽）。
    z-index 必须高于整窗二级页 .screen(60)：菜单挂在 body 下，与 .screen 同处根层叠
    上下文，低于它就会被整窗设置页盖住 —— 菜单其实弹出来了，但点不到，
    表现为「设置 → 生成偏好」里的风格 / 人设 / 结尾引导选不动。toast 是 99，仍在其上。 */
+/* 弹层里有「一行」时，容器圆角取**同心值** = 行圆角 8 + 容器内边距 4 = 12。
+   原来这里是 --r-pop（16）：外圈比内圈更圆，四角会"包不住"里面的行，
+   而行只有一项时整个弹层被画成一颗胶囊（16 的圆角 / 36 的高度）——
+   读起来像"一个按钮后面垫了张卡"，而不是"一张卡里有一行"。
+   判据由 verify.js 现算（容器圆角 === 行圆角 + 容器内边距），不写死数字。 */
 .select-menu {
-  position: absolute; top: calc(100% + 5px); left: 0; z-index: 80;
-  background: var(--glass-strong); border-radius: var(--r-pop);
+  position: absolute; top: calc(100% + var(--s1)); left: 0; z-index: 80;
+  background: var(--glass-strong); border-radius: var(--r-card);
   backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);
-  box-shadow: var(--shadow-pop); padding: 4px; max-height: 264px; overflow: auto;
+  box-shadow: var(--shadow-pop); padding: var(--s1); max-height: 264px; overflow: auto;
   animation: pop .15s var(--ease-pop);
   scrollbar-width: thin;
 }
-/* 胶囊菜单：行高更紧凑，避免 8 项时占满半屏（JS 给菜单加 .compact） */
-.select-menu.compact .select-opt { padding: var(--s2); font-size: var(--f-xs); }
-
-.select-opt {
-  display: flex; align-items: center; gap: 8px;
-  padding: var(--s2); border-radius: var(--r-sm); cursor: pointer;
-  font-size: var(--f-sm); color: var(--text-1); line-height: 1.35;
-  white-space: nowrap;          /* 胶囊菜单按内容取宽，不允许换行折断 */
-}
-.select-opt:hover, .select-opt.hover { background: var(--fill); }
+/* 「胶囊菜单更紧凑一档」这一支已删：它做的事是把行内边距压到 8、字号从 13 降到 11，
+   而 11px 不在 §2 的字阶（控件/列表 13）上。弹层里的行全站同一个档，
+   见文件末尾「弹层里的一行」那条 —— `.select-opt` 的基础规则也并进去了，
+   这里只剩它自己的状态与勾。 */
+.select-opt.hover { background: var(--fill); }   /* 键盘导航的高亮类；鼠标 hover 在统一档里 */
 .select-opt.on { background: var(--sel-bg); color: var(--ink); font-weight: 500; }
 .select-opt .tick { margin-left: auto; opacity: 0; font-weight: 600; color: var(--ink); }
 .select-opt.on .tick { opacity: 1; }
@@ -709,13 +735,19 @@ select {
 .select-wrap .select-btn.is-warn:hover,
 .select-wrap.pill .select-btn.is-warn:hover { color: var(--warn); background: var(--warn-soft); }
 .select-wrap .select-btn.is-warn .chev { color: var(--warn); }
+/* 警示小圆点：6px = 全站状态点那一档（`.dot::before` / `.step-dot` 同为 6）。
+   原来 5px —— 圆点不是「图标盒」，它是字形尺度的记号，5 与 6 之间差的正是
+   「能不能跟同屏其它圆点对得上」。规范 §2 的圆点档见文档那条补充。 */
 .select-wrap .select-btn.is-warn .sel-text::before {
-  content: ""; display: inline-block; width: 5px; height: 5px; border-radius: 50%;
+  content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
   background: var(--warn); margin-right: var(--s2); vertical-align: middle;
 }
-/* 菜单项上的标记：必须在**选中之前**就能看出这个值没定制 */
+/* 菜单项上的标记：必须在**选中之前**就能看出这个值没定制。
+   盒子 14 = §4 的「行内符号」档（原来 13，与同族的 `.dot` 6px 圆点、
+   `.step-dot` 6px 一起看就是随手写的）；左侧不留 2px —— `.select-opt` 的
+   gap 已经是 --s2（8），再加一份就是同一件事两份表示（实际 10px）。 */
 .select-opt.uncovered .opt-warn {
-  flex: 0 0 auto; width: 13px; height: 13px; margin-left: 2px;
+  flex: 0 0 auto; width: 14px; height: 14px;
   display: grid; place-items: center; border-radius: 50%;
   background: var(--warn-soft); color: var(--warn);
   font-size: var(--f-2xs); font-weight: 600; line-height: 1;
@@ -745,18 +777,21 @@ select {
 #left.folded .left-scroll,
 #left.folded .left-foot { display: none; }
 #left.folded #btn-toggle-left {
-  position: fixed; top: var(--s2); left: 12px; z-index: 45;
+  position: fixed; top: var(--s2); left: var(--s3); z-index: 45;
   background: var(--glass-strong);
   box-shadow: var(--shadow-input);
 }
 #left.folded #btn-toggle-left:hover { box-shadow: var(--shadow-input-hover); }
-/* 底部：与顶部同一套 16px 节奏 —— 列表底 → 设置区分隔线 16、分隔线 → 设置按钮 16。
-   padding-bottom 保持 10：那是到窗口下边缘的距离，不属于块间距。
+/* 底部：与 .left-top 完全同一条 padding（16 / 12 / 16）—— 同一列的上下两个固定区
+   用同一套值，「设置」在分隔线与窗口底边之间才是上下等距的。
+   原来下边停在 --s2(8)：上 16 下 8，按钮被压在窗口底边上，读起来就是"四周不齐"。
+   左右保持 12：那是左栏五块共用的图标列（新建/搜索/分组标签/会话行/设置 的
+   图标左边缘都在 x=12），改成 16 会让设置这一块的图标单独往里挪 4px。
    这条线是 border-top（贴在容器一边，不是独立元素）：CSS 写 0.5px，
    但 Windows / dpr=1 下 Chrome 会把它**向上取整成 1px 渲染**（getComputedStyle
    也返回 1px）。所以量「线底 → 设置按钮顶」时，线底 = border box 顶边 + borderTopWidth，
    拿 .left-foot 的 border box 顶边当线会凭空多出 1px。 */
-.left-foot { flex: 0 0 auto; padding: var(--s4) var(--s3) var(--s2);
+.left-foot { flex: 0 0 auto; padding: var(--s4) var(--s3) var(--s4);
   border-top: 0.5px solid var(--line); }
 /* 顶部固定区：搜索 + 新建对话，flex: 0 0 auto 防止被滚动区挤压 */
 /* 左栏竖向节奏**统一 16px**（= --s4）：品牌线→按钮→搜索框→列表，三段都是 16。
@@ -778,18 +813,25 @@ select {
    两条路都通：内容少时贴搜索框，内容多时正常向下滚。
    padding-bottom 16：列表底到设置区分隔线也走同一套 16px 节奏（原来是 12）。 */
 .left-scroll {
+  /* gap 已删：这个容器只有一个子节点（#session-list），gap 在单元素上什么都不做，
+     留着只会让人以为左栏顶部那 1px 是这里给的。 */
   flex: 1; min-height: 0; overflow-y: auto; padding: 0 var(--s3) var(--s4);
-  display: flex; flex-direction: column; gap: 1px;
+  display: flex; flex-direction: column;
   scrollbar-width: none; -ms-overflow-style: none;
 }
 .left-scroll::-webkit-scrollbar { display: none; }
 
 /* 新建对话：ID 选择器提高特异性，无需 !important；
-   同时 flex: 0 0 auto + min-height 防止作为 flex 子项被压缩 */
+   同时 flex: 0 0 auto + min-height 防止作为 flex 子项被压缩。
+   ⚠ `justify-content: flex-start` 不能省 —— 全局 button 给的是 **center**，
+   于是这个通栏主按钮的图标落在整行中间（实测 87.5），而它正下方的搜索框、
+   分组标签、会话行的图标都在左边缘一列上。左栏五块（新建 / 搜索 / 分组标签 /
+   会话行 / 设置）共用一套：高 32、圆角 8、左右内边距 12、图标盒 16、文字列 36。 */
 button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0 auto; }
 #btn-new-chat.primary {
   height: var(--h-btn-lg); min-height: var(--h-btn-lg);
   padding: 0 var(--s3); border-radius: var(--r-ctl);
+  justify-content: flex-start;
 }
 
 /* 会话记录 */
@@ -804,29 +846,57 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
      · 底色 = 这个 32px 的胶囊，处处相等（规范 §2·5.6 同层级同呼吸）
      · 间距 = margin-top（盒子外，不参与绘制），第一个归零
    历史：这里曾是 align-items: flex-start + line-height: 9px，为的是让
-   **字墨顶恰好落在盒顶边**（16px 那一档断言的来源）。那个魔数本身就是
-   「padding 当间距」的产物 —— 胶囊一旦等高就不再需要它：现在两态一致的
-   基准回到**盒子**（盒顶 = 容器顶 = 搜索框下 16px），墨迹在胶囊里居中，
-   与行的文字同一套摆法。gap 一律 4 的倍数（8）。 */
+   **字墨顶恰好落在盒顶边**（16px 那一档断言的来源）。那个推导本身是
+   「padding 当间距」的产物 —— 胶囊一旦等高，两态一致的基准就回到**盒子**
+   （盒顶 = 容器顶 = 搜索框下 16px），墨迹由居中摆放。
+   `line-height: 9px` 仍然保留，但职责变了：它现在只保证「今天」与计数
+   两个 span 的**行盒同高**（那条同基线断言靠它），不再负责顶边对齐。
+   gap 一律 4 的倍数（8）。 */
+/* 分组行 = 一层定位壳，里面装**两个按钮**（折叠标签 + 「…」更多）。
+   壳存在唯一的理由：HTML 不允许按钮套按钮，而「…」必须是按钮 ——
+   实测把「…」写进 .group-lbl 里，解析器会直接把它拆到按钮外面，位置全乱。
+   ⚠ 分组之间的竖向节奏挂在这层壳上（不挂在胶囊上）：胶囊是 flex 子项，
+   它自己的 margin 会撑大壳、连带把「悬停底色 = 胶囊」那套几何判据绕过去。
+   壳不是 flex 子项，margin 正常生效。 */
+.grp-row { position: relative; display: flex; margin-top: var(--s2); }
+/* 第一个分组行是「搜索框的下一行」，不是「上一条记录的下一条」——
+   margin-top 归零，让搜索框到胶囊顶边的距离**等于**滚动区上边界的距离
+   （即 .left-top 的 padding-bottom 16px）。
+   现在盒子里没有上下 padding，所以只归零 margin 就够，两态天然同一个数。
+   （旧写法还要同时归零 padding-top —— 那正是因为间距被画进了盒子里，
+   归零一个 padding 就把悬浮胶囊一起削掉了 12px，见上面 .group-lbl 那段。） */
+.grp-row:first-child { margin-top: 0; }
+/* 两个分组行**直接相邻** = 上面那一组是折着的（折起的分组不渲染任何行）。
+   这时它们的 margin-top 归零，档距从 41px（32 胶囊 + 8 margin + 1 行距）收到
+   33px —— 与展开时行与行的档距同一个数。
+   为什么不改胶囊高度：折叠态把胶囊压矮，就是刚被修掉的病（同一列里
+   几种尺寸的悬浮盒）。间距归 margin 管、胶囊只管画底色，两者互不牵连。
+   全部折起时这一列读起来就是一份普通的密集列表，而不是一堆浮在空中的标题。 */
+.grp-row + .grp-row { margin-top: 0; }
 .group-lbl {
-  font-size: var(--f-2xs); font-weight: 600; color: var(--text-2); letter-spacing: .3px;
-  margin-top: var(--s2);
-  display: flex; align-items: center; gap: var(--s2); line-height: 9px;
+  /* 字距 0（§2·5.2 只留「标题 -.02em / 其余 0」，.3px 那份绝对值在 11px 上等于没加）；
+     行高取标签档 1.35（§2·5.3）—— 原来写 9px，比字号 11 还小，在 `height: 32` +
+     `align-items: center` 之下它已经不决定任何东西，但读代码的人会以为它在管垂直位置。 */
+  font-size: var(--f-2xs); font-weight: 600; color: var(--text-2); letter-spacing: 0;
+  display: flex; align-items: center; gap: var(--s2); line-height: 1.35;
   /* 折叠按钮的复位。⚠⚠ 这一块每一条都不能省 —— 全局 `button` 规则
      （styles.css「按钮」段）会把它接管成另一种东西：
-       · `padding: 0 var(--s3)`   → 顶掉这里的垂直内边距，标签被压扁；
-       · `justify-content: center` → 三角/文字/计数**居中**，标签看着像浮在行中间；
-       · `height: var(--h-btn)`   → 30px，比会话行的 32 矮一档，正是这轮要修的病。
-     实测踩过：漏了 `justify-content` 与 `padding` 两条，量出来三角距左边 80px、
+       · `justify-content: center` → 图标/文字/计数**居中**，标签看着像浮在行中间；
+       · `height: var(--h-btn)`   → 30px，比会话行的 32 矮一档，正是那轮要修的病；
+       · `padding: 0 var(--s3)`   → 与这里同值，但它是**简写**，会把垂直内边距
+         一并按它的语义定死，将来谁给这行加上下留白就会被它顶掉。
+     实测踩过：漏了 `justify-content` 与 `padding` 两条，量出来图标距左边 80px、
      计数右边距 80px（本该贴左），视觉上整行是"居中"的。
-     **判据**：改完必须量 `箭头.left - 标签.left` 与 `文字.left - 标签.left`，
-     实测应当是 8 与 30（= padding-left 8 + 箭头盒 14 + gap 8）。
-     文字左边缘落在这个 30 + 标签左偏移 12 = 42 处，会话行的标题也落在 42
-     （行 padding-left 8 + 状态点盒 14 + gap 8）—— 两列对齐是刻意的，别只改一边。 */
+     **判据**：改完必须量 `图标.left - 标签.left` 与 `文字.left - 标签.left`，
+     实测应当是 12 与 36（= padding-left 12 + 图标盒 16 + gap 8）。
+     这个 36 是左栏**唯一的文字列**：搜索框的输入、会话行的标题、底部设置
+     按钮的文字全部落在同一处（容器左内边距 12 + 36 = 绝对 48），
+     设置页那条同宽侧栏也是同一套。
+     别只改一边 —— 任何一块单独调内边距或图标盒，就会多出一档左边缘。 */
   width: 100%; height: var(--h-md); min-height: 0; border: 0; background: transparent;
   font-family: inherit; text-align: left; cursor: pointer;
   justify-content: flex-start;
-  padding: 0 var(--s2);
+  padding: 0 var(--s3);
   border-radius: var(--r-ctl);
   transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
 }
@@ -836,45 +906,80 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
    「历史记录无法折叠」有一半是这个原因）。规范 §2·5 第 4 条：hover 只用底色一种
    手法，所以这里不加描边、不加阴影、不给箭头位移。 */
 .group-lbl:hover { background: var(--fill); color: var(--text-1); }
-.group-lbl:focus-visible { outline: 2px solid var(--ring-focus); outline-offset: 0; }
-/* 折叠箭头：14px 内联 SVG（规范 §4 的「行内符号 / 箭头」档，线宽由全局
-   `svg { stroke-width: 1.6 }` 收口）。
-   ⚠ 静止态 = 展开态 = 朝下；折叠时 rotate(-90deg) 变朝右。
-   旧实现用 CSS 边框画三角，静止态是朝右的 ▶、折叠转成朝下 ▼，方向与所有
-   分组列表的惯例相反 —— 收起的那一组看着像「点我展开」，展开的反而像收起。
-   这里**不再需要**旧那 2px 的光学补偿：箭头盒与文字行盒现在由 align-items: center
-   一起居中，两者中线恒等；那 -2px 是给 flex-start 时代（都从盒顶起排）补的。 */
-.group-lbl .gl-arrow {
-  width: 14px; height: 14px; flex: 0 0 auto;
-  transition: transform var(--dur) var(--ease);
-}
-.group-lbl.folded .gl-arrow { transform: rotate(-90deg); }
-/* 折叠态**只由箭头表达**，不给文字换色。
-   原来这里写的是 `color: var(--text-2)` —— 与常态同值，是一条空规则；
-   改成提亮到 --text-1 之后在真机上试过一版：折起来的「今天」比展开着的
-   「昨天」更黑，读成「这一行被选中 / 鼠标停在上面」，而不是「这一组收着」。
+/* 焦点环归回全站唯一配方（规范 §2·5.5）。原来这里是 `outline: 2px solid
+   --ring-focus`，而 `--ring-focus` 是 7% 黑 —— 在侧栏那层浅灰上基本量不出来，
+   键盘走到分组标签时看不见焦点。`--shadow-focus` 是 1px@22% + 4px@7%，
+   同一族里既有能看见的那一圈、也有那层柔光。 */
+.group-lbl:focus-visible { outline: none; box-shadow: var(--shadow-focus); }
+/* 分组图标 = 文件夹，开 / 合两个字形（DOM 里两枚都在，靠 display 切）。
+   ⚠ 折叠信号**只能靠这两个字形**：不给文字换色（折起来的「今天」若比展开着的
+   「昨天」更黑，读成「这一行被选中」而不是「这一组收着」，真机上试过），
    规范 §5 也不允许再造一档更弱的灰（--text-3 已并进 --text-2）。
-   箭头方向 + aria-expanded 已经足够区分，数量药丸折起后仍看得见。 */
+   ⚠ 不是「同一个图标转个角度」—— 旋转一个文件夹读不出开合，只会变成歪的。
+   ⚠ 盒宽 16 与行首状态点盒同宽（左栏一整列的图标盒只有一种尺寸），**字形 14**：
+   svg 默认 preserveAspectRatio 把 24 视口按 14 高等比居中进这个 16×16 的盒，
+   改的是盒子、不是字形大小。两枚都占同一个格，切换不动别的列。 */
+.group-lbl .gl-folder {
+  width: 16px; height: 16px; flex: 0 0 auto;
+}
+.group-lbl .gl-folder + .gl-folder { display: none; }
+.group-lbl.folded .gl-folder { display: none; }
+.group-lbl.folded .gl-folder + .gl-folder { display: block; }
+/* 「…」更多：与会话行的垃圾桶同一套画法 —— 悬停/键盘聚焦才现身，
+   常态完全隐藏。一个分组一个入口，展开着十组就有十个，常驻等于在列表里
+   挂一列省略号，而这个动作一次能抹掉整组，最不该一直嚷嚷。 */
+.grp-more {
+  /* 垂直居中不能用 top:50% + translateY(-50%)：全局 button:active 的 scale 会在
+     按下瞬间覆盖掉 translateY，鼠标一抬 click 就落到行上（同 .sess-del 那个坑）。 */
+  position: absolute; right: var(--s1); top: 0; bottom: 0; margin-block: auto;
+  width: 28px; height: 28px; padding: 0; min-height: 0;
+  display: grid; place-items: center; border-radius: var(--r-sm);
+  background: transparent; color: var(--text-2); opacity: 0;
+  transition: opacity var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.grp-row:hover .grp-more, .grp-more:focus-visible, .grp-more[aria-expanded="true"] { opacity: 1; }
+.grp-more:hover { background: transparent; color: var(--text-1); }
+.grp-more svg { pointer-events: none; }
+/* 分组菜单：与参数下拉 `.select-menu` 同一套弹层语言（玻璃底 + 同心圆角 +
+   --shadow-pop + pop 动效），差别只在它是**动作**菜单 —— 项是按钮而不是选项，
+   所以带图标、危险项走 --bad。挂在壳上右对齐：分组行是通栏的，菜单贴右缘
+   才不会盖住下一组的日期。 */
+.grp-menu {
+  position: absolute; top: calc(100% + var(--s1)); right: var(--s1); z-index: 85;
+  min-width: 168px; padding: var(--s1);
+  background: var(--glass-strong); border-radius: var(--r-card);
+  backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);
+  box-shadow: var(--shadow-pop);
+  animation: pop .15s var(--ease-pop);
+}
+/* 尺寸 / 字号 / 内边距 / 圆角 / hover 走文件末尾「弹层里的一行」那条统一档
+   （与参数下拉 `.select-opt` 同型：28 高 / 13 字 / 0 8 / 圆角 8 / --fill 底色）。
+   这里只留这一族自己的图标排布。 */
+.grp-menu-item svg { flex: 0 0 auto; pointer-events: none; }
+/* 危险动作：图标与文字都走 --bad，**不加红底** —— 与会话行删除键同一判据
+   （实色红底被否过：那是把破坏性做成醒目，而醒目不是目的，认得出才是）。 */
+.grp-menu-item.danger { color: var(--bad); }
+.grp-menu-item.danger:hover { background: var(--bad-soft); }
+/* 标签文字不许被省略号挤掉：分组标签是「日期 + 计数」，两个都必须完整可见
+   （计数被裁成「2…」就读不出条数了）。整行的省略交给不了它 —— 通栏 251px
+   装「9月12日 26」用不到一半。 */
 .group-lbl .gl-t { flex: 0 0 auto; }
-/* 第一个分组标签是「搜索框的下一行」，不是「上一条记录的下一条」——
-   margin-top 归零，让搜索框到胶囊顶边的距离**等于**滚动区上边界的距离
-   （即 .left-top 的 padding-bottom 16px）。
-   现在盒子里没有上下 padding，所以只归零 margin 就够，两态天然同一个数。
-   （旧写法还要同时归零 padding-top —— 那正是因为间距被画进了盒子里，
-   归零一个 padding 就把悬浮胶囊一起削掉了 12px，见上面 .group-lbl 那段。） */
-.group-lbl:first-child { margin-top: 0; }
-/* 分组计数：**裸数字**，与标签同字号同字重同色，只是不描背景。
+/* 分组计数：**裸数字**，与标签同字号同行高同色，只把字重降到 400。
    原来是灰底药丸 —— 它在一行 11px 的小字里凭空多出一块面积，
-   读起来比标签本身还重（「今天 17」里眼睛先看到 17）。
-   规范 §5：需要更弱就用非文字色，别加底色；这里连底色都不要了。
-   ⚠ 与设置页 `.kb-group-c`（仍是药丸）**刻意不同族**，分界是宿主字号，见那处注释。
-   ⚠ line-height 必须与 .group-lbl 同值（9px）：两个盒子度量一致，
-   「盒顶零差 + 同基线」那条断言才成立。药丸时代用来抹平中文与数字
-   那 1px 墨底差的 `padding-top: 1px` 已经跟着药丸一起删了 ——
-   裸数字对齐的是基线，不该再拿内边距去挪字形。 */
+   读起来比标签本身还重（「今天 17」里眼睛先看到 17），所以底色先去掉；
+   这一轮再去掉字重，是因为**日期与计数读不分开**（用户原话「区分不出来
+   日期和后面的数字」）—— 600 的「09-12」旁边落一个 600 的「26」，
+   两个数字在视觉上是同一族。现在标签 600 / 计数 400，加上日期本身
+   改成「9月12日」（由「日」字收尾，见 util.dayGroupKey），两头一起才分得开。
+   ⚠ 降的是**字重**，不是颜色：规范 §5 没有第三档灰（--text-3 已并进 --text-2），
+     要更弱只能拿非文字色表达，而这里要的是"轻一档的字"，不是"淡一档的色"。
+   ⚠ line-height 必须与 .group-lbl 同值（标签档 1.35）：两个盒子度量一致，
+     「盒顶零差 + 同基线」那条断言才成立。原来两边都是 9px —— 比字号 11 还小的
+     行高不在 §2·5.3 的两档里，它唯一的作用是「让两个盒子一样」，那就用档上的值做到。
+   ⚠ 与设置页 `.kb-group-c`（仍是药丸）**刻意不同族**，分界是宿主字号，见那处注释。 */
 .group-lbl .count {
-  font-size: var(--f-2xs); color: var(--text-2); font-weight: 600;
-  font-variant-numeric: tabular-nums; line-height: 9px;
+  font-size: var(--f-2xs); color: var(--text-2); font-weight: 400;
+  font-variant-numeric: tabular-nums; line-height: 1.35;
 }
 /* 列表从容器**顶部**开始排，会话少时也不许贴底。
    曾经写过 margin-top: auto（为了绕开 justify-content: flex-end 的滚动陷阱），
@@ -885,6 +990,10 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
    scrollHeight 照常计入，既不会滚不动，也不会贴底。
    flex: 0 0 auto 仍然必需：少了 flex-shrink: 0，列表会被压到容器高度，
    子项溢出到列表盒之外，既滚不动也画不出来。 */
+/* gap 1px 是**缝隙**不是节奏（规范 §2 例外二那一类）：会话行常态无底，
+   但选中态 `.sess-item.active` 与 hover 都会涂底 —— 缝给 0 时两条涂底的行
+   连成一整块，「哪一条正开着」就看不出来了；给 4 又把这 103 行的密集列表松开。
+   同一个理由适用于上面 `.left-scroll` 那颗 1px。 */
 #session-list { display: flex; flex-direction: column; gap: 1px; flex: 0 0 auto; }
 /* 行：单行制、32px 高（= --h-md，与上方搜索框、新建对话同一档控件高度）。
    四格一排：状态点(14 图标盒) | 标题(1fr，省略) | 状态字(auto) | 时刻(auto)。
@@ -896,7 +1005,7 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
    在行内居中不上（见下方 .sess-del 的 top/bottom + margin-block 写法）。 */
 .sess-item {
   position: relative; display: flex; align-items: center; gap: var(--s2);
-  height: var(--h-md); padding: 0 var(--s2);
+  height: var(--h-md); padding: 0 var(--s3);
   border-radius: var(--r-ctl); cursor: pointer;
   transition: background var(--dur) var(--ease);
 }
@@ -906,13 +1015,15 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
    提到 --fill-strong(7%)：仍然只用底色表达（规范 §3），但拉开了能看见的距离。 */
 .sess-item.active { background: var(--fill-strong); }
 .sess-item.active .sess-topic { color: var(--ink); font-weight: 600; }
-/* 行首状态点 = **异常记号**。14px 是图标盒（与分组箭头同宽），所以标题文字的
-   左边缘 = 分组标签文字的左边缘 —— 旧的副标题从 20px 起、标题从 34px 起，
+/* 行首状态点 = **异常记号**。16px 是图标盒（与分组箭头盒同宽，也是规范 §4
+   「控件与列表」那一档），所以标题文字的左边缘 = 分组标签文字的左边缘
+   = 搜索框/新建/设置按钮文字的左边缘 —— 旧的副标题从 20px 起、标题从 34px 起，
    同一行里两个左边缘，用户报的「边距不统一」有一半是这个。
+   ⚠ 盒子 16 而**字形仍是 6px 圆点**：盒子管对齐，字形管轻重，两件事别混。
    6px 圆点是盒里的 ::before，与 .step-dot 同尺寸同画法。
 
    三档，只标异常：
-     ok   正常完成 → **整格不可见**（visibility 不是 display：14px 的盒子
+     ok   正常完成 → **整格不可见**（visibility 不是 display：16px 的盒子
           还得留着占位，否则标题左边缘会随记录状态左右跳）
      no   红点：失败 / 完成但校验未通过 / 已中断
      run  灰点呼吸：真在跑
@@ -922,7 +1033,7 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
    异常才标」。
    色弱可用性反而更好了：区分「有记号 / 没记号」靠的是**有没有**，
    不是红绿两种颜色；读屏与悬浮提示仍给完整状态词（sessions.js 的 stateText）。 */
-.dot { width: 14px; height: 14px; flex: 0 0 auto; display: grid; place-items: center; }
+.dot { width: 16px; height: 16px; flex: 0 0 auto; display: grid; place-items: center; }
 .dot::before {
   content: ""; width: 6px; height: 6px; border-radius: 50%;
   background: var(--text-3); opacity: .5;
@@ -980,9 +1091,12 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
 .sess-del:hover { background: transparent; color: var(--bad); opacity: 1; }
 /* 按下：颜色再深一档 + 缩放，仍然不给底色。 */
 .sess-del:active { background: transparent; color: var(--bad-hover); transform: scale(.9); }
-/* 键盘聚焦：背景透明，只能靠外圈表达焦点 —— 用 --bad 画环。
-   （不能省：这是纯图标按钮唯一的键盘可见反馈。） */
-.sess-del:focus-visible { outline: 2px solid var(--bad); outline-offset: 1px; }
+/* 键盘聚焦：焦点环同样归回全站唯一配方（规范 §2·5.5）。
+   原来用 `--bad` 画环 —— 但「这是危险操作」这件事已经由 hover 那一下变红说了，
+   焦点环的语义是「键盘现在在这儿」，给它涂危险色等于让每一颗删除键
+   在键盘导航时都提前亮一次红。`--shadow-focus` 本来就是外圈，
+   透明底上照样看得见，不需要另开一种颜色。 */
+.sess-del:focus-visible { outline: none; box-shadow: var(--shadow-focus); }
 .sess-del svg { pointer-events: none; }
 .sess-empty { padding: var(--s2) var(--s3); }
 
@@ -1001,7 +1115,11 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
   color: var(--text-2); padding: var(--s1) var(--s3); text-transform: none;
 }
 .nav-item {
-  /* ⚠ 与设置页的 .stg-nav-item 是**同一个控件的两处实例**，改这里必须同步改那边。 */
+  /* ⚠ 与设置页的 .stg-nav-item 是**同一个控件的两处实例**，规则内容是复制粘贴的，
+     改这里必须同步改那边（verify.js 直接比两者的计算值）。
+     左栏底部这一项与设置页左导航那几项吃的是**同一套网格**：两条侧栏同宽同底、
+     容器左右内边距都是 12，所以内边距/图标盒/文字列必须一致 —— 把一边单独
+     收紧 4px，两条并排的侧栏就会出现两档图标列。 */
   /* margin 1px 0 → 0：项间距已由 .nav-sec 的 gap 提供，这里再留 margin 会
      在**容器边界处**也吃进 1px —— 左栏底部只有「设置」一项，它的 margin-top
      直接叠在 .left-foot 的 padding-top(16) 上，把「分隔线 → 设置」顶成 17px
@@ -1017,8 +1135,10 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
 .nav-item .spacer { flex: 1 1 auto; }
 /* 「待建」标签：小面积文字态，暗示功能未接入，不做大块底色 */
 .nav-item kbd {
-  font: inherit; font-size: var(--f-2xs); color: var(--text-3);
-  padding: 1px 5px; border-radius: var(--r-xs); background: var(--fill);
+  font: inherit; font-size: var(--f-2xs); color: var(--text-2);
+  /* 横向 4 在刻度上（原来 5px 违反 §2「间距一律 4 的倍数」的硬约束）；
+     纵向 1px 是小标记一族的墨底补偿，与 .tag-warn 同一写法。 */
+  padding: 1px var(--s1); border-radius: var(--r-ctl); background: var(--fill);
 }
 .nav-item svg { flex: 0 0 auto; color: var(--text-3); }
 .nav-item:hover svg, .nav-item.active svg { color: inherit; }
@@ -1104,7 +1224,7 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
    条目左侧的名称/副行、启用开关、以及两个小标。 */
 .mdl-label { display: block; font-weight: 600; color: var(--text-1); letter-spacing: -.02em; }
 .mdl-sub {
-  display: block; margin-top: 1px; font-size: var(--f-2xs); color: var(--text-3);
+  display: block; margin-top: var(--s1); font-size: var(--f-2xs); color: var(--text-3);
   font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 /* 条目里的两个小标另起一行。
@@ -1117,9 +1237,10 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
   display: inline-block; margin-left: 0; margin-top: 4px;
 }
 .tag-warn {
-  display: inline-block; padding: 1px var(--s2); border-radius: var(--r-xs);
+  /* 同 `.tag-default`：字阶 / 字重 / 内边距 / 圆角走「小标记一族」那条，
+     `display` 与换行间距走上面那条。这里原来重复写了一份 1px 8 + 方角 + 500，
+     其中内边距与圆角被更靠后的同特异性规则盖掉（死声明）。 */
   background: var(--warn-soft); color: var(--warn);
-  font-size: var(--f-2xs); font-weight: 500; letter-spacing: 0;
 }
 /* 启用开关：画成一个开关的样子（参考图里的 toggle），语义是**单选** ——
    打开一个就关掉别的。所以 title 里写清「同一时间只有一个」，
@@ -1203,9 +1324,9 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
    字段在这张卡里挤一点、在别的卡里松一点。 */
 .pg-form { display: flex; flex-direction: column; gap: var(--s4); width: 100%; max-width: 480px; margin-top: var(--s3); text-align: left; }
 .pg-form .block-inner { gap: var(--s2); }
-/* pg-empty-actions：底部按钮组的图标要稍稍离开文字，2px 间距。 */
+/* 底部按钮组：图标与文字的间距由 `button` 自己的 gap（--s2）给。
+   原来这里又给图标加 2px 右外边距 —— 同一件事两份表示，实际距离成了 10px。 */
 .pg-empty-actions { display: flex; gap: var(--s2); margin-top: var(--s4); justify-content: center; }
-.pg-empty-actions .ic-spark { margin-right: 2px; }
 /* 生成失败横幅：常驻在表单下方（失败只有一条几秒的 toast，走开就看不见）。
    样式对齐 .banner.warn（--warn-soft 底 + --warn 字），但贴表单左对齐；
    429 响应体会带回车与引号，pre-wrap + break-word 防长地址撑破卡片。 */
@@ -1485,7 +1606,11 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
   display: grid; place-items: center; background: var(--fill); color: var(--text-2);
 }
 .pl-item.on .pl-ic { background: var(--ink); color: var(--text-inv); }
-.pl-item .pl-txt { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+/* 「标题行 + 副行」两行小字之间的缝全站只有一个值：--s1（4）。
+   原来三处各写一套 —— 模型条目 2px、知识库卡片 2px、模型列表副行 1px，
+   同一个层级关系三种松紧，1px 与 2px 也都落在 §2 的刻度外。
+   同族条目：`.pl-item .pl-txt` / `.kb-meta` / `.mdl-sub`。 */
+.pl-item .pl-txt { min-width: 0; display: flex; flex-direction: column; gap: var(--s1); }
 /* ⚠ display:block 不能省：两者都是 <span>（inline），不显式成块就会**连成一行**，
    「行业包 选择当前生效的行业」读起来像一个词，副标题这一层直接消失。
    中列条目的层级全靠这两行的大小/深浅差，合成一行等于没有层级。 */
@@ -1516,7 +1641,7 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
 .pl-item .tag-warn {
   display: inline-block; margin-top: 4px;
   /* 字号 / 内边距 / 圆角不再另写一套 —— 与文件末尾「小标记一族收口」的
-     `.tag-warn, .tag-default` 同一档（11px / 0 4px / --r-ctl）。
+     `.tag-warn` 同一档（11px / 1px 8px / 药丸）。
      原来这里是 1px 5px 且特异性更高，把统一档顶掉了。 */
   background: var(--bad-soft); color: var(--bad);
 }
@@ -1571,28 +1696,44 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
   word-break: break-word;
 }
 /* 编辑入口：悬停/聚焦才显形（与 .sess-del / .card-foot .rw 同一套路）。
-   修复前用户消息是死的 —— 打错一个字只能重开一条，线程被澄清消息污染。 */
+   修复前用户消息是死的 —— 打错一个字只能重开一条，线程被澄清消息污染。
+   图标按钮 28×28 = --h-sm 档（规范 §2「紧凑按钮、图标块」那一档，全站图标按钮同值）；
+   原来 24 是刻度外的值，与同一排里的建议胶囊 28、卡内图标按钮 28 并排就矮一圈。 */
 .msg-edit {
-  flex: 0 0 auto; margin-top: var(--s2); width: 24px; height: 24px; border-radius: var(--r-xs);
-  display: grid; place-items: center; color: var(--text-3);
+  flex: 0 0 auto; margin-top: var(--s2); width: var(--h-sm); height: var(--h-sm);
+  border-radius: var(--r-ctl);
+  display: grid; place-items: center; color: var(--text-2);
   background: transparent; border: none; cursor: pointer;
   opacity: 0; transition: opacity var(--dur) var(--ease), background var(--dur) var(--ease), color var(--dur) var(--ease);
 }
 .msg-user:hover .msg-edit, .msg-user:focus-within .msg-edit { opacity: .7; }
 .msg-edit:hover { opacity: 1; background: var(--fill); color: var(--ink); }
 .msg-edit:focus-visible { opacity: 1; box-shadow: var(--shadow-focus); outline: none; }
+/* 就地改主题的那个 textarea：只写「与通用输入框不同」的四件事
+   （宽度 / 不许手动拉伸 / 跟气泡同字号 / 行高）。
+   原来这里重复写了 min-height: 34px、0.5px 实描边、圆角 12 —— 三个都在跟
+   通用输入框规则（`input, select, textarea`：32 高 / --e1 描边环 / --r-ctl 8）抢，
+   而 34 与 12 都不在 §2 的刻度上；实描边还比全站输入框重一档（--line-strong 12% vs --line 7%）。
+   聚焦态也不用自己写：通用 `:focus` 那条会给它同一个焦点环。 */
 .bub-edit {
-  width: min(46vw, 420px); min-height: 34px; resize: none; font: inherit;
+  width: min(46vw, 420px); resize: none; font: inherit;
   color: var(--text-1); background: var(--surface);
-  border: 0.5px solid var(--line-strong); border-radius: var(--r-md);
   padding: var(--s2); line-height: 1.6;
 }
 .bub-actions { display: flex; gap: var(--s2); justify-content: flex-end; margin-top: var(--s2); }
-.ghost.tiny, .primary.tiny { height: var(--h-sm); font-size: var(--f-xs); padding: 0 var(--s2); }
+/* 气泡内联动作（取消 / 重新生成）：紧凑只紧凑**横向留白**，不缩字号。
+   原来这里写的是 --f-xs(11) —— 全站按钮文字都是 13（规范 §2 字阶：控件一档），
+   只有这两个动作按钮小一号，读起来像「不太重要的说明文字」而不是按钮。
+   高度与全局 `button` 同档（--h-sm 28），显式写出来是为了让「这一族多高」可读。 */
+.ghost.tiny, .primary.tiny { height: var(--h-sm); padding: 0 var(--s2); }
 .msg-assistant { padding-right: var(--s6); }
 .msg-assistant .avatar {
   width: 24px; height: 24px; flex: 0 0 auto; border-radius: var(--r-ctl);
-  display: grid; place-items: center; margin-top: 2px;
+  display: grid; place-items: center;
+  /* 2px 是光学补偿，不是节奏值（规范 §2 例外一）：头像盒 24 对齐的是正文首行的
+     行盒顶，而 15px/1.6 的中文字形在行盒里偏下约 2px —— 不给这 2px，
+     深色方块看着比第一行字高半格。 */
+  margin-top: 2px;
   background: var(--grad-ink); color: var(--text-inv);
   box-shadow: var(--shadow-ink);
 }
@@ -1724,11 +1865,14 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
    `.think-stream`（思考过程）与状态行，没有第二个"边写边显示正文"的面板。
    留着会让下一个人以为存在实时草稿流。 */
 
-/* 小标签/胶囊（指标、状态徽标共用同一套基础样式） */
+/* 小标签/胶囊（指标、状态徽标共用同一套基础样式）。
+   ⚠ 字阶 / 字重 / 内边距 / 圆角 **不在这里写** —— 它们由文件末尾「小标记一族收口」
+   那条统一给（11 / 600 / 1px·8 / 胶囊）。这里原来另写了一份 11 / 500 / 2px·8，
+   两条同特异性、后写的赢，于是这一族的字重与内边距一直是**写了不生效的死声明**：
+   读代码的人会以为徽标比实际轻一档、padding 大一档。同一个信息只留一份表示。 */
 .m-chip, .acc-badge {
-  font-size: var(--f-xs); padding: 2px var(--s2); border-radius: var(--r-pill);
-  background: var(--fill); color: var(--text-2); font-weight: 500;
-  display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;
+  background: var(--fill); color: var(--text-2);
+  display: inline-flex; align-items: center; gap: var(--s1); white-space: nowrap;
 }
 .m-chip.bad, .acc-badge.bad { background: var(--bad-soft); color: var(--bad); }
 .m-chip.good, .acc-badge.ok { color: var(--ok); }
@@ -1776,26 +1920,37 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
 .script-card { padding: var(--s4) 0 var(--s3); border-bottom: 0.5px solid var(--line); }
 .script-card:last-child { border-bottom: none; }
 .card-head { display: flex; align-items: baseline; gap: var(--s2); margin-bottom: var(--s2); }
-.pill, .quota { font-size: var(--f-xs); flex: 0 0 auto; }
-.pill { font-weight: 600; letter-spacing: .2px; color: var(--text-1); }
-.pill.cta { color: var(--text-2); }
+/* 段落类型小标（钩子 / 正文 / 结尾引导）。
+   ⚠ 它原来叫 `.pill`，与工具条胶囊变体 `.select-wrap.pill` **撞了类名**：
+   这条规则的 `font-weight: 600` 会顺着继承落进每一个参数胶囊（`.select-btn` 写的是
+   `font: inherit`，不挡权重），13px 的一排控件因此比规范 §2 的「控件 500」重一档。
+   两个不相关的东西共用一个名字，改一处就会静默影响另一处 —— 按语义改名，不加 !important。 */
+.seg-tag, .quota { font-size: var(--f-xs); flex: 0 0 auto; }
+.seg-tag { font-weight: 600; color: var(--text-1); }
+.seg-tag.cta { color: var(--text-2); }
 .quota { font-weight: 400; color: var(--text-3); }
 .quota.over { color: var(--bad); font-weight: 500; }
 .meta {
   font-size: var(--f-xs); color: var(--text-3); margin-left: auto;
   text-align: right; line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.card-text { line-height: 1.6; white-space: pre-wrap; font-size: var(--f-md); color: var(--text-1); letter-spacing: .1px; }
+/* 正文字距 0（规范 §2·5.2：只有标题用 -.02em 相对值，正文与控件一律 0）。
+   原来写 .1px —— 绝对值在 15px 正文上等于没加，留着只会让人以为它有用。 */
+.card-text { line-height: 1.6; white-space: pre-wrap; font-size: var(--f-md); color: var(--text-1); }
 /* 这里原本有三条「结果正文可直改」（.card-text.editable / :hover / :focus 与
    .card-text.saving，注释写的是 P0-3）。已删除：全项目没有任何代码给
    `.card-text` 加 `editable` 或 `saving` —— 正文目前**不支持就地编辑**，
    要改内容走输入区的「按此修改」。留着会让人以为正文能点开改。 */
 .card-text strong { font-weight: 600; }
-.card-text .over { color: var(--warn); background: var(--warn-soft); border-radius: var(--r-xs); padding: 0 3px; }
+.card-text .over { color: var(--warn); background: var(--warn-soft); border-radius: var(--r-ctl); padding: 0 var(--s1); }
 .card-foot { margin-top: 8px; display: flex; gap: var(--s2); align-items: center; }
+/* 单段重写的入口按钮：控件档（高 --h-sm / 字 13 / 次级色）。
+   原来写的是 24 高 + --f-xs(11) + --text-3 —— 三个都不在 §2 的刻度上，
+   而它旁边就是 28 高的建议胶囊与 32 高的按钮，一排里三种控件高。
+   「不抢正文注意力」交给淡显与幽灵底，不靠把控件做小。 */
 .card-foot .rw {
-  height: 24px; font-size: var(--f-xs); padding: 0 var(--s2); flex: 0 0 auto;
-  background: transparent; color: var(--text-3); border-radius: var(--r-xs);
+  height: var(--h-sm); font-size: var(--f-sm); padding: 0 var(--s2); flex: 0 0 auto;
+  background: transparent; color: var(--text-2); border-radius: var(--r-ctl);
   /* 默认淡显而非全隐：完全看不见就等于没有这个入口，用户不知道卡片能单段重写。
      悬停/聚焦才提到全亮，平时不抢正文的注意力（与 .sess-del 同一套路）。 */
   opacity: .45; transition: opacity var(--dur) var(--ease), background var(--dur) var(--ease), color var(--dur) var(--ease);
@@ -1859,47 +2014,62 @@ td.bad { color: var(--bad); font-weight: 500; }
 .log-block summary { cursor: pointer; color: var(--text-2); font-size: var(--f-sm); display: flex; align-items: center; gap: var(--s2); }
 .log-block pre { font-size: var(--f-xs); white-space: pre-wrap; max-height: 300px; overflow: auto; padding-top: var(--s2); color: var(--text-2); }
 
-/* ══════════════ 空状态 ══════════════ */
-.empty {
-  margin: auto; text-align: center; color: var(--text-2);
-  max-width: 500px; padding: var(--s6) var(--s6) var(--s4);
-  display: flex; flex-direction: column; align-items: center;
-}
-.empty .mono {
-  width: 52px; height: 52px; border-radius: var(--r-lg);
-  display: grid; place-items: center; margin-bottom: var(--s3);
-  background: var(--grad-ink); color: var(--text-inv);
-  box-shadow: var(--shadow-ink-lg);
-}
-.empty .mono svg { width: 24px; height: 24px; }
-.empty h3 { margin: 0 0 var(--s2); color: var(--text-1); font-size: var(--f-xl); font-weight: 600; letter-spacing: -.02em; }
-.empty .empty-sub { font-size: var(--f-sm); color: var(--text-2); line-height: 1.6; margin: 0; }
-.empty .hint { margin-top: 0; }
+/* ══════════════ 首页（landing）══════════════
+   参考 ZCode 重排（2026-09-20）。改前三块：居中的 hero 块（52px 深色图标砖 + 标题 +
+   副标题 + 2×2 白底示例卡 + 底注）飘在中上部，输入卡钉在底部，中间实测 220px 空白 ——
+   最该被看见的输入框离视觉中心最远，而五个居中块叠在一起没有主次（示例卡还是
+   白底 + 描边 + hover 抬升三手法叠加，规范 §1 一个元素只用一种）。
+   改后合成器就是 hero：弱化标识 + 一句问候在上、输入卡居中、起手示例降为卡下一行胶囊。 */
 
-/* 空状态：可点击示例卡（WorkBuddy / Trae Work 式一键起手） */
+/* 垂直居中用 auto 边距而不是 `justify-content: center`：后者在窗口压矮、内容溢出时
+   会把顶部推出边界且**滚不回来**（居中溢出项的上半截不可达是 flex 的老坑），
+   auto 边距在溢出时自动归零，退化成顶对齐 + 正常滚动。 */
+.view.is-landing #chat-stream { flex: 0 1 auto; margin-top: auto; padding-bottom: 0; }
+.view.is-landing #empty-samples { margin-bottom: auto; }
+/* 首页没有「浮在滚动内容之上」的固定层语义，所以输入区不挂玻璃底（规范 §3）；
+   上下留白也换成这一列自己的节奏（问候语 → 卡 24、卡 → 胶囊 16）。 */
+.view.is-landing #composer {
+  padding-top: var(--s6);
+  background: transparent;
+  backdrop-filter: none; -webkit-backdrop-filter: none;
+}
+
+.empty {
+  margin-inline: auto; text-align: center; color: var(--text-2);
+  max-width: var(--w-content);
+  display: flex; flex-direction: column; align-items: center; gap: var(--s3);
+}
+/* 标识：规范 §4 的展示档（32）。原来这里是一块 52px 深色渐变砖 + --shadow-ink-lg，
+   三手法叠加（渐变 + 阴影 + 圆角）且把「实心深色」这一档用在了非主 CTA 上（§3）。
+   首页的主角是输入卡，标识退成一根安静的墨线字形。 */
+.empty-mark { display: block; color: var(--text-2); }
+.empty-mark svg { width: 32px; height: 32px; }
+.empty h3 { margin: 0; color: var(--text-1); font-size: var(--f-xl); font-weight: 600; letter-spacing: -.02em; }
+
+/* 起手示例：合成器下方的一行胶囊。
+   改前是 hero 里的 2×2 白卡（标签 + 标题 + 说明三行），hover 同时改底色、加描边、
+   加阴影、位移 —— 四种手法（§2·5.4 只许用底色）。点进去其实只填标题，
+   说明与标签是「读一遍就忘」的示例文本，所以收进 title 悬浮。 */
 .samples {
-  width: 100%; margin: var(--s4) 0 var(--s2);
-  display: grid; grid-template-columns: 1fr 1fr; gap: var(--s2);
+  flex: 0 0 auto;
+  max-width: var(--w-stream); width: 100%; margin-inline: auto;
+  /* 上内边距归 0：`#composer` 的下内边距已经是 --s4（16），这里再加一份 16
+     会把「卡 → 胶囊」撑成 32，比「问候语 → 卡」的 24 还宽 —— 起手示例是输入卡的
+     附属（点了只往卡里填一句话），它离卡的距离必须**小于**卡离问候语的距离。
+     这一列的节奏因此是 12 / 24 / 16，与上面那条注释写的口径一致。 */
+  padding: 0 var(--s6) var(--s6);
+  display: flex; flex-wrap: wrap; justify-content: center; gap: var(--s2);
 }
 .sample-card {
-  height: auto; min-height: 56px; padding: var(--s2) var(--s3);
-  display: flex; flex-direction: column; align-items: flex-start; gap: var(--s1);
-  text-align: left; white-space: normal;
+  height: var(--h-sm); padding: 0 var(--s4);
+  border-radius: var(--r-pill);
   background: var(--surface); color: var(--text-1);
-  border-radius: var(--r-md); box-shadow: var(--shadow-ghost);
-  transition: background var(--dur) var(--ease), box-shadow var(--dur) var(--ease), transform var(--dur) var(--ease);
+  font-size: var(--f-sm); font-weight: 500; line-height: 1.35;
+  white-space: nowrap; box-shadow: var(--e1);
+  transition: background var(--dur) var(--ease);
 }
-.sample-card:hover {
-  background: var(--fill-hover);
-  box-shadow: 0 0 0 0.5px var(--line-strong), var(--shadow-lift);
-  transform: translateY(-1px);
-}
-.sample-card .sc-t { font-size: var(--f-sm); font-weight: 500; line-height: 1.35; }
-.sample-card .sc-d { font-size: var(--f-xs); color: var(--text-3); line-height: 1.6; }
-.sample-card .sc-tag {
-  font-size: var(--f-min); color: var(--text-3); font-weight: 500;
-  padding: 1px var(--s2); border-radius: var(--r-pill); background: var(--fill);
-}
+.sample-card:hover { background: var(--fill); }
+.sample-card:focus-visible { outline: none; box-shadow: var(--shadow-focus); }
 
 /* ══════════════ 底部输入区 ══════════════ */
 /* 一体化卡片：输入区与工具条同属一个容器。修复前是「参数条 / 输入框 / 提示行」
@@ -1934,10 +2104,14 @@ td.bad { color: var(--bad); font-weight: 500; }
 
 /* 工具条：左参数、右操作。卡内**不画分隔线** —— 输入区与工具条靠留白分区。
    画线等于把一个卡片切成两个「小卡片」，参考图里都是浑然一体的；
-   而且通栏的线会切开卡片圆角，得再拿 overflow:hidden 去裁，越补越绕。 */
+   而且通栏的线会切开卡片圆角，得再拿 overflow:hidden 去裁，越补越绕。
+   左右内边距取 --s4（16）与 `#topic` 的 padding 同值：原来这里是 8，
+   于是同一张卡里「输入文字左边界 415 / 第一个胶囊左边界 407」两条竖线差 8px
+   （跟左栏那轮「一个行内两个左边界」是同一类缺陷）。上内边距归 0：
+   那 2px 既不在 4 的倍数上，也没有可说明的补偿对象。 */
 .composer-tools {
   display: flex; align-items: center; gap: var(--s2);
-  padding: 2px var(--s2) var(--s2);
+  padding: 0 var(--s4) var(--s2);
 }
 .quick-bar {
   flex: 1 1 auto; min-width: 0;
@@ -1950,17 +2124,19 @@ td.bad { color: var(--bad); font-weight: 500; }
 /* 「更多设置」降级为参数组末尾的图标按钮。
    它原来靠 margin-left:auto 孤悬在整行最右端，与左侧那组参数没有任何视觉关系，
    描边还比主输入框更深（层级倒置）。现在紧贴参数组末尾，
-   语义变成「这些是常用参数，更多参数在设置里」。 */
+   语义变成「这些是常用参数，更多参数在设置里」。
+   盒子与胶囊同档（--h-sm 28）：同一排里 24 的图标盒夹在 28 的胶囊中间，
+   它的 hover 底就比邻居小一圈（规范 §2·5.6）。 */
 .quick-bar .qp-more {
-  flex: 0 0 auto; margin-left: 2px;
-  width: 24px; height: 24px; padding: 0;
+  flex: 0 0 auto;
+  width: var(--h-sm); height: var(--h-sm); padding: 0;
   display: grid; place-items: center;
-  border: none; border-radius: var(--r-sm);
-  background: transparent; color: var(--text-3);
+  border: none; border-radius: var(--r-ctl);
+  background: transparent; color: var(--text-2);
   box-shadow: none;
 }
-.quick-bar .qp-more:hover { background: var(--fill-strong); color: var(--text-1); box-shadow: none; }
-/* 模型与参数胶囊**只差颜色**：尺寸（高 24 / 字号 13 / 内边距 8 / 圆角 8）
+.quick-bar .qp-more:hover { background: var(--fill); color: var(--text-1); box-shadow: none; }
+/* 模型与参数胶囊**只差颜色**：尺寸（高 28 / 字号 13 / 字重 500 / 内边距 8 / 圆角 8）
    全部由上面那条 .select-wrap.pill 给，这一排六个控件逐项相等（规范 §2·5.6
    「同层级同呼吸：并排的两个控件不得出现 1px 的底边差」）。
    原来这里另写了一份 height:30px + font-size:13px，而邻居是 24px + 11px ——
@@ -2089,14 +2265,18 @@ pre#pg-checklist {
 @media (max-width: 860px) {
   #left { width: 258px; min-width: 258px; }
 }
-/* 窗口偏矮时收紧空状态，避免示例卡被下方的输入区顶掉 */
+/* 窗口偏矮时收紧首页的呼吸。这条原来的判据是「示例卡被下方的输入区顶掉」——
+   那个前提已经没了：示例现在是居中列的一部分，跟输入卡同进同退，顶不掉。
+   现在收的是首页整块的高度预算，让输入卡在矮窗里仍尽量贴中线；再矮就靠
+   #chat-stream 自己缩（它是 `flex: 0 1 auto` + `overflow-y: auto`，退化路径是
+   顶对齐 + 正常滚动，不会把内容推到够不着的上边界）。
+   ⚠ 不要再往回加 `.empty .mono`：那块 52px 深色图标砖已下线（规范 §3），
+   且它当时是靠 `width/height` 硬撑的，跟这条媒体查询一起改过两轮。 */
 @media (max-height: 720px) {
-  .empty { padding: var(--s3) var(--s6) var(--s2); }
-  .empty .mono { width: 44px; height: 44px; margin-bottom: var(--s3); }
-  .empty .mono svg { width: 20px; height: 20px; }
-  .empty h3 { font-size: 17px; }
-  .samples { margin: var(--s3) 0 var(--s2); }
-  .sample-card { min-height: 48px; padding: var(--s2) var(--s3); }
+  .empty { gap: var(--s2); }
+  .empty-mark { display: none; }
+  .view.is-landing #composer { padding-top: var(--s4); }
+  .samples { padding-bottom: var(--s4); }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
@@ -2108,20 +2288,23 @@ pre#pg-checklist {
    ══════════════════════════════════════════════════════════════ */
 
 /* 版本导航：「换一版」不再是把旧结果丢掉重画，而是同一个问题下的第 N 个版本，
-   可以来回对照（参考 Claude 的「1 / 2」翻页）。 */
+   可以来回对照（参考 Claude 的「1 / 2」翻页）。
+   整条按控件档收口：高 --h-sm（28）、翻页键 28×28、文字 --f-sm、色 --text-2。
+   原来是 20 高的键 + 22 宽 + `padding: 1px 3px` + `gap: 2px` + 11px 字 + --text-3 ——
+   一屏里唯一一处「控件但比所有控件小一号」，四个值都不在 §2 的刻度上。 */
 .ver-bar {
-  display: inline-flex; align-items: center; gap: 2px; margin-bottom: var(--s2);
-  font-size: var(--f-xs); color: var(--text-3);
-  background: var(--fill); border-radius: var(--r-pill); padding: 1px 3px;
+  display: inline-flex; align-items: center; gap: 0; margin-bottom: var(--s2);
+  height: var(--h-sm); font-size: var(--f-sm); color: var(--text-2);
+  background: var(--fill); border-radius: var(--r-pill); padding: 0;
 }
 .ver-btn {
-  width: 22px; height: 20px; border: none; background: transparent; cursor: pointer;
+  width: var(--h-sm); height: var(--h-sm); border: none; background: transparent; cursor: pointer;
   color: var(--text-2); border-radius: var(--r-pill); font-size: var(--f-sm); line-height: 1;
   display: grid; place-items: center;
 }
 .ver-btn:hover:not(:disabled) { background: var(--surface); color: var(--ink); }
 .ver-btn:disabled { opacity: .3; cursor: default; }
-.ver-label { padding: 0 4px; font-variant-numeric: tabular-nums; }
+.ver-label { padding: 0 var(--s1); font-variant-numeric: tabular-nums; }
 
 /* 后续建议：点了只预填参数、不自动提交，用户改完再发。
    （Perplexity 的 Related —— 空输入框最劝退，给三个明确的下一步） */
@@ -2131,14 +2314,24 @@ pre#pg-checklist {
   border-top: 0.5px solid var(--line);
 }
 .followups.hidden { display: none; }
-.fu-label { font-size: var(--f-xs); color: var(--text-3); margin-right: 2px; }
+/* 建议行的前缀标签：与它领着的胶囊同字号同字色（§2 控件档 13 / --text-2）。
+   原来 11px + --text-3 配在一排 13px 的胶囊前面，读起来像上一行漏下来的注释；
+   那 2px 右外边距也是多余的 —— 容器 gap 已经是 --s2（8）。 */
+.fu-label { font-size: var(--f-sm); color: var(--text-2); }
+/* 与首页卡下那排 `.sample-card` 是**同一个东西**（点了只往输入区填一句话的建议胶囊），
+   原来却是两套画法：24 高 / 11 字 / 次级灰 / `0.5px solid --line-strong` 实描边，
+   对面是 28 高 / 13 字 / 正文色 / `--e1` 描边环。同一语义两种表示就是这轮要防的，
+   数值全部改到同一批 token（实描边换成描边环还顺带去掉它每侧吃掉的 0.5px 布局，
+   与左栏搜索框那次同一修法）。两族由 verify.js 逐项断言相等，不合并选择器 ——
+   它们分处两个视图区，合并会让「改首页」静默改到结果页。 */
 .fu-chip {
-  height: 24px; padding: 0 var(--s3); border-radius: var(--r-pill);
-  border: 0.5px solid var(--line-strong); background: var(--surface);
-  color: var(--text-2); font-size: var(--f-xs); cursor: pointer;
-  transition: background var(--dur) var(--ease), color var(--dur) var(--ease), border-color var(--dur) var(--ease);
+  height: var(--h-sm); padding: 0 var(--s4); border-radius: var(--r-pill);
+  background: var(--surface); color: var(--text-1);
+  font-size: var(--f-sm); font-weight: 500; line-height: 1.35;
+  white-space: nowrap; box-shadow: var(--e1); cursor: pointer;
+  transition: background var(--dur) var(--ease);
 }
-.fu-chip:hover { background: var(--sel-bg); color: var(--ink); border-color: var(--line-strong); }
+.fu-chip:hover { background: var(--fill); }
 .fu-chip:focus-visible { outline: none; box-shadow: var(--shadow-focus); }
 
 /* 这里原本有一组「结果区自由追问」的输入行（.fu-text / .fu-input / .fu-go，
@@ -2235,25 +2428,49 @@ input:not([type]) {
 .danger-text { color: var(--bad); }
 .danger-text:hover { background: var(--bad-soft); color: var(--bad-hover); }
 
-/* 小标签（「内置默认」/「未配置 Key」）：字阶第 1 档 + 4 的倍数内边距 */
-.tag-warn, .tag-default {
-  font-size: var(--f-2xs); padding: 0 var(--s1); border-radius: var(--r-ctl);
-}
+/* 「小标签」这一档已并进文件末尾的「小标记一族收口」那条 ——
+   原来这里与两个类各自的规则三处并存（0 4 方角 / 1px 8 方角 / 1px 8 药丸），
+   同特异性靠源码顺序决胜，写在前面那两份全是死声明。 */
 
 /* ── 小标记一族收口：同一种信息只有一种画法 ──────────────────────
-   实测有 6 个类各写一套 font-size / padding / 圆角：结果卡的 `.m-chip`、
-   手风琴的 `.acc-badge`、tab 的 `.rt-b`、行业包分组的 `.kb-group-c`、
-   设置项的 `.tag-warn` / `.tag-default`。数值统一成这一档。
-   ⚠ **不含**左栏 `.group-lbl .count` —— 它挨着的是 11px 分组标签，
-   药丸在那种小字里比标签本身还抢眼，所以那边是裸数字（理由见那处注释）。
-   分界是「宿主字号多大」，不是「它是不是计数」。 */
-.m-chip, .acc-badge, .rt-b, .kb-group-c {
+   这一族 = **11px 的有底色小标记**：结果卡的 `.m-chip`、手风琴的 `.acc-badge`、
+   tab 的 `.rt-b`、行业包分组的 `.kb-group-c`、品牌行的「草稿」`.badge`、
+   模型行的「内置默认」`.tag-default` 与「未配置 Key」`.tag-warn`、页头的「合格」`.rh-state`。
+   它们原来各写一套：`1px 8`+药丸+600、`2px 8`+药丸+500、`1px 8`+方角 8、
+   `0 4`+方角 8（后两份还是**写了不生效的死声明** —— 被更靠后的同特异性规则静默盖掉）、
+   `4px 8`+药丸+500（页头那颗比卡里的高 6px）。
+   同一个「这条有状态」在八个类上有五种画法，就是用户报的「不统一」。
+   ⚠ **不含**左栏 `.group-lbl .count` —— 那边是**裸数字**（无底色），
+   药丸在 11px 小字里凭空多出一块面积，比标签本身还抢眼（理由见那处注释）。
+   分界是「它有没有面」+「宿主字号多大」，不是「它是不是计数」。
+   ⚠ 也**不含** `.nav-item kbd`：那是键帽提示，不是状态标记。
+   纵向 1px 是墨底补偿不是节奏值：中文降到基线下约 1px 而数字不降，
+   药丸上下等距时数字看起来偏上，所以只给 1px（规范 §2 例外一，已写明补偿对象）。 */
+.m-chip, .acc-badge, .rt-b, .kb-group-c, .badge, .tag-warn, .tag-default, .rh-state {
   font-size: var(--f-2xs);
   font-weight: 600;
   padding: 1px var(--s2);
   border-radius: var(--r-pill);
   font-variant-numeric: tabular-nums;
 }
+
+/* ── 弹层里的一行（用户报「删除的弹层不统一」）──────────────────
+   参数下拉的 `.select-opt` 与分组「…」菜单的 `.grp-menu-item` 是同一个东西：
+   弹层里可点的一行。实测同屏并排时它是两种控件 ——
+     行高 31 vs 28、内边距 8 全边 vs 0 8、字号 11 vs 13、过渡 all vs 四项、
+     与触发元素的缝 5px vs 4px。容器那层（16 圆角 / 4 内边距 / 玻璃 / --shadow-pop）
+     本来就是一样的，差的全在行上。
+   ⚠ 行高用 --h-sm（28）而不是把菜单撑到 31：§2 的控件高度只有 28/32/40 三档。
+   ⚠ 过渡只列 background：这一行 hover 时变的只有底色（§2·5.4 一种手法）。
+      `.select-opt` 原来没写 transition，吃的是浏览器默认的 `all`。 */
+.select-opt, .grp-menu-item {
+  width: 100%; height: var(--h-sm); padding: 0 var(--s2);
+  display: flex; align-items: center; justify-content: flex-start; gap: var(--s2);
+  border: 0; border-radius: var(--r-ctl); background: transparent; cursor: pointer;
+  font-size: var(--f-sm); line-height: 1.35; color: var(--text-1); white-space: nowrap;
+  transition: background var(--dur) var(--ease);
+}
+.select-opt:hover, .grp-menu-item:hover { background: var(--fill); }
 
 /* 表单列限宽：设置页右列约 1130px 宽，一个只有三个选项的下拉拉到整宽后
    「选中值在最左、箭头在最右」，视线一趟要跳 1100px。

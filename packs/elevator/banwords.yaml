@@ -3,9 +3,11 @@
 # hard  : 命中必改（明确违规）
 # soft  : 命中待人工确认（语境相关，可能是正常用法，如"最危险的动作""第一，按警铃"）
 # platform :
-#   promote   : 该平台上由 soft 升级为 hard（如小红书对导流词处罚最重）
+#   promote   : 该平台上由 soft 升级为 hard —— 引擎支持，但**本包目前一条都没用**
+#               （历史上宣传过这个机制却没有数据，看着像有人配过；要用就自己加）
 #   demote    : 该平台上由 hard 降级为 soft（如 B站不禁三连、抖音允许站内私信）
 #   extra_hard: 该平台追加的 hard 词
+#   ⚠ 没有 extra_soft：写了不报错，但引擎不读（app/checker.py 只认上面三种）
 #
 # 依据：compliance/ad-law.md（广告法）、compliance/platform.md（平台规则）、
 #       compliance/industry.md（行业红线）。修订词表时同步更新对应 md。

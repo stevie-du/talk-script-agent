@@ -70,14 +70,15 @@ def test_every_pack_renders_without_unfilled_placeholders():
         p = _fake_params(pack)
         stages = pr.skill.get("stages", {}) or {}
 
+        sections = [{"type": "hook", "text": "钩子"},
+                    {"type": "point", "text": "要点"}]
+        timings = [{"start": 0.0, "end": 5.0}, {"start": 5.0, "end": 14.0}]
         renderings = [("select", pr.select_ctx(p))]
         renderings.append(("write", pr.write_ctx(p, _PLAN, "")))
         renderings.append(("write(回炉)", pr.write_ctx(p, _PLAN, "- 时长偏差 +24%")))
-        if "rewrite_segment" in stages:
-            sections = [{"type": "hook", "text": "钩子"},
-                        {"type": "point", "text": "要点"}]
-            renderings.append(("rewrite_segment",
-                               pr.rewrite_ctx(sections, 1, 50, "更口语")))
+        renderings.append(("rewrite_segment",
+                           pr.rewrite_ctx(sections, 1, 50, "更口语")))
+        renderings.append(("storyboard", pr.storyboard_ctx(sections, timings)))
         for stage, ctx in renderings:
             base = stage.split("(")[0]
             if base not in stages:
@@ -93,20 +94,37 @@ def test_stage_files_keys_are_injected():
 
     这条比「零残留占位符」更进一步：它检查的是「文件确实被注入」，
     而不只是「占位符被替换成了空串」。
+
+    遍历**包里的全部阶段**而不是写死 select/write：growth.md 曾经就是这么
+    静默漏掉一整轮的（files 的 key 与占位符不同名），而 rewrite_segment /
+    storyboard 也各自有一个 ctx 构造器 —— 漏掉哪个，那个阶段的 files 就白声明了。
     """
     problems = []
     for pack in _packs_with_skill():
         pr = PromptRenderer(pack)
         p = _fake_params(pack)
-        for stage in ("select", "write"):
-            files = (pr.skill.get("stages", {}).get(stage, {}).get("files") or {})
+        sections = [{"type": "hook", "text": "钩子文案"},
+                    {"type": "point", "text": "要点文案"}]
+        timings = [{"start": 0.0, "end": 5.0}, {"start": 5.0, "end": 14.0}]
+        ctxs = {
+            "select": pr.select_ctx(p),
+            "write": pr.write_ctx(p, _PLAN, ""),
+            "rewrite_segment": pr.rewrite_ctx(sections, 1, 50, "更口语"),
+            "storyboard": pr.storyboard_ctx(sections, timings),
+        }
+        stages = pr.skill.get("stages", {}) or {}
+        unknown = sorted(set(stages) - set(ctxs))
+        assert not unknown, (f"{pack.name} 有新阶段 {unknown} 没被本测试覆盖 —— "
+                             "给它加 ctx 构造，别删这条断言")
+        for stage, ctx in ctxs.items():
+            files = (stages.get(stage, {}) or {}).get("files") or {}
             if not files:
                 continue
-            ctx = (pr.select_ctx(p) if stage == "select"
-                   else pr.write_ctx(p, _PLAN, ""))
             _, user = pr.render(stage, ctx)
             for key, rel in files.items():
-                content = pack.file_text(rel)
+                # 走 file_slice 而不是 file_text：`路径#章节` 的取值只注入那一节，
+                # 探针必须按引擎真正注入的内容取，否则整份文件的首行永远"未注入"。
+                content = pack.file_slice(str(rel))
                 if not content.strip():
                     continue
                 # 取文件里第一行有效正文，确认它出现在提示词中
@@ -116,6 +134,29 @@ def test_stage_files_keys_are_injected():
                 if probe and probe not in user:
                     problems.append(f"{pack.name}/{stage}: {rel} 未注入（key={key}）")
     assert not problems, "有声明却未注入的知识文件：\n  " + "\n  ".join(problems)
+
+
+def test_declared_stage_files_are_actually_found():
+    """`stages.<阶段>.files` 声明的每个取值都必须真取得到内容。
+
+    为什么单独一条：`路径#章节` 的语义是「只要这一节」，章节名写错或被人改名
+    得到的是**空串**（`Pack.file_slice` 故意不退回整份），于是那份知识又不进
+    提示词了 —— 正是 P0-18 那一半没被「零残留占位符」覆盖的形态（占位符填了，
+    填的是空）。anti_ai.levels.*.files 不在此处断言：那里的约定是
+    「不存在的文件静默跳过」，新包不必照搬电梯的 voice.md。
+    """
+    problems = []
+    for pack in _packs_with_skill():
+        pr = PromptRenderer(pack)
+        for stage, cfg in (pr.skill.get("stages", {}) or {}).items():
+            for key, rel in ((cfg or {}).get("files") or {}).items():
+                spec = str(rel)
+                path = spec.partition("#")[0].strip()
+                if not pack.file_text(path).strip():
+                    problems.append(f"{pack.name}/{stage}.{key}: 文件读不到 → {path}")
+                elif not pack.file_slice(spec).strip():
+                    problems.append(f"{pack.name}/{stage}.{key}: 章节切片为空 → {spec}")
+    assert not problems, "声明了却注入不进去的知识文件：\n  " + "\n  ".join(problems)
 
 
 def test_growth_file_is_actually_injected():

@@ -73,6 +73,7 @@ export const api = {
       { method: "POST", body: { index, feedback: feedback || null } }),
 
   pack: (name) => request(`/api/packs/${encodeURIComponent(name)}`),
+  // 建包 = 后台作业（P1-43）：返回 {job_id}，进度与结果用 job(id) 轮询取。
   createPack: (industry, description) =>
     request("/api/packs/create", { method: "POST", body: { industry, description } }),
   // 注：「导出为 Agent 技能」的 UI 入口已删（2026-09-17），后端

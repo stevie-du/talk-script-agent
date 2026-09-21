@@ -144,9 +144,12 @@ CONFIG_TEMPLATE = """# TalkScript 配置
 #   想改哪一项，把该行的 `#` 去掉并填值，保存后重启（或点「保存」）即可。
 #
 # 三种配置方式，优先级从高到低：
-#   1. 环境变量（推荐，密钥不落盘）
-#   2. 本文件
+#   1. 环境变量（密钥不落盘时用；注意它**没有区间校验**，填 100 就真用 100）
+#   2. 本文件（保存走界面时会校验区间，见 app/server.py 的 NUMERIC_BOUNDS）
 #   3. 内置默认值
+#
+# ⚠ 界面上改不到的两项：`temperature` 与 `max_tokens` 自 2026-09-17 起不在设置页里，
+#   只能改这个文件或环境变量。
 #
 # 环境变量一览：
 #   TALKSCRIPT_API_KEY       模型 Key
@@ -182,8 +185,11 @@ CONFIG_TEMPLATE = """# TalkScript 配置
 #   retries: 2
 #   # 单次请求超时（秒）；长输出模型可调大
 #   timeout: 180
-#   # 单次输出预算。推理型模型的「思考」token 也计入这里，给太小会导致
-#   # content 返回空串。遇到「模型返回了空内容」或 JSON 解析失败，优先调大这一项。
+#   # 单次输出预算，**只对撰写阶段生效**（选题/分镜固定 4000、单段重写固定 3000）。
+#   # 推理型模型的「思考」token 也计入这里，给太小会导致 content 返回空串。
+#   # ⚠ 但它不是越大越稳：实测思考量随这一项单调上涨（6000 → 思考 6~9k，
+#   #   16000 → 17~19k），调大只会更慢、也更容易想满预算而正文为空。
+#   #   频繁遇到空内容时，先降低回炉次数或换非推理档，而不是先调大这里。
 #   max_tokens: 16000
 
 # default_pack: elevator
@@ -236,10 +242,14 @@ def _env_num(name: str, fallback, cast):
         v = cast(raw)
     except (TypeError, ValueError):
         return fallback
-    # P2-11：环境变量路径绕过了 server.set_config 的 NUMERIC_BOUNDS 那道闸，
+    # P2-11 的本意：环境变量路径绕过了 server.set_config 的 NUMERIC_BOUNDS 那道闸，
     # TALKSCRIPT_MAX_TOKENS=100 / TALKSCRIPT_RETRIES=999 会静默生效
-    #（每次生成必然空内容 / attempts=1000）。夹逼到合法区间并留日志——
-    # 抛错会让引擎起不来，夹逼 + 可见警告更符合本项目「别静默」的取向。
+    # （每次生成必然空内容 / attempts=1000），所以要夹逼 + 留日志。
+    # ⚠ 但**下面这段目前永远不会执行**：调用点传进来的 `name` 是环境变量名
+    # （TALKSCRIPT_MAX_TOKENS），而 `_ENV_NUM_BOUNDS` 的键是字段名（max_tokens），
+    # `.get(name)` 恒为 None。实测设 TALKSCRIPT_MAX_TOKENS=100 / TALKSCRIPT_RETRIES=999
+    # 仍然原样生效。修法是把键换成环境变量名、或在调用点传字段名 —— 还没做，
+    # 别照着这段注释以为环境变量那一路也有闸。
     bounds = _ENV_NUM_BOUNDS.get(name)
     if bounds and not (bounds[0] <= v <= bounds[1]):
         log.warning("环境变量 %s=%r 超出合法区间 [%s, %s]，已夹逼为 %s",
@@ -249,8 +259,10 @@ def _env_num(name: str, fallback, cast):
     return v
 
 
-# 环境变量数值项的合法区间（P2-11）。与 server.set_config 的 NUMERIC_BOUNDS
-# 同口径 —— 那一边管 HTTP 保存，这一边管环境变量，两处都夹，不能只收一头。
+# 环境变量数值项的合法区间。**注意区间与 server.set_config 的 NUMERIC_BOUNDS
+# 并不同口径**（那边 retries 0~10、timeout 5~1800、max_tokens 上限 200000）：
+# 两边各夹一次、夹到不同的值，本身就是一处待收敛的漂移。
+# 而且因为上面 `_env_num` 的查键缺陷，这张表当前一次都没生效过。
 _ENV_NUM_BOUNDS: dict[str, tuple[float, float]] = {
     "temperature": (0.0, 2.0),
     "retries": (0, 20),

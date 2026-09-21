@@ -51,7 +51,6 @@ from .fileio import write_atomic
 from .jobs import StateConflict
 from .knowledge import Pack, PackBrokenError, PackError, list_packs
 from .llm import LLMClient, LLMError
-from .packgen import create_pack
 from .pipeline import MAX_CONCURRENT_JOBS, Pipeline
 from .schemas import (GenerateRequest, PackCreateRequest,
                       RewriteSegmentRequest)
@@ -426,22 +425,25 @@ def create_app(root: Path, token: str | None = None,
 
     @app.post("/api/packs/create")
     def packs_create(req: PackCreateRequest):
+        """新建行业包 = 后台作业（P1-43）。返回 `{job_id}`，进度看 `/api/jobs/{id}`。
+
+        修复前这里是**唯一一个挂在同步长请求上的耗时操作**：一次 1~2 分钟的模型
+        调用，断连就失明（客户端不知道包建没建出来），「取消」只是不要返回值而
+        已 —— 钱与目录照旧发生，而且它不占并发额度。
+        现在与生成同一套通道：额度、取消、重试提示、思考流、失败原因都在作业上。
+        """
         cfg = _cfg()
         _require_model(cfg)
         try:
-            return create_pack(root, LLMClient(cfg.llm, mock=cfg.mock),
-                               req.industry, req.description)
+            return {"job_id": pipeline.start_packgen(req.industry, req.description)}
         except FileExistsError as e:
+            # 同名包 / 同名 slug 正在创建中（P2-46）—— 都是「换个名字或等一下再试」，
+            # 一分钱没花就能告诉用户，不该开一个必然失败的作业。
             raise HTTPException(409, str(e))
         except ValueError as e:
             raise HTTPException(400, str(e))
-        except LLMError as e:
-            # 上游模型调用失败（令牌过期 / 网络 / 解析失败等）。
-            # 兜底会让它跌成 FastAPI 默认 500、空 body，toast 只拿到「HTTP 500」，
-            # 连「令牌已过期」这种最该给用户看的理由都丢了 —— 与本项目「让不可见的
-            # 失效变得可见」的核心取向直接违背。502 而不是 500：服务本身没坏，
-            # 坏的是依赖的上游。
-            raise HTTPException(502, str(e))
+        # StateConflict（额度满）由全局处理器映射成 409，与 /api/generate 同口径。
+        # LLMError 不再出现在这里：它发生在作业线程里，界面在作业失败横幅上看到它。
 
     @app.post("/api/packs/{name}/export-skill")
     def packs_export(name: str, include_private: bool = False):
@@ -529,6 +531,10 @@ def create_app(root: Path, token: str | None = None,
         running = []
         for snap in pipeline.snapshot_jobs(include_result=False):
             if snap["state"] in skip or snap["id"] in known:
+                continue
+            if snap.get("kind") != "generate":
+                # 建包作业不是一条脚本：混进左栏会话列表只会多出一行点不开的记录
+                # （它没有产物、没有主题、没有行业包），它的位置是设置页里的进度。
                 continue
             p = snap.get("params") or {}
             running.append({

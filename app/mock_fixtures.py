@@ -73,7 +73,18 @@ def response_for(task: str, user: str) -> dict:
         while len(points) > n_points:
             drop = points.pop(len(points) // 2)
             sections.remove(drop)
-        return {"sections": sections, "storyboard": [dict(s) for s in _STORYBOARD]}
+        # P1-30：write 只出 sections；storyboard 由独立「分镜」阶段产出
+        return {"sections": sections}
+
+    if task == "storyboard":
+        # 分镜与段落一一对应：段数按注入的脚本行数走，时间轴沿用行里
+        # 由代码算好的区间（模型不该自己改时间，夹具也不改）。
+        rows = re.findall(r"^\[\d+\]\s+\S+段\s·\s([\d.]+-[\d.]+)s", user, re.M)
+        if not rows:
+            rows = [s["time"] for s in _STORYBOARD]
+        return {"storyboard": [
+            {**_STORYBOARD[i % len(_STORYBOARD)], "time": t}
+            for i, t in enumerate(rows)]}
 
     if task == "rewrite_segment":
         return {"text": "正确做法就三步。／第一，按轿厢里的警铃，或者对讲按钮。／第二，没人应答，就打电梯里贴的那个救援电话。／第三，说清楚你在哪个小区、哪栋楼、哪部电梯，然后原地等。"}

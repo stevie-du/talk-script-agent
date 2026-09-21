@@ -210,10 +210,11 @@ export function renderPackParams() {
   const placed = new Set();
   // 2026-09-17（任务 2）：生成参数卡片要展示**全量**参数 —— 工具条（TOOLBAR_KEYS）
   // 既然存在就是为了快速设置，硬性把同样的字段在设置页再列一份叫「冗余」。
-  // 但工具条字数有限（segment/audience/duration/platform 之外就放不下），
   // 设置页才是「所有可定制项」的总账。删掉那条 `placed.has(key) || TOOLBAR_KEYS.includes(key)`
   // 排除之后，「生成参数」卡片与工具条胶囊共用同一份 pack.params 数据源，
-  // 用户在两处任一处改都会同步（同一 select id = p-<key>，updateStale 也听得到）。
+  // 用户在两处任一处改都会同步（两处各自一个 select，靠 `data-key` 认字段、
+  // **不共用 id** —— 同 id 会让 getElementById 只认得第一个，另一处改了不生效；
+  // 真值统一收在 state.genParams，updateStale 也听得到）。
   for (const key of Object.keys(params)) {
     if (placed.has(key)) continue;
     if (!params[key]?.options?.length) continue;
@@ -332,7 +333,7 @@ export function beautifySelects(scope = document) {
       <svg class="chev" viewBox="0 0 12 8" width="11" height="8" fill="none" stroke="currentColor"
            stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M1 1.5L6 6.5L11 1.5"/></svg>`;
-    const menu = el("div", "select-menu hidden" + (sel.dataset.pill ? " compact" : ""));
+    const menu = el("div", "select-menu hidden");
     menu.setAttribute("role", "listbox");
     document.body.appendChild(menu);
     wrap.appendChild(btn);
@@ -460,7 +461,32 @@ export function beautifySelects(scope = document) {
   }
 }
 
-// ── 空状态 ──────────────────────────────────────────────────
+// ── 首页（landing）──────────────────────────────────────────
+/** 问候语按时段分五档。写死一句「想聊点什么？」的问题不是它不好，而是它和
+ *  顶部头部的「新对话」是同一层级的两句话 —— 换成带时段的问候，一句同时
+ *  回答「现在能干什么」和「这是新的一条」，hero 就只剩标题 + 输入卡两件事。 */
+const GREET_BUCKETS = [
+  [5, "早上好"], [11, "中午好"], [13, "下午好"], [18, "晚上好"], [23, "夜深了"],
+];
+function greeting(h = new Date().getHours()) {
+  const word = GREET_BUCKETS.find(([from]) => h < from)?.[1] || "夜深了";
+  return `${word}，今天想讲点什么？`;
+}
+
+/** landing（首页）与对话态的唯一开关。
+ *  改前三处 `$("empty").classList.add("hidden")` + 一处 remove 各写各的 ——
+ *  现在示例胶囊搬到了合成器下面、不再嵌在 #empty 里，只切 #empty 会留下
+ *  一排点不动的胶囊。所以把「谁可见 + 布局走哪套」收敛成一个函数、一个类。 */
+export function setLanding(on) {
+  $("view-chat").classList.toggle("is-landing", !!on);
+  $("empty").classList.toggle("hidden", !on);
+  $("empty-samples").classList.toggle("hidden", !on);
+  if (on) {
+    const h3 = $("empty-greet");
+    if (h3) h3.textContent = greeting();
+  }
+}
+
 export function renderSamples() {
   const box = $("empty-samples");
   if (!box || box.dataset.done) return;
@@ -468,9 +494,8 @@ export function renderSamples() {
   box.innerHTML = "";
   for (const s of SAMPLES) {
     const b = el("button", "sample-card");
-    b.innerHTML = `<span class="sc-tag">${esc(s.tag)}</span>
-      <span class="sc-t">${esc(s.t)}</span>
-      <span class="sc-d">${esc(s.d)}</span>`;
+    b.textContent = s.t;
+    b.title = `${s.tag} · ${s.d}`;
     b.onclick = () => {
       $("topic").value = s.t;
       refreshGate();
@@ -480,9 +505,6 @@ export function renderSamples() {
     box.appendChild(b);
   }
 }
-
-// applyEmptyHero() 已删（2026-09-20）：空态 hero 不再有「配置引导」那一态，
-// 两套文案 + [data-when] 切换整块下线。理由见 index.html 的 #empty 注释。
 
 // ── 门控 ────────────────────────────────────────────────────
 export function refreshGate() {

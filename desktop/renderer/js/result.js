@@ -165,7 +165,7 @@ function renderSections(r, opts) {
       : "";
     card.innerHTML = `
       <div class="card-head">
-        <span class="pill ${s.type}">${esc(label)}</span>
+        <span class="seg-tag ${s.type}">${esc(label)}</span>
         ${quota}
         <span class="meta">${tm ? sec(tm.start) + "–" + sec(tm.end) : ""}${tm ? " · " : ""}字幕：${esc(s.subtitle || "—")}</span>
       </div>

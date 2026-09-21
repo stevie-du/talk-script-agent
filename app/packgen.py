@@ -26,17 +26,29 @@ import yaml
 from pydantic import BaseModel, Field
 
 from .fileio import rmtree_resilient, write_atomic
+from .jobs import JobCancelled
 from .knowledge import Pack
 from .llm import LLMClient
 
 # P2-46：同名 slug 并发建包的 TOCTOU —— `d.exists()` 检查与写入分两段，
 # 两个请求可双双通过、后者原子覆盖前者（双份 token、前者产物被静默替换）。
-# 用「正在创建」集合做 slug 级互斥：后者直接 409（与 FileExistsError 同语义）。
+# 现在用这张表 + 锁把"静默替换"关掉了：第二个会拿到 FileExistsError 而不是覆盖。
+# ⚠ **但没有关掉"双份 token"**：锁是在模型调用**之后**才取的（见 create_pack），
+# 所以两个同名请求还是会各烧一次调用，只是其中一个最后判失败。
+# 同步 409 只覆盖"目录已存在"那一种（预检在 Pipeline.start_packgen 里）；
+# 跨进程/多引擎实例同样挡不住（这是进程内的一张表）。
+# 用「正在创建」集合做 slug 级互斥。
 _creating_lock = threading.Lock()
 _creating: set[str] = set()
 
 log = logging.getLogger(__name__)
 
+# 建包时从模板包**原样复制**的文件（不走模型）。
+# ⚠ 模板包目前回退到电梯包（`packs/_template` 还不存在，见 TEMPLATE_PACK），
+# 而 `patterns/growth.md` 的标题就是「电梯口播特有的取舍」、`hooks.md`/`voice.md` 同理 ——
+# 它们会经 `$growth` / `$hooks` **每轮注入**给新行业的模型。
+# 也就是说新建包自带的这三份内容是**别的行业**的，必须在校对清单里改掉；
+# 真要根治，得把这三份拆成「通用骨架 + 行业段」或建出 `_template` 包。
 GENERIC_FILES = [
     "skill.yaml",
     "patterns/hooks.md", "patterns/growth.md",
@@ -103,7 +115,27 @@ def template_pack(root: Path) -> Pack:
     return Pack(root, FALLBACK_TEMPLATE_PACK)
 
 
-def create_pack(root: Path, llm: LLMClient, industry: str, description: str) -> dict:
+def preview_slug(industry: str) -> str:
+    """作业入口用的目录名预演：动手之前就能回答「这个行业包已经存在」。
+
+    与 `create_pack` 同一套 slugify 口径（P2-51：目录名跟**用户输入**走）。
+    输入全是符号时 slugify 为空串 —— 那时取的是模型给的 display_name，
+    预演不出来，交给 `create_pack` 里的正式判定（仍然 409）。
+    """
+    return slugify(industry.strip())
+
+
+def create_pack(root: Path, llm: LLMClient, industry: str, description: str, *,
+                on_retry=None, on_delta=None, should_abort=None) -> dict:
+    """按用户的行业名 + 一句话描述生成一个行业包初稿（草稿态）。
+
+    P1-43 起它跑在后台作业里，三个回调就是作业的三件套：
+    - `on_retry(note, attempt, total)` / `on_delta(kind, text)` 原样透传给
+      `chat_json`，界面因此能看到重试与思考流（以前是一个哑的长请求）；
+    - `should_abort()` 在**唯一那次模型调用返回之后、写盘之前**检查 ——
+      用户点了取消，就不该再往 `packs/` 里落一个没人要的目录
+      （token 已经花掉，收不回来；目录至少可以不落）。
+    """
     base = template_pack(root)
     user = (
         f"【任务】为口播脚本智能体生成「{industry}」行业的知识包初稿。\n"
@@ -124,7 +156,8 @@ def create_pack(root: Path, llm: LLMClient, industry: str, description: str) -> 
 - verify_list: 需人工核实的标准/法规/政策清单（只写名称，不写编号）"""
     )
 
-    out: PackGenOut = llm.chat_json("packgen", PACKGEN_SYSTEM, user, PackGenOut)
+    out: PackGenOut = llm.chat_json("packgen", PACKGEN_SYSTEM, user, PackGenOut,
+                                    on_retry=on_retry, on_delta=on_delta)
 
     # 空数组兜底：模型偶尔会返回 []，直接下标访问会 IndexError → 500
     segments = [s for s in (out.segments or []) if str(s).strip()]
@@ -140,6 +173,9 @@ def create_pack(root: Path, llm: LLMClient, industry: str, description: str) -> 
     # 「全屋定制/装修」），用户输「门窗定制」却得到目录「全屋定制-装修」，
     # 找不到自己刚建的包，重试还必撞「行业包已存在」。
     slug = slugify(industry.strip()) or slugify(out.display_name or industry)
+    if should_abort and should_abort():
+        # 检查点放在这里：上面那次模型调用是全部开销所在，往下就该建目录了。
+        raise JobCancelled("已取消")
     with _creating_lock:
         if slug in _creating:
             raise FileExistsError(f"行业包正在创建中：{slug}")
@@ -263,6 +299,12 @@ def _materialize(d: Path, base: Pack, out: PackGenOut, slug: str, industry: str,
                  "> ⚠️ 向导不生成任何标准/法规编号（防编造）。引用前逐条核实后手工补录。",
                  "", "## 待人工核实的清单", ""]
     std_lines += [f"- [ ] {v}" for v in out.verify_list or []]
+    # 「核心术语」这一节必须留出来：撰写阶段注入的是 `standards.md#核心术语`
+    # （只取这一节，不整份灌编号清单）。作者往别处写术语表 = 引擎一个字都不注入。
+    std_lines += ["", "## 核心术语（规范说法 → 口语解释）", "",
+                  "> 补在这里：撰写阶段只注入这一节。左列说规范叫法，右列给一句听得懂的大白话。",
+                  "", "| 规范术语 | 口语化解释（用于脚本） |", "|---|---|",
+                  "| （待补录） | （待补录） |", ""]
     write_atomic(d / "knowledge/standards.md", "\n".join(std_lines))
 
     red = ["# 行业红线（向导生成初稿，draft：需人工校对）", "",

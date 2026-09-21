@@ -154,7 +154,8 @@ def test_every_live_state_occupies_quota():
     """
     from app.jobs import TERMINAL_STATES, TRANSITIONS
 
-    live = {"queued", "selecting", "writing", "checking", "rewriting"}
+    live = {"queued", "selecting", "writing", "checking", "rewriting", "storyboarding",
+            "packing"}
     assert live == set(TRANSITIONS) - TERMINAL_STATES, (
         "状态机加了新状态，请同步判断它占不占额度 —— 默认应当占")
     for st in live:
