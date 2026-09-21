@@ -464,7 +464,11 @@ main { display: flex; flex: 1; min-height: 0; }
      不要再给 margin —— 否则「搜索」和它过滤的列表之间会被撑开。 */
   margin: 0; padding: 0 var(--s3); height: var(--h-ctl);
   border-radius: var(--r-ctl);
-  background: var(--fill);
+  /* 与 .select-btn 同族同手法：白底 + 0.5px 环。此前是 --fill 灰底 ——
+     输入控件这一族（input / select / .select-btn）只有这里带灰底，
+     灰底 + 环是两种手法叠一起，且和右栏那排自绘下拉不在同一条尺度上
+     （规范 §2.5.6「同一族一种手法」+ §3「一个元素只用一档」）。 */
+  background: var(--surface);
   /* 边界用 0.5px 的**阴影环**，不用真 border：border 会各吃掉左右 0.5px 的布局宽度，
      于是这里的图标与文字比同一列其余四块整体右移半像素 —— 半像素在 dpr=1 的屏上
      就是错开一列（实测改前：图标 12.5 / 文字 36.5，邻居是 12 / 36）。
@@ -472,7 +476,9 @@ main { display: flex; flex: 1; min-height: 0; }
      这里跟着归队（规范 §3：同一族一种手法）。 */
   box-shadow: var(--e1);
 }
-.sess-search:focus-within { box-shadow: var(--shadow-input-hover); background: var(--surface); }
+.sess-search:hover { box-shadow: var(--shadow-input-hover); }
+/* 常态已白底，聚焦只提环、不再换底色（与 .select-btn / .selected 同一种手法） */
+.sess-search:focus-within { box-shadow: var(--shadow-input-hover); }
 .sess-search > svg { flex: 0 0 auto; color: var(--text-3); }
 .sess-search input {
   flex: 1; min-width: 0; border: 0; background: transparent;
@@ -491,6 +497,13 @@ main { display: flex; flex: 1; min-height: 0; }
   display: grid; place-items: center; color: var(--text-3);
 }
 .sess-search .icon-btn:hover { color: var(--text-1); background: var(--fill-strong); }
+/* 搜索快捷键提示：只挂在「空输入」态 —— 一打字就让位给清空按钮（两者同宽，
+   同时存在会在 251px 里挤到输入框）。样式走 .nav-item kbd 那一族的「小标记」。
+   Ctrl+K 已在 ui.js 实现（focusSessionSearch），界面此前一个字没标。 */
+.sess-search > kbd { display: none; flex: 0 0 auto; font: inherit; font-size: var(--f-2xs);
+  color: var(--text-2); padding: 1px var(--s1); border-radius: var(--r-ctl);
+  background: var(--fill); font-family: var(--mono); line-height: 1.35; }
+.sess-search input:placeholder-shown ~ kbd { display: inline-flex; }
 
 /* ── 左栏头部：品牌 + 草稿徽标 ── */
 .left-head {
@@ -778,7 +791,7 @@ select {
 #left.folded .left-foot { display: none; }
 #left.folded #btn-toggle-left {
   position: fixed; top: var(--s2); left: var(--s3); z-index: 45;
-  background: var(--glass-strong);
+  background: var(--surface);
   box-shadow: var(--shadow-input);
 }
 #left.folded #btn-toggle-left:hover { box-shadow: var(--shadow-input-hover); }

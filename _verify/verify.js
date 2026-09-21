@@ -759,6 +759,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     ".linkbtn { padding: 2px var(--s2) }",               // 同上：可点区域 20，行盒仍是 16
     ".m-chip { padding: 1px var(--s2) }",                       // 小标记一族的墨底补偿
     ".nav-item kbd { padding: 1px var(--s1) }",          // 键帽的墨底补偿，与上面同一写法
+    ".sess-search > kbd { padding: 1px var(--s1) }",     // 搜索框 Ctrl+K 同属键帽一族（同上）
     ".msg-assistant .avatar { margin-top: 2px }",        // 24 的头像盒对齐 15/1.6 首行
     ".res-tab { margin-bottom: -1px }",                  // 选中态的黑线压在容器分隔线上
     "#session-list { gap: 1px }",                        // 相邻涂底行之间的缝（§2 例外三）
@@ -3051,10 +3052,11 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   // 「动作区（新建对话）↔ 内容区（搜索+列表）」原本靠一条 0.5px 分隔线区分，
   // 线两侧各留 16 —— 那时搜索框距按钮 32、距列表 16，「更近列表」是有层次的。
   // 2026-09-16 删掉 .left-sep 后只靠一个 16px gap 区分，两段变成**等距**（都 16）。
-  // 断言随之从「更近/更远」改为「等距且都是 16」：守住的是统一节奏，不是层次。
-  check("按钮→搜索→列表 等距 16（靠距离区分，不再靠分隔线）",
-    headOrder.gapToLbl >= 0 && headOrder.gapUp === headOrder.gapToLbl
-    && headOrder.gapUp === 16,
+  // 2026-09-21 改 A：新建对话与搜索框同属「开始一段工作」的动作区，两个 16
+  // 读成"三块等距、没有分组" —— 组内收到 8（--s2），组间保持 16（--s4）。
+  // 断言守的是「组内 < 组间 且各自精确」。组内 12 = --s3、组间 16 = --s4。
+  check("按钮→搜索 12 / 搜索→列表 16（动作区内收、组间保持 16）",
+    headOrder.gapUp === 12 && headOrder.gapToLbl === 16,
     `距按钮=${headOrder.gapUp} 距首条记录=${headOrder.gapToLbl}`);
   // 搜索框到下方内容的间距必须**只有一个来源**，两态读同一个数：
   //   滚动态 = 滚动区容器上边界 - 搜索框底边（.left-top 的 padding-bottom）
@@ -3246,9 +3248,10 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     rhythm.上方 > rhythm.下方 + 6 && rhythm.上方 >= 18,
     JSON.stringify(rhythm));
 
-  // 左栏竖向节奏统一 16px：品牌线→按钮→分隔线→搜索框→列表，四段都是 16。
-  // 原来上三段是 --s3(12)、只有最后一段是 --s4(16)，同一列里两种节奏，
-  // 读起来像"上面挤、下面松" —— 没对齐，不是设计。
+  // 左栏竖向节奏的**分组约定**：按钮→搜索 8（动作区内部，--s2），
+  // 其余各段仍是 16（--s4）：头部线→按钮、搜索→列表、分隔线→设置、设置→窗口底。
+  // 2026-09-21 改 A：此前四段都是 16，按钮与搜索框之间也是 16 —— 动作区两件事
+  // 和"组与列表"的边界用同一个数，读成三块等距、没有分组。
   // 分隔线是 0.5px 发丝线不占节奏，所以量的是「按钮底→分隔线→搜索框顶」两段。
   // 底部设置区同一套：列表底内边距 16、分隔线→设置按钮 16。
   //   这条线是 .left-foot 的 border-top（不是 .left-sep 那样的独立元素），
@@ -3256,7 +3259,7 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   //   所以「线底」= border box 顶边 + borderTopWidth，直接拿 foot.top 当线会少算 1px。
   //   （这正是实测 18 的一半来源；另一半是 .nav-item 的 margin-top:1px 在容器边界
   //   叠到了 padding 上，已改由 .nav-sec 的 gap 承担。）
-  // 容差收到 0.6：改成精确 16 之后，容差 1 会放过「多 1px」的回归（17 也判绿）。
+  // 容差收到 0.6：改成精确值之后，容差 1 会放过「多 1px」的回归（17 也判绿）。
   const leftRhythm = await evalIn(`const r = s => {
       const b = document.querySelector(s).getBoundingClientRect();
       return { t: +b.top.toFixed(2), b: +b.bottom.toFixed(2) }; };
@@ -3276,9 +3279,11 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
              搜索到列表: +(sc.t - sea.b).toFixed(2),
              底线到设置: +(r('#btn-open-settings').t - (foot.top + footBorder)).toFixed(2),
              列表底内边距: getComputedStyle(document.querySelector('.left-scroll')).paddingBottom };`);
-  check("左栏竖向节奏统一 16px（含底部设置区）",
+  check("左栏竖向节奏分组：按钮→搜索 12、其余段 16（含底部设置区）",
     Object.entries(leftRhythm).every(([k, v]) =>
-      k === "列表底内边距" ? v === "16px" : Math.abs(v - 16) <= 0.6),
+      k === "列表底内边距" ? v === "16px"
+        : k === "按钮到搜索" ? Math.abs(v - 12) <= 0.6
+        : Math.abs(v - 16) <= 0.6),
     JSON.stringify(leftRhythm));
 
   // .nav-item（左栏底部「设置」）与 .stg-nav-item（设置页左导航）是**同一个控件的
@@ -3481,13 +3486,16 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       && colGeo.块[0].pad === "0px/12px" && colGeo.块[0].图标左 === 12
       && colGeo.块[0].图标宽 === 16 && colGeo.块[0].文字左 === 36,
     JSON.stringify(colGeo.块[0]));
-  // 竖向：块与块之间一律 16（= --s4），列表内部 1px 是密集行的既定节奏（另一条守）。
+  // 竖向节奏的分组约定：按钮→搜索 8（动作区内），其余段都是 16（= --s4），
+  // 列表内部 1px 是密集行的既定节奏（另一条守）。
+  // 2026-09-21 改 A：此前「头部线→新建→搜索→列表」三 段全是 16，动作区两件事
+  // 与「组→列表」边界等距 → 三块等距没有分组。组内收到 8，其余 16 不动。
   // 这里连底部「分隔线→设置」一起量 —— 它曾被 .nav-item 的 1px margin 顶成 17。
   // 「设置→窗口底边」也钉在同一条 16 上：.left-foot 与 .left-top 是同列上下两个
   // 固定区，必须用同一套 padding。下边曾停在 --s2，于是上 16 下 8 —— 用户报
   // 「底部设置区域四周间距不统一」量的正是这个。左右仍是 12（图标列，见五块几何那条）。
-  check("左栏竖向节奏统一 16：头部线→新建→搜索→列表、分隔线→设置、设置→窗口底边",
-    colGeo.竖向.头部线到新建 === 16 && colGeo.竖向.新建到搜索 === 16
+  check("左栏竖向节奏分组：新建→搜索 12，其余段 16（头→新、搜→列、分隔→设、设→底）",
+    colGeo.竖向.头部线到新建 === 16 && colGeo.竖向.新建到搜索 === 12
       && colGeo.竖向.搜索到列表 === 16 && colGeo.竖向.分隔线到设置 === 16
       && colGeo.竖向.设置到窗口底 === 16,
     JSON.stringify(colGeo.竖向));
