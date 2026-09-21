@@ -8,7 +8,6 @@
 // PATH 里的 `python`，而它未必装了 fastapi / uvicorn / httpx / pydantic / pyyaml。
 // 于是 `npm run dist` 出来的安装包在没装过 Python 的机器上启动即失败，
 // 还提示用户 `pip install -r requirements.txt` —— 对 NSIS 安装包来说不可接受。
-// 详见 `代码审查报告-20260915.md` 的 P1-3。
 //
 // 做法：抄 WorkBuddy 的「zip 随包」形态，但用 **embeddable 免 pip 版**
 // （压缩包十来 MB、解开几十 MB —— 实际值看 `du -sm desktop/vendor/py`，
