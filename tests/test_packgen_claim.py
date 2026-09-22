@@ -466,6 +466,34 @@ def test_claim_and_release_are_pairwise():
     assert packgen._creating == {}
 
 
+def test_the_claim_table_collapses_exactly_what_the_filesystem_collapses():
+    """表键要与"本机文件系统是不是把这两个目录当成同一个"**实测**一致（第 20 轮 Q1）。
+
+    判据的ground truth 是文件系统（真去 mkdir 一次），不是 `_table_key` 自己 —— 否则
+    就是拿实现证明实现。方向上两种不一致都要报：
+    - 文件系统合并而表不合并 = §15.32 那条 P1-2 的形状（同名两条作业并行建一个目录）；
+    - 表合并而文件系统不合并 = 误报「行业包正在创建中」，第二个合法名字建不出来。
+    今天这一格是绿的，靠的是 `slugify` 恰好把 NTFS 会忽略的那些字符（尾部点、空格、
+    全角空格）都折掉；哪天有人放宽 `slugify`（允许 `.` 或 `~`），这条会立刻红。
+    """
+    lookalikes = [("a", "a."), ("a", "a "), ("a.", "a "), ("甲", "甲　"),
+                  ("Probe Case", "probe case"), ("CON", "con"),
+                  ("宠物 医院", "宠物-医院"), ("电梯包", "电梯包"),
+                  ("x. ", "x"), ("全屋定制/装修", "全屋定制 装修")]
+    loose, strict = [], []
+    for a, b in lookalikes:
+        sa, sb = preview_slug(a), preview_slug(b)
+        assert sa and sb, f"前置：这对名字要都能起出目录名（{a!r}->{sa!r} {b!r}->{sb!r}）"
+        fs_same = _fs_same_dir(sa, sb)
+        key_same = packgen._table_key(sa) == packgen._table_key(sb)
+        if fs_same and not key_same:
+            loose.append((a, b, sa, sb))
+        if key_same and not fs_same:
+            strict.append((a, b, sa, sb))
+    assert not loose, f"文件系统当成同一个目录、表却分作两个（并行双建）：{loose}"
+    assert not strict, f"表合并而文件系统不合并（误报 409，合法名字建不出来）：{strict}"
+
+
 def _stub_slug():
     """把 `_verify/verify.js` 里的 pgSlug 抠出来（不抄第二份实现）。"""
     src = (ROOT / "_verify" / "verify.js").read_text(encoding="utf-8")
