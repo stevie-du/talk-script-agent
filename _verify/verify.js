@@ -5542,9 +5542,12 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     { key: 'Escape', bubbles: true })); return true;`);
   await sleep(900);
   const escKeep = await evalIn(`return { keepcancel: window.__calls.keepcancel || 0,
+    keepjob: window.__calls.keepjob || 0,
     busy: window.__ts.busy, jobId: window.__ts.jobId };`);
+  // keepjob >= 1 是这条断言的**前提**被说清楚：界面必须先轮询过这条作业，才有资格
+  // 说"在跑的是它"；只看 keepcancel===1 的话，"停了一条从没轮询过的作业"也算过。
   check("Esc 停掉的正是界面上在跑的那一条（jobkeep）",
-    escKeep.keepcancel === 1 && escKeep.busy === false && !escKeep.jobId,
+    escKeep.keepcancel === 1 && escKeep.keepjob >= 1 && escKeep.busy === false && !escKeep.jobId,
     JSON.stringify(escKeep));
 
   // ── 12j) 就地编辑主题里按 Esc 不许停掉作业（P2-6）───────────────
@@ -5811,6 +5814,7 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       return one(0).then(function () { return last; });
     };
     var a = await newPack('猫咖甲');
+    var dup0 = (window.__calls && window.__calls.pgdup) || 0;
     var b = await newPack('口腔诊所乙');
     var ida = a.b.job_id, idb = b.b.job_id;
     var ra = await pollTo(ida);                    // A 先收工
@@ -5831,6 +5835,7 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
              cancelState: cancelDone.st + ':' + (cancelDone.b.state || ''),
              detail: detailGone.st + ':' + (detailGone.b.code || ''),
              indA: (ra.b.params || {}).industry, indB: (rb.b.params || {}).industry,
+             dupHits: ((window.__calls && window.__calls.pgdup) || 0) - dup0,
              idA2: dupA.b.job_id, idB2: dupB2.b.job_id };
   })();`);
   // 引擎在包目录已存在时报的是「行业包已存在」，只有仍在创建中才报「正在创建中」
@@ -5843,6 +5848,9 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       && pgTwoJobs.dupB === 409 && pgTwoJobs.dupBwhy === '行业包正在创建'
       && pgTwoJobs.midB === 'packing' && pgTwoJobs.rb === 'done'
       && pgTwoJobs.dupB2 === 409 && pgTwoJobs.dupB2why === '行业包已存在：'
+      // "排队中"这个理由必须**只**给还在跑的那一条：整个场景里 pgdup 只能 +1
+      // （dupA / dupB2 走的是"目录已存在"那句，不算重复排队）。
+      && pgTwoJobs.dupHits === 1
       && pgTwoJobs.still === '200:done'
       && pgTwoJobs.cancelState === '200:done'
       && pgTwoJobs.detail === '404:pack_missing'
