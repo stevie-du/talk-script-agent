@@ -1146,7 +1146,7 @@ def test_a_full_house_of_stuck_jobs_still_admits_a_new_one():
     测试先 prune 等于替实现补上那道网要做的事，把唯一要证明的前提证没了。
     真正要测的是两道额度闸**在取锁之前**各自扫一遍。
 
-    `running_count`（界面看到的"在跑几条"）与 `add_if_room`（真的放不放行）
+    `running_count`（额度账上算数的那几条）与 `add_if_room`（真的放不放行）
     必须同一个口径，否则又是一处两本账：显示"0 个在跑"却继续拒绝新作业。
     """
     reg = JobRegistry()
@@ -1361,8 +1361,13 @@ def test_rewrite_of_an_old_record_is_not_stranded_the_moment_it_starts():
     assert reg.add_if_room(other, MAX_CONCURRENT_JOBS)
     assert not j.stranded, "刚放行的重写在下一次扫描里被摘掉额度 —— 这一条重写在额度账上不存在"
     assert reg.running_count() == 2, f"重写不在账上：{[s['state'] for s in reg.snapshots()]}"
+    # `reset_budget` 只管**整作业预算**那只钟（回收网的钟由放行那一步负责，
+    # 第 15 轮复核量到在那里再 touch 一次是 0 秒的死行）—— 所以要测的是它能观察到的效果。
+    before = j.deadline()
     j.reset_budget()
-    assert j.last_progress > time.time() - 2, "reset_budget 只重开了 started_at，没重开回收网的钟"
+    assert j.deadline() > before, "reset_budget 没重开整作业预算"
+    reg.prune()
+    assert not j.stranded, "重写进行中却被回收网摘了额度（预算重开之后不该再旧）"
 
 
 def test_packgen_admission_failure_after_the_slot_is_taken_settles_the_job(tmp_path,
@@ -1463,10 +1468,38 @@ def _stranded_busy(reg, n):
     return out
 
 
+def test_transition_if_room_sweeps_before_counting():
+    """`transition_if_room` 自己那次扫描是**承重**的：删掉它，重写会永久 409。
+
+    ⚠ 造现场不许借道 `add_if_room` 的扫描（第 15 轮复核抓我上一版就是这个毛病：
+    `_stranded()` / `_stranded_busy()` 让 add_if_room 顺手把记录摘好，于是
+    `transition_if_room` 里那行 `_reap_stranded()` 删掉也 550 全绿）。
+    这里先把四条忙态作业**新鲜地**放进注册表，之后统一改老，再让唯一能救场的
+    那道闸自己扫。
+    """
+    reg = JobRegistry()
+    stuck = []
+    for i in range(MAX_CONCURRENT_JOBS):
+        j = Job(f"f-{i}", "generate", {})
+        assert reg.add_if_room(j, MAX_CONCURRENT_JOBS + 8)   # 额度放宽：这一步不该扫到老记录
+        j.transition_or_raise("writing")
+        stuck.append(j)
+    old = Job("old-1", "generate", {})
+    assert reg.add_if_room(old, MAX_CONCURRENT_JOBS + 8)
+    old.transition_or_raise("writing")
+    old.transition_or_raise("done")
+    for j in stuck:
+        j.last_progress = 0.0                                # 全部改成"40 分钟没进展"
+    assert reg.running_count() == MAX_CONCURRENT_JOBS, "前置：还没人扫描，额度应仍被占满"
+    assert reg.transition_if_room(old, "rewriting", MAX_CONCURRENT_JOBS), \
+        "重写被四条卡死的旧作业挡住了 —— 这道闸没在取锁前自己扫一遍"
+    assert all(j.stranded for j in stuck), "重写能进来，只能是这道闸自己回收了额度"
+
+
 def test_stranded_records_cannot_pile_up_unaccounted_rewrites():
     """被误摘额度的老记录各自点「重写本段」，并发数不许突破上限。
 
-    第 12 轮实测：准入这条与 `all_busy_counted` 对 stranded 的规则相反
+    第 12 轮实测：准入这条与三个额度口径对 stranded 的规则相反
     —— 准入允许它、计数排除它，7 条同时在飞而 `running_count()` 报 3。
     """
     reg = JobRegistry()
@@ -1481,15 +1514,6 @@ def test_stranded_records_cannot_pile_up_unaccounted_rewrites():
                   if s["state"] in ("rewriting", "writing", "queued"))
     assert admitted <= MAX_CONCURRENT_JOBS, f"放行了 {admitted} 条 > 上限 {MAX_CONCURRENT_JOBS}"
     assert counted == admitted, f"界面/额度两本账：在飞 {counted}，准入 {admitted}"
-
-
-def test_prune_bounds_stranded_entries():
-    """`keep` 必须也管住"被摘额度但还没进终态"的记录（第 12 轮：它们永久驻留）。"""
-    reg = JobRegistry()
-    _stranded_busy(reg, MAX_CONCURRENT_JOBS)
-    assert reg.prune(keep=1) is None
-    left = [s for s in reg.snapshots() if s["state"] == "writing"]
-    assert len(left) <= 1, f"keep=1 却留下 {len(left)} 条被摘额度的记录（内存无界增长）"
 
 
 def test_the_wait_note_never_understates_the_sleep():

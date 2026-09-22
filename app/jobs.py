@@ -220,10 +220,10 @@ class Job:
         「重写本段」会立刻被判超预算，把一次正常的重写报成失败。
         """
         self.started_at = time.time()
-        # 回收网的钟也要一起重开：只 reset `started_at` 的话，一条 41 分钟前的老记录
-        # 点「重写本段」会在刚被放行的瞬间被 `last_progress` 判成卡死并永久摘掉额度
-        # （`stranded` 是单向门），整条重写全程零额度记账（第 11 轮复核 P1）。
-        self.touch()
+        # ⚠ 与 `transition_if_room` 配对：那道闸在放行时 `touch()`（回收网的另一只钟），
+        #   所以这里**不**再 touch —— 第 15 轮复核量到那一行在这条路径上贡献恰好 0 秒，
+        #   是一具被断言自己喂饱的安慰剂。将来若有别的地方调用 `reset_budget`，
+        #   那条路径必须自己负责把两只钟一起重开。
 
     def touch(self) -> None:
         """记一次「这条作业还在往前走」。浮点写，不需要锁。"""
@@ -383,7 +383,7 @@ class JobRegistry:
             job.transition_or_raise(new_state, error=None)
             # 放行与"重新计时"必须在同一个临界区：不然刚被放行的老作业会在
             # 下一次回收扫描里被摘掉额度（第 11 轮复核 P1，实测 stranded=True 跑完整条重写）。
-            # 被摘过额度的作业在这里**回到账上**（第 12 轮复核 P1）：`all_busy_counted`
+            # 被摘过额度的作业在这里**回到账上**（第 12 轮复核 P1）：三个额度口径
             # 对 stranded 的两条规则是"排除它"，而准入这条又允许它，于是 N 条被误摘的
             # 老记录可以同时重写，实测 7 条在飞 > 上限 4 而计数报 3。
             # 单向门在这里打开是安全的：这一次准入真的占了一个名额，就必须被数到。
@@ -455,11 +455,11 @@ class JobRegistry:
         self._reap_stranded()
         with self._lock:
             self._trim(lambda j: j.state in TERMINAL_STATES, keep)
-            # 被摘掉额度的作业不会进终态，`keep` 对它们形同虚设（第 12 轮复核 P2：
-            # 实测 20 条永久驻留，`prune(keep=0)` 也收不掉）。它们已经没有名额、
-            # 也再不会被准入逻辑算到，留着只为了轮询 —— 超过 keep 就该按最旧的丢掉，
-            # 否则这条"只摘额度不动作业"的网自己变成了无界内存增长点。
-            self._trim(lambda j: j.stranded and j.state in BUSY_STATES, keep)
+            # ⚠ 这里**不**收"被摘额度但仍忙"的记录（第 15 轮复核把我上一轮加的这条收回来了）：
+            #   那些作业的线程还活着，删条目就等于 `/api/jobs/{id}` 从此 404，
+            #   而它下一秒就会写出产物 —— 正是 `_reap_stranded` 上面立誓不再犯的那个 P1。
+            #   内存代价（每条一份快照、各带一行 WARNING）留着，因为它同时是一个可见的
+            #   缺陷信号：非零就说明有路径没把作业收口，该修的是那条路径。
 
     def _reap_stranded(self) -> None:
         """把「远超预算却还挂在忙态」的作业从并发额度里摘出去 —— 只摘额度。
@@ -478,8 +478,9 @@ class JobRegistry:
         作业自己那套预算闸门照旧生效：每个检查点都会以「预算用尽」收工，
         那条路走的是它自己的状态机，迁移合法、说明也写得清楚。
 
-        单向门（`touch` 不会撤销 stranded）是刻意的：额度已经还给下一条作业了，
-        再收回去就是同一份算力卖两次。
+        单向门只对 `touch` 成立（第 15 轮复核把这句话改准）：光"还在往前走"不把额度收回来，
+        否则等于同一份算力卖两次。唯一打开这道门的地方是 `transition_if_room` ——
+        那是一次**新的准入**，占了名额就必须回到账上。
         """
         limit = JOB_BUDGET_SECONDS * STALE_JOB_MULTIPLIER
         now = time.time()
@@ -492,7 +493,8 @@ class JobRegistry:
                 j.mark_stranded()
         for j in stale:
             log.warning("作业 %s 已 %s 秒无任何进展，不再占用并发额度"
-                        "（作业线程仍在跑，条目与产物保留；如长期无进展请检查上游接口）",
+                        "（作业线程仍在跑，条目与产物保留；无进展的原因可能是上游慢，"
+                        "也可能是磁盘/确定性代码这一段卡住，两处都查）",
                         j.id, int(now - j.last_progress))
 
     def _trim(self, pred, keep: int) -> None:
