@@ -264,25 +264,34 @@ class Pipeline:
         #   抢锁之前，两条同名请求可以同时越过它 → 各起一个作业、各花一份 token，
         #   后写的那一份还覆盖前一份；`packgen` 里那句"占位在模型调用之前，
         #   所以并发同名不会重复花钱"的说明因此与实际不符。
-        if not claim_slug(slug):
+        # ⚠ 归还点**必须交回自己那份凭证**（第 16 轮复核 P1）：这条路径上归还点有三个
+        #   —— 目录已存在的早退、这里的兜底、`_run_packgen` 的 finally。原来它们是三处
+        #   `_creating.discard(slug)`，而 `Thread.start()` 在"工作线程已经跑完"之后仍可能
+        #   自己抛（CPython 3.14 的 start = 起线程 + `_started.wait()`），于是两次归还之间
+        #   挤进来的那条同名作业会被第二次 discard 偷走占位 → 两条作业并行建同一个目录。
+        token = claim_slug(slug)
+        if token is None:
             if (self.root / "packs" / slug).exists():
                 raise FileExistsError(f"行业包已存在：{slug}")
             raise FileExistsError(f"行业包正在创建中：{slug}")
         if (self.root / "packs" / slug).exists():
-            release_slug(slug)                # 抢到锁了但目录已在：把锁还回去再报错
+            release_slug(slug, token)         # 抢到锁了但目录已在：把锁还回去再报错
             raise FileExistsError(f"行业包已存在：{slug}")
         # 占位从这一行起就要有人还。原来 `try` 从 `self.llm` 才开始，于是
         # `new_job_id()` / `Job(...)` / `add_if_room()` 任何一处抛（第 6 轮复核
         # 实测：强行让 `new_job_id` 抛）都会留下一个**永不归还**的 slug ——
         # 那个行业名此后永远建不出来，而报错写着「行业包正在创建中」，
-        # 只能重启引擎。归还做成幂等的：`release_slug` 用 discard。
-        # ⚠ 归还点**只能有这一个**：内层再 release 一次，若这期间别人抢到了同名
-        #   占位，第二次 discard 会偷走别人的锁。
+        # 只能重启引擎。归还现在认凭证：同一个凭证叫两次，第二次是空操作。
+        # ⚠ 原来这里写的是"归还点只能有这一个"，与实际不符（有三个），
+        #   而"discard 幂等"恰恰是那条 P1 的成因 —— 幂等地摘错了人的锁。
         job_added = False
         try:
             jid = new_job_id()
             job = Job(jid, "packgen", {"industry": industry,
                                        "description": (description or "").strip()})
+            # 凭证跟着作业走：`_run_packgen` 的 finally 要用它归还，
+            # 而这里的兜底用的是同一个 `token` —— 谁先还成，另一次就是空操作。
+            job.claim_token = token
             # 建包没有产物目录：job.json 不落 generated/，不进历史索引
             # （它不是一条脚本，出现在左栏会话列表里只会让人找不到）。
             if not self.registry.add_if_room(job, MAX_CONCURRENT_JOBS):
@@ -294,7 +303,7 @@ class Pipeline:
             client = self.llm               # P1-6：作业级抓一次，中途不换配置
             self._spawn(job, lambda: self._run_packgen(job, client, slug))
         except BaseException as e:
-            release_slug(slug)
+            release_slug(slug, token)
             # P1-46 的第四条路（第 11 轮复核 P2）：`self.llm` 在 `add_if_room` **之后**抛
             # （配置读不出来）时，原来只归还 slug，作业却永远停在 queued —— 那条并发额度
             # 要等 2× 预算才被回收网摘掉，实测连点十次就是"一个都没在跑但一直已达上限"。
@@ -473,7 +482,9 @@ class Pipeline:
         finally:
             # 名字是在 `start_packgen` 里、花钱之前就占下的，所以**任何**收尾路径
             # （成功 / 失败 / 取消 / 早 return）都要归还，否则这个 slug 永远建不了。
-            release_slug(slug)
+            # 用作业上那份凭证归还：入口的兜底可能已经先还过一次（那种情况下
+            # 这里也是空操作），而**别人**在这之后抢到的同名占位不会被我们还掉。
+            release_slug(slug, job.claim_token)
 
     # ── 节点实现 ────────────────────────────────────────────
     _OPTION_PARAMS = ("segment", "audience", "style", "platform", "persona", "cta")

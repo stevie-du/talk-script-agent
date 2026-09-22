@@ -40,7 +40,24 @@ from .llm import LLMClient
 # 跨进程/多引擎实例同样挡不住（这是进程内的一张表）。
 # 用「正在创建」集合做 slug 级互斥。
 _creating_lock = threading.Lock()
-_creating: set[str] = set()
+# slug -> **这一次占位的凭证**。原来是一张 set，于是"归还"无从判断还得掉的是谁的：
+# 同一条建包有两个归还点（`start_packgen` 的兜底与 `_run_packgen` 的 finally），
+# 而 CPython 3.14 的 `Thread.start()` 是"先起线程、再 `_started.wait()`"——
+# 工作线程跑完之后 `start()` 自己被打断是完全可能的，两次归还之间挤进别人的
+# 同名占位，第二次 discard 就把那个**活着的**占位偷走了（第 16 轮复核实测：
+# 第三条请求因此能与第一条并行建同一个目录 = 双份 token + 目录互踩）。
+# 现在归还必须交出凭证，凭证对不上就是空操作。
+_creating: dict[str, str] = {}
+_claim_seq = 0
+NO_CLAIM = "no-claim"     # 空 slug：本次不占位（正式判定留给 create_pack 里那句）
+ANY_OWNER = "any"         # 显式"不管是谁，摘掉" —— 只给测试的兜底清理用
+
+
+def _new_token() -> str:
+    """发一个占位凭证。只在 `_creating_lock` 内调用，所以不需要额外的原子性。"""
+    global _claim_seq
+    _claim_seq += 1
+    return f"c{_claim_seq}"
 
 log = logging.getLogger(__name__)
 
@@ -161,28 +178,43 @@ def preview_slug(industry: str) -> str:
     return slugify(industry.strip())
 
 
-def claim_slug(slug: str) -> bool:
-    """P2-46 的后半：**在花钱之前**把目录名占住。
+def claim_slug(slug: str) -> str | None:
+    """P2-46 的后半：**在花钱之前**把目录名占住，返回这一次占位的**凭证**。
 
     修复前 `_creating` 的占用发生在 `create_pack` 里（唯一那次模型调用之后），
     而入口的同步检查只有 `(packs/slug).exists()` —— 目录还没建出来，于是两条
     同名请求双双通过检查、双双起作业：双份 token，且第二条是以"作业失败"的形态
     告诉用户的（等了一两分钟才知道重名）。现在作业入口先占位，占不到就直接同步 409。
+
+    返回值刻意不是 bool：归还方必须能证明"还的是我自己那一次占位"。
+    占不到返回 None；空 slug 返回 `NO_CLAIM`（照旧放行，正式判定在 `create_pack` 里）。
     """
     if not slug:
-        return True                       # 空 slug（符号名）走 create_pack 里的正式判定
+        return NO_CLAIM                   # 空 slug（符号名）走 create_pack 里的正式判定
     with _creating_lock:
         if slug in _creating:
-            return False
-        _creating.add(slug)
-        return True
+            return None
+        token = _new_token()
+        _creating[slug] = token
+        return token
 
 
-def release_slug(slug: str) -> None:
+def release_slug(slug: str, owner: str) -> bool:
+    """凭 `owner` 归还。凭证对不上（已被摘走、或已被别人重新占上）就是空操作。
+
+    旧实现是 `_creating.discard(slug)`：一条作业的第二个归还点会把**别人**的占位
+    摘掉（第 16 轮复核量到的 P1）。传 `ANY_OWNER` 才是"不管是谁都摘"，
+    今天只有测试的兜底清理用它。
+    """
     if not slug:
-        return
+        return True
     with _creating_lock:
-        _creating.discard(slug)
+        if owner == ANY_OWNER:
+            return _creating.pop(slug, None) is not None
+        if _creating.get(slug) == owner:
+            del _creating[slug]
+            return True
+        return False
 
 
 def create_pack(root: Path, llm: LLMClient, industry: str, description: str, *,
@@ -275,14 +307,15 @@ def create_pack(root: Path, llm: LLMClient, industry: str, description: str, *,
     if should_abort and should_abort():
         # 检查点放在这里：上面那次模型调用是全部开销所在，往下就该建目录了。
         raise JobCancelled("已取消")
-    with _creating_lock:
-        if slug in _creating and not slug_preclaimed:
+    # 占位与归还只有一本账：`claim_slug` 发凭证、`release_slug` 认凭证。
+    # 作业入口（`pipeline.start_packgen`）已经用 `claim_slug` 在**花钱之前**占好了名字，
+    # 这里就不能再占一次（否则自己跟自己撞），也不能在结束时释放别人的占位。
+    owns_claim = not slug_preclaimed
+    claim_token = None
+    if owns_claim:
+        claim_token = claim_slug(slug)
+        if claim_token is None:
             raise FileExistsError(f"行业包正在创建中：{slug}")
-        # 作业入口（`pipeline.start_packgen`）已经用 `claim_slug` 在**花钱之前**占好了名字，
-        # 这里就不能再占一次（否则自己跟自己撞），也不能在结束时释放别人的占位。
-        owns_claim = not slug_preclaimed
-        if owns_claim:
-            _creating.add(slug)
     try:
         d = root / "packs" / slug
         if d.exists():
@@ -337,8 +370,7 @@ def create_pack(root: Path, llm: LLMClient, industry: str, description: str, *,
                 "banwords_extra_soft": [str(x) for x in (out.banwords_extra_soft or [])]}
     finally:
         if owns_claim:            # 入口预占的那份由 `pipeline._run_packgen` 释放
-            with _creating_lock:
-                _creating.discard(slug)
+            release_slug(slug, claim_token)
 
 
 def _pack_audit(root: Path, slug: str) -> list[str]:

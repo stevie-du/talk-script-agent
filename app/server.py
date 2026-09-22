@@ -101,13 +101,18 @@ def read_version(root: Path | None = None) -> str:
 
 # 路径参数白名单：作业 id 形如 20260910-010929-ddb666；
 # 行业包名为 slug（允许中英文、数字、下划线与连字符），两者都禁止 . / 等穿越字符。
-_JID_RE = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{6}$")
-_NAME_RE = re.compile(r"^[\w\u4e00-\u9fff-]+$")
+# ⚠ 这两条**不带** `^`/`$`，一律用 `.fullmatch()`：Python 的 `$` 允许串尾多一个换行，
+# 于是 `"elevator\n"`、`"20260101-000000-abcdef\n"` 在引擎这边算合法，而 JS 的 `$`
+# 不允许 —— 桩判不合法、引擎放行（第 16 轮复核实测，方向正是"桩比引擎严"那侧，
+# 也就是本仓库对账守卫写明不可接受的那一侧）。Windows 上尾部空白还会被文件系统
+# 吃掉，`packs/elevator\n` 实际落到 `packs/elevator`：一条 URL 能指到真的包上。
+_JID_RE = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}")
+_NAME_RE = re.compile(r"[\w\u4e00-\u9fff-]+")
 
 
 def _safe_jid(jid: str) -> str:
     """校验作业 id：既防路径穿越，也防 glob 通配（如 jid=* 命中任意记录）。"""
-    if not _JID_RE.match(jid or ""):
+    if not _JID_RE.fullmatch(jid or ""):
         raise HTTPException(400, "记录标识不合法")
     return jid
 
@@ -117,8 +122,9 @@ def _safe_name(name: str) -> str:
 
     FastAPI 的 `{name}` 匹配单个路径段，但 `%2e%2e` / `%2f` 会在路由匹配**之后**
     被解码成 `..` / `/`，所以「只匹配一段」并不等于安全 —— 必须显式校验。
+    用 `fullmatch` 而不是 `match` + `$`：后者会放行尾部换行（见上面 `_NAME_RE` 的注释）。
     """
-    if not _NAME_RE.match(name or "") or ".." in name:
+    if not _NAME_RE.fullmatch(name or "") or ".." in name:
         raise HTTPException(400, "行业包名称不合法")
     return name
 

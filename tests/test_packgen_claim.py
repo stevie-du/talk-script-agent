@@ -77,9 +77,9 @@ def test_a_thread_that_cannot_start_releases_the_claim_exactly_once():
     releases = []
     real_start, real_release = threading.Thread.start, plmod.release_slug
 
-    def counting(slug):
-        releases.append(slug)
-        return real_release(slug)
+    def counting(slug, owner):
+        releases.append((slug, owner))
+        return real_release(slug, owner)
 
     def boom(self, *a, **k):
         raise RuntimeError("起不了线程")
@@ -93,16 +93,66 @@ def test_a_thread_that_cannot_start_releases_the_claim_exactly_once():
         threading.Thread.start = real_start
         plmod.release_slug = real_release
         for s in list(packgen._creating):
-            packgen.release_slug(s)
+            packgen.release_slug(s, packgen.ANY_OWNER)
         shutil.rmtree(tmp, ignore_errors=True)
 
-    assert releases == ["探针丙"], f"归还点不唯一或漏了：{releases}"
+    slugs = [s for s, _ in releases]
+    assert slugs == ["探针丙"], f"归还点不唯一或漏了：{slugs}"
+    # 归还必须交回**凭证**（不是空串、不是 ANY_OWNER 的"硬摘"）：
+    # 只数次数看不出"摘的是谁的锁"，而第 16 轮那条 P1 恰恰是次数对、对象错。
+    owners = [o for _, o in releases]
+    assert all(o and o != packgen.ANY_OWNER for o in owners), \
+        f"归还时没带占位凭证，等于无条件 discard：{owners}"
     assert "探针丙" not in packgen._creating, "同名占位没还，之后永远建不出来"
     states = [s["state"] for s in pl.registry.snapshots()]
     assert states == ["failed"], f"作业没落到终态：{states}"
     assert pl.registry.running_count() == 0, "占着的并发额度没还"
-    assert packgen.claim_slug("探针丙") is True
-    packgen.release_slug("探针丙")
+    assert packgen.claim_slug("探针丙")
+    packgen.release_slug("探针丙", packgen.ANY_OWNER)
+
+
+def test_a_late_release_cannot_steal_a_claim_made_in_between():
+    """`Thread.start()` 在**工作线程跑完之后**才抛：兜底那次归还不得摘掉别人的占位。
+
+    第 16 轮复核的 P1。上面那条用例钉的是"start 完全起不来"（worker 从没跑过），
+    这条钉的是另一半：worker 已经跑完并自己归还了，之后 `start()` 才抛
+    —— CPython 3.14 的 `Thread.start()` = `_start_joinable_thread` **然后**
+    `_started.wait()`，等待被打断是真实可能的形状。这时 `start_packgen` 的
+    `except BaseException` 会再归还一次；这中间挤进来的那条同名作业正持有占位，
+    按名字硬摘就等于让它和第一条并行建同一个目录（双份 token + 目录互踩）。
+    """
+    import app.pipeline as plmod
+    from app import packgen as pg
+
+    pl, tmp, client = _pipeline()
+    slug = pg.preview_slug("探针庚")
+    real_start = threading.Thread.start
+    seen: dict[str, object] = {}
+
+    def late_boom(self, *a, **k):
+        real_start(self, *a, **k)
+        if seen.get("done"):
+            return
+        seen["done"] = True
+        self.join()                          # 等工作线程跑完（它自己已经归还）
+        seen["b"] = pg.claim_slug(slug)      # 另一个人此刻抢到同一个名字
+        raise RuntimeError("start() 在 _started.wait() 上被打断")
+
+    try:
+        threading.Thread.start = late_boom
+        with pytest.raises(RuntimeError):
+            pl.start_packgen("探针庚", "探针用的行业说明文字")
+        assert seen["b"], "前置没成立：插进来的那次占位根本没拿到名字"
+        assert pg._creating.get(slug) == seen["b"], \
+            "活着的同名占位被第一条作业的第二次归还偷走了"
+        assert pg.claim_slug(slug) is None, \
+            "第三条请求能与 B 并行建同一个目录：占位互斥已经失效"
+        pg.release_slug(slug, seen["b"])
+    finally:
+        threading.Thread.start = real_start
+        for s in list(pg._creating):
+            pg.release_slug(s, pg.ANY_OWNER)
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def test_cancel_after_the_pack_is_written_leaves_no_orphan_dir(monkeypatch):
@@ -232,7 +282,7 @@ def test_claim_is_released_on_every_exit_path():
         assert slug not in packgen._creating
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-        packgen.release_slug(slug)
+        packgen.release_slug(slug, packgen.ANY_OWNER)
 
 
 def test_failed_build_also_gives_the_name_back(monkeypatch):
@@ -253,7 +303,7 @@ def test_failed_build_also_gives_the_name_back(monkeypatch):
         assert "令牌已过期" in (pl.get_job(jid).error or "")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-        packgen.release_slug(slug)
+        packgen.release_slug(slug, packgen.ANY_OWNER)
 
 
 def test_quota_rejection_also_gives_the_name_back():
@@ -276,7 +326,7 @@ def test_quota_rejection_also_gives_the_name_back():
         assert slug not in packgen._creating, "额度满那条出口漏了归还占位"
     finally:
         for s in list(packgen._creating):
-            packgen.release_slug(s)
+            packgen.release_slug(s, packgen.ANY_OWNER)
         shutil.rmtree(tmp, ignore_errors=True)
 
 
@@ -286,12 +336,22 @@ def slug_of(client) -> str:
 
 def test_claim_and_release_are_pairwise():
     s = "某个临时占位"
-    assert packgen.claim_slug(s) is True
-    assert packgen.claim_slug(s) is False       # 自己占着的，第二条占不到
-    packgen.release_slug(s)
-    assert packgen.claim_slug(s) is True
-    packgen.release_slug(s)
-    assert packgen.claim_slug("") is True       # 空 slug 交给正式判定，不占位
+    ta = packgen.claim_slug(s)
+    assert ta, "第一次占位就该成功"
+    assert packgen.claim_slug(s) is None          # 自己占着的，第二条占不到
+    # 凭证不对就摘不掉 —— 这一格就是第 16 轮那条 P1 的最小形状
+    assert packgen.release_slug(s, "") is False, "忘带凭证等于无条件 discard"
+    assert packgen.release_slug(s, "不是那一份") is False
+    assert s in packgen._creating, "失败的归还把占位弄丢了"
+    assert packgen.release_slug(s, ta) is True
+    tb = packgen.claim_slug(s)
+    assert tb and tb != ta, "两次占位发的是同一个凭证，认不出谁是谁"
+    # 同一份凭证叫第二次：空操作，且**不会**误伤 B 的新占位
+    assert packgen.release_slug(s, ta) is False
+    assert packgen._creating.get(s) == tb, "A 的第二次归还偷走了 B 的占位"
+    assert packgen.release_slug(s, tb) is True
+    assert packgen.claim_slug(""), "空 slug 交给正式判定，不占位"
+    assert packgen.claim_slug("") == packgen.NO_CLAIM
 
 
 def _stub_slug():
@@ -335,13 +395,16 @@ def test_stub_pack_name_check_agrees_with_the_engine():
     node = shutil.which("node")
     if not node:
         pytest.skip("没有 node，跨语言对账跑不了")
-    from app.server import _NAME_RE
+    from app.server import _safe_name
 
     cps = [cp for cp in range(0x21, 0x2000) if not 0xD800 <= cp <= 0xDFFF] \
         + list(range(0x4E00, 0x4E20)) + [0x1D400, 0x1F600, 0x2C2F, 0x10000]
     names = [chr(cp) for cp in cps] \
         + ["-a", "a-", "a--b", "ab-", "-", "--", "a.b", "a/b", "..", "x", "电梯_a-1",
-           "全屋定制-装修", "２３D打印"]
+           "全屋定制-装修", "２３D打印",
+           # 尾部空白这一族：Python 的 `$` 放过一个结尾换行、JS 的不放（第 16 轮实测）。
+           # 引擎侧现在用 fullmatch，两边都拒 —— 改回 `match` + `$` 这条会红。
+           "elevator\n", "宠物医院\n", "elevator ", "a\nb", "\nelevator"]
     tmp = Path(tempfile.mkdtemp())
     try:
         (tmp / "in.json").write_text(json.dumps(names, ensure_ascii=False), encoding="utf-8")
@@ -364,7 +427,17 @@ def test_stub_pack_name_check_agrees_with_the_engine():
         shutil.rmtree(tmp, ignore_errors=True)
 
     def engine_ok(n):
-        return bool(_NAME_RE.match(n or "")) and ".." not in (n or "")
+        """问生产函数本身，不在测试里重抄一遍判据。
+
+        原来这里是 `bool(_NAME_RE.match(n)) and ".." not in n` —— 那是对服务端判据的
+        **第二次抄写**：服务端把 `match` 换成 `fullmatch`、或把 `..` 规则挪走，
+        这份副本不会跟着变，对账就成了"我的判据 vs 桩的判据"（两本账）。
+        """
+        try:
+            _safe_name(n)
+            return True
+        except Exception:
+            return False
 
     diff = [(n, engine_ok(n), bool(o), bool(w)) for n, o, w in zip(names, out["ok"], out["word"])
             if engine_ok(n) != bool(o)]

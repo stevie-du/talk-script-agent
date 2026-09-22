@@ -153,6 +153,10 @@ class Job:
         # 被第二道网"挂起来"：不再占用并发额度，但**条目、状态、产物一律不动**。
         # 见 `_reap_stranded`：删条目会让还在跑它的前端 404，改状态会废掉它的状态机。
         self.stranded = False
+        # 建包作业持有的那份「目录名占位凭证」（`packgen.claim_slug` 发的）。
+        # 归还点有两个（入口的兜底与 worker 的 finally），凭证必须跟着作业走，
+        # 否则第二个归还点会把这期间别人抢到的同名占位摘走（第 16 轮复核 P1）。
+        self.claim_token = ""
 
     # ── 状态迁移（唯一的写入口）──────────────────────────────
     def transition(self, to_state: str, *, force: bool = False, **fields) -> bool:

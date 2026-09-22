@@ -115,8 +115,9 @@ def test_slug_and_slot_released_when_the_thread_wont_start(tmp_path, monkeypatch
     assert pl.registry.running_count() == 0
     # 名字确实还回来了：同一个 slug 再占一次能成功（修复前永远占不到）
     slug = preview_slug("猫咖")
-    assert claim_slug(slug)
-    release_slug(slug)
+    t0 = claim_slug(slug)
+    assert t0, "同一个 slug 再占一次应该成功（修复前永远占不到）"
+    release_slug(slug, t0)
 
 
 def test_generate_dir_failure_does_not_eat_the_quota(tmp_path, monkeypatch):
@@ -884,16 +885,18 @@ def test_start_packgen_releases_the_claim_even_before_the_job_exists(tmp_path, m
     """
     pl = _pipeline(tmp_path)
     slug = preview_slug("宠物医院")
-    assert slug and claim_slug(slug) is True        # 与 start_packgen 争同一个名字之前先归还
-    release_slug(slug)
+    t1 = claim_slug(slug) if slug else None         # 与 start_packgen 争同一个名字之前先归还
+    assert slug and t1, "前置：这个 slug 要能占上"
+    release_slug(slug, t1)
 
     def boom():
         raise RuntimeError("作业 id 都发不出来")
     monkeypatch.setattr("app.pipeline.new_job_id", boom)
     with pytest.raises(RuntimeError):
         pl.start_packgen("宠物医院", "社区小店")
-    assert claim_slug(slug) is True, "占位没还：这个名字从此永远建不出包"
-    release_slug(slug)
+    t2 = claim_slug(slug)
+    assert t2, "占位没还：这个名字从此永远建不出包"
+    release_slug(slug, t2)
 
 
 # ── 第 7 轮复核（打 §15.13 那批新代码的 lane）查出的四条，各自钉一条 ──
@@ -1389,8 +1392,9 @@ def test_packgen_admission_failure_after_the_slot_is_taken_settles_the_job(tmp_p
     assert "failed" in states, f"作业没落终态：{states}"
     assert pl.registry.running_count() == 0, "那条并发额度还挂在 queued 上"
     from app.packgen import claim_slug, release_slug
-    assert claim_slug("猫咖丁"), "归还点漏了：这个名字从此永远建不出包"
-    release_slug("猫咖丁")
+    t3 = claim_slug("猫咖丁")
+    assert t3, "归还点漏了：这个名字从此永远建不出包"
+    release_slug("猫咖丁", t3)
 
 
 def _whole_second_regex_offenders(sources):
