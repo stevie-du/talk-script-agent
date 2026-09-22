@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 import threading
 import time
 import uuid
@@ -37,6 +38,8 @@ from datetime import datetime
 # 终态：进入后不再流转。同时用于「停止」的幂等判断。
 TERMINAL_STATES = frozenset({"done", "failed", "cancelled"})
 
+log = logging.getLogger(__name__)
+
 # P1-5「整作业预算」：修复前只有**逐层**的重试上限（回炉轮 × chat_json 重试 ×
 # 请求层重试），没有任何一处管「一条作业最多花多长时间」。按默认配置
 # (1+2)×(1+1)×(1+3) 的最坏形态，一次生成可以一路重试到几十分钟而不被叫停，
@@ -44,6 +47,12 @@ TERMINAL_STATES = frozenset({"done", "failed", "cancelled"})
 # 这里给一个宽到不会误伤正常作业的上界：正常路径实测 3 次调用、几十秒到几分钟，
 # 触到这条线的都是「上游卡住 / 重试层叠乘」这类真正需要人看一眼的情况。
 JOB_BUDGET_SECONDS = 1200.0
+
+# 第二道网的倍数：忙态作业超过 `JOB_BUDGET_SECONDS × 本值` 还没收口，就一定是
+# 收口代码自己坏了（正常路径上每个检查点都在预算内触发：阶段前的 `_stop_check`、
+# 流式逐行 abort、被夹到剩余预算的读超时与退避）。第 9 轮复核定到的形态是
+# `_guarded` 的兜底在 `transition` 上再抛 —— 那时没有任何东西会把额度还回来。
+STALE_JOB_MULTIPLIER = 2
 
 # 真正占用模型资源的作业状态 —— **并发额度只看这些**。
 BUSY_STATES = frozenset({"queued", "selecting", "writing", "checking", "rewriting",
@@ -316,6 +325,7 @@ class JobRegistry:
         插入时 `job.state` 已是 `queued`（在 `BUSY_STATES` 里），
         所以额度从这一刻起就被占住，不必等 `_spawn` 起线程。
         """
+        self._reap_stranded()      # 第二道网：先还额度再判（见 prune 的说明）
         with self._lock:
             if sum(1 for j in self._jobs.values() if j.state in BUSY_STATES) >= limit:
                 return False
@@ -333,6 +343,7 @@ class JobRegistry:
         注意锁序：拿 registry 锁 → 调 `Job.transition_or_raise`（作业自身锁）。
         全库没有反向（先作业锁再 registry 锁）的路径，不会死锁。
         """
+        self._reap_stranded()      # 与 add_if_room 同一道第二网（取锁之前）
         with self._lock:
             busy = sum(1 for j in self._jobs.values()
                        if j.state in BUSY_STATES and j.id != job.id)
@@ -382,9 +393,37 @@ class JobRegistry:
         这里曾并列着第二条 `_trim(paused, PAUSED_KEEP)` —— 给"待确认作业"单独
         设一道内存上界（它们当时被排除在并发额度外，数量不受 MAX_CONCURRENT_JOBS
         约束）。分步确认移除后这条上界连同它的静默丢弃一起没了。
+
+        ⚠ 第二道网（第 9 轮复核：`_guarded` 的兜底如果自己也在 `transition` 上抛，
+        作业就永远停在忙态，而这里只回收终态 —— 症状照旧是"一个都没在跑，
+        生成却一直报已达上限"，只能重启）。远超预算的忙态作业**不可能还在正当工作**：
+        每一个检查点（阶段前的 `_stop_check`、流式逐行 abort、被夹到剩余预算的
+        读超时与退避）都在预算内就会触发。所以到 2× 预算仍挂着的，一律就地收口；
+        连收口都失败的最直接移出注册表（把额度还回来），并在日志里说清。
         """
+        self._reap_stranded()
         with self._lock:
             self._trim(lambda j: j.state in TERMINAL_STATES, keep)
+
+    def _reap_stranded(self) -> None:
+        limit = JOB_BUDGET_SECONDS * STALE_JOB_MULTIPLIER
+        with self._lock:
+            stale = [j for j in self._jobs.values()
+                     if j.state not in TERMINAL_STATES
+                     and time.time() - j.started_at > limit]
+        for j in stale:
+            age = int(time.time() - j.started_at)
+            try:
+                j.transition("failed", force=True,
+                             error=f"作业超过整作业预算 {limit:.0f} 秒仍未收口（已运行 {age} 秒），"
+                                   f"由引擎回收额度")
+                log.warning("作业 %s 停在 %s 已 %s 秒，强制收口以回收并发额度", j.id, j.state, age)
+            except BaseException:  # noqa: BLE001
+                # 收口这条路本身也坏了（MemoryError 一类）：那就只把额度还回来，
+                # 作业对象仍在线程手里，它的产物照常落盘、只是不再占注册表位置。
+                log.exception("作业 %s 收口失败，直接从注册表移除以归还额度", j.id)
+                with self._lock:
+                    self._jobs.pop(j.id, None)
 
     def _trim(self, pred, keep: int) -> None:
         """丢掉匹配 pred 的、最旧的超出部分（调用方须持锁）。"""

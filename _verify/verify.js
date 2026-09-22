@@ -285,6 +285,10 @@ window.__addCount = 0;
   // 不是实现。第一个答案进来时记账，之后一律复用同一个值。
   var born = {};
   var PG_CLAIMED = [];   // 建包占位**目录名**集合：与 app/packgen.claim_slug 同一口径
+  // 归还时必须还得是本次占住的那个键。原来两处归还都写死 pgSlug('全屋定制/装修')：
+  // 只要有用例提交别的行业名（口腔诊所、猫咖…），它的键就**永远留在集合里**，
+  // 之后同一个名字再提交就被桩判成"正在创建中" —— 桩又比后端严了另一个方向。
+  var PG_HELD = null;
   // ⚠ 引擎按 slugify 之后的目录名占位，不是按用户输入的那串字：
   //   「全屋定制/装修」与「全屋定制 装修」都会落成 packs/全屋定制-装修/，
   //   真引擎第二次直接 409。桩原来按原文比，等于桩比后端宽容 ——
@@ -654,13 +658,17 @@ window.__addCount = 0;
       // 且**与包名无关**。桩原来只认 elevator：前面有用例建出第二个包之后，
       // 请求落到通用的 /api/packs/ 清单分支、拿回一份没有 size/text 的东西，
       // 于是这条断言量到空 body —— 红得像是实现的错（实测踩过）。
-      // 判 private 的位置在下面（要先解码、再按路径**分段**判）：原来这里是一条
-      // "URL 里含 private 字样"的子串正则，于是 knowledge%2Fprivate-notes.md 这种
-      // 合法文件被桩 403 掉，而真引擎给 200（第 8 轮量到）。
+      // 判 private 与规范化都在下面做。第 8 轮把"URL 里含 private 字样"的子串正则
+      // 换成了分段判（那会把 knowledge/private-notes.md 这种合法文件误拦成 403），
+      // 第 9 轮对打 18 例又量出这段本身 11 例分歧：漏掉**最后一段**、大小写敏感、
+      // 缺 rel 时缺省成一个真存在的文件、以及清单里没有的路径也回 200。
       var req2 = (s.split('rel=')[1] || '').split('&')[0];
-      var relRaw = req2 ? decodeURIComponent(req2) : 'knowledge/topics.md';
+      var relRaw = req2 ? decodeURIComponent(req2) : '';
+      // 没给 rel 就是没给：真路由拿空串当"包目录本身"→ 404。缺省成 topics.md
+      // 等于把「界面少传了参数」这种错演成「读到了一个真文件」。
+      if (!relRaw) return err(404, '文件不存在：（没有给出 rel）');
       // 规范化要跟真实路由同步：server.py 先 resolve 再 relative_to(base)，
-      // 反斜杠 / 重复斜杠 / ./ / ../ 都会被折掉；private 是"某一段正好叫 private"。
+      // 反斜杠 / 重复斜杠 / ./ / ../ 都会被折掉。
       var withSlash = relRaw.split(BS).join('/');
       var segs = [], parts = withSlash.split('/');
       for (var pi = 0; pi < parts.length; pi++) {
@@ -669,17 +677,26 @@ window.__addCount = 0;
         if (seg === '..') { segs.pop(); continue; }
         segs.push(seg);
       }
+      // 判据抄 app/server.py 的 _is_private_rel：**每一段**（含最后一段）小写后等于 private 就算。
+      // 漏末段 → rel=private 在桩上 200、真引擎 403；不分大小写 → PRIVATE/x.md 同理。
+      // 另一种方向的差异留在原地：越界路径桩会先折成 private/xxx 判 403，而引擎是 404 ——
+      //   方向是"桩更严"，不会替实现掩盖任何东西，因此不改。
       var isPriv = false;
-      for (var qi = 0; qi < segs.length - 1; qi++) { if (segs[qi] === 'private') isPriv = true; }
+      for (var qi = 0; qi < segs.length; qi++) {
+        if (segs[qi].toLowerCase() === 'private') isPriv = true;
+      }
       if (isPriv) {
         return err(403, '私有资料不经界面浏览（packs/elevator/private 下的内容）。'
                         + '要查看或修改，请直接用编辑器打开本地文件。');
       }
-      // 文件名按请求回显，size 则取自详情那份 DET_FILES（两处各写一份就是第二本账）。
+      // 文件名按请求回显，size 取自详情那份 DET_FILES（一处定义两处用）。
+      // 清单里没有的路径真引擎是 404（文件不存在），桩以前对任意 rel 都编一份 200
+      // 内容 —— 「读到一个不存在的文件」这类错于是永远量不出来。
       var relQ = segs.join('/');
       var szRow = null;
       for (var ri = 0; ri < DET_FILES.length; ri++) { if (DET_FILES[ri].rel === relQ) szRow = DET_FILES[ri]; }
-      return mk({ rel: relQ, size: szRow ? szRow.size : 1024,
+      if (!szRow) return err(404, '文件不存在：' + relQ);
+      return mk({ rel: relQ, size: szRow.size,
                   text: relQ + ' 的内容（桩）— 家用电梯怎么挑？' });
     }
     // 只在**有 body** 时记录：GET /api/config 会把 __lastConfigBody 覆盖成空，
@@ -726,6 +743,7 @@ window.__addCount = 0;
         return err(409, '行业包正在创建中：' + indKey);
       }
       PG_CLAIMED.push(indKey);
+      PG_HELD = indKey;          // 归还时必须还得是**这一个**键（见 PG_CLAIMED 处的说明）
       calls.pg = 0;
       return mk({ job_id: 'jobpg' });
     }
@@ -735,7 +753,7 @@ window.__addCount = 0;
         return err(500, '引擎没有接受这次取消：作业正在写文件');
       }
       calls.cancel++;
-      PG_CLAIMED = PG_CLAIMED.filter(function(x){ return x !== pgSlug('全屋定制/装修'); });
+      PG_CLAIMED = PG_CLAIMED.filter(function(x){ return x !== PG_HELD; }); PG_HELD = null;
       return mk({ id: 'jobpg', state: 'cancelled', kind: 'packgen', params: {} });
     }
     if (s.indexOf('/api/jobs/jobpg') >= 0) {
@@ -748,7 +766,7 @@ window.__addCount = 0;
           stream: { phase: '行业包生成', reasoning_tail: '先想这个行业的细分领域……',
                     reasoning_len: 512, content_len: 0 } });
       }
-      PG_CLAIMED = PG_CLAIMED.filter(function(x){ return x !== pgSlug('全屋定制/装修'); });  // finally 归还
+      PG_CLAIMED = PG_CLAIMED.filter(function(x){ return x !== PG_HELD; }); PG_HELD = null;  // finally 归还
       return mk({ id: 'jobpg', kind: 'packgen', state: 'done', result: PG_RESULT });
     }
     if (s.indexOf('/api/packs/') >= 0) {

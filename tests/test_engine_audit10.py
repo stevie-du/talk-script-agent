@@ -1105,3 +1105,47 @@ def test_read_error_survives_a_cause_that_raises_base_exception():
     # 直接对象那侧仍然放行：Ctrl-C / SystemExit 不该被当成"这句话取不出来"
     with pytest.raises(SystemExit):
         _safe_str(_NoStr())
+
+
+# ── 第 9 轮 N7：忙态漏槽的第二道网 ──────────────────────────────
+def test_stranded_busy_jobs_are_reaped_but_fresh_ones_are_not():
+    """远超预算仍挂在忙态的作业要被收口；正常在跑的一条不许被碰。
+
+    `prune()` 原来只回收终态，于是"停在忙态"等于永久占一个并发额度
+    （本轮已经修过多条把作业留在忙态的路径，但兜底自己坏掉时仍然没有后手）。
+    """
+    from app import jobs as J
+    reg = J.JobRegistry()
+    fresh = J.Job("stale-fresh", "generate", {})
+    stranded = J.Job("stale-old", "generate", {})
+    assert reg.add_if_room(fresh, 4) and reg.add_if_room(stranded, 4)
+    stranded.transition_or_raise("selecting")
+    stranded.started_at = time.time() - J.JOB_BUDGET_SECONDS * 3
+    reg.prune()
+    assert stranded.state == "failed", stranded.state
+    assert "回收额度" in (stranded.error or ""), stranded.error
+    assert fresh.state == "queued", "在预算内的作业被误伤"
+    assert reg.running_count() == 1
+
+
+def test_the_net_frees_the_slot_even_when_transition_raises():
+    """收口这条路自己也坏了（MemoryError 一类）时，额度照样要还回来。
+
+    这正是第 9 轮复核点出的残留：`_guarded` 的兜底若在自己那次 `job.transition`
+    上抛，作业就停在忙态、没有任何东西能救。第二道网因此不能依赖同一次调用。
+    """
+    from app import jobs as J
+    reg = J.JobRegistry()
+    jobs_ = [J.Job(f"leak-{i}", "generate", {}) for i in range(4)]
+    for j in jobs_:
+        assert reg.add_if_room(j, 4)
+    stuck = jobs_[0]
+    stuck.transition_or_raise("selecting")
+    stuck.started_at = time.time() - J.JOB_BUDGET_SECONDS * 3
+
+    def boom(*a, **k):
+        raise MemoryError("连迁移都失败")
+    stuck.transition = boom                       # 收口失败的最坏形态
+    newcomer = J.Job("newcomer", "generate", {})
+    assert reg.add_if_room(newcomer, 4) is True, "四槽全被漏掉的忙态占死，第二道网没生效"
+    assert reg.running_count() <= 4

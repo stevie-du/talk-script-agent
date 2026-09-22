@@ -205,21 +205,12 @@ def test_stub_slug_agrees_with_the_engine_over_a_unicode_sweep(tmp_path):
     node = shutil.which("node")
     if not node:
         pytest.skip("没有 node，跨语言对账跑不了")
-    cps = list(range(0x21, 0x2FF)) + list(range(0x370, 0x6FF)) \
-        + list(range(0x900, 0x1000)) + list(range(0x1E00, 0x1F00)) \
-        + list(range(0x2000, 0x2100)) + list(range(0x2E80, 0x3400, 3)) \
-        + list(range(0x4E00, 0x4F00)) + list(range(0xFB00, 0xFB10)) \
-        + list(range(0xFF00, 0xFFF0)) + list(range(0x1D400, 0x1D560, 5)) \
-        + [0x10000, 0x20000, 0x1F600, 0x3099, 0x0301, 0x00AA, 0x00B2,
-           0x0259, 0x3005, 0xFF3F, 0xAC00, 0xD7A3]
-    inputs = []
-    for cp in cps:
-        ch = chr(cp)
-        inputs.append(ch)
-        inputs.append("A" + ch + "B")
-        if ch == "-":
-            continue
-        inputs.append("宠物" + ch + "诊所")
+    cps = [cp for cp in range(0x21, 0xFFFF) if not 0xD800 <= cp <= 0xDFFF] \
+        + list(range(0x1D400, 0x1D560, 5)) + [0x10000, 0x20000, 0x1F600, 0x2C2F]
+    inputs = [chr(cp) for cp in cps]
+    # 几条真实的"同目录不同写法"，碰撞语义要靠多字符才量得到
+    inputs += ["全屋定制/装修", "全屋定制 装修", "宠物医院", "？？？", "!!!",
+               "café 机电", "３D打印", "ひらがな诊所", "한국어", "𝕬宠物"]
     (tmp_path / "in.json").write_text(json.dumps(inputs, ensure_ascii=False), encoding="utf-8")
     (tmp_path / "slug.js").write_text(_stub_slug() + "\nmodule.exports = pgSlug;\n",
                                       encoding="utf-8")
@@ -234,13 +225,31 @@ def test_stub_slug_agrees_with_the_engine_over_a_unicode_sweep(tmp_path):
     assert r.returncode == 0, r.stderr[:300]
     got = json.loads(r.stdout)
     bad = [(s, preview_slug(s), g) for s, g in zip(inputs, got) if preview_slug(s) != g]
-    # 唯一允许的例外：V8 的 Unicode 属性数据比 CPython 的旧一轮，这两个 Telugu
-    # 字母在 JS 里还不是字母。它们是"运行时数据版本差"，不是判据写错 —— 换成
-    # 手写区段表也一样追不上。清单只准变小不许变大：哪天 Node 升级把它俩认成
-    # 字母了，这里只会少一项；出现第三项就是桩又算错了，必须修桩而不是加进来。
-    known_version_split = {"\u0c5c", "\u0cdc"}
-    unexplained = [(s, a, b) for s, a, b in bad
-                   if not any(ch in known_version_split for ch in s)]
-    assert not unexplained, (
+    # 例外清单里的每个码点都必须**自带理由**：Python 认为它不是单词字符（目录名被折空），
+    # V8 的 \p{L} 却认它是字母。这是两个运行时各自带的 Unicode 数据版本差，不是判据写错。
+    # 第 9 轮复核定下的两点：清单原来只作减法（加条目永远不会红）且扫描范围有洞
+    # （U+088F、U+A7C0 段整段没扫），所以现在是全 BMP 逐码点 + 每条都要自证。
+    known_version_split = {"\u088f", "\u0c5c", "\u0cdc", "\ua7ce",
+                           "\ua7cf", "\ua7d2", "\ua7d4", "\ua7f1"}
+    single = {s: (a, b) for s, a, b in bad if len(s) == 1}
+    new_ones = sorted(set(single) - known_version_split)
+    assert not new_ones, (
         "建包桩与引擎出现了新的目录名分歧（前 8 条）：\n"
-        + "\n".join(f"  {s!r}: 引擎={a!r} 桩={b!r}" for s, a, b in unexplained[:8]))
+        + "\n".join(f"  {s!r} U+{ord(s):04X}: 引擎={single[s][0]!r} 桩={single[s][1]!r}"
+                    for s in new_ones[:8]))
+    for ch in sorted(known_version_split):
+        assert preview_slug(ch) == "", \
+            f"白名单里的 U+{ord(ch):04X} 在引擎侧并不是「折成空」，这条理由已站不住：删掉它"
+        stub_out = got[inputs.index(ch)]
+        assert stub_out == ch or ch in single, (
+            f"白名单里的 U+{ord(ch):04X} 两边已经一致（Node 升级了？）——把这条从清单删掉")
+    # 多字符的输入里，只有含分裂码点的那条才允许分歧
+    multi = [(s, a, b) for s, a, b in bad if len(s) > 1
+             and not any(ch in known_version_split for ch in s)]
+    assert not multi, ("含碰撞语义的多字符输入不一致（前 6 条）：\n"
+                       + "\n".join(f"  {s!r}: 引擎={a!r} 桩={b!r}" for s, a, b in multi[:6]))
+    # 真实用例的语义还得对得上：两种写法同一个目录名、纯符号起不出名字
+    key = {s: g for s, g in zip(inputs, got)}
+    assert key["全屋定制/装修"] == key["全屋定制 装修"] == "全屋定制-装修"
+    assert key["？？？"] == "" and key["!!!"] == ""
+    assert key["한국어"] == "한국어" and key["𝕬宠物"] == "𝕬宠物"
