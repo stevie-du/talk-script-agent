@@ -1228,11 +1228,23 @@ class Pipeline:
                         # 连"记失败"都失败（第 7 轮复核：归因里一次 `str()` 抛错就够）时，
                         # 绝不能把作业留在忙态 —— `prune()` 只回收终态，那个并发额度
                         # 就永久没了，症状还是那句"一个都没在跑，但生成一直报已达上限"。
-                        # 这里只走 `transition`（不落盘、不渲染文案），它自己不再抛。
-                        job.transition("failed", force=True,
-                                       error=f"作业失败（{type(e).__name__}）·状态收口时"
-                                             f"二次出错，详情看引擎日志")
-                        log.exception("作业 %s 收口失败，已强制落 failed", job.id)
+                        #
+                        # ⚠ 但这条兜底**不许覆盖已经记对的东西**（第 8 轮复核实测）：
+                        #   让 `registry.prune` 抛一下，作业里原本那句
+                        #   「行业包配置缺少字段：'quota_table'」就被换成
+                        #   「…状态收口时二次出错」—— 一次不相干的收尾失败把可执行的
+                        #   原因抹掉了，正是这个函数自己声明要避免的事。
+                        #   同理，`_fail` 之后取消才落进来时不能把 cancelled 改成 failed
+                        #   （取消不是失败）。所以：重查一次状态，有 error 就留着。
+                        if job.state in TERMINAL_STATES or job.is_cancelled():
+                            log.warning("作业 %s 收口时二次出错，但状态已落定，保持原状",
+                                        job.id)
+                        else:
+                            kept = _safe_str(getattr(job, "error", "") or "")
+                            job.transition("failed", force=True,
+                                           error=kept or
+                                           f"作业失败（{type(e).__name__}）·详情看引擎日志")
+                            log.exception("作业 %s 收口失败，已强制落 failed", job.id)
                 raise
         return run
 
@@ -1275,8 +1287,12 @@ def _safe_str(obj) -> str:
     """
     try:
         return str(obj).strip()
-    except BaseException:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         return ""
+    except BaseException:
+        # KeyboardInterrupt / SystemExit 是"用户或解释器在说话"，不许当成
+        # "这句话取不出来"吞掉（第 8 轮复核抓到：原来连 Ctrl-C 都会被吞成空串）。
+        raise
 
 
 def _readable_error(e: Exception) -> str:

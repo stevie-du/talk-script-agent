@@ -960,3 +960,81 @@ def test_clamped_wait_never_turns_retries_into_a_hammer():
     # 未到点时仍然以"剩余预算"为上界，不能被下限顶回去
     soon = time.time() + 0.05
     assert LLMClient._clamped_wait(60.0, soon, floor=0.0) <= 0.05
+
+
+def test_the_backoff_floor_reaches_the_actual_sleep(tmp_path, monkeypatch):
+    """下限必须一路传到真正那次 `time.sleep`，不然它只是句注释。
+
+    第 8 轮复核实测到的安慰剂：调用点夹出 0.2s，`_interruptible_sleep` 又用
+    **默认 floor=0** 夹一次 → 0.2 被压回 0，一次都不睡；4 个请求 0.000s 发完，
+    与修前一模一样，而通知里却写着 0.2s（于是"通知与实睡同源"这条也被破了）。
+    既有那条测 `_clamped_wait` 的用例只看辅助函数，看不见这件事 —— 它绿着放的过。
+    """
+    client = _client()
+    slept: list[float] = []
+    monkeypatch.setattr("app.llm.time.sleep", lambda s: slept.append(s))
+    past = time.time() - 1.0
+    client._interruptible_sleep(60.0, None, past, floor=0.2)
+    assert slept and slept[-1] >= 0.2, f"下限没传到底：{slept}"
+    # 有闸门可问时仍然交给闸门：那条路上预算到点该立刻收工，不该多睡
+    slept.clear()
+    client._interruptible_sleep(60.0, lambda: None, past, floor=0.2)
+
+
+def test_expired_budget_without_a_gate_still_spaces_its_retries(tmp_path, monkeypatch):
+    """429 一路 + 预算已过 + 没闸门：重试之间必须有间隔（不许 0 秒连打）。"""
+    import httpx
+    stamps: list[float] = []
+
+    def handler(req):
+        stamps.append(time.monotonic())
+        return httpx.Response(429, headers={"Retry-After": "60"}, text="slow")
+
+    client = _client()
+    client.cfg = dataclasses.replace(client.cfg, retries=2)
+    real = httpx.Client
+    monkeypatch.setattr("app.llm.get_client",
+                        lambda *a, **k: real(transport=httpx.MockTransport(handler)))
+    with pytest.raises(Exception):
+        client.chat_json("write", "s", "u", ScriptDraft, deadline=time.time() - 1.0)
+    assert len(stamps) >= 2, stamps
+    gaps = [b - a for a, b in zip(stamps, stamps[1:])]
+    assert min(gaps) > 0.05, f"重试间隔被夹成了 0（安慰剂形态）：{gaps}"
+
+
+def test_guarded_fallback_keeps_the_error_already_recorded(tmp_path, monkeypatch):
+    """兜底那句"二次出错"不许覆盖掉已经记对的可执行原因。
+
+    复现（第 8 轮复核给的最小触发）：worker 抛 `KeyError('quota_table')`，
+    `_fail` 已经把「行业包配置缺少字段：'quota_table'」写进 job.error，
+    随后 `registry.prune()` 抛一下 —— 原来兜底无条件 force 成
+    「…状态收口时二次出错」，一次不相干的收尾失败把原因抹了。
+    """
+    pl = _pipeline(tmp_path)
+    job = Job("gf-1", "generate", {})
+    pl.registry.add_if_room(job, MAX_CONCURRENT_JOBS)
+    job.transition_or_raise("selecting")
+    monkeypatch.setattr(pl.registry, "prune", lambda *a, **k: (_ for _ in ()).throw(OSError(28, "full")))
+    with pytest.raises(Exception):
+        pl._guarded(job, lambda: (_ for _ in ()).throw(KeyError("quota_table")))()
+    assert job.state == "failed", job.state
+    assert "quota_table" in (job.error or ""), job.error
+    assert "二次出错" not in (job.error or ""), f"可执行的原因被兜底话覆盖了：{job.error}"
+
+
+def test_guarded_fallback_does_not_turn_a_cancel_into_a_failure(tmp_path, monkeypatch):
+    """取消之后落进来的兜底不许把 cancelled 改成 failed（取消不是失败）。"""
+    pl = _pipeline(tmp_path)
+    job = Job("gf-2", "generate", {})
+    pl.registry.add_if_room(job, MAX_CONCURRENT_JOBS)
+    job.transition_or_raise("selecting")
+
+    def fail_then_cancel(*a, **k):
+        job.request_cancel()          # 模拟"_fail 查过 is_cancelled 之后"取消才落进来
+        raise OSError("记失败这一步炸了")
+
+    monkeypatch.setattr(pl, "_fail", fail_then_cancel)
+    with pytest.raises(Exception):
+        pl._guarded(job, lambda: (_ for _ in ()).throw(RuntimeError("worker")))()
+    assert job.state == "cancelled", job.state
+    assert not (job.error or ""), f"取消被写成了失败：{job.error}"

@@ -55,6 +55,7 @@ from urllib.parse import urlparse
 
 import yaml
 from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -134,6 +135,7 @@ ERR_PACK_MISSING = "pack_missing"       # → 404 包不存在
 ERR_PACK_BROKEN = "pack_broken"         # → 409 包在，但内容要人修
 ERR_QUOTA = "quota_exceeded"            # → 409 并发额度满（可重试）
 ERR_STATE_CONFLICT = "state_conflict"   # → 409 作业状态不允许这个操作
+ERR_FIELD_INVALID = "field_invalid"     # → 422 请求字段不合格（pydantic 挡的，不是业务挡的）
 
 # StateConflict 的三个抛出点（app/pipeline.py 的生成 / 建包 / 单段重写额度闸）
 # 都带「已达上限」这四个字，而 jobs.py 的那一条是「作业状态为 X，无法执行该操作」。
@@ -149,6 +151,69 @@ def _error_json(message: str, status: int, code: str) -> JSONResponse:
     把它换成对象会让「detail 里有没有那句话」的断言读不到东西。
     """
     return JSONResponse({"detail": message, "code": code}, status_code=status)
+
+
+# 请求体字段 → 界面上那个输入框的叫法。渲染层把 detail 原样进错误框（api.js 的约定：
+# 「detail 里就是人话」），而 pydantic 给的是英文 + 内部字段名 —— 用户在表单里
+# 找不到叫 `description` 的东西。抄字段名而不是抄整句英文，是为了让这条表跟着界面文案走。
+_FIELD_LABELS = {
+    "topic": "主题", "pack": "行业包", "duration": "时长（秒）", "rate": "语速（字/秒）",
+    "audience": "受众", "style": "风格", "persona": "人设", "platform": "平台",
+    "cta": "结尾引导", "facts": "补充资料", "segment": "段落", "index": "段落序号",
+    "feedback": "修改意见", "industry": "行业名称", "description": "业务描述",
+}
+
+
+def _num(v) -> str:
+    """界面上「时长不能大于 600.0」这种小数尾巴去掉（schema 里 duration 是 float）。"""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    return str(int(f)) if f.is_integer() else repr(f)
+
+
+def _humanize_validation(errors: list) -> str:
+    """pydantic 的字段错 → 一句"哪个框、要怎么改"的中文。
+
+    实测到的形态：建包时业务描述只打三个字 → 422 的 detail 是
+    `[{'type': 'string_too_short', …, 'msg': 'String should have at least 4 characters'}]`，
+    而 api.js 对数组的处理是 `map(x => x.msg).join('；')` —— 于是中文界面里
+    冒出英文原文，用户不知道该往哪个框里补几个字。
+    """
+    parts: list[str] = []
+    for e in errors or []:
+        loc = [str(x) for x in (e.get("loc") or []) if x not in ("body", "query")]
+        key = loc[-1] if loc else "请求内容"
+        label = _FIELD_LABELS.get(key, key)
+        ctx = e.get("ctx") or {}
+        kind = str(e.get("type") or "")
+        if kind.endswith("too_short"):
+            bound = ctx.get("min_length", ctx.get("min_items", "?"))
+            unit = "个字" if "string" in kind else "项"
+            parts.append(f"{label}太短了，要至少 {bound} {unit}")
+        elif kind.endswith("too_long"):
+            bound = ctx.get("max_length", ctx.get("max_items", "?"))
+            unit = "个字" if "string" in kind else "项"
+            parts.append(f"{label}太长了，最多 {bound} {unit}")
+        elif "greater_than_equal" in kind:
+            parts.append(f"{label}不能小于 {_num(ctx.get('ge', '?'))}")
+        elif "less_than_equal" in kind:
+            parts.append(f"{label}不能大于 {_num(ctx.get('le', '?'))}")
+        elif kind == "greater_than":
+            parts.append(f"{label}要大于 {_num(ctx.get('gt', '?'))}")
+        elif kind == "less_than":
+            parts.append(f"{label}要小于 {_num(ctx.get('lt', '?'))}")
+        elif kind == "missing":
+            parts.append(f"{label}不能为空")
+        elif kind.endswith("_parsing"):
+            parts.append(f"{label}要填数字")
+        elif kind == "string_type":
+            parts.append(f"{label}要填文字")
+        else:
+            # 认不出的类型不猜：把字段名与原文一起给，至少知道是哪个框出了问题。
+            parts.append(f"{label}：{e.get('msg') or kind or '字段不合格'}")
+    return "；".join(p for p in parts if p) or "请求里有字段不合格"
 
 
 # ── 私有资料判定 ────────────────────────────────────────────
@@ -574,6 +639,15 @@ def create_app(root: Path, token: str | None = None,
         msg = str(exc)
         return _error_json(msg, 409,
                            ERR_QUOTA if _QUOTA_MARK in msg else ERR_STATE_CONFLICT)
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error(_req, exc: RequestValidationError):
+        # 422 由 pydantic 代发，默认 detail 是**英文原文列表**，而渲染层按约定把
+        # detail 当人话直接显示 —— 描述打三个字就会在中文界面里露出
+        # 「String should have at least 4 characters」。状态码不动（有按码分流的调用方），
+        # 只把 detail 换成人话；code 给 field_invalid，让界面将来要区分时不必猜文案。
+        return _error_json(_humanize_validation(list(exc.errors() or [])),
+                           422, ERR_FIELD_INVALID)
 
     # ── 静态资源（渲染层同源提供）───────────────────────────
     if renderer.exists():

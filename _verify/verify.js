@@ -289,35 +289,37 @@ window.__addCount = 0;
   //   「全屋定制/装修」与「全屋定制 装修」都会落成 packs/全屋定制-装修/，
   //   真引擎第二次直接 409。桩原来按原文比，等于桩比后端宽容 ——
   //   「界面对重名提交做了什么」又变成量不出来的东西。
-  //   ⚠ 本函数整体是模板字符串：这里不许出现反引号，也不许写带反斜杠的正则，
-  //     所以逐字符判（反斜杠在这里会被吃掉一层，正则里的 w 类不能用）。
-  // ⚠ 判据必须与 Python 的"单词字符"类（Unicode 字母数字 + 下划线）同域，不能只认 ASCII + 汉字：
-  //   第 7 轮复核对 26 个输入量出 5 处差异（café 机电 / ３D打印 / ひらがな诊所 / 한국어 /
-  //   Ürün 名称）—— 桩按窄集折，会把引擎认为合法的字符当成"要折成 - 的符号"，
-  //   极端情况下连占位键都算成空串，于是桩自己造出一个引擎不会给的 409。
+  //   ⚠ 本函数整体在模板字符串里：不许出现反引号，也不许写带反斜杠的正则
+  //     （反斜杠会被吃掉一层，注进页面就是非法正则 —— 本项目踩过五次）。
+  // ⚠ 判据必须与 Python 的"单词字符"类（Unicode 字母数字 + 下划线）同域。
+  //   第 7 轮这里是手写区段表，第 8 轮复核对 218 个码点量出 62 个不一致：
+  //   ª µ ² ə ᄒ 々 ﬀ 与一切 astral 字符（代理对被拆成两个 - ）被漏掉，
+  //   × ÷ ． ＂ ＿ 与组合记号被错留。后果不是"算得不像"，而是桩会造出引擎
+  //   根本不会给的 409/400 —— 例如 × 在引擎里目录名为空（花钱前 400、不占位），
+  //   在桩里却占住键、第二次提交回 409。手写表追不上 Unicode，所以改用属性类
+  //   p{L} p{N} + 下划线（与 CPython 的定义同源），带 u 标志后按码点走。
+  //   跨语言一致性由 tests/test_packgen_claim.py 逐码点对账钉住。
+  var BS = String.fromCharCode(92);
+  var NON_WORD = new RegExp("[^" + BS + "p{L}" + BS + "p{N}_]+", "gu");
+  var EDGE_DASH = new RegExp("^-+|-+$", "g");
   function pgSlug(t) {
-    var s = String(t || ''), out = '';
-    for (var i = 0; i < s.length; i++) {
-      var c = s.charAt(i), code = s.charCodeAt(i);
-      var keep = (code >= 48 && code <= 57) || (code >= 65 && code <= 90)
-                 || (code >= 97 && code <= 122) || c === '_'
-                 || (code >= 0xC0 && code <= 0x24F)
-                 || (code >= 0x370 && code <= 0x3FF)
-                 || (code >= 0x400 && code <= 0x4FF)
-                 || (code >= 0x590 && code <= 0x6FF)
-                 || (code >= 0xE00 && code <= 0xE7F)
-                 || (code >= 0x1E00 && code <= 0x1EFF)
-                 || (code >= 0x3041 && code <= 0x30FF)
-                 || (code >= 0x3400 && code <= 0x4DBF)
-                 || (code >= 0x4E00 && code <= 0x9FFF)
-                 || (code >= 0xAC00 && code <= 0xD7A3)
-                 || (code >= 0xF900 && code <= 0xFAFF)
-                 || (code >= 0xFF10 && code <= 0xFF19)
-                 || (code >= 0xFF21 && code <= 0xFF5A);
-      out += keep ? c : '-';
-    }
-    return out.replace(/-+/g, '-').replace(/^-+|-+$/g, '');
+    return String(t || "").replace(NON_WORD, "-").replace(EDGE_DASH, "");
   }
+  // 详情里那份文件清单（/api/packs/<name> 的 files）提到外面来：读文件的分支要按
+  // **同一份表**回 size —— 两处各写一份就是第二本账（第 8 轮量到：详情说
+  // knowledge/topics.md 是 5120 字节，读文件那条分支回的却是 1024）。
+  var DET_FILES = [
+    {rel:'pack.yaml',size:2048},
+    {rel:'skill.yaml',size:1024},
+    {rel:'banwords.yaml',size:512},
+    {rel:'校对清单.md',size:768},
+    {rel:'knowledge/topics.md',size:5120},
+    {rel:'knowledge/faq.md',size:3072},
+    {rel:'compliance/platform.md',size:1536},
+    {rel:'patterns/hook.md',size:2560},
+    {rel:'rules/duration.md',size:1024},
+    {rel:'private/pricing.md',size:896},
+  ];
   function bornAt(id, backMs) {
     if (!born[id]) born[id] = new Date(Date.now() - backMs).toISOString();
     return born[id];
@@ -652,22 +654,32 @@ window.__addCount = 0;
       // 且**与包名无关**。桩原来只认 elevator：前面有用例建出第二个包之后，
       // 请求落到通用的 /api/packs/ 清单分支、拿回一份没有 size/text 的东西，
       // 于是这条断言量到空 body —— 红得像是实现的错（实测踩过）。
-      // ⚠ 这段在模板字符串里：不许出现反引号；也不许写带反斜杠的正则
-      //   （反斜杠会被模板字符串吃掉一层，注进页面就成了非法正则 —— 实测踩过两次）。
-      if (/rel=([^&]*)private/i.test(s)) {
+      // 判 private 的位置在下面（要先解码、再按路径**分段**判）：原来这里是一条
+      // "URL 里含 private 字样"的子串正则，于是 knowledge%2Fprivate-notes.md 这种
+      // 合法文件被桩 403 掉，而真引擎给 200（第 8 轮量到）。
+      var req2 = (s.split('rel=')[1] || '').split('&')[0];
+      var relRaw = req2 ? decodeURIComponent(req2) : 'knowledge/topics.md';
+      // 规范化要跟真实路由同步：server.py 先 resolve 再 relative_to(base)，
+      // 反斜杠 / 重复斜杠 / ./ / ../ 都会被折掉；private 是"某一段正好叫 private"。
+      var withSlash = relRaw.split(BS).join('/');
+      var segs = [], parts = withSlash.split('/');
+      for (var pi = 0; pi < parts.length; pi++) {
+        var seg = parts[pi];
+        if (seg === '' || seg === '.') continue;
+        if (seg === '..') { segs.pop(); continue; }
+        segs.push(seg);
+      }
+      var isPriv = false;
+      for (var qi = 0; qi < segs.length - 1; qi++) { if (segs[qi] === 'private') isPriv = true; }
+      if (isPriv) {
         return err(403, '私有资料不经界面浏览（packs/elevator/private 下的内容）。'
                         + '要查看或修改，请直接用编辑器打开本地文件。');
       }
-      // 文件名也要**按请求回显**：原来无论点哪个文件都回 topics.md，界面把
-      // 「读到的内容」标成别的文件名这类错就量不出来。
-      var req2 = (s.split('rel=')[1] || '').split('&')[0];
-      var relQ = req2 ? decodeURIComponent(req2) : 'knowledge/topics.md';
-      // 真实路由回的是**规范化之后**的 rel（app/server.py 用 relative_to(base)），
-      // 直接回显原始请求等于替界面保守住了"标签取自请求而不是响应"这类错。
-      // ⚠ 这段在模板字符串里：不写反斜杠（正则里的反斜杠会被吃掉一层 —— 本项目踩过四次），
-      //   所以折叠重复斜杠用 split/join 而不是 replace 正则。
-      relQ = relQ.split('//').join('/');
-      return mk({ rel: relQ, size: 1024,
+      // 文件名按请求回显，size 则取自详情那份 DET_FILES（两处各写一份就是第二本账）。
+      var relQ = segs.join('/');
+      var szRow = null;
+      for (var ri = 0; ri < DET_FILES.length; ri++) { if (DET_FILES[ri].rel === relQ) szRow = DET_FILES[ri]; }
+      return mk({ rel: relQ, size: szRow ? szRow.size : 1024,
                   text: relQ + ' 的内容（桩）— 家用电梯怎么挑？' });
     }
     // 只在**有 body** 时记录：GET /api/config 会把 __lastConfigBody 覆盖成空，
@@ -698,6 +710,12 @@ window.__addCount = 0;
       try { pgBody = JSON.parse((o && o.body) || '{}'); } catch (_) {}
       var ind = String(pgBody.industry || '');
       var indKey = pgSlug(ind);
+      // 真实引擎的顺序是 pydantic 在前（422）再业务判断（400）：描述只打三个字时，
+      // 行业名再怪也先回 422。桩原来两层都没建模，于是界面那条"422 的 detail 是人话"
+      // 的路径在整个门禁里永远跑不到（服务端配套：app/server.py 的 _humanize_validation）。
+      var dsc = String(pgBody.description || '');
+      if (ind.length < 2) return errc(422, '行业名称太短了，要至少 2 个字', 'field_invalid');
+      if (dsc.length < 4) return errc(422, '业务描述太短了，要至少 4 个字', 'field_invalid');
       // 纯符号名字：引擎在**花钱之前**就拒（pipeline.start_packgen → 400），
       // 压根不占位。桩原来会算出一个空串键并把 409 的理由写成「行业包正在创建中：」——
       // 那是桩自己造的一种"假忙碌"，还会让第二个纯符号名字看起来在排队（第 7 轮复核抓到）。
@@ -761,18 +779,7 @@ window.__addCount = 0;
       // 「行业包面板覆盖知识 / 技能 / 合规 / 私有等所有角色」这条断言验的是
       // 桩的贫瘠，不是实现的正确 —— 属于空转。真实包（elevator）有 22 个文件，
       // 这里取覆盖 9 个角色的最小真形态。
-      files:[
-        {rel:'pack.yaml',size:2048},
-        {rel:'skill.yaml',size:1024},
-        {rel:'banwords.yaml',size:512},
-        {rel:'校对清单.md',size:768},
-        {rel:'knowledge/topics.md',size:5120},
-        {rel:'knowledge/faq.md',size:3072},
-        {rel:'compliance/platform.md',size:1536},
-        {rel:'patterns/hook.md',size:2560},
-        {rel:'rules/duration.md',size:1024},
-        {rel:'private/pricing.md',size:896},
-      ] });
+      files: DET_FILES });
     }
     if (s.indexOf('/api/history') >= 0) return mk([]);
     return mk({});
@@ -1795,6 +1802,49 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     .find(p => !p.classList.contains('hidden'))?.id;`);
   check("packgen「完成」回到来源面板（从 packinfo 进来的，别再扔回工作台）",
     afterPgDone === 'pane-packinfo', afterPgDone);
+
+  // 花钱之前就拒的那两类输入，界面要说什么、按钮要回到什么状态。
+  // ① 纯符号行业名 → 引擎 400（不占位、不起作业）；② 描述太短 → pydantic 422，
+  // detail 必须是中文人话（修前会露出 String should have at least 4 characters）。
+  // 两条都额外钉"一次轮询都没发"：400/422 之后还去轮询就是凭空造了个不存在的作业。
+  await evalIn(`window.__ts.setPane('packinfo'); return true;`);
+  await sleep(200);
+  await evalIn(`document.getElementById('pi-newpack').click(); return true;`);
+  await sleep(200);
+  const pollsBefore = await evalIn(`return (window.__calls || {}).pg || 0;`);
+  await evalIn(`document.getElementById('pg-industry').value = '？？？';
+    document.getElementById('pg-desc').value = '纯符号名字，起不出目录名';
+    document.getElementById('pg-run').click(); return true;`);
+  await sleep(900);
+  const pollsAfter = await evalIn(`return (window.__calls || {}).pg || 0;`);
+  const p400 = await evalIn(`return {
+    errShown: !document.getElementById('pg-error').classList.contains('hidden'),
+    err: document.getElementById('pg-error').textContent,
+    btnDisabled: document.getElementById('pg-run').disabled,
+    formStill: !document.getElementById('pg-form').classList.contains('hidden'),
+    resultShown: !document.getElementById('pg-result').classList.contains('hidden'),
+    industry: document.getElementById('pg-industry').value };`);
+  check("纯符号行业名：400 的原因常驻说清、按钮恢复、表单保留，且不起作业不轮询",
+        p400.errShown && /可用作目录名/.test(p400.err) && p400.btnDisabled === false
+          && p400.formStill && p400.resultShown === false && p400.industry === '？？？'
+          && pollsAfter === pollsBefore,
+        JSON.stringify(Object.assign({ polls: pollsAfter - pollsBefore }, p400)));
+  await evalIn(`document.getElementById('pg-industry').value = '猫咖探针';
+    document.getElementById('pg-desc').value = '小店';
+    document.getElementById('pg-run').click(); return true;`);
+  await sleep(900);
+  const p422 = await evalIn(`return {
+    err: document.getElementById('pg-error').textContent,
+    shown: !document.getElementById('pg-error').classList.contains('hidden'),
+    btnDisabled: document.getElementById('pg-run').disabled,
+    resultShown: !document.getElementById('pg-result').classList.contains('hidden'),
+    polls: (window.__calls || {}).pg || 0 };`);
+  check("业务描述太短：422 的 detail 是中文人话而不是 pydantic 英文，且不起作业",
+        p422.shown && p422.err.indexOf('业务描述太短了，要至少 4 个字') >= 0
+          && p422.err.indexOf('String should have') < 0 && p422.btnDisabled === false
+          && p422.resultShown === false && p422.polls === pollsAfter,
+        JSON.stringify(p422));
+  await evalIn(`document.getElementById('pg-close').click(); return true;`);
   // 收尾：把面板切回工作台，后面的断言都在量 .stg-main / pane-gen 的几何
   await evalIn(`const n = document.querySelector('.stg-nav-item[data-pane="gen"]');
     if (n) n.click(); return true;`);

@@ -93,6 +93,36 @@ def _wait_state(c, jid: str, want: str, timeout=30.0):
 
 
 # ── 1 配置现读 ──────────────────────────────────────────────
+def test_validation_errors_are_said_in_chinese():
+    """422 的 detail 必须是人话：渲染层按约定把 detail 原样显示（api.js 的注释写着）。
+
+    复现路径极普通 —— 新建行业包时业务描述只打三个字，或主题打一个字。修前界面会
+    露出 pydantic 的英文原文「String should have at least 4 characters」，
+    而中文界面上没有任何一个叫 `description` 的框给用户看。
+    """
+    tmp = _tmp_root_mock()
+    try:
+        c = _client(tmp)
+        r = c.post("/api/packs/create", json={"industry": "猫咖", "description": "小店"})
+        assert r.status_code == 422, r.text
+        body = r.json()
+        assert body["detail"] == "业务描述太短了，要至少 4 个字", body
+        assert body["code"] == "field_invalid", body
+        # 两个字段同时错：一条一句并列给出，不能只报第一个就吞掉第二个
+        r2 = c.post("/api/generate",
+                    json={"topic": "梯", "pack": "elevator", "duration": 999})
+        assert r2.json()["detail"] == "主题太短了，要至少 2 个字；时长（秒）不能大于 600", r2.json()
+        # schema 里 duration 是 float，界面上不该出现「600.0」这种小数尾巴
+        assert "600.0" not in r2.json()["detail"]
+        # 纯符号行业名：引擎在花钱之前 400，且这句话就是建包桩的口径（不许两本账）
+        r3 = c.post("/api/packs/create",
+                    json={"industry": "？？？", "description": "纯符号名字探针"})
+        assert r3.status_code == 400, r3.text
+        assert "可用作目录名" in r3.json()["detail"], r3.json()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_config_fresh(tmp_path=None):
     tmp = _tmp_root()
     c = _client(tmp)

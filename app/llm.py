@@ -376,12 +376,13 @@ class LLMClient:
                 if attempt + 1 < attempts:
                     wait = self._backoff(attempt, rate_limited=(e.code == 429),
                                          retry_after=e.retry_after)
-                    # 通知与真正要睡的秒数同源（夹到剩余预算）
-                    wait = self._clamped_wait(wait, deadline, floor=0.0 if should_abort else 0.2)
+                    # 通知与真正要睡的秒数同源：夹逼与下限都算在内，两边共用同一个值
+                    wf = 0.0 if should_abort else 0.2
+                    wait = self._clamped_wait(wait, deadline, wf)
                     note = (f"上游限流(429)，{wait:.0f}s 后重试" if e.code == 429
                             else f"接口返回 {e.code}")
                     self._notify(on_retry, note, attempt + 1, attempts)
-                    self._interruptible_sleep(wait, should_abort, deadline)
+                    self._interruptible_sleep(wait, should_abort, deadline, floor=wf)
                     continue
                 raise LLMError(f"模型接口返回 {e.code}: {_brief(e.text)}") from e
             except httpx.RequestError as e:          # 超时 / 连接失败 / 网络中断
@@ -395,7 +396,8 @@ class LLMClient:
                 last_err = e
                 if attempt + 1 < attempts:
                     self._notify(on_retry, f"网络异常（{type(e).__name__}）", attempt + 1, attempts)
-                    self._interruptible_sleep(self._backoff(attempt), should_abort, deadline)
+                    self._interruptible_sleep(self._backoff(attempt), should_abort, deadline,
+                                              floor=0.0 if should_abort else 0.2)
                     continue
                 raise LLMError(f"模型接口连接失败（已重试 {attempts} 次）："
                                f"{type(e).__name__}: {_brief(str(e))}") from e
@@ -405,11 +407,12 @@ class LLMClient:
                 wait = self._backoff(attempt, rate_limited=rate_limited,
                                      retry_after=(_retry_after_seconds(resp.headers)
                                                   if rate_limited else None))
-                wait = self._clamped_wait(wait, deadline, floor=0.0 if should_abort else 0.2)   # 与界面同一口径（P2-49 后半）
+                wf = 0.0 if should_abort else 0.2      # 通知与实睡同一个口径
+                wait = self._clamped_wait(wait, deadline, wf)
                 note = (f"上游限流(429)，{wait:.0f}s 后重试" if rate_limited
                         else f"接口返回 {resp.status_code}")
                 self._notify(on_retry, note, attempt + 1, attempts)
-                self._interruptible_sleep(wait, should_abort, deadline)
+                self._interruptible_sleep(wait, should_abort, deadline, floor=wf)
                 continue
             if resp.status_code >= 400:
                 raise LLMError(f"模型接口返回 {resp.status_code}: {_brief(resp.text)}")
@@ -593,7 +596,8 @@ class LLMClient:
 
     @staticmethod
     def _interruptible_sleep(seconds: float, should_abort=None,
-                             deadline: float | None = None) -> None:
+                             deadline: float | None = None,
+                             floor: float = 0.0) -> None:
         """可打断、且不睡过作业预算的退避等待。
 
         两个独立的洞，一次补：
@@ -608,8 +612,13 @@ class LLMClient:
 
         没有闸门（`should_abort=None`，例如 `ping`）时保持一次性的 `time.sleep`：
         可打断只在有作业可问的时候才有意义，也保住既有对退避时长的观测口径。
+
+        ⚠ `floor` 必须由调用点**原样传进来**：第 8 轮复核实测，这里用默认值再夹一次，
+        等于把调用点刚夹出来的 0.2 秒又压回 0 —— 那条防"0 秒连打 N 次"的下限
+        成了安慰剂（4 个请求 0.000s 发完，与修前一模一样），而且通知说 0.2s、
+        实际睡 0.0s，正好破了这个函数存在的理由（通知与实睡同源）。
         """
-        wait = LLMClient._clamped_wait(seconds, deadline)
+        wait = LLMClient._clamped_wait(seconds, deadline, floor)
         if not should_abort:
             if wait > 0:
                 time.sleep(wait)
