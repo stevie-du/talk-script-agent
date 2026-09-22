@@ -50,10 +50,25 @@ _SPEC_ROW = re.compile(r"^\|\s*`([a-z_]+)`\s*\|([^|]*)\|([^|]*)\|([^|]*)\|\s*$")
 
 
 def _spec_table() -> dict[str, tuple[str, str]]:
-    """规格文档 §2.1 的 tell 表 → {tell: (中文名, severity)}。"""
+    """规格文档 §2.1 的 tell 表 → {tell: (中文名, severity)}。
+
+    ⚠ **只扫 §2.1 那一节**，不要全文扫。实测教训：文档后面又加了别的表
+    （§2.11 记实测结果的那张「元凶 / 命中 / 性质 / 处置」表，行首也是
+    ``| `tell名` | …``），全文扫会把它们一并吃进来 —— 于是对账报的是一堆
+    "规格里有、代码不认识"的幽灵 tell，而真正的原因（解析范围太宽）看不出来。
+    按小节切片的代价是"§2.1 的标题被改名会红"，那条红是**该红**的。
+    """
     text = SPEC.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    try:
+        start = next(i for i, ln in enumerate(lines) if ln.startswith("### 2.1"))
+    except StopIteration:                               # pragma: no cover
+        raise AssertionError("需求方案里找不到 §2.1 小节 —— 标题被改名了？"
+                             "本测试按小节切片取 tell 表，改名要同步这里")
+    end = next((i for i in range(start + 1, len(lines))
+                if lines[i].startswith(("### ", "## "))), len(lines))
     out: dict[str, tuple[str, str]] = {}
-    for line in text.splitlines():
+    for line in lines[start:end]:
         m = _SPEC_ROW.match(line.strip())
         if not m:
             continue

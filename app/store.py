@@ -405,6 +405,20 @@ def render_script_md(result: dict) -> str:
                   f"{result.get('quota', {}).get('total', '-')} 字）是按「时长 × 语速」"
                   "估算的通用值，不是为本行业定制的。要拿到贴合本行业的配额，"
                   "请在 packs/<行业>/pack.yaml 里补 quota_table。", ""]
+    # 人味分（`app/ai_tells.py`）：**只在界面上露等于导出后又变回不可见** ——
+    # 与上面那条 quota_degraded 是同一条规矩（md 是最终交付物）。
+    # ⚠ `ai_tells` 落 null = 这个包没配词表、**本次没测**，与"测了、很好"是两件事，
+    #   所以这里只在非 null 时输出，且明说"不进合格判定"（否则会被读成不合格）。
+    ai = ch.get("ai_tells") or {}
+    if ai:
+        lines += [f"> 人味分 {ai.get('score', '-')}/100"
+                  f"（strong {ai.get('strong', 0)} 条 · weak {ai.get('weak', 0)} 条）"
+                  " —— 不进合格判定，只是「念出来像不像人」的提示。", ""]
+        for h in (ai.get("hits") or [])[:8]:
+            lines.append(f"> - [{h.get('severity', '')}] {h.get('id', '')}"
+                         f"（{h.get('where', '')}，{h.get('count', 0)} 处）：{h.get('detail', '')}")
+        if ai.get("hits"):
+            lines.append("")
     if result.get("storyboard"):
         lines += ["## 分镜表", "", "| 时间 | 画面/景别 | 口播 | 字幕 | 音效 | 提示 |",
                   "|---|---|---|---|---|---|"]

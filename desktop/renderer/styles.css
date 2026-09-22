@@ -2709,3 +2709,10 @@ input:not([type]) {
   flex: 0 0 auto; display: inline-flex; align-items: center; cursor: pointer;
   color: var(--text-2); border-radius: var(--r-ctl); opacity: .72; }
 .card-foot .tell-jump:hover { opacity: 1; background: var(--fill); color: var(--ink); }
+
+/* 人味分面板（§2.7 ③ 的落点）：正文里的下划线负责"可定位"，这一屏负责
+   "可命名"与"可计数"。分数用 --mono 大字号 —— 它是这一屏唯一的量。 */
+.smell-pane { display: flex; flex-direction: column; gap: var(--s4); }
+.smell-score { display: flex; align-items: baseline; gap: var(--s3); flex-wrap: wrap; }
+.smell-score .n { font: 600 var(--f-display)/1.35 var(--mono); letter-spacing: -.02em; }
+.smell-score .u { font-size: var(--f-2xs); color: var(--text-2); }

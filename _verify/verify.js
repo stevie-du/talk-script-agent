@@ -1741,9 +1741,13 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("指标速览 4 项", done.metrics === 4, `metrics=${done.metrics}`);
   check("每段字数用后端统计值（12/85 而非前端重算）",
     done.quotaChips.some(t => t.includes("12/85")), JSON.stringify(done.quotaChips));
-  // 产物分区由「一条长流里的折叠区」改为 tab：文案 / 分镜 / 字幕 / 合规 / 数据
-  check("产物分区改为 5 个 tab（文案/分镜/字幕/合规/数据）",
-    done.tabs.join(",") === "文案,分镜,字幕,合规,数据", JSON.stringify(done.tabs));
+  // 产物分区由「一条长流里的折叠区」改为 tab：文案 / 分镜 / 人味分 / 字幕 / 合规 / 数据。
+  // 「人味分」是 2026-09-23 加的（§2.7 ③）：正文里那条下划线要有个可跳的落点，
+  // 否则「可定位」是句空话（挂了可点样式却没处理器 = 把假能力冒充真能力）。
+  // ⚠ 它排在「字幕」之前：文案 → 分镜 → 人味分 是"读一遍稿子"的顺序，
+  //   字幕/合规/数据都是导出与核对用的。
+  check("产物分区改为 6 个 tab（文案/分镜/人味分/字幕/合规/数据）",
+    done.tabs.join(",") === "文案,分镜,人味分,字幕,合规,数据", JSON.stringify(done.tabs));
   check("默认停在「文案」tab（主产物不被分镜挤下去）",
     (await evalIn(`return document.querySelector('.res-tab.on .rt-t').textContent;`)) === "文案",
     await evalIn(`return document.querySelector('.res-tab.on .rt-t').textContent;`));
@@ -6481,6 +6485,30 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     result3.markCount === 2 && result3.marksInText && result3.markTipCount === 2,
     JSON.stringify({ marks: result3.markCount, inText: result3.marksInText,
                      tips: result3.markTipCount }));
+
+  // 人味标记的"可定位"要真的能点（§2.7 ③）—— 挂了个可点样式却没处理器，
+  // 就是"把假能力冒充真能力"。判据：点正文里的下划线 → 真的切到人味分面板。
+  await evalIn(`document.querySelector('.card-text .tell-mark').click(); return true;`);
+  await sleep(150);
+  const smell = await evalIn(`return (function(){
+    var pane = document.querySelector('.res-pane[data-tab="smell"]');
+    var tab = document.querySelector('.res-tab[data-tab="smell"]');
+    return {
+      tabLabel: tab ? tab.textContent.trim() : '',
+      tabOn: tab ? tab.classList.contains('on') : false,
+      paneVisible: pane ? !pane.classList.contains('hidden') : false,
+      score: pane ? pane.querySelector('.smell-score .n').textContent.trim() : '',
+      hitRows: pane ? pane.querySelectorAll('table tr').length - 1 : 0,
+      saysNotGated: pane ? /不进「合格」判定/.test(pane.textContent) : false,
+      phShown: pane ? /占位事实/.test(pane.textContent) : false,
+    }; })()`);
+  check("人味标记可定位：点正文里的下划线真的切到「人味分」面板",
+    smell.tabOn && smell.paneVisible && smell.tabLabel.indexOf("人味分") === 0,
+    JSON.stringify(smell));
+  check("人味分面板：分数 + 逐条命中明细 + 明说「不进合格判定」（只报不拦）",
+    smell.score === "88" && smell.hitRows === 2 && smell.saysNotGated && smell.phShown,
+    JSON.stringify({ score: smell.score, rows: smell.hitRows,
+                     notGated: smell.saysNotGated, ph: smell.phShown }));
 
   // ── 今日选题 / 情报源（B 线，§2.2 与 §2.4/§2.5）────────────────
   // 这一组守的核心是「**一处声明、四处一致**」：分区、chip、计数、情报源表

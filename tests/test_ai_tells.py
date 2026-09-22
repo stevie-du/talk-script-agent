@@ -190,3 +190,53 @@ def test_live_mock_generation_carries_the_score():
         assert "ai_tells" in disk.read_text(encoding="utf-8")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ── 导出的 脚本.md 必须带人味分（2026-09-23）────────────────────
+def _md_result(ai_tells):
+    """一份刚好够 `store.render_script_md` 跑完的最小产物。"""
+    return {
+        "id": "x", "created_at": "", "pack": "elevator", "pack_draft": False,
+        "params": {"topic": "家用电梯怎么挑", "duration": 60, "platform": "抖音",
+                   "style": "亲和接地气", "persona": "维保老师傅",
+                   "segment": "家用电梯", "audience": "业主乘客"},
+        "quota": {"total": 290}, "quota_degraded": False,
+        "plan": {"angle": "a", "hook_type": "反常识", "hook_line": "h",
+                 "points": ["一"], "cta": "关注"},
+        "sections": [{"type": "hook", "text": "开场。", "subtitle": "开场"}],
+        "storyboard": [], "scenes": [], "placeholders": [], "revisions": [],
+        "timings": [{"start": 0, "end": 3}], "logs": [],
+        "check": {"chars_total": 3, "target_total": 290, "estimated_seconds": 3,
+                  "deviation_pct": -95.0, "passed": False, "blockers": ["太短"],
+                  "hard_hits": [], "soft_hits": [], "segments": [], "ai_tells": ai_tells},
+    }
+
+
+def test_script_md_carries_the_human_score():
+    """md 是**最终交付物** —— 人味分只在界面上露，导出后又变回不可见。
+
+    与 `quota_degraded` 是同一条规矩（`app/store.py` 里两处相邻的注释）。
+    """
+    from app.store import render_script_md
+
+    md = render_script_md(_md_result({
+        "score": 88, "strong": 0, "weak": 1, "hits": [
+            {"id": "bookish_connective", "severity": "weak", "count": 2,
+             "where": "第2段", "detail": "首先×1、其次×1", "words": []}],
+        "tells_enabled": ["bookish_connective"], "config_warnings": [],
+        "placeholders": {"count": 0, "per_100": None, "cap": 1}}))
+    assert "人味分 88/100" in md, md
+    assert "bookish_connective" in md, "命中明细要跟着导出，否则只有分数没线索"
+    assert "不进合格判定" in md, "必须明说它不拦发布，否则 88 分会被读成不合格"
+
+
+def test_script_md_says_nothing_when_tells_were_not_measured():
+    """`ai_tells` 落 null = **本次没测**，与「测了、很好」是两件事。
+
+    所以这时**不许**输出任何分数行 —— 输出「人味分 100/100」就是把
+    "没测" 冒充成 "满分"，正是本项目一直在治的那种静默降级。
+    """
+    from app.store import render_script_md
+
+    md = render_script_md(_md_result(None))
+    assert "人味分" not in md, md

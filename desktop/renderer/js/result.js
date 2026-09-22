@@ -152,7 +152,62 @@ function renderBanners(r, ch, opts) {
   return wrap;
 }
 
+/** 人味分面板（§2.7 ③ 的落点）。
+
+ *  正文里那条下划线负责「**可定位**」，这一屏负责「可命名」与「可计数」——
+ *  L1 tell 的规格要求三样都做到，明细单开一屏等于让用户自己来回找。
+ *
+ *  ⚠ 两句话必须写在界面上，否则这一屏会被误读：
+ *    1. 分数**不进 passed**（只报不拦）—— 不然用户以为 88 分就不合格；
+ *    2. `ai_tells` 落 null 是「**没测**」，与「测了、很好」是两件事
+ *       （`checker.py` 硬编码只报不拦，包没配词表时字段是 null 而不是满分）。
+ */
+function renderSmell(r) {
+  const a = r.check?.ai_tells;
+  const wrap = el("div", "smell-pane");
+  if (!a) {
+    wrap.innerHTML = `<p class="hint">这个行业包没配 <code>ai_tells.yaml</code>，
+      所以本次**没有测**人味 —— 注意这与「测了、很好」是两件事
+      （报告里 <code>ai_tells</code> 落 null，而不是 100 分）。</p>`;
+    return wrap;
+  }
+  const score = Number(a.score ?? 0);
+  const hits = a.hits || [];
+  const ph = a.placeholders || {};
+  const rows = hits.map(h => `<tr>
+      <td class="${h.severity === "strong" ? "bad" : "warn"}">${esc(h.severity)}</td>
+      <td><code>${esc(h.id)}</code></td>
+      <td>${esc(h.where || "")}</td>
+      <td>${esc(h.detail || "")}</td>
+    </tr>`).join("");
+  const warns = (a.config_warnings || []).map(w => `<p class="hint">⚠ ${esc(w)}</p>`).join("");
+  wrap.innerHTML = `
+    <div class="page-card">
+      <div class="res-top"><b class="card-title">人味分</b>
+        <span class="m-chip ${score >= 90 ? "good" : "bad"}">${score} / 100</span>
+        <span class="m-chip">${hits.filter(h => h.severity === "strong").length} 条 strong · ${hits.filter(h => h.severity === "weak").length} 条 weak</span>
+      </div>
+      <p class="hint">越高越像人说话。**这一项不进「合格」判定**（只报不拦）——
+        文风是提示，不是门槛。扣分口径：strong 每条 −12、weak 每条 −4。</p>
+      <div class="smell-score">
+        <span class="n">${score}</span><span class="u">/ 100</span>
+        <span class="score-legend">
+          <span><i class="hi"></i>≥ 90</span><span><i class="mid"></i>50–89</span><span><i></i>&lt; 50</span>
+        </span>
+      </div>
+      ${rows ? `<div class="tbl-wrap"><table>
+        <tr><th>档位</th><th>tell</th><th>位置</th><th>命中</th></tr>${rows}</table></div>`
+        : `<p class="hint">零命中 —— 这一版没有可指认的 AI 味。</p>`}
+      <p class="hint">占位事实 ${ph.count ?? 0} 处（上限 ${ph.cap ?? "-"}，
+        每百字 ${ph.per_100 === null || ph.per_100 === undefined ? "—" : ph.per_100}）——
+        超过上限就不再是「留了个空」而是「整篇没写」，会触发「通篇零具体」。</p>
+      ${warns}
+    </div>`;
+  return wrap;
+}
+
 // ── 3) 分段卡片 ─────────────────────────────────────────────
+
 /** 某一段的实际语速（字/秒）。`null` = 算不出（没时间轴 / 没字数）。
 
  *  口播稿的第一约束是**时间**不是字数，而"这段念太快"正是最该被看见的问题 ——
@@ -226,7 +281,7 @@ function markTells(html, words) {
   const parts = String(html).split(/(<[^>]*>)/);
   return parts.map((p, idx) => idx % 2 === 1
     ? p                                        // 奇数下标是标签，原样放回
-    : p.replace(rx, m => `<span class="tell-mark" data-tell="1">${m}</span>`)
+    : p.replace(rx, m => `<span class="tell-mark" data-goto="smell">${m}</span>`)
   ).join("");
 }
 
@@ -339,6 +394,10 @@ function renderResultTabs(r, ch, hardN, opts) {
     { id: "story", label: "分镜", badge: `${(r.storyboard || []).length} 镜`,
       render: () => renderStoryboard(r),
       hide: !(r.storyboard || []).length },
+    { id: "smell", label: "人味分",
+      cls: (r.check?.ai_tells?.score ?? 100) >= 90 ? "ok" : "bad",
+      badge: r.check?.ai_tells ? String(r.check.ai_tells.score ?? "-") : "未测",
+      render: () => renderSmell(r) },
     { id: "subs", label: "字幕", badge: "",
       render: () => renderSubtitlePane(r) },
     { id: "comp", label: "合规", cls: complyOk ? "ok" : "bad",
@@ -407,6 +466,16 @@ function renderResultTabs(r, ch, hardN, opts) {
     if (next === null) return;
     e.preventDefault();
     selectTab(list[next].dataset.tab);
+  });
+
+  // `[data-goto]` 的委托处理器：正文里那枚「N 处人味标记」与卡脚的提示都靠它。
+  // ⚠ 委托在 `wrap` 上而不是逐元素绑 —— 卡片是每次渲染重建的，
+  //   逐元素绑会在重渲染后失效（点了没反应，而界面看不出来）。
+  wrap.addEventListener("click", e => {
+    const g = e.target.closest("[data-goto]");
+    if (!g) return;
+    const id = g.dataset.goto;
+    if (bar.querySelector(`.res-tab[data-tab="${id}"]`)) selectTab(id);
   });
 
   wrap.appendChild(bar);
