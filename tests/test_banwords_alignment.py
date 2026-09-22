@@ -19,9 +19,15 @@ ROOT = Path(__file__).resolve().parent.parent
 AD_LAW = ROOT / "packs" / "elevator" / "compliance" / "ad-law.md"
 BANWORDS = ROOT / "packs" / "elevator" / "banwords.yaml"
 
-# ad-law.md 六个词族行各自以这些前缀开头；行内用 顿号/空格/逗号 分隔。
+# ad-law.md 词族行各自以这些前缀开头；行内用 顿号/空格/逗号 分隔。
+#
+# ⚠ 前缀必须逐字等于**正文行**的开头，不是小节的标题。第 22 轮复核实测：
+#   这里原来写的是 "级、"，而 ad-law.md 那一族的正文行是
+#   `国家级、世界级、极品、…` —— 前缀永远匹配不上，于是**这一整族 11 个词
+#   从来没有被对账过**（测试常年绿着，却什么都没查）。判据是「这行到底查没查到」：
+#   把前缀改对之后，从 banwords 里删掉 `国家级` 必须立刻变红。
 _WORD_LINE_PREFIXES = (
-    "最、", "第一、", "级、", "行业领先、", "100%、", "清仓倒闭、", "央视上榜、",
+    "最、", "第一、", "国家级、", "行业领先、", "100%、", "清仓倒闭、", "央视上榜、",
 )
 _SPLIT = re.compile(r"[\s、，,;；]+")
 
@@ -49,3 +55,24 @@ def test_ad_law_word_families_are_covered_by_banwords():
         "ad-law.md 词族在 banwords.yaml 里没有覆盖（子串互含判定）："
         + "、".join(missing)
         + " —— 补进 banwords.yaml 后本条测试自然变绿")
+
+
+def test_every_declared_prefix_actually_matches_a_line():
+    """盯「这条对账自己有没有在工作」。
+
+    前缀写错时，上面那条测试会**静默空转**：第 22 轮实测 `"级、"` 对不上
+    ad-law.md 的 `国家级、…`，于是那一整族 11 个词从来没被查过，而测试常年绿。
+    「永远为真的断言等于没有断言」—— 所以这里单独钉一条：每个声明的前缀
+    都必须在 ad-law.md 里真的命中过至少一行。
+
+    它不查词表，只查对账的**靶子还在不在**：前缀写错、或那一族正文行被改写
+    （标题换了、行首插了字）都会红。
+    """
+    lines = [ln.strip() for ln in AD_LAW.read_text(encoding="utf-8").splitlines()]
+    dead = [p for p in _WORD_LINE_PREFIXES
+            if not any(ln.startswith(p) for ln in lines)]
+    assert not dead, (
+        "这些前缀在 ad-law.md 里一行都没匹配上 —— 对账测试对它们等于没跑："
+        + "、".join(dead)
+        + "。要么前缀写错了（注意要比的是**正文行**开头，不是小节标题），"
+          "要么那一族正文行被改写了。")

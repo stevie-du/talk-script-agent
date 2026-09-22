@@ -252,6 +252,12 @@ class LLMClient:
         on_retry = on_retry or self.on_retry
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
         last_err: Exception | None = None
+        # `truncated` 是本轮的标志，`saw_truncated` 是**整条重试链**的：
+        # 末轮若又是截断，下面那条 `isinstance(last_err, EmptyContentError)` 会直接
+        # 重抛截断文案，根本走不到结构错那一句 —— 只看 `truncated` 的话，
+        # 「预算在哪改」那半句永远不显示（死文案）。而「首轮被截断、升预算之后
+        # 换成了别的结构错」是一条完全真实的路径，那种情况用户确实需要知道预算在哪。
+        saw_truncated = False
         # 输出预算按次累计：**重试必须升级参数，不能原样重发**。
         # 主报告 R3：同样的 payload 打第二遍注定复现 —— 空内容是思考吃光预算，
         # 再发一遍照样吃光（P0-2）；被 max_tokens 截断（finish_reason=length）
@@ -276,6 +282,7 @@ class LLMClient:
                     # 预算问题 → 升级预算 + 带「完整输出」提示重试（R3.3：不是
                     # 同一份 payload 原样重发）。
                     truncated = True
+                    saw_truncated = True
                     raise EmptyContentError(
                         f"模型输出被输出预算截断（finish_reason=length，正文 {len(content)} 字符，"
                         f"{stage + '阶段' if stage else '本次调用'}的 JSON 不完整）。")
@@ -334,10 +341,23 @@ class LLMClient:
         #   原文改成本地日志：排查要看的字段级细节一条不少，界面那句只留能照着做的。
         log.warning("模型输出结构不符（%s 次尝试后用尽）：%s",
                     max_retries + 1, _validation_detail(last_err))
+        # P0-4 被省掉的那半：这句原来以「或在设置里调大输出预算」收尾，而
+        #   `max_tokens` / `temperature` 自 2026-09-17 起**不在设置页**
+        #   （用户明确决策，见 config.py 的那段说明）—— 照着这句话去设置页找键
+        #   只会找不到，用户于是卡在「文案叫我改一个界面上没有的东西」。
+        #   改成指真正的位置，并且区分「引擎写死的阶段预算」：那种情况改
+        #   llm.max_tokens 也不生效，指过去是同一种误导的第二个版本。
+        _budget_now = mt if mt is not None else self.cfg.max_tokens
+        budget_hint = (f"本次用的是引擎写死的阶段预算 {_budget_now}"
+                       f"（改 llm.max_tokens 不影响本次调用）"
+                       if max_tokens is not None
+                       else f"该键在 config.yaml 的 llm.max_tokens"
+                            f"（**不在设置页**，当前 {_budget_now}）")
         raise LLMError(f"模型连续 {max_retries + 1} 次输出的结构都不符合要求"
                        f"（{_structural_summary(last_err)}），本次任务已停止。"
-                       f"可以再试一次；反复出现时换一档不那么爱加解释文字的模型，"
-                       f"或在设置里调大输出预算。")
+                       f"可以再试一次；反复出现时换一档不那么爱加解释文字的模型。"
+                       + (f"本次有尝试是被输出预算截断的，调大预算前先看清楚位置 —— {budget_hint}。"
+                          if saw_truncated else ""))
 
     def ping(self) -> tuple[bool, str]:
         """最小连通性测试：不约束输出格式，返回 (是否连通, 说明)。

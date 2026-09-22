@@ -1305,7 +1305,14 @@ def test_a_structurally_bad_model_output_never_quotes_internal_class_names(monke
     assert "validation errors" not in msg, f"整段英文原话进了错误框：{msg}"
     assert msg.startswith("模型") and "结构" in msg, msg
     assert "sections" in msg, f"字段路径被一并抹掉了：{msg}"
-    assert "调大输出预算" in msg, f"没给下一步：{msg}"
+    # 「给了下一步」不能靠钉死某一句文案 —— 第 23 轮就是这么翻的车：
+    # 这里原来钉的是 `调大输出预算`，而那半句**把用户指向一个界面上不存在的
+    # 入口**（`max_tokens` 自 2026-09-17 起不在设置页，P0-4）。于是修掉误导
+    # 文案反而把这条测试弄红了：钉文案，等于把缺陷钉成了契约。
+    # 现在断的是性质：① 至少有一条能照着做的动作；② 不许再指那个不存在的入口。
+    assert any(k in msg for k in ("再试一次", "换一档", "调大预算")), f"没给下一步：{msg}"
+    assert "设置里调大" not in msg and "在设置里" not in msg, (
+        f"把用户指向一个界面上不存在的入口（max_tokens 不在设置页）：{msg}")
     # 原文没丢：一次在日志里（排查），一次在给模型的那条 re-prompt 里
     assert "validation errors for ScriptDraft" in caplog.text
     reprompt = [m for m in seen[-1]["messages"] if m["role"] == "user"][-1]["content"]
