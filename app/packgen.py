@@ -186,31 +186,38 @@ def preview_slug(industry: str) -> str:
 _RESERVED_NAMES = frozenset(
     {"CON", "PRN", "AUX", "NUL"}
     | {f"COM{i}" for i in range(1, 10)} | {f"LPT{i}" for i in range(1, 10)})
-# NTFS 单个路径段上限 255 个 UTF-16 码元；留一点余量（中文一个字就是 1 个码元，
-# 但拼上父目录与 generated/ 之类还要走整条路径）。
-_MAX_SLUG_UNITS = 120
+# 目录名长度上限的**唯一**出处是请求层的 `schemas.INDUSTRY_MAX`（行业名允许多长，
+# 折出来的目录名就不会更长）。原来这里另写了一个 120，两处互不相容、而且永远撞不到
+#（40 字的输入折不出 121 码元的目录名）—— 死分支长得像有人在守（第 20 轮复核 P3-5）。
+def _max_slug_units() -> int:
+    from .schemas import INDUSTRY_MAX
+    return INDUSTRY_MAX
 
 
 def _utf16_units(s: str) -> int:
     return sum(2 if ord(c) > 0xFFFF else 1 for c in s)
 
 
-def slug_problem(slug: str) -> str:
+def slug_problem(slug: str, typed: str = "") -> str:
     """目录名能不能真建出来。返回人话原因，空串 = 没问题。
 
     判据放在花钱**之前**跑：`start_packgen` 里 `preview_slug` 之后、`claim_slug` 之前。
-    实测过的情形：`CON` / `nul.` / `com1` 这类保留名与 300 字的长名字，
+    实测过的情形：`CON` / `nul.` / `com1` 这类保留名与过长的名字，
     旧流程会先付一份 token、再在 `_materialize` 的 mkdir 上炸掉，
-    用户看到的是"生成失败"，而那两个字段的钱已经花掉了。
+    用户看到的是"生成失败"，而那一份钱已经花掉了。
+    `typed` 是用户原本输入的那串字：回显只给折叠后的目录名会让人对不上号
+    （输入 `CON.`、报错说「CON」，第 20 轮复核 P3-6）。
     """
     if not slug:
         return ""
+    shown = (typed or "").strip() or slug
     if slug.upper().rstrip(" .") in _RESERVED_NAMES:
-        return (f"「{slug}」是 Windows 的保留设备名，做不了目录名 —— "
+        return (f"「{shown}」折成目录名后是「{slug}」，这是 Windows 的保留设备名，做不了目录名 —— "
                 "请在行业名里加一点实际文字（如「CON 建材」）")
-    if _utf16_units(slug) > _MAX_SLUG_UNITS:
-        return (f"行业名太长了（目录名 {_utf16_units(slug)} 个字符，上限 {_MAX_SLUG_UNITS}）—— "
-                "请用更短的行业名，创建后可以在包详情里改显示名")
+    limit = _max_slug_units()
+    if _utf16_units(slug) > limit:
+        return (f"行业名太长了：折出的目录名有 {_utf16_units(slug)} 个码元（UTF-16），"
+                f"上限 {limit} —— 请用更短的行业名，创建后可以在包详情里改显示名")
     return ""
 
 
@@ -251,7 +258,16 @@ def _table_key(slug: str) -> str:
     POSIX 保持区分），而且它本来就是"按本机文件系统归一名字"这件事的正解 ——
     表的职责是"别人能不能建出同一个目录"，那正是文件系统说了算的那件事。
     """
-    return os.path.normcase(slug)
+    key = os.path.normcase(slug)
+    if os.name == "nt":
+        # NTFS 在建目录时就把尾部的点与空格剥掉（`a.`、`a ` 与 `a` 是同一个目录），
+        # 而 `normcase` 不管这件事。今天 `slugify` 恰好把这两个字符折掉，所以不补
+        # 也不会出事 —— 但那样这条守卫就靠上游的巧合撑着：有人放宽 `slugify`
+        #（允许 `.` 结尾）就会悄悄回到"两条作业并行建一个目录"（第 20 轮复核 P3-2）。
+        # POSIX 上这三个名字是**不同**的目录，所以那边不做这个剥离 ——
+        # 判据跟着本机文件系统的行为走，而不是跟着直觉。
+        key = key.rstrip(" .")
+    return key
 
 
 def release_slug(slug: str, owner: str) -> bool:
@@ -368,7 +384,7 @@ def create_pack(root: Path, llm: LLMClient, industry: str, description: str, *,
         # 走到这里说明调用方没在花钱之前拦（`start_packgen` 会拦）。
         # 宁可现在报错，也不把目录名交给模型的 display_name（P2-51）。
         raise ValueError("行业名称里没有任何可用作目录名的字符，请换成含文字或数字的名称")
-    bad = slug_problem(slug)
+    bad = slug_problem(slug, industry)
     if bad:
         # 同一形态在 `start_packgen` 就该拦住；这里兜住**直接**调用 create_pack 的人，
         # 免得白写出一个永远建不完整的目录（钱已经在那一次模型调用里花掉了）。
@@ -462,6 +478,13 @@ def _pack_audit(root: Path, slug: str) -> list[str]:
     「风格没配语速」「平台没配词表」这类静默降级 —— param_audit 把它们逐项列出；
     结构坏（YAML 解析不了等）则 Pack 直接抛，捕捉后给一句指向性的说明。
 
+    ⚠ "捕捉后给一句说明"必须覆盖**整个体检**，不是只盖住 `Pack(...)` 那一行
+    （第 20 轮复核 P2）：体检后半段的 `pk.skill()` / `file_text` / `file_slice` /
+    `param_audit` / `_placeholder_audit` 任何一处抛出，都会逃到 `create_pack` 的
+    `except Exception`，而那时 `created_here` 已为真 —— 回收网会把**已经写完、
+    钱已经花**的整包删掉，作业还记成 failed。体检失败只是"少一份自动说明"，
+    删包是"用户付了钱什么都没有"，两者的分量差着一个数量级。
+
     **切片对账**是这里补上的一格：`路径#章节` 找不到章节时返回空串（不退回整份），
     而仓库里的对账测试只跑 `list_packs()` 看到的包 —— 生成的草稿包根本不在其中。
     于是"红线/术语/选题库注入不到东西"这种失效在生成时完全无声（P0-18 的同一形态）。
@@ -470,24 +493,27 @@ def _pack_audit(root: Path, slug: str) -> list[str]:
     notes: list[str] = []
     try:
         pk = Pack(root, slug)
+        skill = pk.skill() or {}
+        for stage, cfg in (skill.get("stages", {}) or {}).items():
+            for key, spec in ((cfg or {}).get("files") or {}).items():
+                spec = str(spec)
+                if "#" not in spec:
+                    continue
+                path = spec.partition("#")[0].strip()
+                if not pk.file_text(path).strip():
+                    notes.append(f"{stage}.{key}：文件读不到 → {path}")
+                elif not pk.file_slice(spec).strip():
+                    notes.append(f"{stage}.{key}：章节切片为空 → {spec}"
+                                 "（该知识一个字都不会注入；`#章节` 找不到时不退回整份）")
+        for key, mapping in (param_audit(pk.dir, pk.data) or {}).items():
+            for value, text in mapping.items():
+                notes.append(f"参数「{key}={value}」：{text}")
+        notes.extend(_placeholder_audit(root, pk))
     except Exception as e:                       # noqa: BLE001
-        return [f"行业包加载失败：{e} —— 请检查生成的文件结构"]
-    skill = pk.skill() or {}
-    for stage, cfg in (skill.get("stages", {}) or {}).items():
-        for key, spec in ((cfg or {}).get("files") or {}).items():
-            spec = str(spec)
-            if "#" not in spec:
-                continue
-            path = spec.partition("#")[0].strip()
-            if not pk.file_text(path).strip():
-                notes.append(f"{stage}.{key}：文件读不到 → {path}")
-            elif not pk.file_slice(spec).strip():
-                notes.append(f"{stage}.{key}：章节切片为空 → {spec}"
-                             "（该知识一个字都不会注入；`#章节` 找不到时不退回整份）")
-    for key, mapping in (param_audit(pk.dir, pk.data) or {}).items():
-        for value, text in mapping.items():
-            notes.append(f"参数「{key}={value}」：{text}")
-    notes.extend(_placeholder_audit(root, pk))
+        # 体检自己跑不成 ≠ 包是坏的：把"没跑成"如实写进清单，让包留在盘上。
+        return [*notes,
+                f"引擎体检未能跑完：{type(e).__name__}: {e}"
+                " —— 上面那些说明可能不完整，请自行核对切片与参数（这不是包结构错误）"]
     return notes
 
 

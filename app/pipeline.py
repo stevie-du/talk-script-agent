@@ -257,7 +257,7 @@ class Pipeline:
         # 保留设备名（CON / NUL / COM1…）与过长的名字，目录压根建不出来：
         # 拦在占位与模型调用**之前**，否则用户付完一份 token 才看到"生成失败"
         #（第 18 轮复核 P3-4）。
-        problem = slug_problem(slug)
+        problem = slug_problem(slug, industry)
         if problem:
             raise ValueError(problem)
         if slug and (self.root / "packs" / slug).exists():

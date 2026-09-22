@@ -494,6 +494,42 @@ def test_the_claim_table_collapses_exactly_what_the_filesystem_collapses():
     assert not strict, f"表合并而文件系统不合并（误报 409，合法名字建不出来）：{strict}"
 
 
+def test_the_claim_table_agrees_with_the_filesystem_even_before_slugify():
+    """绕开 `slugify` 的巧合，直接钉"表键 == 本机文件系统对目录名的看法"（第 20 轮 P3-2）。
+
+    上面那条不变式今天能绿，一部分功劳在 `slugify` 恰好把尾部的点与空格折掉；
+    那等于把安全性押在别人的一句话上。这里喂原始名字，两个方向都不许偏：
+    Windows 上 `a.` / `a ` / `a` 是同一个目录（表也必须并作一个键），
+    POSIX 上是三个不同目录（表也不许提前合并，那是误报 409）。
+    """
+    for a, b in (("a", "a."), ("a", "a "), ("a.", "a "), ("甲.", "甲")):
+        fs_same = _fs_same_dir(a, b)
+        key_same = packgen._table_key(a) == packgen._table_key(b)
+        assert key_same == fs_same, f"{a!r}/{b!r}：表说同键={key_same}，文件系统说同一目录={fs_same}"
+        ta = packgen.claim_slug(a)
+        tb = packgen.claim_slug(b)
+        assert ta
+        assert (tb is None) == fs_same, f"{a!r}/{b!r}：占位互斥与本机的目录名不一致"
+        packgen.release_slug(a, ta)
+        if tb:
+            packgen.release_slug(b, tb)
+        packgen.release_slug(a, packgen.ANY_OWNER)
+
+
+def test_the_slug_length_cap_has_one_authority_and_the_message_shows_what_the_user_typed():
+    """目录名长度上限不许有第二本账；保留名的说明要回显用户输入（第 20 轮 P3-5 / P3-6）。"""
+    from app.schemas import INDUSTRY_MAX
+
+    assert packgen._max_slug_units() == INDUSTRY_MAX, \
+        "packgen 又自己写了一个长度上限 —— 与请求层那处会各自漂移（原来是 120 vs 40）"
+    # 走 HTTP 到不了这个分支（schema 先拒），但 CLI / 直调 pipeline 能到：判据必须真在
+    assert packgen.slug_problem("x" * (INDUSTRY_MAX + 1)), "超过上限却没人挡"
+    assert packgen.slug_problem("x" * INDUSTRY_MAX) == "", "边界内的名字被误伤"
+    msg = packgen.slug_problem("CON", "CON.")
+    assert "CON." in msg, f"报错只回显折叠后的目录名，用户会对不上自己输入的那串字：{msg}"
+    assert "保留设备名" in msg, msg
+
+
 def _stub_slug():
     """把 `_verify/verify.js` 里的 pgSlug 抠出来（不抄第二份实现）。"""
     src = (ROOT / "_verify" / "verify.js").read_text(encoding="utf-8")

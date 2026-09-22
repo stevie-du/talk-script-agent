@@ -17,6 +17,10 @@ from pydantic import BaseModel, Field
 DURATION_MIN = 5.0
 DURATION_MAX = 600.0
 TOPIC_MAX = 200
+# 行业名 → 目录名的长度上限只有这一个出处：`packgen.slug_problem` 读的就是这个值。
+# 原来那里另写了一个 120（"码元"），而这个字段限 40 字 —— 40 字的输入永远撞不到 120，
+# 那道检查是死的，却长得像有人在守（第 20 轮复核 P3-5）。
+INDUSTRY_MAX = 40
 FACTS_MAX = 20000
 
 
@@ -43,7 +47,7 @@ class RewriteSegmentRequest(BaseModel):
 
 
 class PackCreateRequest(BaseModel):
-    industry: str = Field(min_length=2, max_length=40, description="行业名，如：全屋定制/装修")
+    industry: str = Field(min_length=2, max_length=INDUSTRY_MAX, description="行业名，如：全屋定制/装修")
     description: str = Field(min_length=4, max_length=500,
                              description="一句话业务描述，如：全屋定制家居品牌，面向新房装修业主获客")
 

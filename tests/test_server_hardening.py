@@ -618,6 +618,34 @@ def test_packgen_rollback_ignores_a_dir_created_after_the_check():
     shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_packgen_audit_failure_does_not_delete_the_finished_pack():
+    """体检自己跑不成时，包必须留在盘上、这次建包仍算成功（第 20 轮复核 P2）。
+
+    原形状：`_pack_audit` 的 try 只裹住 `Pack(root, slug)` 那一行，其后
+    `pk.skill()` / `file_text` / `file_slice` / `param_audit` / `_placeholder_audit`
+    全在无保护区 —— 任一处抛出就逃进 `create_pack` 的 `except Exception`，
+    而那时目录已经写完、`created_here` 为真 → 回收网把**用户付过钱的那一整包**删掉，
+    作业还记成 failed。"少一份自动说明"与"钱花了什么都没有"差着一个数量级。
+    """
+    tmp = _tmp_root()
+    from app import packgen
+
+    real = packgen._placeholder_audit
+    packgen._placeholder_audit = lambda *a, **k: (_ for _ in ()).throw(
+        RuntimeError("体检这一步自己炸了（模拟）"))
+    slug = packgen.slugify("体检探针")
+    d = tmp / "packs" / slug
+    try:
+        out = packgen.create_pack(tmp, _FakeLLM(Partial), "体检探针", "测试描述文本")
+        assert d.is_dir(), "体检跑不成却把已写完的包删了：用户付了一份模型的钱，结果什么都没有"
+        assert out["name"] == slug, "体检失败把整次建包判成失败了"
+        text = (d / "校对清单.md").read_text(encoding="utf-8")
+        assert "引擎体检未能跑完" in text, "没把「体检没跑成」如实写进清单，用户会以为体检过"
+    finally:
+        packgen._placeholder_audit = real
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_history_route_rejects_a_jid_with_trailing_whitespace():
     """`_JID_RE` 那半边的 fullmatch 迁移也得有用例（第 18 轮复核 P2-2）。
 
