@@ -34,6 +34,23 @@ STRONG, WEAK = "strong", "weak"
 # yaml 里改这个数字等于改评分口径，必须和 score_of() 一起看，不该分散在两处。
 WEAK_MIN = 2
 
+#: 词表类 tell 的**取词范围**（A-6 收敛：spec 与实现此前不是一条尺子）。
+#:   cta_only   —— 只看结尾引导段；该段有第二人称或在提问，就是对着人说话而不是喊口号。
+#:   first_sent —— 只看全篇第一句「以」词表开头；正文里引用一句"大家好"不是模板开场。
+#:   缺省 any   —— 全文扫描（其余词表类）。
+LEX_SCOPE = {"slogan_closing": "cta_only", "opening_ban": "first_sent"}
+
+#: 汉字数词后面能跟的量词。原来只列了 11 个，于是「全城只有两家公司」被判"通篇零具体"，
+#: 而同一句写成「2 家」就放过 —— 口播里汉字数词更自然（TTS 念出来没差别），
+#: 判定不该被写法翻过去（A-6 #7）。双字量词另列，单字走字符类。
+_MEASURE_CHARS = ("天次台元块米层个位条家间辆口份部套户站年月日秒分点成倍人手脚轮趟宗件种项类款档期批起")
+# 单字量词走**字符类**，双字的另列分支。写成 `(?:天次台…)` 会把整串当成一个
+# 字面分支，于是「两家」照样不匹配（本文件第一版就是这个错，由测试抓出）。
+_MEASURE_RE = re.compile(r"[一二三四五六七八九十百千万两]\s*(?:[" + _MEASURE_CHARS + r"]|分钟|小时|%|％)")
+
+#: 占位符 `{{…}}`：作者标出"这里缺事实"。
+_PLACEHOLDER_RE = re.compile(r"\{\{[^}]*\}\}")
+
 
 def _plain(text: str) -> str:
     """剥掉 {{待补：…}}、[画面：…]、**加粗** 标记，便于按"念出来的话"判断。"""
@@ -116,19 +133,35 @@ class AITells:
         return self.severity.get(tid, WEAK)
 
     # ── 结构类 ────────────────────────────────────────────
+    #: 并列串要占这一段的多少字才算"排比**占满一段**"（依据见
+    #: `patterns/anti-ai-smell.md` §一「排比三连占满一段」）。
+    #: 为什么必须补这条：实现原来只要段里出现一处 ≥3 项并列就报，于是
+    #: 「说清楚小区名、几号楼、哪部梯」这种**自然列举**也被算成排比 ——
+    #: A-3 误报集实测 6/23 篇正常稿栽在这条上（正常稿误报率 39%）。
+    #: md 写的是"占满一段"，代码就该按"占满"判，而不是按"出现过"判。
+    PARALLEL_COVERAGE = 0.5
+
     def _parallel_triple(self, sections) -> list[TellHit]:
-        """排比三连：同一段里 ≥3 个由「、」连接、字数相近的并列项。"""
+        """排比三连：同一段里 ≥3 个由「、」连接、字数相近的并列项，**且占满该段**。"""
         hits = []
         for i, s in enumerate(sections, 1):
+            spoken = _count(s.get("text", ""))
             for clause_run in re.findall(r"[\u4e00-\u9fa5A-Za-z0-9]+(?:、[\u4e00-\u9fa5A-Za-z0-9]+){2,}",
                                          _plain(s.get("text", ""))):
                 items = clause_run.split("、")
                 lens = [len(x) for x in items]
                 # 长度极差 ≤3 才算"工整"；差得远是自然列举，不是排比
-                if max(lens) - min(lens) <= 3:
-                    hits.append(TellHit("parallel_triple", self.sev("parallel_triple"),
-                                        len(items), f"第{i}段",
-                                        f"{len(items)} 连并列：{clause_run[:24]}…"))
+                if max(lens) - min(lens) > 3:
+                    continue
+                # 并列串自己的字数（不含「、」）要吃掉这一段一半以上 ——
+                # 段里顺带列举三样，与整段就是在排比，是两件事。
+                body = len(clause_run) - (len(items) - 1)
+                cover = (body / spoken) if spoken else 0.0
+                if cover < self.PARALLEL_COVERAGE:
+                    continue
+                hits.append(TellHit("parallel_triple", self.sev("parallel_triple"),
+                                    len(items), f"第{i}段",
+                                    f"{len(items)} 连并列占该段 {cover:.0%}：{clause_run[:24]}…"))
         return hits
 
     def _list_enumeration(self, sections) -> list[TellHit]:
@@ -186,35 +219,67 @@ class AITells:
         return []
 
     def _no_specific(self, sections) -> list[TellHit]:
-        """通篇零具体：没有数字、没有可数事实、也没有 {{待补}} 占位。
+        """通篇零具体：没有数字、没有可数事实，也没有留占位。
 
         这是 voice.md 自己标为"最致命"的一条，所以默认 strong。
-        有 {{待补}} 不算命中 —— 那是"知道这里缺事实"，比编一个数字诚实。
+        有 `{{待补}}` 可以不算命中 —— 那是"知道这里缺事实"，比编一个数字诚实；
+        但**豁免有上限**（A-1）：占位数超过段数就不是"留了个空"而是整篇没写。
+        光有上限还堵不住"每段恰好一个空"（8 段 8 个 → 8≤8 照样豁免），所以再加一条下限：
+        **念出来的字数为 0 时不豁免**。两条各堵一头：上限管"空得太多"，下限管"只有空"。
         """
         full = "\n".join(s.get("text", "") for s in sections)
-        if re.search(r"\{\{[^}]*\}\}", full):
+        ph = len(_PLACEHOLDER_RE.findall(full))
+        if 0 < ph <= max(len(sections), 1) and sum(_count(s.get("text", "")) for s in sections) > 0:
             return []
-        if re.search(r"\d|[一二三四五六七八九十百]+\s*(天|次|台|元|块|米|层|分钟|小时|起|个|位|%|％)", full):
+        if re.search(r"\d", full) or _MEASURE_RE.search(full):
             return []
-        return [TellHit("no_specific", self.sev("no_specific"), 1, "全篇",
-                        "通篇无一个具体数字/时间/数量")]
+        return [TellHit("no_specific", self.sev("no_specific"), max(ph, 1), "全篇",
+                        "通篇无一个具体数字/时间/数量" + (f"（{ph} 处占位，超过段数）" if ph else ""))]
 
     # ── 词表类 ────────────────────────────────────────────
+    @staticmethod
+    def _first_sentence(sections) -> tuple[int, str] | None:
+        """全篇第一句（连同它所在的段号）。"""
+        for i, s in enumerate(sections, 1):
+            for sent in _sentences(s.get("text", "")):
+                return i, sent
+        return None
+
+    def _opening_ban(self, tid: str, sections, words) -> list[TellHit]:
+        """开场禁区只看全篇**第一句是否以词表开头**。
+
+        此前是全文扫描，于是正文里引用一句"大家好"也被判模板开场 ——
+        strong 单次即报、一扣 12 分，误伤代价最大的就是这条（A-6 #2）。
+        """
+        got = self._first_sentence(sections)
+        if not got:
+            return []
+        i, sent = got
+        w = next((w for w in sorted(words, key=lambda w: -len(w)) if sent.startswith(w)), None)
+        if not w:
+            return []
+        return [TellHit(tid, self.sev(tid), 1, f"第{i}段", f"开场以「{w}」起：{sent[:16]}…")]
+
     def _lexical(self, tid: str, sections) -> list[TellHit]:
         words = self.lexicon.get(tid) or []
         if not words:
             return []
-        hits, total = [], 0
+        scope = LEX_SCOPE.get(tid, "any")
+        if scope == "first_sent":
+            return self._opening_ban(tid, sections, words)
+        hits = []
         for i, s in enumerate(sections, 1):
+            if scope == "cta_only" and s.get("type") != "cta":
+                continue          # 口号式收尾只可能出现在结尾引导段（A-6 #1）
             text = _plain(s.get("text", ""))
+            if scope == "cta_only" and (re.search(r"[你您]", text) or "？" in text or "?" in text):
+                continue          # 对着人说话/在提问，不是喊口号 —— spec 的豁免
             found = _scan_words(text, words)
             if not found:
                 continue
             n = sum(found.values())
-            # 口号/开场禁区是"出现即问题"，走 strong 的单次阈值；
-            # 其余词表类按弱处理，需要累计到 WEAK_MIN 才报。
+            # strong 单次即报；其余词表类按弱处理，需累计到 WEAK_MIN 才报。
             if self.sev(tid) == STRONG or n >= WEAK_MIN:
-                total += n
                 hits.append(TellHit(tid, self.sev(tid), n, f"第{i}段",
                                     "、".join(f"{w}×{c}" for w, c in sorted(
                                         found.items(), key=lambda kv: -kv[1])[:4])))
@@ -242,10 +307,19 @@ class AITells:
     def report(self, sections: list[dict]) -> dict:
         """给 checker 用的人味报告。**不参与 passed 判定**。"""
         hits = self.scan(sections)
+        # 占位密度（A-1）：`{{待补}}` 是"知道这里缺事实"，但整篇都是空就是没写。
+        # 这个字段以前不存在，于是"全是待补"在整条链路上隐形 —— 满分通道。
+        # per_100 按**念出来的字数**算（_count 已剥掉占位本身）；字数为 0 时记 null，
+        # 因为"每百字几个"在没有正文时是个无意义数，不能拿 0 冒充"很干净"。
+        ph = len(_PLACEHOLDER_RE.findall("\n".join(s.get("text", "") for s in sections)))
+        spoken = sum(_count(s.get("text", "")) for s in sections)
         return {"score": score_of(hits),
                 "hits": [h.as_dict() for h in hits],
                 "strong": sum(1 for h in hits if h.severity == STRONG),
                 "weak": sum(1 for h in hits if h.severity == WEAK),
+                "placeholders": {"count": ph,
+                                 "per_100": round(ph / spoken * 100, 1) if spoken else None,
+                                 "cap": max(len(sections), 1)},
                 "tells_enabled": sorted(self.severity),
                 "config_warnings": self.warnings()}
 

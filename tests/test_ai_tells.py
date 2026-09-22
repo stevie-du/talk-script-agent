@@ -102,6 +102,73 @@ def test_score_is_monotone_in_hits():
     assert score_of([]) == 100
 
 
+def _ids(hits):
+    """`scan()` 给 dataclass、`report()["hits"]` 给 dict —— 两种都要能读。"""
+    return [h.id if hasattr(h, "id") else h["id"] for h in hits]
+
+
+def _where(hit):
+    return hit.where if hasattr(hit, "where") else hit["where"]
+
+
+# ── A-1：满分通道 ─────────────────────────────────────────
+def test_all_placeholder_script_no_longer_scores_perfect():
+    """8 段全是 `{{待补}}` 的稿子以前拿 100 分零命中 —— 整篇没写在链路上是隐形的。"""
+    t = AITells({"strong": ["no_specific"]})
+    secs = [{"type": "point", "text": "{{待补：数字}}"} for _ in range(8)]
+    r = t.report(secs)
+    assert "no_specific" in _ids(r["hits"]), r["hits"]
+    assert r["score"] < 100, r["score"]
+    assert r["placeholders"] == {"count": 8, "per_100": None, "cap": 8}, r["placeholders"]
+
+
+def test_honest_gaps_are_still_exempted():
+    """正向对照（防止把豁免整条删掉来"修"满分通道）：每段留一个空、正文是真写的，仍不报。"""
+    t = AITells({"strong": ["no_specific"]})
+    secs = [{"type": "point", "text": "钢丝绳要按期检查，具体批次{{待补：批次号}}。"}
+            for _ in range(4)]
+    r = t.report(secs)
+    assert "no_specific" not in _ids(r["hits"]), r["hits"]
+    assert r["placeholders"]["count"] == 4 and r["placeholders"]["per_100"] > 0
+
+
+# ── A-6 #7：汉字数词+量词也算具体 ──────────────────────────
+def test_hanzi_measure_words_count_as_specific():
+    """「两家公司」与「2 家公司」必须给同一个结论 —— 口播里汉字写法更自然。"""
+    t = AITells({"strong": ["no_specific"]})
+    hanzi = [{"type": "point", "text": "全城只有两家公司肯接这种单，三家业委会都问过。"}]
+    assert "no_specific" not in _ids(t.scan(hanzi)), t.scan(hanzi)
+
+
+def test_genuinely_vague_script_still_fires():
+    """正向对照：量词扩了之后，真·空话稿仍要报，否则这条 tell 等于被删。"""
+    t = AITells({"strong": ["no_specific"]})
+    vague = [{"type": "point", "text": "这种单没人肯接，业委会也没问过，大家都觉得麻烦。"}]
+    assert "no_specific" in _ids(t.scan(vague))
+
+
+# ── A-6 #1：口号收尾只看结尾引导段 ─────────────────────────
+def test_slogan_closing_scoped_to_cta_with_exemption():
+    lex = {"strong": ["slogan_closing"], "lexicon": {"slogan_closing": ["品质保证"]}}
+    t = AITells(lex)
+    assert _ids(t.scan([{"type": "cta", "text": "选我们，品质保证。"}])) == ["slogan_closing"]
+    # 同样的词出现在要点段 —— 不是"口号式收尾"
+    assert t.scan([{"type": "point", "text": "厂家会给你品质保证的。"}]) == []
+    # cta 段里对着"你"说话或在提问 —— spec 的豁免
+    assert t.scan([{"type": "cta", "text": "品质保证，你放心。"}]) == []
+    assert t.scan([{"type": "cta", "text": "品质保证，你说是不是？"}]) == []
+
+
+# ── A-6 #2：开场禁区只看全篇第一句 ─────────────────────────
+def test_opening_ban_only_first_sentence():
+    lex = {"strong": ["opening_ban"], "lexicon": {"opening_ban": ["大家好"]}}
+    t = AITells(lex)
+    hit = t.scan([{"type": "hook", "text": "大家好，今天说说电梯。"}])
+    assert _ids(hit) == ["opening_ban"] and _where(hit[0]) == "第1段", hit
+    # 正文里引用一句"大家好"不是模板开场（此前全文扫描，误伤代价最大：strong 一扣 12）
+    assert t.scan([{"type": "hook", "text": "我们聊过很多次。大家好不容易聚齐，就别绕弯子。"}]) == []
+
+
 def test_live_mock_generation_carries_the_score():
     """活体链路：mock 生成的产物里要真有 `check.ai_tells`（不是只在单测里通）。"""
     import shutil
