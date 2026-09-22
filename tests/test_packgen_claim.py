@@ -65,6 +65,46 @@ def _pipeline() -> tuple[Pipeline, Path, SlowMock]:
     return pl, tmp, client
 
 
+def test_a_thread_that_cannot_start_releases_the_claim_exactly_once():
+    """`Thread.start()` 起不来时：归还点必须只有一个、作业必须落终态、名字必须还能再用。
+
+    第 15 轮我在报告里写下"这条路径会归还两次，可能偷走别人的同名占位"，自己复测下来是
+    **恰好一次** —— 那就把它钉成用例，而不是留在一段话里（§15.25 的更正）。
+    """
+    import app.pipeline as plmod
+
+    pl, tmp, client = _pipeline()
+    releases = []
+    real_start, real_release = threading.Thread.start, plmod.release_slug
+
+    def counting(slug):
+        releases.append(slug)
+        return real_release(slug)
+
+    def boom(self, *a, **k):
+        raise RuntimeError("起不了线程")
+
+    try:
+        threading.Thread.start = boom
+        plmod.release_slug = counting
+        with pytest.raises(RuntimeError):
+            pl.start_packgen("探针丙", "探针用的行业说明文字")
+    finally:
+        threading.Thread.start = real_start
+        plmod.release_slug = real_release
+        for s in list(packgen._creating):
+            packgen.release_slug(s)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    assert releases == ["探针丙"], f"归还点不唯一或漏了：{releases}"
+    assert "探针丙" not in packgen._creating, "同名占位没还，之后永远建不出来"
+    states = [s["state"] for s in pl.registry.snapshots()]
+    assert states == ["failed"], f"作业没落到终态：{states}"
+    assert pl.registry.running_count() == 0, "占着的并发额度没还"
+    assert packgen.claim_slug("探针丙") is True
+    packgen.release_slug("探针丙")
+
+
 def test_second_same_name_is_refused_before_any_token_is_spent():
     pl, tmp, client = _pipeline()
     try:
