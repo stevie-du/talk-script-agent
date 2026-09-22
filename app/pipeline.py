@@ -97,6 +97,11 @@ log = logging.getLogger(__name__)
 # /api/generate，每个作业开一个线程、各自烧 token，直到内存和额度一起见底。
 MAX_CONCURRENT_JOBS = 4
 
+# 回炉记录里给界面分流用的机器码（`action` 那一份是给人看的中文标签）。
+# 界面以前只能拿中文字面量去筛，等于把一条 UI 行为绑在文案上。
+REVISION_CODE_FULL_RECHECK = "full_recheck"
+REVISION_ACTION_FULL_RECHECK = "全文回炉"
+
 # ── `_normalize` 的产出，每个键都必须有着落 ──────────────────────
 #
 # `_finalize` 曾经用一份手写白名单从 `p` 里挑参数落盘，而 `quota_degraded`
@@ -747,7 +752,13 @@ class Pipeline:
                 draft["check"] = report
                 return draft, revisions
             feedback = self._violation_feedback(report, draft.get("sections") or [])
-            revisions.append({"round": rnd, "report": report, "action": "全文回炉"})
+            # `action` 是给人看的，`action_code` 才是给界面分流用的。修复前只有
+            # `action`，而 result.js 拿中文字面量去筛"哪些版本是全文回炉" ——
+            # 改一句中文文案（不改任何行为）就会让那条横幅静默消失，而 UI 桩是
+            # 手抄同一句中文的，于是门禁照绿（第 9 轮扫字面量时抓到）。
+            revisions.append({"round": rnd, "report": report,
+                              "action": REVISION_ACTION_FULL_RECHECK,
+                              "action_code": REVISION_CODE_FULL_RECHECK})
         return draft, revisions
 
     @staticmethod

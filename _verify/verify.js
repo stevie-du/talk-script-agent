@@ -82,8 +82,12 @@ const RESULT = {
     points: 2,
   },
   placeholders: ["{{待补：主力机型载重}}"],
-  revisions: [{ round: 1, action: "全文回炉",
-                report: { deviation_pct: 24.0, hard_hits: [{ word: "政府补贴", count: 1 }], chars_total: 320 } }],
+  // 两条回炉记录：新形态带机器码 action_code，第二条**故意只带中文标签**，
+  // 用来覆盖 result.js 里对老产物的兜底分支（少一条，那条分支就在门禁里跑不到）。
+  revisions: [{ round: 1, action: "全文回炉", action_code: "full_recheck",
+                report: { deviation_pct: 24.0, hard_hits: [{ word: "政府补贴", count: 1 }], chars_total: 320 } },
+              { round: 2, action: "全文回炉",
+                report: { deviation_pct: 12.0, hard_hits: [{ word: "绝对靠谱", count: 1 }], chars_total: 300 } }],
   timings: [{ start: 0, end: 3 }, { start: 3.5, end: 7 }, { start: 7.5, end: 11 }, { start: 11.5, end: 13 }],
   logs: [{ key: "select", title: "选题策划", ts: "2026-09-13T10:00:01", data: {} }],
 };

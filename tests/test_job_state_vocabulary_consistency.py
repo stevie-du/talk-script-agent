@@ -260,3 +260,30 @@ def test_error_codes_the_renderer_compares_against_exist_on_the_server():
     dangling = sorted(used - server_codes)
     assert not dangling, \
         f"渲染层在比对这些码，但服务端已经不发它们：{dangling}（服务端现有：{sorted(server_codes)}）"
+
+
+def test_revision_filtering_uses_a_shared_code_not_prose():
+    """「哪些版本是全文回炉」由机器码分流；中文标签只做展示，且两侧不许各写一份。
+
+    第 9 轮扫字面量扫出来的：`result.js` 原来写 `v.action === "全文回炉"`，
+    而那句中文是 `pipeline.py` 产的 —— 改一句中文文案（行为完全不变）就会让
+    「为什么回炉」横幅静默消失；而 `_verify/verify.js` 的桩手抄同一句中文，
+    所以界面门禁照绿（桩比实现宽容 = 假绿）。同一族已修过三处：
+    界面正则↔服务端文案、`_QUOTA_MARK` 分桶、错误码表。
+    """
+    root = Path(__file__).resolve().parent.parent
+    py = (root / "app" / "pipeline.py").read_text(encoding="utf-8")
+    js = (root / "desktop" / "renderer" / "js" / "result.js").read_text(encoding="utf-8")
+    stub = (root / "_verify" / "verify.js").read_text(encoding="utf-8")
+
+    m = re.search(r'REVISION_CODE_FULL_RECHECK\s*=\s*["\']([^"\']+)["\']', py)
+    assert m, "app/pipeline.py 里的机器码常量不见了 —— 这条守卫要跟着改写法，别直接删"
+    code = m.group(1)
+    assert f'"full_recheck"' in js or f"'{code}'" in js, "result.js 不再按机器码分流"
+    assert code in stub, "UI 桩不回机器码，界面就只能一直走兜底分支"
+
+    prose = [l.strip() for l in js.splitlines()
+             if "全文回炉" in l and not l.strip().startswith(("//", "*", "/*"))]
+    assert len(prose) == 1, f"中文标签被当成判据用了不止一处：{prose}"
+    assert "action_code === undefined" in prose[0], \
+        f"唯一允许的那处必须是「老产物兜底」，且要带 action_code 判空：{prose}"

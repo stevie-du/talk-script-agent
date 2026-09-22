@@ -97,7 +97,11 @@ function renderHeader(r, ch, dev, hardN, opts) {
 // ── 2) 横幅（含「为什么回炉」的可展开解释）──────────────────
 function renderBanners(r, ch, opts) {
   const items = [];
-  const revs = (r.revisions || []).filter(v => v.action === "全文回炉");
+  // 分流读机器码 `action_code`；只有这条改动之前落盘的老产物才走中文标签兜底
+  // （不然历史记录里这条「为什么回炉」横幅会凭空消失）。
+  const isFullRecheck = v => v.action_code === "full_recheck"
+    || (v.action_code === undefined && v.action === "全文回炉");
+  const revs = (r.revisions || []).filter(isFullRecheck);
   if (revs.length) {
     const why = [...new Set(revs.map(v => (v.report?.blockers || []).join("、")).filter(Boolean))]
       .join("；") || "未通过校验";
