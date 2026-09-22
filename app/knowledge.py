@@ -18,6 +18,8 @@ from pathlib import Path
 import yaml
 
 from .checker import DEFAULT_RATE, quota_table_errors, tolerance_error, validate_banwords
+from .intel import parse_sources
+from .schemas import IntelSource as IntelSourceModel
 from .fileio import read_yaml_file
 from .schemas import PackInfo
 
@@ -214,6 +216,11 @@ def pack_info(pack_dir: Path) -> PackInfo:
             version=int(data.get("version", 1) or 1),
             params=data.get("params", {}) or {},
             param_audit=param_audit(pack_dir, data),
+            # 情报源声明（`需求方案 §2.2`）。与 `topics_map`/`audience_map` 同一读法：
+            # `data.get(键, [])`，缺了就是空列表（= 这个包没盯任何源），
+            # **不是错误** —— 情报是锦上添花，不是生成的前提。
+            intel_sources=[IntelSourceModel(**s.as_dict())
+                           for s in parse_sources(data.get("intel_sources", []))[0]],
             pack_error=err,
         )
     except Exception as e:                       # noqa: BLE001
@@ -587,6 +594,14 @@ def param_audit(pack_dir: Path, data: dict) -> dict[str, dict[str, str]]:
     _tells, tell_notes = resolve_ai_tells(pack_dir, data)
     for n in tell_notes:
         note("ai_tells", str(data.get("ai_tells", "ai_tells.yaml")), n)
+
+    # 情报源（A/B 线交接处，`需求方案 §2.2`）：未知 id / label 重复 / 结构写坏
+    # 记一条 note，**不报错、不拦生成** —— 情报是锦上添花，不是生成的前提。
+    # 但必须可见：包作者写了 `id: xhs_board` 以为接上了，实际引擎没这个适配器，
+    # 表现是"这个源永远 0 条"，与"今天没货"长得一模一样。
+    _sources, src_notes = parse_sources(data.get("intel_sources", []))
+    for n in src_notes:
+        note("intel_sources", "intel_sources", n)
 
     # 时长：quota_table 缺该键 → 配额按相邻键插值；points_by_duration 缺 → 默认 3
     quota, points = as_keys(data.get("quota_table", {})), as_keys(
@@ -1006,6 +1021,40 @@ class Pack:
         if rewrite_scope_error(v):
             return None
         return str(v) if v not in (None, "") else None
+
+    def intel_sources(self) -> list:
+        """本包声明的情报源（`pack.yaml` 的 `intel_sources`）。缺了就是空列表。
+
+        与 `pack_info` 走**同一个** `parse_sources`（一本账）：设置页/`/api/meta`
+        看到的那份与抓取时真正跑的那份必须完全一致 —— 两处各解析一次迟早会漂，
+        而漂法是"界面说有 5 个源、实际只跑了 3 个"。
+        """
+        return parse_sources(self.data.get("intel_sources", []))[0]
+
+    def intel_seeds(self) -> list[str]:
+        """需求词种子：**细分领域的选项**（下拉词按领域扩散，§1.2 实测的有效做法）。
+
+        取 `params.segment.options` 而不是另开一个配置项：细分领域本来就是
+        "这个行业的人会怎么问"，正是雷达要的种子。
+        """
+        return [str(x) for x in self.param_options("segment")]
+
+    def intel_keywords(self) -> list[str]:
+        """命中过滤词（热榜只做关键词命中，§1.2：泛热榜对垂直行业覆盖接近零）。
+
+        `params.segment.options` + `display_name` + `topics_map` 的映射词 ——
+        这三样合起来就是"这个行业的词"，不需要包作者再维护一份。
+        """
+        out = [str(x) for x in self.param_options("segment")]
+        if self.info.display_name:
+            out.append(str(self.info.display_name))
+        out += [str(v) for v in (self.data.get("topics_map", {}) or {}).values() if v]
+        seen, uniq = set(), []
+        for w in out:
+            if w and w not in seen:
+                seen.add(w)
+                uniq.append(w)
+        return uniq
 
     def ai_tells_data(self) -> dict | None:
         """文风 tell 词表（`pack.yaml` 的 `ai_tells` 键指定文件名）；结构坏了返回 None。

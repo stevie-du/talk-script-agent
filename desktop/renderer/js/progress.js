@@ -20,6 +20,7 @@ export const STATE_LABEL = {
   checking: "代码校验中",
   storyboarding: "分镜生成中",
   packing: "行业包生成中",
+  fetching: "情报抓取中",
   done: "完成",
   failed: "失败",
   cancelled: "已取消",
@@ -27,9 +28,14 @@ export const STATE_LABEL = {
 
 /** 还在跑的状态集合 —— 「要不要继续轮询」的唯一判据。
  *
- *  必须与后端 `app/jobs.py` 的 `BUSY_STATES` 逐项相等，
+ *  必须与后端 `app/jobs.py` 的 **`ALL_BUSY_STATES`**（两族额度的并集）逐项相等，
  *  由 `tests/test_job_state_vocabulary_consistency.py` 读两个文件比对守着
  *  （两种语言没法共享代码，同一个口径只能写两遍，那就得有人检查它们没走散）。
+ *
+ *  ⚠ 比对的是 `ALL_BUSY_STATES` 而不是 `BUSY_STATES`：后端从 B4 起有**两族**
+ *  额度（模型额度 `BUSY_STATES` + 情报抓取的独立额度 `INTEL_BUSY_STATES`），
+ *  而前端只关心"这条作业还在动吗" —— 那与它占哪一族的额度无关。
+ *  少一个值 = 界面把还在跑的作业读成"已结束"，不再刷新（用户看不到进度）。
  *
  *  ⚠ 写成**白名单**而不是「不是终态就是在跑」。历史索引里会留着已经删掉的
  *  状态：`paused_awaiting_confirmation` 随分步确认在 2026-09-19 整体移除，
@@ -37,6 +43,7 @@ export const STATE_LABEL = {
  *  会让左栏每 3 秒空转刷新一次、永不停止，行上还挂一颗呼吸点。 */
 export const BUSY_STATES = new Set([
   "queued", "selecting", "writing", "checking", "rewriting", "storyboarding", "packing",
+  "fetching",
 ]);
 
 

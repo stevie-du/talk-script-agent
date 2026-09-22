@@ -39,7 +39,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from app.jobs import BUSY_STATES, TERMINAL_STATES, TRANSITIONS  # noqa: E402
+from app.jobs import (ALL_BUSY_STATES, BUSY_STATES, INTEL_BUSY_STATES,  # noqa: E402
+                      TERMINAL_STATES, TRANSITIONS)
 
 PROGRESS_JS = ROOT / "desktop" / "renderer" / "js" / "progress.js"
 
@@ -90,11 +91,20 @@ def _all_backend_states() -> set[str]:
 # ── 1. 前后端「在跑」口径一致 ─────────────────────────────────
 
 def test_js_busy_states_match_backend():
-    """核心断言：前端的在跑集合逐项等于后端 `BUSY_STATES`。"""
-    assert _js_busy() == set(BUSY_STATES), (
-        f"前端 {sorted(_js_busy())} != 后端 {sorted(BUSY_STATES)}。"
+    """核心断言：前端的在跑集合逐项等于后端 **`ALL_BUSY_STATES`**（两族额度的并集）。
+
+    为什么不是 `BUSY_STATES`：后端从 B4 起有**两族**额度 ——
+    模型额度（`BUSY_STATES`）与情报抓取的独立额度（`INTEL_BUSY_STATES`）。
+    前端只关心"这条作业还在动吗"，那与它占哪一族额度无关，
+    所以它的判据是两族的并集。拿 `BUSY_STATES` 比对会让 `fetching`
+    被前端读成"已结束"：抓取跑着、界面不刷新、用户看不到进度。
+    """
+    assert _js_busy() == set(ALL_BUSY_STATES), (
+        f"前端 {sorted(_js_busy())} != 后端 {sorted(ALL_BUSY_STATES)}。"
         "不一致时前端会把认不出来的状态当成「已结束」（少刷新），"
         "或把已结束当成「在跑」（每 3 秒空转轮询、永不停止）")
+    assert set(ALL_BUSY_STATES) == set(BUSY_STATES) | set(INTEL_BUSY_STATES), \
+        "ALL_BUSY_STATES 必须是两族额度的并集（两族各占一档额度，见 app/jobs.py）"
 
 
 def test_js_state_labels_are_human_readable():
@@ -129,7 +139,7 @@ def test_no_label_for_a_state_that_no_longer_exists():
 def test_busy_states_all_have_labels():
     """在跑的每个中间态都必须有标签 —— 列表行上要写字。"""
     labels = _js_labels()
-    for st in BUSY_STATES:
+    for st in ALL_BUSY_STATES:
         assert st in labels, f"在跑状态 {st} 没有标签，行上只剩一颗呼吸点"
 
 
@@ -147,8 +157,10 @@ def test_state_sets_cover_the_transition_table():
     漏进 BUSY_STATES 的作业**不占并发额度**（`running_count()` 读的是它），
     于是配额形同虚设；漏进 TERMINAL_STATES 则 `_trim()` 永远不会回收它。
     """
-    unclassified = _all_backend_states() - (BUSY_STATES | TERMINAL_STATES)
-    assert not unclassified, f"这些状态既不在 BUSY_STATES 也不在 TERMINAL_STATES：{sorted(unclassified)}"
+    unclassified = _all_backend_states() - (ALL_BUSY_STATES | TERMINAL_STATES)
+    assert not unclassified, (
+        f"这些状态既不在 BUSY_STATES / INTEL_BUSY_STATES 也不在 TERMINAL_STATES："
+        f"{sorted(unclassified)}")
 
 
 @pytest.mark.parametrize("where", ["transitions", "busy", "terminal"])

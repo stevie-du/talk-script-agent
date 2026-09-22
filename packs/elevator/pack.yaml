@@ -113,3 +113,71 @@ files:
   private: [private/products.yaml, private/service.yaml, private/cases.yaml, private/faq.yaml]
 
 banwords: banwords.yaml
+
+# ── 情报源（需求方案 §2.2）──────────────────────────────────────
+# **一处声明、四处一致**：① 选题页的分区（`label · role` + 组内卡片）；
+# ② 筛选行的 chip 与计数（只列 enabled 且有货的）；③ 左栏 nav 的计数；
+# ④ 情报源页那张表（id / role / cadence / 接入 / 上次 / 命中）。
+# 渲染层**一个平台名都不写死** —— 换行业包时这四处自动跟着变。
+#
+# `id` 是**引擎侧的适配器名**（app/intel.py 的 ADAPTERS），写错不会报错，
+# 只会让这个源永远 0 条 —— 引擎会把它记进 param_audit 摊到界面上。
+# `enabled: false` 的源照常下发，界面据此显示「未接入 N」与原因（是**决定**，不是 bug）。
+#
+# 实测结论（别重复调研）：泛热榜对垂直行业覆盖接近零（三平台 130 条命中 0），
+# 所以热榜的价值只在"行业词偶尔真上了榜"这个破圈信号，命中 0 是**正常结果**；
+# 政策库不是雷达是口径库（存量 10 份、最新一份距今 466 天），它给的是可引的文号；
+# **下拉词才是雷达**（10 个种子扩散出 102 条真实问句、噪声 0）。
+intel_sources:
+  - id: demand_terms
+    label: 下拉词
+    platform: 百度/必应
+    role: 雷达
+    cadence: daily
+    note: 搜索联想词 diff，比政策文件滞后出现 —— 那才是「正在办、正卡壳」
+  - id: bilibili_search
+    label: B站同类
+    platform: B站
+    role: 供给度量
+    cadence: on_demand
+    note: 公开搜索字段：播放 / 点赞 / 发布日期；计数只当相对值
+  - id: hot_board
+    label: 抖音热榜
+    platform: 抖音
+    role: 破圈触发器
+    cadence: daily
+    params: { board: douyin, match: keyword }
+    note: 只做关键词命中；命中「困人 / 伤亡」强制走权威科普档
+  - id: hot_board
+    label: 头条
+    platform: 头条
+    role: 破圈触发器
+    cadence: daily
+    params: { board: toutiao, match: keyword }
+    note: 已接入，多数时候今日无行业命中
+  - id: hot_board
+    label: 知乎
+    platform: 知乎
+    role: 破圈触发器
+    cadence: daily
+    params: { board: zhihu, match: keyword }
+    note: 已接入，多数时候今日无行业命中
+  - id: policy_library
+    label: 政策库
+    platform: 国务院
+    role: 口径库
+    cadence: quarterly
+    note: 不是雷达是口径库：库内最新一份距今 466 天。它给的是可引的文号与条款
+  - id: manual_import
+    label: 人工导入
+    platform: 本地
+    role: 数据源
+    cadence: on_demand
+    note: 拿不到的平台（小红书 / 协会资讯）贴链接或导 CSV，落 data_dir/intel/elevator/manual/
+  - id: xhs_board
+    label: 小红书
+    platform: 小红书
+    role: 破圈触发器
+    cadence: "—"
+    enabled: false
+    note: 未接入：没有可用公开榜，要 x-s 签名逆向 —— 不做（要它的内容请走「人工导入」）

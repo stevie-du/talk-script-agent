@@ -61,11 +61,25 @@ STALE_JOB_MULTIPLIER = 2
 BUSY_STATES = frozenset({"queued", "selecting", "writing", "checking", "rewriting",
                          "storyboarding", "packing"})
 
+# B4：情报抓取**走 Job 管道，但用独立并发额度**。
+# 为什么要独立：抓取是**纯 HTTP**，不花模型的钱，把它塞进 `BUSY_STATES` 会让
+# 「点一次重抓」把生成的名额占掉（`MAX_CONCURRENT_JOBS=4`）—— 用户会看到
+# "生成已达上限"，而占着名额的是一个不花钱的 HTTP 请求。
+# 为什么仍然走 Job 管道而不是同步请求：抓取要几十秒、要能取消、要能在
+# 关窗后回来接上进度 —— 这三条正是 `start_packgen`（P1-43）当初走 Job 的理由。
+INTEL_BUSY_STATES = frozenset({"fetching"})
+MAX_CONCURRENT_INTEL = 2
+
+#: 所有"占额度"的状态（回收网要按这个判，别只看 BUSY_STATES ——
+#: 否则一条卡死的情报抓取永远不会被摘额度，症状是"一个都没在跑，重抓却报已达上限"）。
+ALL_BUSY_STATES = BUSY_STATES | INTEL_BUSY_STATES
+
 # 合法迁移表：from_state -> 允许去的 to_state。
 # 写成表而不是散落在各方法里的 if，是为了让「谁能到哪儿」一眼可查，
 # 也让非法迁移统一变成 409 而不是静默写坏状态。
 TRANSITIONS: dict[str, frozenset[str]] = {
-    "queued": frozenset({"selecting", "writing", "packing", "failed", "cancelled"}),
+    "queued": frozenset({"selecting", "writing", "packing", "fetching",
+                         "failed", "cancelled"}),
     "selecting": frozenset({"writing", "failed", "cancelled"}),
     "writing": frozenset({"checking", "rewriting", "done", "failed", "cancelled"}),
     # storyboarding：P1-30 拆出来的分镜阶段，只在校验通过后进 —— 正文没过校验时
@@ -78,6 +92,9 @@ TRANSITIONS: dict[str, frozenset[str]] = {
     # packing：新建行业包（P1-43）。与生成同一套额度、取消与错误通道，
     # 不再是「唯一一个走同步长 HTTP 请求的耗时操作」。
     "packing": frozenset({"done", "failed", "cancelled"}),
+    # fetching：B4 情报抓取。纯 HTTP，**不占模型额度**（见 INTEL_BUSY_STATES）——
+    # 但仍然是一条作业：要能取消、要能在关窗后回来接上、失败要有原因。
+    "fetching": frozenset({"done", "failed", "cancelled"}),
     "done": frozenset({"rewriting", "cancelled"}),
     # failed → rewriting：done 作业重写失败后，用户还能再点一次「重写本段」。
     # 修复前 failed 只允许 {writing, cancelled}，失败记录在重试原作业之外
@@ -349,7 +366,8 @@ class JobRegistry:
         with self._lock:
             self._jobs[job.id] = job
 
-    def add_if_room(self, job: Job, limit: int) -> bool:
+    def add_if_room(self, job: Job, limit: int,
+                    states: frozenset[str] = BUSY_STATES) -> bool:
         """**同一把锁内**检查并发额度并插入；返回 False 表示已满（未插入）。
 
         为什么不写成「先 `running_count() >= limit` 判断、再 `add(job)`」：
@@ -362,11 +380,15 @@ class JobRegistry:
 
         插入时 `job.state` 已是 `queued`（在 `BUSY_STATES` 里），
         所以额度从这一刻起就被占住，不必等 `_spawn` 起线程。
+
+        `states`：要按哪一族状态计数。默认是模型额度（`BUSY_STATES`）；
+        B4 的情报抓取传 `INTEL_BUSY_STATES`，于是它与生成**互不占名额**
+        —— 但两条抓取之间仍然按 `MAX_CONCURRENT_INTEL` 互斥。
         """
         self._reap_stranded()      # 第二道网：先还额度再判（见 prune 的说明）
         with self._lock:
             if sum(1 for j in self._jobs.values()
-                   if j.state in BUSY_STATES and not j.stranded) >= limit:
+                   if j.state in states and not j.stranded) >= limit:
                 return False
             self._jobs[job.id] = job
             return True
@@ -421,8 +443,13 @@ class JobRegistry:
             jobs = list(self._jobs.values())
         return [j.snapshot(include_result=include_result) for j in jobs]
 
-    def running_count(self) -> int:
-        """占用并发额度的作业数（口径见 BUSY_STATES）。
+    def running_count(self, states: frozenset[str] = BUSY_STATES) -> int:
+        """占用**某一族**并发额度的作业数（默认是模型额度 `BUSY_STATES`）。
+
+        后端从 B4 起有**两族**额度：模型额度与情报抓取的独立额度
+        （`INTEL_BUSY_STATES`）。所以这里必须能按族取数 —— 只回一个数的话，
+        「4 个生成在跑」与「4 个生成 + 1 个抓取在跑」是同一个值，
+        诊断时看不出抓取占没占名额。
 
         **不是**「非终态作业数」：待确认的作业不该算并发 ——
         否则 4 张没人理的确认卡就能把后续所有生成永久挡在 409 之外。
@@ -439,7 +466,7 @@ class JobRegistry:
         """
         with self._lock:
             return sum(1 for j in self._jobs.values()
-                       if j.state in BUSY_STATES and not j.stranded)
+                       if j.state in states and not j.stranded)
 
     def prune(self, keep: int = 200) -> None:
         """回收终态作业，只保留最近 `keep` 个，防止长跑进程内存无界增长。
@@ -494,7 +521,7 @@ class JobRegistry:
         now = time.time()
         with self._lock:
             stale = [j for j in self._jobs.values()
-                     if j.state in BUSY_STATES
+                     if j.state in ALL_BUSY_STATES
                      and not j.stranded
                      and now - j.last_progress > limit]
             for j in stale:

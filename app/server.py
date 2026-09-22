@@ -63,13 +63,14 @@ from pydantic import BaseModel
 from .config import (DEFAULT_MODEL, ensure_config_template, load_config,
                      load_raw_models, public_models, save_config, save_models)
 from .fileio import write_atomic
+from .intel import IntelSource as _IntelSourceDC, add_ignored, today as intel_today
 from .jobs import StateConflict
 from .knowledge import Pack, PackBrokenError, PackError, list_packs
 from .llm import LLMClient
 from .packseed import PRIVATE_DIR_NAME, seed_bundled_packs
 from .pipeline import MAX_CONCURRENT_JOBS, Pipeline
-from .schemas import (GenerateRequest, PackCreateRequest,
-                      RewriteSegmentRequest)
+from .schemas import (GenerateRequest, IntelIgnoreRequest, IntelPackRequest,
+                      PackCreateRequest, RewriteSegmentRequest)
 from .security import (LOOPBACK_HOSTS, TOKEN_HEADER, allowed_hostnames,
                        new_token, origin_allowed, token_ok)
 
@@ -988,6 +989,58 @@ def create_app(root: Path, token: str | None = None,
         except Exception as e:  # noqa: BLE001
             raise HTTPException(500, f"打开失败：{e}")
         return {"ok": True, "path": str(target.resolve())}
+
+    # ── 情报（今日选题）─────────────────────────────────────
+    #
+    # 三个端点，口径逐条对到 `需求方案 §2.2` 与 README 的 B3/B4：
+    #   GET  /api/intel/today   只读本地文件（**空或坏返回空结构，不抛**）
+    #   POST /api/intel/refresh 立即重抓（走 Job 管道 + 独立并发额度）
+    #   POST /api/intel/ignore  忽略一条（**只影响今天**）
+    def _intel_sources(name: str) -> list:
+        """读包的源声明 —— 走 `pack_info` 而不是 `Pack()`。
+
+        刻意的选择：`Pack()` 对坏包抛 `PackBrokenError`（409），而**情报不该
+        因为 pack.yaml 写坏了就看不了** —— 那两件事互不相干，而且
+        "包坏了 → 选题页也白屏"会让用户以为两个功能一起坏了。
+        `pack_info` 保证不抛，坏包退成空源列表（= 这个包没盯任何源），
+        与「包里没配 intel_sources」是同一种表现，界面上的说法也一样。
+        """
+        info = next((p for p in list_packs(root_for_packs) if p.name == name), None)
+        return [_IntelSourceDC(**s.model_dump()) for s in (info.intel_sources if info else [])]
+
+    @app.get("/api/intel/today")
+    def intel_today_api(pack: str = "elevator"):
+        """只读：返回最近一次抓取的分组 / 条目 / 计数 / 是否该补抓。
+
+        **空或坏返回空结构，不抛**（B3）。⚠ 这与 `Pack.private_facts()` 的失败
+        语义**相反** —— 那边读不到要中止生成（否则模型会编事实），这边读不到
+        只是"今天没有选题可看"。**这条差异别顺手统一。**
+        """
+        name = _safe_name(pack)
+        return intel_today(data_dir, name, _intel_sources(name))
+
+    @app.post("/api/intel/refresh")
+    def intel_refresh(req: IntelPackRequest):
+        """立即重抓（顶栏那颗「重抓」/ 懒触发的补跑）。
+
+        懒触发本身**不在这里**：`/api/intel/today` 只回 `stale: true/false`，
+        由渲染层决定要不要发这一发 POST。GET 不带副作用 —— 一个会自己起作业的
+        GET 在轮询/预取/刷新时会被重复触发，而每次都是一轮真实网络请求。
+        """
+        name = _safe_name(req.pack)
+        # 包不存在 → 404；坏包 → 409（与生成同口径，由全局处理器映射）
+        return {"job_id": pipeline.start_intel_fetch(name)}
+
+    @app.post("/api/intel/ignore")
+    def intel_ignore(req: IntelIgnoreRequest):
+        """忽略一条选题。**只影响今天**：明天同题还会回来，连续 3 天被忽略才沉底。
+
+        所以落盘的是 `{key: 最后一次忽略的日期}` —— 界面按"连续几天"决定沉底，
+        而"连续"这件事只能靠日期算，记一个布尔是算不出来的。
+        """
+        name = _safe_name(req.pack)
+        rec = add_ignored(data_dir, name, req.key)
+        return {"ok": True, "ignored": len(rec)}
 
     # ── 设置 ────────────────────────────────────────────────
     @app.get("/api/config")

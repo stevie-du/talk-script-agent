@@ -38,7 +38,9 @@ from .checker import Banwords, Quota, check_script, count_chars
 from .config import AppConfig, load_config
 from .fileio import rmtree_resilient
 from . import jobs as _jobs                              # noqa: F401
-from .jobs import (JOB_BUDGET_SECONDS, TERMINAL_STATES, Job,  # noqa: F401
+from .intel import fetch_pack
+from .jobs import (INTEL_BUSY_STATES, JOB_BUDGET_SECONDS,  # noqa: F401
+                   MAX_CONCURRENT_INTEL, TERMINAL_STATES, Job,
                    JobBudget, JobCancelled, JobRegistry, StateConflict,
                    new_job_id)
 from .knowledge import (DEFAULT_REWRITE_SCOPE, Pack, PackError,  # noqa: F401
@@ -546,6 +548,78 @@ class Pipeline:
             # 用作业上那份凭证归还：入口的兜底可能已经先还过一次（那种情况下
             # 这里也是空操作），而**别人**在这之后抢到的同名占位不会被我们还掉。
             release_slug(slug, job.claim_token)
+
+    # ── B4：情报抓取（走 Job 管道 + **独立**并发额度）────────────
+    def start_intel_fetch(self, pack_name: str) -> str:
+        """跑一遍本包声明的全部情报源。返回 `{job_id}`，进度看 `/api/jobs/{id}`。
+
+        为什么走 Job 管道（README B4 明确点名）：抓取要几十秒、要能取消、
+        要能在关窗后回来接上进度 —— 这三条正是 `start_packgen`（P1-43）当初
+        从同步长请求改成作业的理由，一字不差。
+
+        为什么**独立**额度（`MAX_CONCURRENT_INTEL`）：抓取是纯 HTTP、不花模型的钱。
+        塞进 `MAX_CONCURRENT_JOBS` 的后果实测过一次同类形态 ——
+        "点一次重抓"把生成的名额占掉，用户看到「生成已达上限」，
+        而占着名额的是一个不花钱的请求。
+
+        能在开跑前确定的错误（包不存在 / 包坏了）仍然同步抛：不花一分钱、
+        也不用等几十秒才知道包名写错了。
+        """
+        pack = Pack(self.root, pack_name)     # 不存在 → PackError(404)；坏 → 409
+        jid = new_job_id()
+        job = Job(jid, "intel", {"pack": pack.name})
+        if not self.registry.add_if_room(job, MAX_CONCURRENT_INTEL, INTEL_BUSY_STATES):
+            raise StateConflict(
+                f"同时进行的情报抓取已达上限（{MAX_CONCURRENT_INTEL} 个），"
+                "请等其中一次完成后再试")
+        try:
+            self._spawn(job, lambda: self._run_intel_fetch(job, pack))
+        except BaseException as e:            # noqa: BLE001
+            # P1-46 同款兜底：起不来线程也要把作业落成终态，否则那个额度
+            # 要等 2× 预算才被回收网摘掉，症状是"一个都没在跑，重抓却报已达上限"。
+            if job.state not in TERMINAL_STATES:
+                self._fail(job, e)
+            raise
+        return jid
+
+    def _run_intel_fetch(self, job: Job, pack: Pack) -> None:
+        """情报抓取作业的主体。
+
+        ⚠ **失败不是异常出口**：`fetch_pack` 内部每个源各自 try，失败记进
+        `errors` 并继续 —— 一个源挂了不该让整次抓取报失败（那会让界面显示
+        「重抓失败」，而其实另外 7 个源都成功了）。整条作业失败只留给
+        "声明读不出来"这种真正致命的情况。
+        """
+        try:
+            self._stop_check(job)
+            job.transition_or_raise("fetching")
+            sources = pack.intel_sources()
+            self._step(job, "intel_plan", f"情报源声明（{len(sources)} 个）",
+                       {"sources": [s.as_dict() for s in sources]})
+            out = fetch_pack(
+                pack.name, self.data_dir, sources,
+                seeds=pack.intel_seeds(), keywords=pack.intel_keywords(),
+                topics_map=pack.data.get("topics_map") or {},
+                segment_options=pack.param_options("segment"))
+            # 取消检查放在**写盘之后、落状态之前**：落盘是有用的副作用
+            # （下次打开就有数据），但状态必须是 cancelled 而不是 done。
+            self._stop_check(job)
+            for i, row in enumerate(out["sources"]):
+                self._step(job, f"intel_src_{i}",
+                           f"{row['label']}：{row['count']} 条"
+                           + (f"（{row['error']}）" if row["error"] else ""),
+                           {"count": row["count"], "error": row["error"],
+                            "state": row["state"], "id": row["id"]})
+            if not job.transition("done", result={
+                    "pack": out["pack"], "fetched_at": out["fetched_at"],
+                    "items": len(out["items"]), "sources": out["sources"],
+                    "errors": out["errors"]}):
+                return
+            self.registry.prune()
+        except JobCancelled:
+            self._settle_cancel(job)
+        except Exception as e:                # noqa: BLE001
+            self._fail(job, e)
 
     # ── 节点实现 ────────────────────────────────────────────
     _OPTION_PARAMS = ("segment", "audience", "style", "platform", "persona", "cta")

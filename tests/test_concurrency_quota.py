@@ -142,28 +142,41 @@ def test_add_if_room_full_leaves_registry_untouched():
 
 
 def test_every_live_state_occupies_quota():
-    """额度口径：**除终态外，任何状态都必须占额度**。
+    """额度口径：**除终态外，任何状态都必须占某一族额度**。
 
     原来有一条 `test_add_if_room_ignores_paused_jobs`（待确认不占额度）——
     那是为了给"开着确认卡慢慢想"腾地方而刻意开的口子，代价是必须再补一道
     `PAUSED_KEEP` 内存上界，并且攒够就会静默丢卡。分步确认移除后这个状态没了，
     口径回到最简单也最安全的形式：只要作业还活着就占额度。
 
-    这条断言守的是**别再开这种口子**：哪天有人往状态机加一个"不占额度的活跃态"，
-    并发上限就会被绕过，而绕过的方式总是"这次情况特殊"。
+    B4 起额度分**两族**（模型 / 情报抓取，各自独立计数），所以判据从
+    "在不在 BUSY_STATES" 改成"在两族的并集里" —— 并集仍然要覆盖全部活跃态，
+    这条断言守的还是同一件事：**别再开"不占额度的活跃态"这种口子**。
     """
-    from app.jobs import TERMINAL_STATES, TRANSITIONS
+    from app.jobs import (ALL_BUSY_STATES, BUSY_STATES, INTEL_BUSY_STATES,
+                          TERMINAL_STATES, TRANSITIONS)
 
     live = {"queued", "selecting", "writing", "checking", "rewriting", "storyboarding",
-            "packing"}
+            "packing", "fetching"}
     assert live == set(TRANSITIONS) - TERMINAL_STATES, (
         "状态机加了新状态，请同步判断它占不占额度 —— 默认应当占")
+    assert set(ALL_BUSY_STATES) == set(BUSY_STATES) | set(INTEL_BUSY_STATES)
+    assert not (set(BUSY_STATES) & set(INTEL_BUSY_STATES)), \
+        "两族额度不许重叠 —— 重叠的作业会被两条闸各数一次，额度凭空翻倍"
     for st in live:
         reg = JobRegistry()
         job = Job("x", "generate", {})
         job.state = st
         reg.add(job)
-        assert reg.running_count() == 1, f"{st} 不占额度 → 并发上限可被绕过"
+        family = (INTEL_BUSY_STATES if st in INTEL_BUSY_STATES else BUSY_STATES)
+        assert reg.running_count(family) == 1, f"{st} 不占额度 → 并发上限可被绕过"
+    # 两族**互不占名额**：一条抓取不该让生成报"已达上限"（那正是 B4 拆两族的原因）。
+    reg = JobRegistry()
+    fetch_job = Job("f", "intel", {})
+    fetch_job.state = "fetching"
+    reg.add(fetch_job)
+    assert reg.running_count(BUSY_STATES) == 0, "情报抓取占了模型额度 —— 生成会被误报已达上限"
+    assert reg.running_count(INTEL_BUSY_STATES) == 1
 
 
 # ── 2. start_generate 在真并发下不超额 ───────────────────────

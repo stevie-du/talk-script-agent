@@ -818,6 +818,10 @@ def _materialize(d: Path, base: Pack, out: PackGenOut, slug: str, industry: str,
             "persona": {"label": "人设", "options": personas, "default": personas[0]},
             "cta": {"label": "结尾引导", "options": ["关注", "私信", "留资", "到店", "评论关键词"],
                     "default": "关注"},
+            # A-2：改写范围三档，与行业无关，新包直接沿用默认档。
+            "rewrite_scope": {"label": "改写范围",
+                              "options": ["in-place", "bounded", "structural"],
+                              "default": "bounded"},
         },
         "rate_by_style": base.data.get("rate_by_style") or {
             "权威科普": 4.5, "亲和接地气": 4.5, "幽默玩梗": 5.0,
@@ -834,6 +838,28 @@ def _materialize(d: Path, base: Pack, out: PackGenOut, slug: str, industry: str,
                         "private/cases.yaml", "private/faq.yaml"],
         },
         "banwords": "banwords.yaml",
+        # 情报源初版（`需求方案 §2.2`：新行业包由 packgen 生成初版配置）。
+        # 种子/关键词**不写进这里** —— 它们由引擎从 `params.segment.options` 与
+        # `topics_map` 现取（`Pack.intel_seeds` / `intel_keywords`），
+        # 抄一份到这里就是"同一信息两份表示"，改了一处另一处不跟着变。
+        "intel_sources": [
+            {"id": "demand_terms", "label": "下拉词", "platform": "百度/必应",
+             "role": "雷达", "cadence": "daily",
+             "note": "搜索联想词 diff，种子取本包的细分领域"},
+            {"id": "bilibili_search", "label": "B站同类", "platform": "B站",
+             "role": "供给度量", "cadence": "on_demand",
+             "note": "同题条数越多越红海；计数只当相对值"},
+            {"id": "hot_board", "label": "抖音热榜", "platform": "抖音",
+             "role": "破圈触发器", "cadence": "daily",
+             "params": {"board": "douyin", "match": "keyword"},
+             "note": "只做关键词命中；命中 0 是正常结果"},
+            {"id": "policy_library", "label": "政策库", "platform": "国务院",
+             "role": "口径库", "cadence": "quarterly",
+             "note": "不是雷达是口径库：它给的是可引的文号与条款"},
+            {"id": "manual_import", "label": "人工导入", "platform": "本地",
+             "role": "数据源", "cadence": "on_demand",
+             "note": "拿不到的平台贴链接或导 CSV，落 data_dir/intel/<pack>/manual/"},
+        ],
     }
     # pack.yaml 是这个包在列表里的身份证：写坏了不是这一个包不可用，
     # list_packs 会连带把整个首页的行业包列表一起带崩，所以必须原子替换。

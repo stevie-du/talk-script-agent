@@ -13,6 +13,9 @@ ROOT = Path(__file__).resolve().parent.parent
 AI = ROOT / "app/ai_tells.py"
 KN_F = ROOT / "app/knowledge.py"
 PIPE_F = ROOT / "app/pipeline.py"
+INTEL_F = ROOT / "app/intel.py"
+JOBS_F = ROOT / "app/jobs.py"
+SRV_F = ROOT / "app/server.py"
 PACK = ROOT / "packs/elevator"
 YAML_F = PACK / "ai_tells.yaml"
 
@@ -209,6 +212,131 @@ MUTATIONS = [
         """    "unused_placeholder":
         "**可以重排**""",
         "tests/test_rewrite_scope.py -k every_scope",
+    ),
+    # ── B 线：情报 ─────────────────────────────────────────────
+    (
+        "B 去重不认 guid 优先级（只按 url）",
+        INTEL_F,
+        'key = it.get("guid") or it.get("url") or f"title:{it.get(\'title\')}"',
+        'key = it.get("url") or it.get("guid") or f"title:{it.get(\'title\')}"',
+        "tests/test_intel.py -k dedup",
+    ),
+    (
+        "B 一个源挂了就整次抓取失败（不隔离）",
+        INTEL_F,
+        """        try:
+            rows = ADAPTERS[spec.id](spec, ctx) or []
+        except Exception as e:                     # noqa: BLE001""",
+        """        try:
+            rows = ADAPTERS[spec.id](spec, ctx) or []
+        except ImportError as e:                   # noqa: BLE001""",
+        "tests/test_intel.py -k broken_source",
+    ),
+    (
+        "B 每话题上限失效（防刷屏没了）",
+        INTEL_F,
+        "rows = dedup(rows)[:PER_SOURCE_CAP]",
+        "rows = dedup(rows)",
+        "tests/test_intel.py -k per_source_cap",
+    ),
+    (
+        "B 落点写回 packs/（打包后安装目录不可写）",
+        INTEL_F,
+        'return Path(data_dir) / "intel" / pack',
+        'return Path(data_dir) / "packs" / pack',
+        "tests/test_intel.py -k lands_in_data_dir",
+    ),
+    (
+        "B 读坏文件直接抛（只读端点变 500）",
+        INTEL_F,
+        """    except Exception as e:                         # noqa: BLE001
+        log.warning("情报文件读不出来：%s —— %s", f, e)
+        return {**empty, "errors": {"_read": f"latest.json 读不出来：{e}"}}""",
+        """    except Exception as e:                         # noqa: BLE001
+        raise""",
+        "tests/test_intel.py -k load_latest_never_raises",
+    ),
+    (
+        "B 算不出的机会分落成 0（「没数据」被读成「没机会」）",
+        INTEL_F,
+        '"opportunity": round(D * (1 - S) * 100) if (D is not None and S is not None) else None,',
+        '"opportunity": round((D or 0) * (1 - (S or 0)) * 100),',
+        "tests/test_intel.py -k scores_are_none_not_zero",
+    ),
+    (
+        "B 事件衰减的 τ 不分角色（热榜旧闻与政策一样新鲜）",
+        INTEL_F,
+        '''TAU_BY_ROLE: dict[str, float] = {
+    "破圈触发器": 3.0, "供给度量": 3.0, "雷达": 14.0,
+    "数据源": 30.0, "口径库": 30.0,
+}''',
+        "TAU_BY_ROLE: dict[str, float] = {}",
+        "tests/test_intel.py -k event_decay",
+    ),
+    (
+        "B 解析不出的日期当成「就是今天」",
+        INTEL_F,
+        """    except ValueError:
+            return None
+        if t.tzinfo is None:""",
+        """    except ValueError:
+            return 0.0
+        if t.tzinfo is None:""",
+        "tests/test_intel.py -k unparseable_published",
+    ),
+    (
+        "B 按需源被算进懒触发（B站天天被抓）",
+        INTEL_F,
+        'CADENCE_DAYS: dict[str, int] = {"daily": 1, "weekly": 7, "monthly": 30, "quarterly": 90}',
+        'CADENCE_DAYS: dict[str, int] = {"daily": 1, "weekly": 7, "monthly": 30, '
+        '"quarterly": 90, "on_demand": 1}',
+        "tests/test_intel.py -k is_stale",
+    ),
+    (
+        "B 忽略记录只存布尔（算不出「连续几天」）",
+        INTEL_F,
+        'rec[str(key)] = today or datetime.now().strftime("%Y-%m-%d")',
+        'rec[str(key)] = "1"',
+        "tests/test_intel.py -k ignore_only_affects_today",
+    ),
+    (
+        "B 主动关掉的源也被记成问题（审计变噪音）",
+        INTEL_F,
+        'if sid not in ADAPTERS and item.get("enabled", True) is not False:',
+        'if sid not in ADAPTERS:',
+        "tests/test_intel.py -k unknown_adapter",
+    ),
+    (
+        "B 两族额度配错（INTEL_BUSY_STATES 写成 BUSY_STATES）",
+        JOBS_F,
+        'INTEL_BUSY_STATES = frozenset({"fetching"})',
+        "INTEL_BUSY_STATES = BUSY_STATES",
+        "tests/test_intel.py -k does_not_consume_model_quota",
+    ),
+    (
+        "B add_if_room 无视 states 参数（两族额度合成一族）",
+        JOBS_F,
+        "                   if j.state in states and not j.stranded) >= limit:",
+        "                   if j.state in BUSY_STATES and not j.stranded) >= limit:",
+        "tests/test_intel.py -k its_own_limit",
+    ),
+    (
+        "B 坏包让选题页白屏（改用 Pack() 而不是 pack_info）",
+        SRV_F,
+        "        info = next((p for p in list_packs(root_for_packs) if p.name == name), None)",
+        "        from .knowledge import Pack as _P\n"
+        "        _P(root_for_packs, name)\n"
+        "        info = next((p for p in list_packs(root_for_packs) if p.name == name), None)",
+        "tests/test_intel.py -k survives_a_broken_pack",
+    ),
+    (
+        "B 盘上有、声明里没有的源被藏掉（分组计数与总数对不上）",
+        INTEL_F,
+        """    for label, rows in by_source.items():
+        if label not in known:""",
+        """    for label, rows in by_source.items():
+        if False:""",
+        "tests/test_intel.py -k orphan_sources",
     ),
 ]
 

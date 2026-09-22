@@ -86,3 +86,46 @@ files:
   private: [private/products.yaml, private/service.yaml, private/cases.yaml, private/faq.yaml]
 
 banwords: banwords.yaml
+
+# ── 情报源（需求方案 §2.2）──────────────────────────────────────
+# 新包带着这一份出生：**选题页的分区、筛选行 chip、左栏计数、情报源表四处
+# 都由它渲染**，删掉它 = 这个包没有"今日选题"可看。
+# `id` 是引擎侧适配器名（app/intel.py 的 ADAPTERS），可用的有：
+#   demand_terms 下拉词（雷达，最有效） · bilibili_search B站同类（供给度量）
+#   hot_board 热榜（破圈触发器，按 params.board 出抖音/头条/知乎多个源）
+#   policy_library 政策库（口径库，给可引的文号） · manual_import 人工导入
+# 节奏（cadence）各源自己定：daily / weekly / monthly / quarterly / on_demand。
+# 没有公开检索口的平台就 `enabled: false` + 一句 `note` 说明为什么 ——
+# 「这个平台我们不做」要是一个**可见的决定**，而不是"界面上没有它"。
+intel_sources:
+  - id: demand_terms
+    label: 下拉词
+    platform: 百度/必应
+    role: 雷达
+    cadence: daily
+    note: 搜索联想词 diff，种子取本包的细分领域
+  - id: bilibili_search
+    label: B站同类
+    platform: B站
+    role: 供给度量
+    cadence: on_demand
+    note: 同题条数越多越红海；计数只当相对值
+  - id: hot_board
+    label: 抖音热榜
+    platform: 抖音
+    role: 破圈触发器
+    cadence: daily
+    params: { board: douyin, match: keyword }
+    note: 只做关键词命中；命中 0 是正常结果
+  - id: policy_library
+    label: 政策库
+    platform: 国务院
+    role: 口径库
+    cadence: quarterly
+    note: 不是雷达是口径库：它给的是可引的文号与条款
+  - id: manual_import
+    label: 人工导入
+    platform: 本地
+    role: 数据源
+    cadence: on_demand
+    note: 拿不到的平台贴链接或导 CSV，落 data_dir/intel/<pack>/manual/

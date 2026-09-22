@@ -61,6 +61,20 @@ class RewriteSegmentRequest(BaseModel):
     feedback: str | None = Field(default=None, max_length=2000)
 
 
+class IntelPackRequest(BaseModel):
+    """情报端点的包名参数（`GET /api/intel/today` 用查询参数，其余用请求体）。"""
+
+    pack: str = Field(default="elevator", max_length=64)
+
+
+class IntelIgnoreRequest(BaseModel):
+    """忽略一条选题。`key` 就是条目的 `guid`（没有 guid 时退回 url / 标题）——
+    与 `intel.dedup` 用的是同一个键，否则"忽略了但明天又出现"会变成找不到原因。"""
+
+    pack: str = Field(default="elevator", max_length=64)
+    key: str = Field(min_length=1, max_length=500)
+
+
 class PackCreateRequest(BaseModel):
     # 下界按**码点**、上界按 **UTF-16 码元**，这不是漂移而是两件事：
     # "至少两个字"是人的计数单位（`'𠀀'` 一个字符不算名字），
@@ -183,6 +197,29 @@ class ScriptResult(BaseModel):
     logs: list[dict] = []
 
 
+class IntelSource(BaseModel):
+    """`pack.yaml` 里的一条 `intel_sources`（见 `app/intel.py`）。
+
+    字段名与语义逐条对到 `需求方案 §2.2` 的 YAML 示例。这里只做**形状**契约，
+    语义校验（id 有没有对应适配器、label 重不重复）在 `intel.parse_sources` 里，
+    结果摊到 `PackInfo.param_audit["intel_sources"]`。
+
+    `wired` 是**引擎侧的事实**（有没有这个适配器），不是包配置 —— 所以它由
+    `parse_sources` 算出来而不是从 YAML 读。下发它，界面才能把
+    「声明了但引擎没接」与「已声明但主动关掉」分开显示。
+    """
+
+    id: str
+    label: str
+    platform: str = ""
+    role: str = ""
+    cadence: str = ""
+    note: str = ""
+    params: dict = {}
+    enabled: bool = True
+    wired: bool = False
+
+
 class PackInfo(BaseModel):
     name: str
     display_name: str
@@ -193,6 +230,12 @@ class PackInfo(BaseModel):
     # {参数键: {选项值: 降级说明}}，只列「用户能选、但本包没给对应定制」的值。
     # 这些值不会报错，只会静默走通用默认 —— 摊到界面上，避免用户以为在定制。
     param_audit: dict = {}
+    # 情报源声明（`需求方案 §2.2`）。**一处声明、四处一致**：选题页的分区、
+    # 筛选行的 chip 与计数、左栏 nav 的计数、情报源页那张表，全由它渲染 ——
+    # 渲染层一个平台名都不写死，换行业包时它们自动跟着变。
+    # 校验（未知 id / label 重复 / 结构写坏）挂在 `param_audit["intel_sources"]`，
+    # 记一条 note 而**不是报错** —— 与「用户能选但本包没定制」同一口径。
+    intel_sources: list[IntelSource] = []
     # 非空 = 这个包的 pack.yaml 或它引用的 banwords.yaml 读不出来（人话说明，
     # 含「第 N 行第 M 列」）。此时 params / display_name 全是降级值，
     # **不能拿它生成**（`Pack` 会抛 PackBrokenError）。列表里仍要显示这个包，
