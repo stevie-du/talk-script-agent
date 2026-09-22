@@ -5,13 +5,13 @@
 // 顺序是「打开设置 → 改 URL → Ctrl+, 关掉 → Ctrl+, 再开 → 输入没了」。
 // 现在按字段记 dirty，只有没被改过的输入框才回填。
 
-import { $, el, esc, toast, bindOnce } from "./util.js";
+import { $, $$, el, esc, toast, bindOnce } from "./util.js";
 import { api } from "./api.js";
 import { state, emit } from "./store.js";
 import { closeOverlays, openOverlay, appConfirm } from "./overlays.js";
 // ui.js 与 settings.js 互相引用，但引用的都是**函数声明**（会被提升），
 // 所以循环依赖在调用时已解析完毕，安全。
-import { fillPackSelect } from "./ui.js";
+import { fillPackSelect, closeOpenSelectMenus } from "./ui.js";
 
 const PANES = ["gen", "packinfo", "packgen", "llm"];
 // 2026-09-17：「知识 / 技能」两个独立面板已并入「行业包」面板，
@@ -33,6 +33,11 @@ let packgenJob = null;
 // 取消已发出、作业还没落到 cancelled 的那 ≤0.9 秒。按钮文案靠它，
 // 不能只靠一次性 textContent 赋值 —— 秒表每 1s 会重写一次按钮（实测覆盖）。
 let packgenCanceling = false;
+// 正在跑的那趟建包的**界面刷新函数**（runPackgen 的 tick）。
+// 「取消」失败时要靠它把按钮从「取消中…」改回「生成中 · Ns…」：那行字归 tick 所有
+// （秒表每秒重写一次），在别处赋 textContent 只会被下一拍盖掉 —— 修复前正是这样，
+// 于是取消失败后按钮永远停在「取消中…」并且 disabled，用户既停不掉它也回不去（P3-10）。
+let packgenTick = null;
 const dirty = new Set();
 // 最近一次 /api/config 的结果。模型列表、弹窗回填、「恢复默认」都读它 ——
 // 每次要一个字段就现发一次请求的话，弹窗里的默认值可能与列表不是同一时刻的。
@@ -81,16 +86,72 @@ export function settingsOpen() {
   return !$("settings-screen").classList.contains("hidden");
 }
 
+// ── 模态焦点圈（P2-7）────────────────────────────────────────
+// #settings-screen 是**整窗**二级页：它打开时背后的东西一律不该被摸到。
+// 修复前它只有一个 hidden 类，于是：
+//   · 没有 role=dialog —— 读屏完全不知道"进了一个模态"；
+//   · 打开后焦点还留在齿轮上 —— 键盘用户下一步 Tab 会从**背景**里那排按钮继续走；
+//   · 全局 Ctrl+K 会把焦点直接扔到设置页**背后**那颗会话搜索框（实测
+//     activeElement=sess-search 而 settingsOpen=true）—— 用户看不见地清空了列表。
+// 三件事一起在这里收口：进面板 / 出面板还焦点 / Tab 只在面板里绕。
+const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]),'
+  + ' select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/** 设置页里**当前真的能聚焦**的控件（隐藏面板与 hidden 子树都算不进来）。
+ *  用 getClientRects() 判可见：display:none 的子树返回空列表，
+ *  而 `.stg-pane.hidden` 正是这么藏的 —— 不看可见性的话 Tab 会绕进看不见的表单。 */
+export function settingsFocusables() {
+  const box = $("settings-screen");
+  if (!box) return [];
+  return $$(FOCUSABLE, box).filter(x => x.getClientRects().length > 0);
+}
+
+/** 打开设置时把焦点送进面板的第一件事（= 左上角那颗「返回工作区」）。 */
+function focusIntoSettings() {
+  const items = settingsFocusables();
+  if (items.length) items[0].focus();
+}
+
+/** Tab / Shift+Tab 圈在面板里；焦点已经在背后的（被别的全局快捷键丢出去的）
+ *  也一把拉回来 —— 这一半才是 Ctrl+K 那个洞的总闸。 */
+export function trapSettingsTab(e) {
+  if (e.key !== "Tab" || !settingsOpen()) return;
+  const items = settingsFocusables();
+  if (!items.length) return;
+  const first = items[0], last = items[items.length - 1];
+  const cur = document.activeElement;
+  if (!items.includes(cur)) {
+    e.preventDefault();
+    (e.shiftKey ? last : first).focus();
+    return;
+  }
+  if (e.shiftKey && cur === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && cur === last) { e.preventDefault(); first.focus(); }
+}
+
+// 打开设置前屏幕上停着的那个控件：关掉后焦点要还给它（模态的基本礼仪，
+// 也防键盘用户"关掉设置之后 Tab 从页面顶部重新走一遍"）。
+let settingsOpener = null;
+
 export function openSettings(pane) {
   closeOverlays();          // 确认浮层 z 高于设置页，不关会一直糊在整窗上
+  settingsOpener = document.activeElement;
   $("settings-screen").classList.remove("hidden");
   setPane(PANES.includes(pane) ? pane : state.settingsPane);
   preloadSettings().catch(() => {});
+  // 焦点必须在 setPane **之后**送：面板是谁决定了哪些控件可见。
+  focusIntoSettings();
   return Promise.resolve();
 }
 
 export function closeSettings() {
   if (settingsOpen()) $("settings-screen").classList.add("hidden");
+  // 焦点交回去：只在那颗控件还在屏幕上时才交（切会话可能已经把它摘掉了）。
+  if (settingsOpener && document.contains(settingsOpener)
+      && settingsOpener.getClientRects().length) {
+    settingsOpener.focus();
+  }
+  settingsOpener = null;
   // P3-49：结果页直接关设置（没点「完成」）时，主界面行业包下拉要能看到新包。
   // 只刷新、**不切包**：用户没点「完成」，没有「去用新包」的意图，当前包保持不变。
   // 切包是 onPackDone 的职责（fillPackSelect({prefer})）—— 这里若也 prefer，
@@ -106,6 +167,9 @@ export function closeSettings() {
 
 export function setPane(pane) {
   if (!PANES.includes(pane)) pane = state.settingsPane;
+  // 自绘下拉的菜单挂在 body 上，**不在这一次要隐藏的 .stg-pane 里面**：
+  // 菜单开着切面板，按钮藏了、菜单还盖在新面板上。收口在切走之前做一次。
+  closeOpenSelectMenus();
   PANES.forEach(p => $(("pane-" + p))?.classList.toggle("hidden", p !== pane));
   // 导航高亮：packgen 这种子动作让「资源」项高亮（NAV_OF_PANE 映射）。
   // 单一 `.on` 仍是断言守的「高亮唯一」，packgen 走到 packinfo，
@@ -129,20 +193,47 @@ export function setPane(pane) {
   } else if (pane === "llm") {
     // 进入模型面板：右列默认停在「当前启用」那条 —— 空着的话第一眼看到的是
     // 一张空表单，会以为还没配模型。
-    // `addingNew` 归零：重新进面板要回到「空态 / 停在当前启用那条」，
-    // 不能停在上次点到一半的「添加」表单上。
-    addingNew = false;
-    if (!editingId) {
-      const act = ((lastCfg || {}).models || []).find(x => x.active);
-      selectModel(act ? act.id : "");
+    // ⚠ 但**未保存的新增草稿**要留在新增态：修前这里无条件 `addingNew = false`
+    //  + `selectModel(当前启用那条)`，于是「填好请求地址与 Key → 切去别的面板 →
+    //  切回来」会把表单翻成「编辑模型」，并把刚填的内容原地覆盖成那条模型的旧值 ——
+    //  用户看到的是「我填的东西没了，而且标题说我在编辑」。
+    if (addingNew && hasDraftText()) {
+      selectModel("");              // 停在「添加模型」，回填的正是那份草稿
+    } else {
+      addingNew = false;
+      newDraft = null;
+      // `lastCfg` 还没到（openSettings 里 setPane 排在 preloadSettings 之前）：
+      // 这时**什么都不要猜** —— 一列表都没拉到就 selectModel("")，
+      // 首眼就是一张四格全空的「添加模型」表单，而真实情况可能是「有一条启用的」。
+      // 等 preloadSettings 回来再落位（见那里的 placeLlmForm）。
+      if (lastCfg && !editingId) {
+        const act = (lastCfg.models || []).find(x => x.active);
+        selectModel(act ? act.id : "");
+      }
     }
   }
   return pane;
 }
 
+/** 明文地址警告常驻（后端 `warnings` / `base_url_warnings` 字段的消费者）。
+ *
+ *  后端每次保存 / 测试都会回一份 `warnings`，GET /api/config 还常驻一份
+ *  `base_url_warnings` —— 修复前**没有任何一处读它**：提示只活在一次性 toast 里，
+ *  而"这个远端地址走的是明文 http，密钥每次请求都明文发出去"是每天都要成立的事实，
+ *  该一直挂在地址那一行下面。写的是 textContent（内容是后端给的地址文本，
+ *  不给它进 innerHTML 的机会）。 */
+function setModelWarnings(list) {
+  const n = $("md-warn");
+  if (!n) return;
+  const items = (Array.isArray(list) ? list : []).filter(Boolean);
+  n.textContent = items.join("　");
+  n.classList.toggle("hidden", !items.length);
+}
+
 async function preloadSettings() {
   const c = await api.config();
   lastCfg = c;
+  setModelWarnings(c.base_url_warnings);     // 打开设置页就看到，不用等一次保存
   const dflt = new Set(c.llm_defaulted || []);
   fill("st-retries", c.retries ?? "");
   fill("st-timeout", c.timeout ?? "");
@@ -151,14 +242,34 @@ async function preloadSettings() {
   // 底部那行浅灰小字他根本不会看。
   // 2026-09-17：模型行不再渲染「内置默认」标（任务 5 —— 移除默认模型）。
   // 高级配置这两项仍标：它们是「兜底值」，告诉用户「这个值不是你自己存的」
-  // 仍有用（点「保存高级配置」就能变成自己的）。
+  // 仍有用（保存随模型表单那一次一起提交 —— 「保存高级配置」按钮 2026-09-17 已删）。
   markDefault("st-retries", dflt.has("retries"), "retries");
   markDefault("st-timeout", dflt.has("timeout"), "timeout");
   renderAdvSub(dflt);
+  renderModelPlaceholders(c);   // 新增行的示例 = 服务端那份 defaults
   renderModelList(c);
   renderLlmEmpty(c);        // 空列表 → 右列只显示空态（隐藏表单 + 高级配置）
+  placeLlmForm(c);          // 第一次进面板的落位（setPane 时 lastCfg 还没到）
   renderConfigError(c.config_error);
   renderStatus(c);
+}
+
+/** 新增模型表单的「示例」取服务端下发的 `defaults`（app/server.py 的 /api/config）。
+ *
+ *  为什么要动这一处：冷启动没有模型时，四格全空、示例是 HTML 里手写死的一串字 ——
+ *  「什么都没有 pre-filled」的问题一半在于**没人告诉用户该填什么**，
+ *  而另一半在于那半句提示还可能与这台机器真正的内置默认不是同一条（两份表示）。
+ *  ⚠ 是把 defaults 当**示例**（placeholder）而不是当**值**填进框里：
+ *  新增时请求地址必须用户自己填（后端的 400 与 verify.js 都在守这条），
+ *  静默填成别家的地址 = 用户加一条 DeepSeek 却指向智谱、报错要到生成时才出现。 */
+function renderModelPlaceholders(c) {
+  const d = c.defaults || {};
+  const url = $("md-baseurl"), model = $("md-model");
+  // ⚠ 地址那条要**以 URL 开头**：placeholder 的开头几个字是断言口径
+  // （verify.js「留空的字段用 placeholder 说明默认值」查 /^https:\/\//），
+  // 前面加「例：」会把一条正常实现判成红的。
+  if (url && d.base_url) url.placeholder = `${d.base_url}（内置默认，可改）`;
+  if (model && d.model) model.placeholder = `${d.model}（内置默认）/ 服务商文档里的模型名`;
 }
 
 /** 高级配置收起来时，摘要行上要能看出「里面还有几项是内置默认」。
@@ -380,6 +491,7 @@ async function testModel(m) {
     // 带 model_id：编辑一条**非当前**模型时，不带 id 会错拿当前那条的 Key 去测 ——
     // 测出来的结果与用户以为的不是一回事，而界面会照常显示「连接正常」。
     const r = await api.testConfig({ model_id: m.id });
+    setModelWarnings(r && r.warnings);
     $("st-status").textContent = r.ok
       ? `「${name}」连接正常 · ${r.model}${r.detail ? " · " + r.detail : ""}`
       : `「${name}」连接失败：${r.detail}`;
@@ -390,12 +502,60 @@ async function testModel(m) {
   }
 }
 
-// ── 添加 / 编辑模型弹窗 ─────────────────────────────────────
+// ── 添加 / 编辑模型表单 ─────────────────────────────────────
 
 let editingId = "";
 // 空列表下用户主动点了「添加模型」→ 临时显示表单（否则点了没反应）。
 // 见 renderLlmEmpty 的说明。
 let addingNew = false;
+// 「添加模型」这张表单里**还没保存**的内容。
+// 为什么要有它：切面板 / 刷新列表都会重新落位右列（selectModel），
+// 修前没有这份草稿，用户填好的请求地址与 Key 就在切回来那一刻被覆盖掉，
+// 而且标题翻成「编辑模型」—— 于是那份草稿看起来像是被存进了别的模型里。
+let newDraft = null;
+const MD_FIELDS = ["md-model", "md-name", "md-baseurl", "md-apikey"];
+
+function mdValue(id) { return ($(id) || {}).value || ""; }
+
+/** 表单里此刻有没有用户填过的东西（新增态下才算草稿）。 */
+function hasDraftText() { return MD_FIELDS.some(id => mdValue(id).trim() !== ""); }
+
+function captureDraft() {
+  if (!addingNew) return;
+  newDraft = hasDraftText()
+    ? { model: mdValue("md-model"), name: mdValue("md-name"),
+        base_url: mdValue("md-baseurl"), api_key: mdValue("md-apikey") }
+    : null;
+}
+
+function clearDraft() { newDraft = null; }
+
+/** 新增态的说明行：哪些是必填、草稿是不是还没保存。
+ *  「必填」必须写在这里 —— 界面上只有 placeholder 暗示，用户要等到点保存
+ *  才知道地址不能空（后端也是这一刻才 400）。 */
+function addModeSub() {
+  return (newDraft ? "这是一份**未保存**的新增内容，切走再回来还在。" : "")
+    + "模型 ID 与请求地址必填；Key 可以之后再补。"
+    + "留空的框里，示例就是这台机器现在的内置默认（"
+    + ((lastCfg && lastCfg.defaults) || {}).model + " / "
+    + ((lastCfg && lastCfg.defaults) || {}).base_url + "）。";
+}
+
+/** 第一次进「模型接口」的落位（preloadSettings 拿到 lastCfg 之后才谈得上落位）。
+ *  见 setPane 里那段「lastCfg 还没到就什么都别猜」。 */
+function placeLlmForm(c) {
+  if (state.settingsPane !== "llm") return;
+  if (addingNew) { if (!hasDraftText() && newDraft) fillDraftIntoForm(); return; }
+  if (editingId && (c.models || []).some(x => x.id === editingId)) return;   // 正编辑着那条
+  const act = (c.models || []).find(x => x.active);
+  selectModel(act ? act.id : "");
+}
+
+function fillDraftIntoForm() {
+  const d = newDraft || { model: "", name: "", base_url: "", api_key: "" };
+  $("md-model").value = d.model; $("md-name").value = d.name;
+  $("md-baseurl").value = d.base_url; $("md-apikey").value = d.api_key;
+}
 
 /**
  * 选中一个模型：右列加载它的编辑表单（**不再开弹窗**）。
@@ -411,22 +571,28 @@ function selectModel(id) {
   const models = (lastCfg || {}).models || [];
   const m = models.find(x => x.id === id) || null;
   const dfl = new Set(m ? (m.defaulted || []) : []);
+  // 新增态（id 为空）：回填的是**那份未保存的草稿**，不是空白，也不是别的模型。
+  const adding = !m;
   $("md-id").value = editingId;
   $("md-title").textContent = m ? "编辑模型" : "添加模型";
   $("md-sub").textContent = m
     ? "改完点保存即生效；API Key 留空表示不改动已存的那把。"
     // 不写「左列」：一条模型都没有时中列是收起来的（见 renderLlmEmpty），
     // 指着一个不在 screen 上的方位，用户只会回头找。
-    : "填好保存后，随时可以在模型列表里启用它。";
+    : addModeSub();
   // ⚠ 回填的是**文件里存着的值**，不是生效值。
   // 一条没配过地址的模型，生效值里那个地址是内置默认兜出来的 —— 填进框里
   // 就变成了「你填的」，用户没动过手却看到一串地址，而且保存一次它就真的成了
   // 他的配置。所以 defaulted 里的字段一律留空，靠 placeholder + 小标说明。
-  $("md-model").value = m && !dfl.has("model") ? m.model : "";
-  $("md-baseurl").value = m && !dfl.has("base_url") ? m.base_url : "";
-  $("md-name").value = m ? m.name || "" : "";
+  if (adding && newDraft) {
+    fillDraftIntoForm();
+  } else {
+    $("md-model").value = m && !dfl.has("model") ? m.model : "";
+    $("md-baseurl").value = m && !dfl.has("base_url") ? m.base_url : "";
+    $("md-name").value = m ? m.name || "" : "";
+    $("md-apikey").value = "";
+  }
   const ak = $("md-apikey");
-  ak.value = "";
   if (!ak.dataset.phSet) ak.dataset.phSet = ak.placeholder;
   ak.placeholder = (m && m.api_key_set) ? ak.dataset.phSet : ak.dataset.phEmpty;
   // 2026-09-17（任务 5）：模型行不再渲染「内置默认」小标 —— 「默认模型」概念
@@ -477,6 +643,7 @@ async function saveModelDialog() {
   if (key) body.api_key = key;
   try {
     const out = await api.saveModel(body);
+    setModelWarnings(out && out.warnings);   // 保存成功但地址有合规风险，要说
     // 高级配置**并入同一次保存**（2026-09-17）：用户报「模型面板有两个保存」——
     // 原来高级配置折叠区底部有一个独立的「保存高级配置」，与这里的「保存」
     // 同屏并列，让人不知道该点哪个。现在一屏一个保存：点它同时存
@@ -535,6 +702,7 @@ async function testModelDialog() {
       api_key: $("md-apikey").value,
       model: $("md-model").value.trim(),
     });
+    setModelWarnings(r && r.warnings);
     $("md-status").textContent = r.ok
       ? `连接正常 · ${r.model}${r.detail ? " · " + r.detail : ""}`
       : `连接失败：${r.detail}`;
@@ -605,6 +773,9 @@ function fill(id, value) {
 
 export const bindSettings = bindOnce(function bindSettings() {
   applyNumericBounds();          // 区间由 JS 统一写入输入框的 min/max
+  // 模态焦点圈（P2-7）。注册在 document 上而不是面板上：Tab 的默认行走顺序
+  // 由浏览器决定，必须在**捕获阶段**先看到它，才拦得住"走出面板"那一步。
+  document.addEventListener("keydown", trapSettingsTab, true);
   ["st-retries", "st-timeout"].forEach(id => {
     $(id).addEventListener("input", () => dirty.add(id));
   });
@@ -656,15 +827,37 @@ export const bindSettings = bindOnce(function bindSettings() {
   // 下次建同名会 409，不是"什么都没发生"。
   // 修复前它在生成期间被禁用 —— 因为那是个同步长请求，中途退出后结果会悄悄
   // 落进隐藏面板（P3-48）；现在取消有真实语义，禁用它的理由也随之消失。
-  $("pg-close").onclick = () => {
-    if (!packgenJob) { setPane(packgenFrom); return; }
+  /** 真的去取消（pg-close 与"取消失败后再点一次"共用这一份）。
+   *  @returns {boolean} 有没有发出取消请求 */
+  function cancelPackgen() {
+    if (!packgenJob) return false;
     // 乐观反馈：作业要到下一拍轮询（≤0.9s）才落到 cancelled，
     // 按钮一直写着「生成中 · Ns…」会让人以为没点上而再点一次。
     packgenCanceling = true;
     $("pg-run").textContent = "取消中…";
-    api.cancel(packgenJob).catch(e => toast("取消失败：" + e.message));
+    api.cancel(packgenJob).catch(e => {
+      // 「取消中…」是一句关于**后端**的承诺，取消请求本身失败就得收回。
+      // 修复前这里只弹一条 toast：packgenCanceling 留在 true，秒表每一拍都继续
+      // 把按钮写成「取消中…」，而它同时是 disabled —— 于是取消失败之后
+      // 这颗按钮永久卡死，用户既停不掉这个作业，也退回不了表单（P3-10）。
+      // 交回 tick 去改写：那行字归它所有，在这里赋 textContent 会被下一拍盖掉。
+      packgenCanceling = false;
+      if (packgenTick) packgenTick();
+      // 收回 disabled：作业还在跑，但**这一颗按钮不能是死的**。
+      // 用户在生成期间点它只会再发一次取消（后端 cancel 是幂等的，
+      // 见 pipeline.cancel 对终态作业直接返回快照），绝不会变成第二次建包提交，
+      // 所以"防重复提交"不需要靠禁用它来实现 —— 禁用换来的只是一个死控件。
+      $("pg-run").disabled = false;
+      toast(`取消失败：${e.message} —— 行业包仍在生成`, 5000);
+    });
+    return true;
+  }
+  $("pg-close").onclick = () => {
+    if (!packgenJob) { setPane(packgenFrom); return; }
+    cancelPackgen();
   };
-  $("pg-run").onclick = runPackgen;
+  // 生成期间这颗按钮的点击语义就是"再试一次取消"（禁用它的理由随取消变成真操作而消失）。
+  $("pg-run").onclick = () => { if (cancelPackgen()) return; runPackgen(); };
   // 结果页双出口：返回回来源面板（与表单页「取消」一致），完成去工作台用新包。
   $("pg-back").onclick = () => setPane(packgenFrom);
   $("pg-done").onclick = onPackDone;
@@ -872,7 +1065,15 @@ async function showPackFile(name, rel, row) {
       d.size > 1024 ? (d.size / 1024).toFixed(1) + " KB" : d.size + " B";
     $("pi-file-body").textContent = d.text;
   } catch (e) {
-    $("pi-file-body").textContent = "读取失败：" + e.message;
+    // 403 是**故意不开这个口子**（安装包与导出都排除 private/），不是包坏了。
+    // 报成"读取失败"会让人去查没坏的东西；后端 detail 已经写清楚去哪儿改。
+    if (e && e.status === 403) {
+      $("pi-file-size").textContent = "不经界面浏览";
+      $("pi-file-body").textContent = (e.message || "") +
+        "\n\n（这里读不到不代表包有问题：列表与体积照常显示，只是全文不出这道口子。）";
+    } else {
+      $("pi-file-body").textContent = "读取失败：" + (e && e.message ? e.message : e);
+    }
   }
 }
 
@@ -916,10 +1117,12 @@ async function runPackgen() {
       : `生成中 · ${Math.round((Date.now() - t0) / 1000)}s…`;
     if (working) working.textContent = note || PACKGEN_HINT;
   };
+  packgenTick = tick;                       // 交出去：取消失败时要靠它收回「取消中…」（P3-10）
   const finish = () => {
     clearInterval(timer);
     packgenJob = null;
     packgenCanceling = false;
+    packgenTick = null;                     // 这趟界面归完了，别让迟到的回调写旧按钮
     btn.disabled = false;
     if (working) working.classList.add("hidden");
     btn.textContent = "";
@@ -954,8 +1157,43 @@ async function runPackgen() {
   $("pg-form").classList.add("hidden");
   $("pg-result").classList.remove("hidden");
   renderPackgenSummary(out);
-  $("pg-checklist").textContent = out.checklist;
+  renderChecklist($("pg-checklist"), out.checklist);
   toast(`行业包「${out.display_name}」已生成（草稿）`);
+}
+
+/** 校对清单：按行的记号分类后画成"一栏待勾的方框 + 正文"（P3-50）。
+ *  原来是一份 markdown 原文塞进 `<pre>`：`- [ ]`、`##`、`---` 一起上屏，
+ *  二十来条就是一面读不动的文本墙 —— 而它恰恰是这次生成**唯一需要人看**的东西。
+ *  ⚠ 内容来自模型：只用 textContent / createElement，绝不 innerHTML 拼接。
+ *  行级样式复用结果页摘要已有的 `.pg-summary-row/.pg-summary-k/.pg-summary-v`
+ *  （这一屏不该为一个小清单新增 CSS 档）。 */
+function renderChecklist(el, md) {
+  el.textContent = "";
+  const row = (mark, text, cls) => {
+    const r = document.createElement("div");
+    r.className = "pg-summary-row";
+    const k = document.createElement("span");
+    k.className = "pg-summary-k";
+    k.textContent = mark;
+    const v = document.createElement("span");
+    v.className = cls || "pg-summary-v";
+    v.textContent = text;
+    r.append(k, v);
+    el.append(r);
+  };
+  for (const raw of String(md || "").split("\n")) {
+    const line = raw.trim();
+    // 空行、`---` 分隔线、以及 H1（`<summary>` 已经写着「校对清单」）都不占一行
+    if (!line || /^-{3,}$/.test(line) || line.startsWith("# ")) continue;
+    if (line.startsWith("- [ ]")) row("□", line.slice(5).trim());
+    else if (line.startsWith("- [x]")) row("☑", line.slice(5).trim(), "pg-idea-more");
+    else if (line.startsWith("- ") || line.startsWith("* ")) row("·", line.slice(2).trim());
+    else if (line.startsWith("## ")) row("", line.slice(3).trim(), "pg-idea");
+    else if (line.startsWith("> ")) row("", line.slice(2).trim(), "pg-idea-more");
+    else row("", line);
+  }
+  if (!el.childElementCount) row("", "（这份清单是空的 —— 说明本次生成没有留下待核实项，" +
+                                    "但私有资料与标准清单仍需自己过一遍）");
 }
 
 /** 结果页「生成了什么」：细分/受众/人设/选题摘要。
@@ -1009,13 +1247,17 @@ function renderPackgenSummary(out) {
 }
 
 async function onPackDone() {
-  setPane("gen");
+  // 「完成」的去向要跟「返回 / 取消」同一套语义（P2-47）。
+  // 从行业包面板进来的人，事情还没做完 —— 他紧接着要看的就是这个新包的
+  // 校对清单与文件，原来却被一律扔回工作台，等于替他决定了"建完就走"。
+  const backToPacks = packgenFrom === "packinfo";
+  setPane(backToPacks ? "packinfo" : "gen");
   try {
     state.meta = await api.meta();
     emit("meta", state.meta);
     // 显式选中刚建好的包（emit 只负责刷新列表，选择权在这里）
     fillPackSelect({ prefer: state.lastCreatedPack });
-    toast("已切换到新建的行业包");
+    toast(backToPacks ? "已建好，回到行业包列表" : "已切换到新建的行业包");
   } catch (e) { toast("刷新行业包列表失败：" + e.message, 3500); }
 }
 
@@ -1024,17 +1266,25 @@ async function onPackDone() {
 // 最显眼的位置。后端 `/api/packs/<name>/export-skill` 保留（没被别处依赖，
 // 删接口是另一件事），只是界面不再暴露。
 
+/** 行业包详情右列当前**显示的是哪一个包**（`piName`）。
+ *  必须记下来：`#pack` 那个下拉是「生成参数选哪个包」的控件，两者可以不一致
+ *  —— 例如建包作业完成后列表刷成了 fitment，而右列还停在 elevator 的详情上。
+ *  修复前「标记为已校对」读 `$("pack").value`，于是**用户看着电梯包点的按钮，
+ *  转正的是另一个包**（批次 10 复核把桩改成按包名回显之后才量出来：
+ *  桩原来无论请求哪个包都翻 elevator 的草稿位，这条一直绿着）。 */
+let piName = "";
+
 async function undraftPack() {
-  const name = $("pack").value;
+  const name = piName || $("pack").value;
   const ok = await appConfirm("标记为已校对",
-    "确认该行业包已人工校对完毕？\n草稿标记会被移除，生成结果不再提示“需校对”。");
+    `确认把行业包「${name}」标记为已人工校对完毕？\n草稿标记会被移除，生成结果不再提示“需校对”。`);
   if (!ok) return;
   try {
     await api.undraft(name);
     toast("已标记为校对完成");
     state.meta = await api.meta();
     emit("meta", state.meta);
-    await openPackInfo();
+    await openPackInfo(name);          // 刷新的必须还是**这一个**包，不是下拉里的
   } catch (e) { toast("操作失败：" + e.message, 3500); }
 }
 
@@ -1048,6 +1298,26 @@ async function undraftPack() {
  * ⚠ 与「当前启用」不同：行业包没有「唯一启用」语义（任何包都可以选），
  *   所以 `.on` 留给业务态（这里是「草稿」），`.sel` 表示「当前在右列查看」。
  */
+/** 可写包目录摊在详情列顶部。
+ *
+ *  打包版里包**不住**在安装目录（覆盖安装会重写 `resources/engine`），
+ *  自建包与手改的词表住在用户数据目录 —— 路径不摊出来就等于没人知道去哪儿改，
+ *  而"我改的词表怎么没生效"会是下一个求助。
+ *  放详情列而不是中列：`#pi-list` 是三列骨架里被断言过宽度的窄列，
+ *  一条不含空格的长路径撑开它就把整个面板的列宽推歪（实测 258 → 282/320）。
+ *  每次刷新先摘掉旧的，避免重复叠加。 */
+function renderPacksDir() {
+  const desc = $("pi-desc");
+  const detail = document.querySelector("#pane-packinfo .pane-detail");
+  document.querySelectorAll("#pi-packs-dir").forEach(n => n.remove());
+  if (!desc || !detail || !state.meta || !state.meta.packs_dir) return;
+  const n = el("p", "hint");
+  n.id = "pi-packs-dir";
+  n.textContent = "行业包目录：" + state.meta.packs_dir;
+  n.title = "新建的包与手改的词表都在这里；覆盖安装不会动这一份";
+  desc.after(n);
+}
+
 function renderPackList() {
   const list = $("pi-list");
   if (!list) return;
@@ -1058,6 +1328,7 @@ function renderPackList() {
     return;
   }
   for (const p of packs) list.appendChild(packItem(p));
+  renderPacksDir();
   // 恢复右列当前查看的那条的 .sel（列表重建会丢选中态）
   const cur = $("pack").value;
   if (cur) {
@@ -1102,6 +1373,7 @@ async function openPackInfo(name) {
   // 三列化后 name 由调用方传；保留旧的「未传则从 #pack 读」作为兜底，
   // 保证 `btn-packinfo` / `pi-refresh` 这两条老路径仍然能用。
   if (name === undefined) name = $("pack").value;
+  piName = name;                        // 「标记为已校对」操作的必须是**这一个**包
   const p = await api.pack(name);
   $("pi-title").textContent = `${p.display_name || name} · 包内容`;
   $("pi-desc").textContent = (p.description || "")
@@ -1110,7 +1382,9 @@ async function openPackInfo(name) {
   const cw = $("pi-checklist-wrap");
   if (p.checklist) {
     cw.classList.remove("hidden");
-    $("pi-checklist").textContent = p.checklist;
+    // 与结果页同一个渲染器（P3-50）：这里原来是 `textContent = p.checklist`，
+    // 而 p.checklist 就是盘上的 校对清单.md 原文 —— `- [ ]`、`##`、`---` 一起上屏。
+    renderChecklist($("pi-checklist"), p.checklist);
   } else {
     cw.classList.add("hidden");
   }

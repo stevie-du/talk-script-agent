@@ -36,6 +36,7 @@ class SlowLLM:
         temperature = 0.7
         max_tokens = 4096
         model = "fake-model"
+        base_url = "http://fake/v1"      # 选题缓存指纹要读它（_plan_key）
 
     def __init__(self):
         self.cfg = self._Cfg()
@@ -44,7 +45,8 @@ class SlowLLM:
 
     def chat_json(self, task, system, user, model_cls, max_retries=1,
                   on_retry=None, temperature=None, on_delta=None,
-                  max_tokens=None):
+                  max_tokens=None, on_attempt=None, should_abort=None,
+                  usage=None, deadline=None):
         if task == "select":
             return TopicPlan(angle="被困别慌", hook_type="反常识",
                              hook_line="电梯里最危险的动作是扒门。",
@@ -232,7 +234,13 @@ def test_stream_buffers_are_bounded():
     # 换阶段要重置（否则上一阶段的思考会串到下一阶段）
     j.begin_stream("校验")
     assert j.stream_reasoning_len == 0 and j.stream_content_len == 0
-    assert j.snapshot(include_result=False).get("stream") is None
+    # P1-7 修正：阶段一开始（即使还没有任何增量）就必须带 stream 键，
+    # 前端据此显示「等待模型首个 token…」。修复前门禁挂在两个计数上，
+    # 把「无 stream 键」当期望 —— 首字节前的静默期由此隐藏了几十秒。
+    snap = j.snapshot(include_result=False)
+    assert snap.get("stream") is not None, snap
+    assert snap["stream"]["phase"] == "校验"
+    assert snap["stream"]["reasoning_len"] == 0
 
 
 def main() -> int:

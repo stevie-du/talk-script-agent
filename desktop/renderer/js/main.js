@@ -9,8 +9,9 @@ import { $, esc, toast, dayGroupKey } from "./util.js";
 import { api } from "./api.js";
 import { state, detachJob } from "./store.js";
 import * as T from "./thread.js";
-import { abort, send, autoGrowTopic, collectParams } from "./jobs.js";
-import { loadSessions, bindSessionList } from "./sessions.js";
+import { abort, send, autoGrowTopic, collectParams, reattachBusyJob,
+  stopAllBackgroundJobs } from "./jobs.js";
+import { loadSessions, bindSessionList, busyRecords } from "./sessions.js";
 import { bindSettings, openSettings, setPane, settingsOpen, closeSettings } from "./settings.js";
 import { setHead, resultSrt, resultMarkdown, voicePlainText,
   errorText } from "./result.js";
@@ -18,6 +19,7 @@ import {
   bindShell, renderSamples, refreshGate, gotoView, fillPackSelect, setCfgHint,
   renderModelPicker, setLanding,
 } from "./ui.js";
+import { BUSY_STATES } from "./progress.js";
 
 async function boot() {
   bindShell();
@@ -48,11 +50,23 @@ async function boot() {
   refreshGate();
   autoGrowTopic();
 
+  // 生成中刷新页面 / 重开窗口：以前这里什么都没有 —— 左栏那一行挂着一颗呼吸点，
+  // 但界面上没有任何一条路径把渲染接回那个**已经在跑**的作业（缺陷 3）：
+  // 发送键被 409 挡住、进度也看不见，用户只能等或者关掉窗口。
+  // /api/history 会把内存里在跑的作业并进摘要（app/server.py 的 history()），
+  // 所以「有没有在跑」读的就是刚拿到的这一份；接不接得回去问 /api/jobs/{id}。
+  const running = (sessions || []).filter(it => BUSY_STATES.has(it.state || ""));
+  let attached = false;
+  for (const it of running) {
+    if (await reattachBusyJob(it.id)) { attached = true; break; }
+  }
+
   // 空态 hero 的「配置引导」那一态已下线：五个居中块叠着没有主次，
   // 而且「还没配模型」这件事工具条那颗胶囊已经在说了。
   // 只在「确实没配过」（无 Key 且无历史记录）时自动弹设置，避免打扰老用户。
+  // 接上了一个在跑的作业时不弹 —— 那说明这台机器配过，弹上去反而把进度页顶走。
   const noKey = !state.meta.has_api_key && !state.meta.mock;
-  if (noKey && !(sessions || []).length) openSettings("llm");
+  if (!attached && noKey && !(sessions || []).length) openSettings("llm");
 }
 
 function newChat() {
@@ -67,7 +81,14 @@ function newChat() {
   state.sentTopic = "";
   setHead("新对话", "", "");
   $("topic").focus();
-  loadSessions();
+  // 「不取消」是有代价的：并发额度只有 4 条，连点四次新建对话之后再发就是 409，
+  // 而那几条作业在界面上只剩左栏几颗呼吸点。所以这里必须**说出来**，
+  // 并把「停止全部」那颗入口指给用户 —— 静默吃一个 409 是最坏的形态（缺陷 4）。
+  loadSessions().then(() => {
+    const bg = busyRecords();
+    if (bg.length) toast(`这条新对话不含刚才那 ${bg.length} 条：它们仍在后台进行，`
+      + `额度满了会被拒。下方「停止全部后台生成」可以一次停掉`, 6000);
+  });
 }
 
 function showEngineDown(e) {
@@ -102,7 +123,11 @@ window.__ts = {
   errorText,
   send,
   abort,
+  // 后台作业可见性：有几条在跑、以及那颗「停止全部」到底停了几条。
   loadSessions,
+  busyRecords,
+  stopAll: () => stopAllBackgroundJobs(),
+  reattachBusyJob,
   openSettings,
   closeSettings,
   setPane,

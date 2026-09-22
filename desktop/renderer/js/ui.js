@@ -9,9 +9,9 @@
 import { $, $$, el, esc, toast, bindOnce } from "./util.js";
 import { state, setBusy, on, emit, setGenParam, resetGenParams } from "./store.js";
 import { api } from "./api.js";
-import { collectParams, updateStale, autoGrowTopic, getParam } from "./jobs.js";
+import { collectParams, updateStale, autoGrowTopic, getParam, stopAllBackgroundJobs } from "./jobs.js";
 import { stopTicker } from "./progress.js";
-import { focusSessionSearch } from "./sessions.js";
+import { focusSessionSearch, busyRecords } from "./sessions.js";
 import { closeSettings, openSettings, setPane, settingsOpen } from "./settings.js";
 import { anyOverlayOpen, closeOverlays } from "./overlays.js";
 
@@ -315,6 +315,7 @@ function renderQuickParams() {
 
 // ── 自绘下拉 ────────────────────────────────────────────────
 // 原生菜单的系统蓝高亮 + 黑描边与整体设计语言冲突太大，统一换成自绘。
+let MENU_SEQ = 0;
 export function beautifySelects(scope = document) {
   scope.querySelectorAll("select:not([data-beauty])").forEach(sel => {
     sel.dataset.beauty = "1";
@@ -335,6 +336,11 @@ export function beautifySelects(scope = document) {
         <path d="M1 1.5L6 6.5L11 1.5"/></svg>`;
     const menu = el("div", "select-menu hidden");
     menu.setAttribute("role", "listbox");
+    // aria-activedescendant 要指到**具体某一项**，那一项就得有 id。
+    // 菜单挂在 body 下、同一页里可能同时开过好几个，所以编号取全局自增，
+    // 不能用「按下标」这种在同一次 build 里才会唯一的写法。
+    menu.id = `smenu-${++MENU_SEQ}`;
+    btn.setAttribute("aria-controls", menu.id);
     document.body.appendChild(menu);
     wrap.appendChild(btn);
 
@@ -352,15 +358,20 @@ export function beautifySelects(scope = document) {
       btn.classList.toggle("is-mock", !!sel._mock);
       const base = sel.title || "";
       btn.title = note ? (base ? base + "\n" : "") + note : base;
-      menu.querySelectorAll(".select-opt").forEach(d =>
-        d.classList.toggle("on", d.dataset.value === sel.value));
+      menu.querySelectorAll(".select-opt").forEach(d => {
+        const on = d.dataset.value === sel.value;
+        d.classList.toggle("on", on);
+        // role=option 的选中态要写在 aria 上 —— `.on` 那个类只是颜色，
+        // 读屏用户听不出「这一项是当前的值」。
+        d.setAttribute("aria-selected", on ? "true" : "false");
+      });
     };
     // 暴露给调用方：select 的值被程序改动后（「自定义模型…」只是个入口，
     // 选完要退回原值），外部需要主动重画按钮文字。
     sel._sync = sync;
     const build = () => {
       menu.innerHTML = "";
-      Array.from(sel.options).forEach(o => {
+      Array.from(sel.options).forEach((o, i) => {
         const note = sel._audit && sel._audit[o.value];
         // 缺定制的选项在**选中之前**就要能看出来，所以标记打在菜单项上，
         // 而不是只在选中后变色。
@@ -370,7 +381,9 @@ export function beautifySelects(scope = document) {
           (note ? `<span class="opt-warn" aria-hidden="true">!</span>` : "") +
           `<span class="tick">✓</span>`);
         d.dataset.value = o.value;
+        d.id = `${menu.id}-o${i}`;              // aria-activedescendant 的落点
         d.setAttribute("role", "option");
+        d.setAttribute("aria-selected", o.value === sel.value ? "true" : "false");
         if (note) {
           d.title = note;
           d.setAttribute("aria-label", `${o.textContent}：${note}`);
@@ -385,11 +398,23 @@ export function beautifySelects(scope = document) {
       });
     };
     const isOpen = () => !menu.classList.contains("hidden");
+    /** 键盘高亮位（aria-activedescendant 的落点）。
+     *  读屏用户在这个自绘 listbox 里**完全看不见**上一轮 `.hover` 类画在哪一行 ——
+     *  那只是个 CSS 状态，没有任何东西告诉辅助技术"焦点在哪一项"。 */
+    let activeOpt = null;
+    const setActive = (d) => {
+      activeOpt = d || null;
+      menu.querySelectorAll(".select-opt").forEach(n =>
+        n.classList.toggle("hover", n === d));
+      if (d) btn.setAttribute("aria-activedescendant", d.id);
+      else btn.removeAttribute("aria-activedescendant");
+    };
     const open = () => {
       build();
       menu.classList.remove("hidden");
       wrap.classList.add("open");
       btn.setAttribute("aria-expanded", "true");
+      setActive(menu.querySelector(".select-opt.on") || menu.querySelector(".select-opt"));
       const r = wrap.getBoundingClientRect();
       // 先置于视口外测量自身尺寸：胶囊形态需按内容取宽（可宽于按钮）
       Object.assign(menu.style, {
@@ -412,28 +437,58 @@ export function beautifySelects(scope = document) {
       menu.classList.add("hidden");
       wrap.classList.remove("open");
       btn.setAttribute("aria-expanded", "false");
+      btn.removeAttribute("aria-activedescendant");
+      activeOpt = null;
       Object.assign(menu.style, {
         position: "", left: "", right: "", top: "", width: "", maxHeight: "",
       });
     };
     sel._syncDropdown = sync;
     wrap._menu = menu;
+    wrap._closeMenu = close;
 
     btn.onclick = () => (isOpen() ? close() : open());
+    // ⚠ 这一段的事件顺序是修出来的，别改回「只 close()」：
+    //   菜单开着按 Esc，原本只做 `close()` 就结束了函数，但 keydown **继续冒泡**
+    //   到 ui.js 里那个 document 级 Esc 分派（浮层 → 关设置 → 停止生成）。
+    //   后果有两层，都是实测到的：
+    //     · 收起菜单的同一刻把设置整页关掉 / 把正在跑的作业停了（破坏性动作被误触）；
+    //     · 焦点在别处（例如用鼠标点开后按 Tab 走开、或菜单是从隐藏面板里打开的）时
+    //       这条 onkeydown 根本没跑到，Esc 直接落到分派层 —— 设置页关了，
+    //       **菜单还挂在 body 上**（它是浮层，不受 .pane 的 hidden 影响），
+    //       于是界面上留着一个盖在工作区上的孤儿菜单（缺陷报告里的"菜单还开着"）。
+    //   所以：这里吃掉这个事件（stopPropagation + preventDefault），并按住
+    //   「谁开的菜单谁负责收」这条线在 closeSettings / setPane 里补一次总收口。
     btn.onkeydown = ev => {
       const opts = Array.from(menu.querySelectorAll(".select-opt"));
-      if (ev.key === "Escape") { close(); return; }
+      if (ev.key === "Escape") {
+        if (isOpen()) { close(); btn.focus(); ev.stopPropagation(); ev.preventDefault(); }
+        return;
+      }
       if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
         ev.preventDefault();
+        ev.stopPropagation();               // 别被全局的折叠/滚动快捷键抢走
         if (!isOpen()) open();
-        const idx = opts.findIndex(d => d.classList.contains("on"));
+        const cur = opts.indexOf(activeOpt || opts.find(d => d.classList.contains("on")));
         const next = ev.key === "ArrowDown"
-          ? Math.min(idx + 1, opts.length - 1) : Math.max(idx - 1, 0);
-        opts.forEach(d => d.classList.remove("hover"));
-        (opts[next] || opts[0])?.classList.add("hover");
-      } else if (ev.key === "Enter") {
-        const hit = menu.querySelector(".select-opt.hover") || menu.querySelector(".select-opt.on");
+          ? Math.min(cur + 1, opts.length - 1) : Math.max(cur - 1, 0);
+        setActive(opts[next] || opts[0]);
+      } else if (ev.key === "Home" || ev.key === "End") {
+        if (!isOpen()) return;
+        ev.preventDefault();
+        setActive(opts[ev.key === "Home" ? 0 : opts.length - 1]);
+      } else if (ev.key === "Enter" || ev.key === " ") {
+        if (!isOpen()) return;              // 关着的时分派给原生按钮的 click 去开菜单
+        const hit = activeOpt || menu.querySelector(".select-opt.on") || opts[0];
+        // preventDefault 是必需的：`<button>` 在 keydown Enter 上会**另外**合成一次
+        // click，而我们的 click 处理是「没开就开」—— 于是选中一项、close() 之后
+        // 那一次合成 click 又把菜单开了回来（表现为"选完菜单赖着不走"）。
+        ev.preventDefault();
+        ev.stopPropagation();
         if (hit) hit.onclick();
+        btn.focus();
+      } else if (ev.key === "Tab") {
+        close();                            // 走开 = 收起，不留孤儿浮层
       }
     };
     sync();
@@ -461,6 +516,50 @@ export function beautifySelects(scope = document) {
   }
 }
 
+// ── 后台作业可见性 与 浮层收口 ──────────────────────────────
+/** 收掉所有开着的自绘菜单。
+ *  菜单是挂在 body 上的浮层，**不受 .stg-pane / .view 的 hidden 影响** ——
+ *  面板一被切走、设置页一关，按钮藏起来了而菜单还盖在屏幕上（孤儿浮层）。
+ *  Esc 那条路径已经在 trigger 里自己收了（并 stopPropagation），
+ *  这里补的是别的路径：切面板、关设置。 */
+export function closeOpenSelectMenus() {
+  document.querySelectorAll(".select-wrap.open").forEach(w => {
+    if (w._closeMenu) w._closeMenu();
+    else { w.classList.remove("open"); w._menu?.classList.add("hidden"); }
+  });
+}
+
+/** 还有几条生成在后台跑 —— 说清楚，并给一个能腾出额度的动作。
+ *
+ *  缺陷实况：切会话 / 连点「新建对话」都**不会**取消后台作业（这是有意的：
+ *  用户没说要停它），但并发额度只有 4（app/pipeline.py 的 MAX_CONCURRENT_JOBS），
+ *  于是点四次之后再发就吃 409，而界面上除了左栏几颗呼吸点什么都没有 ——
+ *  既不知道是谁占的额度，也没有任何入口把它们停下来。
+ *  这里改的是**可见性与出口**，不动后端语义。「正在看的那一条」不算后台
+ *  （它已经有进度与「停止」键了）。 */
+export function syncBusyAffordance() {
+  const btn = $("btn-stop-all");
+  const hint = $("composer-gen-hint");
+  if (!btn) return;
+  const bg = busyRecords().filter(it => !state.job || it.id !== state.job.id);
+  // landing（首页）不写这一行：输入卡下面那条 `composer-foot` 有一条硬不变量 ——
+  // 没话可说时不占高度。首页的节奏是「问候语→卡 24 / 卡→起手示例 16」，
+  // 这里多出 28px 会把整列挤歪（实测 chipsGap 16 → 44）。
+  // 首页不缺线索：左栏那几颗呼吸点就是实况，被额度挡住时还有 409 的 toast；
+  // 真正看不见左栏的人是在**某条会话里**，那一态才需要这行字与这个动作。
+  const landing = $("view-chat")?.classList.contains("is-landing");
+  const show = bg.length > 0 && !landing;
+  btn.classList.toggle("hidden", !show);
+  btn.textContent = bg.length ? `停止全部后台生成（${bg.length}）` : "";
+  if (bg.length) {
+    btn.title = bg.map(it => `「${(it.topic || "未命名").slice(0, 12)}」`)
+      .join(" ") + " 仍在后台进行，会占用生成额度";
+  }
+  if (hint && !state.busy) {
+    hint.textContent = show ? `还有 ${bg.length} 条生成在后台进行（不属于这个会话）` : "";
+  }
+}
+
 // ── 首页（landing）──────────────────────────────────────────
 /** 问候语按时段分五档。写死一句「想聊点什么？」的问题不是它不好，而是它和
  *  顶部头部的「新对话」是同一层级的两句话 —— 换成带时段的问候，一句同时
@@ -485,6 +584,9 @@ export function setLanding(on) {
     const h3 = $("empty-greet");
     if (h3) h3.textContent = greeting();
   }
+  // 两态之间切换要立刻重算后台那一行：landing 不占行、对话态占行
+  // （见 syncBusyAffordance），不刷新的话从会话切回首页会把那 28px 留在原地。
+  syncBusyAffordance();
 }
 
 export function renderSamples() {
@@ -516,6 +618,9 @@ export function refreshGate() {
   btn.title = canStop ? "停止生成（Esc）"
     : state.busy ? "生成中…"
       : empty ? "输入主题后发送" : "发送（Enter / Ctrl + Enter）";
+  // 按钮里只有两个 aria-hidden 的图标 —— 读屏下它**没有名字**，
+  // 而「生成中」时它是界面上唯一能做的动作。title 不算可靠的无障碍名。
+  btn.setAttribute("aria-label", canStop ? "停止生成" : "生成脚本");
 }
 
 export function lockParams(lock) {
@@ -569,6 +674,9 @@ export const bindShell = bindOnce(function bindShell() {
   // 「去配置」那颗按钮随空态引导一起下线了（见 index.html 的 #empty）——
   // 入口收敛到两处：工具条那颗模型胶囊，和设置页 headbar 的一颗「添加模型」。
   $("btn-packinfo").onclick = () => setPane("packinfo");
+  // 「停止全部后台生成」：切会话 / 连点新建对话都不会取消后台作业（有意的），
+  // 但额度只有 4 —— 没有这颗按钮的话，用户唯一能做的就是等，或者被 409 反复挡住。
+  $("btn-stop-all").onclick = () => stopAllBackgroundJobs();
 
   // busy / job 任一变化都刷新门控与参数锁。
   // job 也要听：send() 先置 busy 再拿到 job_id，只听 busy 的话按钮会停在
@@ -581,6 +689,9 @@ export const bindShell = bindOnce(function bindShell() {
     lockParams(state.busy && state.loading);
     $("composer-gen-hint").textContent =
       state.busy && state.loading ? "生成中，参数已锁定（Esc 可停止）" : "";
+    // 放在最后：不在生成态时它才有话可说（「还有 N 条在后台」），
+    // 顺序反了会被上面那句清空。
+    syncBusyAffordance();
   };
   on("busy", syncGate);
   on("job", syncGate);
@@ -630,13 +741,32 @@ export const bindShell = bindOnce(function bindShell() {
       return;
     }
     if (mod && (e.key === "k" || e.key === "K")) {
+      // 设置页是**整窗模态**（role=dialog），焦点不能跑到它背后去。
+      // 修复前这里无条件 `focusSessionSearch()`：设置页开着按 Ctrl+K，
+      // 实测 activeElement=sess-search 而 settingsOpen=true —— 左栏被盖住了，
+      // 用户看不见地在搜索框里打字，列表被悄悄清空（P2-7）。
+      // 这里只说"此刻按它没用、以及怎么让它有用"，不替用户关掉设置页：
+      // 表单里可能有他刚填还没存的草稿。
+      if (settingsOpen()) {
+        toast("设置页里不能搜会话 —— 先按 Esc 返回工作区", 3200);
+        return;
+      }
       e.preventDefault();
       focusSessionSearch();
       return;
     }
     if (e.key === "Escape") {
-      // 优先级：先收浮层 → 再关设置 → 最后才是「停止生成」。
+      // 优先级：先收**自绘菜单** → 再收浮层 → 关设置 → 最后才是「停止生成」。
+      // 菜单排第一是因为它是挂在 body 上的浮层：焦点不在 trigger 上时（用鼠标
+      // 点开再 Tab 走开、或菜单是从即将隐藏的面板里开的）trigger 那条 onkeydown
+      // 收不到事件，没有这一层兜底就会出现「按 Esc 把设置关了、菜单还盖在工作区上」。
       // 「停止」放最后是因为它是破坏性动作（token 不退），不该被误触。
+      const openMenu = document.querySelector(".select-wrap.open");
+      if (openMenu) {
+        e.preventDefault();
+        closeOpenSelectMenus();
+        return;
+      }
       if (anyOverlayOpen()) { closeOverlays(); return; }
       if (settingsOpen()) { closeSettings(); return; }
       if (state.busy && state.job) {

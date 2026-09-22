@@ -1,7 +1,6 @@
 # 重试、空内容诊断与配置保持测试
 # 跑法：python tests/test_llm_retry.py   或   pytest tests/test_llm_retry.py
 import json
-import re
 import sys
 import tempfile
 from pathlib import Path
@@ -206,12 +205,11 @@ def test_retries_exhausted_reports_count():
         assert "已重试 3 次" in str(e), str(e)
 
 
-def test_streaming_empty_content_gives_actionable_error():
-    """流式分支必须也做空内容诊断。
+def test_streaming_empty_content_retries_with_upgraded_budget():
+    """流式空内容：必须升级预算重试（P0：这条升级分支原本是死代码）。
 
-    修复前 `if on_delta: return self._stream_once(...)` 直接返回，绕过了
-    非流式分支里的那段诊断，而 pipeline 全程都传 on_delta —— 于是
-    「模型返回空内容，请调大 max_tokens」这条提示在真实使用中永远不出现。
+    断言口径 = **数请求次数 + 第二次请求 body.max_tokens > 第一次**。
+    不许再看文案里的数字（那只能证明文案会写数字，不能证明真的重发了）。
     """
     cfg = _cfg(retries=0, max_tokens=1234)
     client = LLMClient(cfg.llm)
@@ -220,8 +218,10 @@ def test_streaming_empty_content_gives_actionable_error():
     sse = (b'data: {"choices":[{"delta":{"reasoning_content":"\\u60f3\\u5f88\\u4e45"}}]}\n\n'
            b'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n'
            b"data: [DONE]\n\n")
+    bodies = []
 
     def handler(req):
+        bodies.append(json.loads(req.content))
         return httpx.Response(200, content=iter([sse]),
                               headers={"content-type": "text/event-stream"})
 
@@ -230,12 +230,108 @@ def test_streaming_empty_content_gives_actionable_error():
         _run(handler, lambda: client.chat_json(
             "t", "s", "u", Out, on_delta=lambda k, t: seen.append((k, t))))
         raise AssertionError("空内容应抛 EmptyContentError")
-    except EmptyContentError as e:
-        # P0-2 后空内容先升级预算重试（1234 → 1851），重试仍空才抛；
-        # 文案必须体现「是预算问题」且带**本次实际预算**数字（不写死位数）。
-        assert "max_tokens" in str(e) and "预算" in str(e), str(e)
-        assert re.search(r"\d{3,}", str(e)), str(e)
+    except EmptyContentError:
+        pass
+    assert len(bodies) == 2, f"空内容应重试一次 → 2 个请求，实际 {len(bodies)}"
+    assert bodies[1]["max_tokens"] > bodies[0]["max_tokens"], \
+        f"第二次预算必须升级: {bodies[0]['max_tokens']} → {bodies[1]['max_tokens']}"
     assert seen and seen[0][0] == "reasoning", seen
+
+
+def test_non_streaming_empty_content_retries_with_upgraded_budget():
+    """非流式空内容：与流式同一条升级预算的重试分支。"""
+    cfg = _cfg(retries=0, max_tokens=1234)
+    client = LLMClient(cfg.llm)
+    bodies = []
+
+    def handler(req):
+        bodies.append(json.loads(req.content))
+        return _resp(200, "")          # HTTP 200 但 content 为空
+
+    try:
+        _run(handler, lambda: client.chat_json("t", "s", "u", Out))
+        raise AssertionError("空内容应抛 EmptyContentError")
+    except EmptyContentError:
+        pass
+    assert len(bodies) == 2, f"空内容应重试一次 → 2 个请求，实际 {len(bodies)}"
+    assert bodies[1]["max_tokens"] > bodies[0]["max_tokens"], \
+        f"第二次预算必须升级: {bodies[0]['max_tokens']} → {bodies[1]['max_tokens']}"
+
+
+def test_streaming_length_truncation_retries_with_upgraded_budget():
+    """content 非空但 finish_reason=length（JSON 被截断）：必须升级预算重试，
+    且第二次请求带「完整输出」提示 —— 不是把同一份 payload 原样重发
+    （主报告 R3.3 的核心批评）。"""
+    cfg = _cfg(retries=0, max_tokens=1234)
+    client = LLMClient(cfg.llm)
+    bodies = []
+    sse = (b'data: {"choices":[{"delta":{"content":"{\\"ok\\":"}}]}\n\n'
+           b'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n'
+           b"data: [DONE]\n\n")
+
+    def handler(req):
+        bodies.append(json.loads(req.content))
+        return httpx.Response(200, content=iter([sse]),
+                              headers={"content-type": "text/event-stream"})
+
+    try:
+        _run(handler, lambda: client.chat_json(
+            "t", "s", "u", Out, on_delta=lambda k, t: None))
+        raise AssertionError("被截断的输出应抛错")
+    except LLMError:
+        pass
+    assert len(bodies) == 2, f"截断应重试一次 → 2 个请求，实际 {len(bodies)}"
+    assert bodies[1]["max_tokens"] > bodies[0]["max_tokens"], \
+        f"第二次预算必须升级: {bodies[0]['max_tokens']} → {bodies[1]['max_tokens']}"
+    # 第二次请求必须带着「完整输出」的用户提示（消息最后一条）
+    assert "完整输出" in bodies[1]["messages"][-1]["content"], bodies[1]["messages"][-1]
+
+
+def test_streaming_429_retried_with_backoff():
+    """流式分支的 429（RetryableStatus）走同一套限流专用退避。"""
+    cfg = _cfg(retries=2, timeout=5)
+    client = LLMClient(cfg.llm)
+    calls = {"n": 0}
+    sleeps = []
+    sse = (b'data: {"choices":[{"delta":{"content":"{\\"ok\\":true}"}}]}\n\n'
+           b"data: [DONE]\n\n")
+
+    def handler(req):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return httpx.Response(429, text="slow down")
+        return httpx.Response(200, content=iter([sse]),
+                              headers={"content-type": "text/event-stream"})
+
+    with patch("app.llm.time.sleep", side_effect=lambda s: sleeps.append(s)):
+        out = _run(handler, lambda: client.chat_json(
+            "t", "s", "u", Out, on_delta=lambda k, t: None))
+    assert out.ok is True and calls["n"] == 3, (out, calls)
+    # 429 无 Retry-After → 限流专用退避：1.5s×2^n + 抖动
+    assert len(sleeps) == 2, sleeps
+    assert 1.5 <= sleeps[0] < 2.0 and 3.0 <= sleeps[1] < 3.5, sleeps
+
+
+def test_brief_masks_secrets():
+    """上游响应回显必须脱敏（P1）：sk- 密钥 / Bearer / Authorization 头掩码，
+    原文 Key 绝不能落进 error 字段 / 历史 / 界面。"""
+    from app.llm import _brief
+    key = "sk-" + "A" * 46          # 模拟上游 500 回显里夹带 46 字符假 Key
+
+    # 1) 单独一个 Bearer 令牌
+    out = _brief(f"error: Bearer {key} 更多内容" + "x" * 300)
+    assert key not in out and key[3:] not in out, f"Key 泄漏: {out}"
+    assert "Bearer" in out and "***" in out, out
+
+    # 2) Authorization 头（连同整个令牌值掩掉）
+    out2 = _brief(f"Authorization: Bearer {key} 上下文" + "x" * 300)
+    assert key not in out2 and key[3:] not in out2, f"Key 泄漏: {out2}"
+    assert "authorization" in out2.lower() and "***" in out2, out2
+
+    # 3) 裸 Key（不带 Bearer 前缀）
+    out3 = _brief(f"context={key}" + "x" * 300)
+    assert key not in out3 and key[3:] not in out3, f"Key 泄漏: {out3}"
+    assert "sk-" in out3 and key[3:] not in out3, out3
 
 
 def test_streaming_content_accumulates_and_excludes_reasoning():
@@ -318,10 +414,10 @@ def main() -> int:
     for fn in cases:
         try:
             fn()
-            print(f"  ✅ {fn.__name__}")
+            print(f"  OK {fn.__name__}")
         except Exception as e:  # noqa: BLE001
             failed += 1
-            print(f"  ❌ {fn.__name__}: {type(e).__name__}: {e}")
+            print(f"  FAIL {fn.__name__}: {type(e).__name__}: {e}")
     print(f"\n{len(cases) - failed}/{len(cases)} 通过")
     return 1 if failed else 0
 

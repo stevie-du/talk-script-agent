@@ -104,7 +104,10 @@
 
       <div id="composer">
         <div id="composer-body">
-          <textarea id="topic" rows="1" placeholder="输入主题，生成口播脚本…（Enter 发送 · Esc 停止）" title="Enter 发送 · Shift+Enter 换行 · Esc 停止生成"></textarea>
+          <!-- 这一栏没有可见的字段标签（信息全在 placeholder 里），所以无障碍名要显式给：
+               placeholder 只是**兜底**的名字，输入到一半它就被内容顶掉了。 -->
+          <textarea id="topic" rows="1" aria-label="口播主题"
+                    placeholder="输入主题，生成口播脚本…（Enter 发送 · Esc 停止）" title="Enter 发送 · Shift+Enter 换行 · Esc 停止生成"></textarea>
           <div class="composer-tools">
             <div class="quick-bar" id="quick-params"></div>
             <div class="composer-actions">
@@ -118,6 +121,12 @@
         </div>
         <div class="composer-foot">
           <span class="hint gen-hint" id="composer-gen-hint"></span>
+          <!-- 「停止全部后台生成」：切会话 / 连点新建对话都**不会**取消后台作业（有意的，
+               用户没说要停），但并发额度只有 4 条 —— 之前用户连点四次之后
+               只会反复吃一个 409，界面上除了左栏几颗呼吸点没有任何线索和出口。
+               这里加的是可见性与一个动作，不改后端语义（逐条走同一个取消请求）。
+               文案与可见性由 ui.js 的 syncBusyAffordance() 按左栏那份实况写。 -->
+          <button type="button" class="link-btn hidden" id="btn-stop-all"></button>
         </div>
       </div>
 
@@ -132,7 +141,9 @@
 </main>
 
 <!-- ══════════ 设置：整窗二级页面 ══════════ -->
-<div id="settings-screen" class="screen hidden">
+<!-- 整窗二级页 = 模态：role/aria-modal 让读屏知道"进了设置"，
+     也才是焦点圈（settings.js 的 trapSettingsTab）该圈住的那个容器。 -->
+<div id="settings-screen" class="screen hidden" role="dialog" aria-modal="true" aria-label="设置">
   <aside class="stg-nav">
     <button class="stg-back" id="btn-close-settings">
       <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg>
@@ -220,7 +231,7 @@
               <p class="hint">选择当前生效的行业包。改动即时生效，重新生成即用新包的内容。</p>
               <div class="fg">
                 <div class="block-inner">
-                  <label class="lbl">当前行业包</label>
+                  <label class="lbl" for="pack">当前行业包</label>
                   <select id="pack"></select>
                 </div>
                 <div class="block-inner">
@@ -255,14 +266,14 @@
               <h3 class="card-title">输出与风格</h3>
               <div class="fg">
                 <div class="block-inner">
-                  <label class="lbl">输出内容</label>
+                  <label class="lbl" for="format">输出内容</label>
                   <select id="format">
                     <option value="both" selected>口播 + 分镜</option>
                     <option value="voice">仅口播</option>
                   </select>
                 </div>
                 <div class="block-inner">
-                  <label class="lbl">文案人味</label>
+                  <label class="lbl" for="voice">文案人味</label>
                   <select id="voice">
                     <option value="strong" selected>加强（口语 + 具体细节）</option>
                     <option value="standard">标准（只去 AI 腔）</option>
@@ -270,7 +281,7 @@
                   </select>
                 </div>
                 <div class="block-inner">
-                  <label class="lbl">补充资料</label>
+                  <label class="lbl" for="facts">补充资料</label>
                   <textarea id="facts" rows="3" placeholder="产品手册 / 数据 / 案例，选填。例：主力机型载重 1050kg，市区 2 小时内到场"></textarea>
                 </div>
               </div>
@@ -312,7 +323,9 @@
               <p class="hint" id="pi-desc"></p>
               <div id="pi-checklist-wrap" class="hidden">
                 <label class="lbl">校对清单（草稿包需逐项核实）</label>
-                <pre id="pi-checklist"></pre>
+                <!-- 行级结构同结果页（P3-50 的另一半：那边改了、这里还是 `<pre>`，
+                     同一份 校对清单.md 在两个界面一面文本墙、一份行级清单）。 -->
+                <div id="pi-checklist"></div>
               </div>
               <!-- 文件分组 + 查看器**左右并排**（2026-09-17）。
                    之前上下堆叠：9 个角色分组全展开后查看器被推到很下面，
@@ -363,11 +376,11 @@
             <p class="pg-empty-d">输入行业名称与业务描述，模型会帮你生成细分领域、受众痛点、选题库、行业红线与待核实清单 —— 生成后请人工校对。</p>
             <div class="pg-form">
               <div class="block-inner">
-                <label class="lbl">行业名称</label>
+                <label class="lbl" for="pg-industry">行业名称</label>
                 <input id="pg-industry" placeholder="例：全屋定制/装修">
               </div>
               <div class="block-inner">
-                <label class="lbl">一句话业务描述</label>
+                <label class="lbl" for="pg-desc">一句话业务描述</label>
                 <textarea id="pg-desc" rows="2" placeholder="例：全屋定制家居品牌，面向新房装修业主获客"></textarea>
               </div>
             </div>
@@ -390,7 +403,9 @@
             <div id="pg-summary" class="pg-summary"></div>
             <details class="pg-more" id="pg-more">
               <summary>校对清单（生成后需人工核实）</summary>
-              <pre id="pg-checklist"></pre>
+              <!-- 行级结构由 settings.js 的 renderChecklist 画（P3-50：原来直接把
+                   markdown 原文塞进 <pre>，`- [ ]` / `##` / `---` 一起上屏成一面文本墙）。 -->
+              <div id="pg-checklist"></div>
             </details>
             <div class="pg-empty-actions">
               <button class="ghost" id="pg-back">返回</button>
@@ -461,27 +476,32 @@
               <input type="hidden" id="md-id">
               <div class="fg">
                 <div class="block-inner">
-                  <label class="lbl">模型 ID</label>
+                  <label class="lbl" for="md-model">模型 ID</label>
                   <input id="md-model" placeholder="glm-4.7 / deepseek-chat">
                   <p class="hint">发给服务端的模型名，要和服务商文档里写的一致。</p>
                 </div>
                 <div class="block-inner">
-                  <label class="lbl">展示名称</label>
+                  <label class="lbl" for="md-name">展示名称</label>
                   <input id="md-name" placeholder="留空则直接显示模型 ID">
                 </div>
                 <div class="block-inner">
-                  <label class="lbl">请求地址</label>
+                  <label class="lbl" for="md-baseurl">请求地址</label>
                   <input id="md-baseurl" placeholder="https://open.bigmodel.cn/api/paas/v4">
                   <p class="hint">OpenAI 兼容接口的根地址，<b>不要</b>带 /chat/completions。
                     新增模型时必填；编辑时留空表示不改动。</p>
                 </div>
                 <div class="block-inner">
-                  <label class="lbl">API Key</label>
+                  <label class="lbl" for="md-apikey">API Key</label>
                   <input id="md-apikey" type="password" placeholder="已配置时留空即保持不变"
                          data-ph-empty="粘贴你的 API Key">
                 </div>
               </div>
               <p class="hint" id="md-status"></p>
+              <!-- 地址警告**常驻**行（与 #md-status 分开）：toast 与状态行会被下一次
+                   操作顶掉，而"这个地址走明文 http、密钥会被明文传输"是每天都要成立的事实。
+                   文案来自后端 GET /api.config 的 base_url_warnings 与保存/测试回的 warnings。
+                   复用 .cfg-err 一族（同一套警示底色），不新增样式。 -->
+              <p class="hint cfg-err hidden" id="md-warn"></p>
               <div class="page-actions">
                 <button class="ghost" id="md-test"
                         title="用上面填的值发一个最小请求，验证是否连通">测试连接</button>
@@ -502,7 +522,7 @@
             </summary>
             <div class="st-adv-body">
               <div class="block-inner">
-                <label class="lbl">重试次数
+                <label class="lbl" for="st-retries">重试次数
                   <button class="linkbtn" id="st-reset-adv" type="button"
                           title="恢复为默认：重试 2 次 / 超时 180 秒">恢复默认</button>
                 </label>
@@ -510,7 +530,7 @@
                 <p class="hint">请求失败（网络 / 超时 / 429 / 5xx）时自动重试的次数。</p>
               </div>
               <div class="block-inner">
-                <label class="lbl">单次超时（秒）</label>
+                <label class="lbl" for="st-timeout">单次超时（秒）</label>
                 <input id="st-timeout" type="number" min="5" max="1800" step="5"
                        placeholder="180（默认）">
               </div>
@@ -562,7 +582,13 @@
      #md-form-card。删掉 overlay 是**有意的** —— 留着就有两套编辑 UI，
      「到底该改哪套」的问题迟早出现（同一信息两份表示）。 -->
 
-<div id="toast" class="toast hidden"></div>
+<!-- 全站唯一的反馈出口：十几条提示都只写在这里（util.js 的 toast()）。
+     role=status + aria-live=polite 让它成为**礼貌实时区**，aria-atomic 保证
+     整句被重读而不是只读变化的那几个字。
+     ⚠ 与 .hidden（display:none）配合的写法有个已知边界：节点不在无障碍树里时
+     读屏听不到属性变化，所以 toast() 是**先现身、再写字**（见 util.js），
+     并且对同一句重复提示补一个零宽字符强制产生一次变化。 -->
+<div id="toast" class="toast hidden" role="status" aria-live="polite" aria-atomic="true"></div>
 <script type="module" src="/static/js/main.js"></script>
 </body>
 </html>

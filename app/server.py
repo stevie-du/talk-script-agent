@@ -11,21 +11,34 @@ Electron:  主进程 spawn 本模块并轮询 /api/health
 `chrome-extension://` 一律拒绝。`/api/*` 再叠一层一次性令牌 ——
 修复前这两道都没有，本机任意网页都能读走全部脚本、删记录、改 base_url。
 
+令牌怎么交到引擎手里（缺陷 1）
+------------------------------
+Electron **不再**把令牌写在子进程的命令行上（`--token`）：Windows 上同机任意
+进程都能读到别人的 argv。现在走子进程环境变量 `TALKSCRIPT_TOKEN`。
+`--token` 这个 flag 保留给手工起引擎调试的场景，看门狗用的 `--parent-pid`
+不是凭证、继续走 argv。
+
 错误映射
 --------
 修复前 PackError 直接冒到 FastAPI 变成 500「Internal Server Error」，
-用户选了个不存在的行业包只得到一句无信息的 500。现在：
-    PackError       → 404（行业包不存在）
-    StateConflict   → 409（并发操作与当前状态冲突）
-    ValueError      → 400（参数不合法）
-    LLMError        → 502（上游模型调用失败 —— 令牌过期/网络/解析失败，
-                          都让 toast 看到具体理由，而不是「HTTP 500」）
+用户选了个不存在的行业包只得到一句无信息的 500。现在**只有三个**全局处理器
+（见下面 `@app.exception_handler`）：
+    PackError       → 404  code=pack_missing     （行业包不存在）
+    PackBrokenError → 409  code=pack_broken      （包在，但内容要人修）
+    StateConflict   → 409  code=quota_exceeded / state_conflict
+每个应答都同时给 `detail`（给人看的那一句，渲染层原样显示）与 `code`
+（给程序看的稳定码）。两个 409 靠 code 分开：额度满与坏包是两件不同的事，
+只看状态码会把坏包说成「队列满了」（P1-1）。
 
-为什么 P0-2 之后这块仍要单独加：原兜底只覆盖 PackError / StateConflict /
-ValueError，**任何没被显式 catch 的异常都跌成 FastAPI 默认 500、空 body** —
-`LLMError` 即属此类（HTTP 401 / 502、连接失败、JSON 解析失败等）。前端
-`toast(e.message)` 只拿到一句「HTTP 500」，连「令牌已过期」这种用户最该
-看见的信息都丢了，是项目核心取向「让不可见的失效变得可见」的典型漏网。
+其余两类不在全局层：
+    ValueError      → 400，由各端点就地 `raise HTTPException(400, str(e))`
+                      （作业取消 / 重写 / 配置校验各自的措辞不同）
+    LLMError        → **不映射成 HTTP 状态码**：它发生在作业线程里，被
+                      app/pipeline.py 捕获后落成 `state=failed` + `error`，
+                      界面在作业失败横幅上看到具体原因；设置页「测试连接」
+                      走 LLMClient.ping()，它自己把异常转成 (False, 说明)。
+                      本项目里没有任何一条请求会把 LLMError 冒到 HTTP 层，
+                      所以这里也就没有一个 502 处理器（此处以前写着有）。
 """
 from __future__ import annotations
 
@@ -38,6 +51,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import yaml
 from fastapi import Body, FastAPI, HTTPException, Request
@@ -50,14 +64,19 @@ from .config import (DEFAULT_MODEL, ensure_config_template, load_config,
 from .fileio import write_atomic
 from .jobs import StateConflict
 from .knowledge import Pack, PackBrokenError, PackError, list_packs
-from .llm import LLMClient, LLMError
+from .llm import LLMClient
+from .packseed import PRIVATE_DIR_NAME, seed_bundled_packs
 from .pipeline import MAX_CONCURRENT_JOBS, Pipeline
 from .schemas import (GenerateRequest, PackCreateRequest,
                       RewriteSegmentRequest)
-from .security import (TOKEN_HEADER, allowed_hostnames, new_token,
-                        origin_allowed, token_ok)
+from .security import (LOOPBACK_HOSTS, TOKEN_HEADER, allowed_hostnames,
+                       new_token, origin_allowed, token_ok)
 
 FALLBACK_VERSION = "0.0.0-dev"
+
+# 引擎令牌从环境变量读取（**不走命令行**，见 main() 的说明）。
+# 名字与 .env 风格一致、只在本模块用，故不放进 config.py 的 _LLM_ENV。
+TOKEN_ENV = "TALKSCRIPT_TOKEN"
 
 
 def read_version(root: Path | None = None) -> str:
@@ -101,6 +120,177 @@ def _safe_name(name: str) -> str:
     if not _NAME_RE.match(name or "") or ".." in name:
         raise HTTPException(400, "行业包名称不合法")
     return name
+
+
+# ── 错误的机器可读码（异常 → HTTP 的那一层用）─────────────────
+# 为什么状态码不够：「同时进行的生成已达上限」与「行业包的 pack.yaml 语法有误」
+# 都是 409 Conflict（两者确实都是"请求与资源当前状态冲突"），但用户要做的
+# 是两件完全不同的事 —— 等一拍再发 vs 去修那个文件。
+# 修复前渲染层只判 `status === 409`，于是坏包被说成「队列满了」，
+# 而服务端那句具体的「第 4 行第 6 列」被整句丢掉（P1-1）。
+# 所以：detail 继续是给人看的那一句（原样进 toast，不许改写成别的事），
+# code 是给程序看的那一个 —— 判据读 code，不读文案。
+ERR_PACK_MISSING = "pack_missing"       # → 404 包不存在
+ERR_PACK_BROKEN = "pack_broken"         # → 409 包在，但内容要人修
+ERR_QUOTA = "quota_exceeded"            # → 409 并发额度满（可重试）
+ERR_STATE_CONFLICT = "state_conflict"   # → 409 作业状态不允许这个操作
+
+# StateConflict 的三个抛出点（app/pipeline.py 的生成 / 建包 / 单段重写额度闸）
+# 都带「已达上限」这四个字，而 jobs.py 的那一条是「作业状态为 X，无法执行该操作」。
+# 这里按**共有片段**分桶而不是抄整句：文案改了标点不会让分桶悄悄失效，
+# 而真改了语义（不再说"上限"）时会落到 state_conflict —— 那是更安全的失败方向。
+_QUOTA_MARK = "已达上限"
+
+
+def _error_json(message: str, status: int, code: str) -> JSONResponse:
+    """错误应答：人话（detail）+ 机器可读码（code）一起给。
+
+    `detail` 保持**字符串**原样：多处测试与渲染层都直接读它，
+    把它换成对象会让「detail 里有没有那句话」的断言读不到东西。
+    """
+    return JSONResponse({"detail": message, "code": code}, status_code=status)
+
+
+# ── 私有资料判定 ────────────────────────────────────────────
+# 目录名 `private` 的**唯一**定义在 app/packseed.py 的 PRIVATE_DIR_NAME
+# （播种时要靠它决定"哪些内容属于用户自己的、不许被出厂更新删掉"），
+# 这里 import 它而不是再抄一个字面量：两处各写一份，迟早有一处改漏 ——
+# 漏的那一处就是"界面读得到私有资料"或"更新删掉了私有资料"。
+
+
+def _is_private_rel(rel: str) -> bool:
+    """这个包内相对路径是否落在 `private/` 下（安装包刻意不带、也不该经 HTTP 外读）。
+
+    判据用**路径段**而不是 `rel.startswith("private/")`：
+      · Windows 文件系统不区分大小写，`Private/products.yaml` 是同一个文件；
+      · 反斜杠形态（`private\\products.yaml`）也要挡住，否则等于没拦。
+    与 `app/export_skill.py` 的 `PRIVATE_DIR`、pack.yaml 的 `files.private`
+    是同一个约定（那些文件都在 `private/` 段下）。
+    """
+    parts = re.split(r"[/\\]+", rel or "")
+    return any(p.lower() == PRIVATE_DIR_NAME for p in parts)
+
+
+# ── 模型请求地址校验 ────────────────────────────────────────
+class BaseUrlError(ValueError):
+    """地址**非法**（必须拒掉，不能只是警告）。"""
+
+
+def check_base_url(raw: str) -> list[str]:
+    """校验一条模型请求地址，返回**警告**列表（可能为空）。
+
+    这台机器是用户自己的，本地 LLM 走 `http://192.168.x.x:9200/v1` 是正常用法，
+    所以这里刻意做两件事的分工：**危险/写进去必然出错的** reject，
+    **只是不体面的** warn。硬拦明文 http 会把用户已经在跑的配置改坏。
+
+    拒绝（`BaseUrlError`）：
+      · 前缀不是 http:// / https:// —— 少协议头会一路存到请求层才炸（原有闸，保留）；
+        顺带堵住 `file://`、`javascript:`、`data:`、`gopher:` 这类不该出现在这里的 scheme；
+      · 主机名为空（`http://` 后面什么都没有）；
+      · 内嵌凭据（`http://user:pass@host`）—— httpx 会把它自动变成 Basic 头，
+        等于把另一份凭据塞进每个请求里，而设置页上看不见；
+      · 含空白 / 控制字符（粘贴带空格、`\\n` 尾巴，会让所有请求静默失败）。
+
+    警告：明文 http 且主机不是回环 —— 每一次生成都会把 `Bearer <api_key>`
+    和整段私有资料以明文发出去，同网段可直接读。
+    """
+    url = (raw or "").strip()
+    if not url:
+        return []
+    # 内部控制字符 / 换行：先单独判，否则后面的报错会指不到根因
+    if re.search(r"[\x00-\x1f\x7f]", raw):
+        raise BaseUrlError("请求地址含控制字符或换行，请检查是否粘贴错了内容")
+    if re.search(r"\s", url) or url != raw.strip():
+        raise BaseUrlError("请求地址不能含空格")
+    low = url.lower()
+    if low.startswith(("http://", "https://")):
+        pass
+    elif "://" in url or ":" in url.split("/", 1)[0]:
+        scheme, _, rest = url.partition(":")
+        if scheme.lower() in ("http", "https"):
+            # `https://`（只填了协议头）与 `http:/a`（少一个斜杠）都会走到这里。
+            # 前者要说的是"主机名没写"，说斜杠反而把人引开 —— 接口层的
+            # `.rstrip("/")` 会把 `https://` 变成 `https:`，所以两种都得判。
+            if not rest.lstrip("/"):
+                raise BaseUrlError("请求地址里没有主机名（只有协议头）")
+            # `http:/a` 这类手滑：说清是斜杠的问题，
+            # 而不是回一句「协议只能是 http 或 https」——他写的就是 http。
+            raise BaseUrlError("请求地址要以 http:// 或 https:// 开头（两个斜杠）")
+        raise BaseUrlError(f"请求地址的协议只能是 http 或 https，当前为「{scheme}」")
+    else:
+        # 用户最常见的漏填是「api.openai.com/v1」少了协议头 ——
+        # 不拦的话，这个值会一路存到生成时才在 urllib 里炸，报错完全指不到根因。
+        raise BaseUrlError("请求地址要以 http:// 或 https:// 开头")
+    try:
+        u = urlparse(url)
+        host = (u.hostname or "").strip()
+    except ValueError:
+        raise BaseUrlError("请求地址无法解析，请检查拼写")
+    if not host:
+        raise BaseUrlError("请求地址里没有主机名")
+    if "@" in (u.netloc or ""):
+        raise BaseUrlError("请求地址不能内嵌账号密码（http://user:pass@host），"
+                           "请用 API Key 字段认证")
+    try:
+        u.port                      # 端口非数字要在这里就报错，而不是等到发请求
+    except ValueError:
+        raise BaseUrlError("请求地址的端口不合法")
+    warnings: list[str] = []
+    if u.scheme == "http" and host.lower() not in LOOPBACK_HOSTS:
+        warnings.append(
+            f"请求地址走的是明文 HTTP，而目标不是本机（{host}）："
+            "每次生成都会把 API Key（Bearer 头）与整段私有资料以明文发出去，"
+            "同一网络里任何一台机器都能读到。建议改用 https，或让本地网关做 TLS。")
+    return warnings
+
+
+# ── pack.yaml 的原地改写 ───────────────────────────────────
+_DRAFT_KEY_RE = re.compile(r"draft:([ \t]*)(.*)$")
+
+
+def undraft_yaml_text(text: str) -> str:
+    """把 pack.yaml 里顶层 `draft:` 的值改成 false，**其余字节一律不动**。
+
+    为什么不能用 `yaml.safe_load` + `yaml.safe_dump` 往返（这是原来的实现）：
+    PyYAML 不保留注释，而**这个仓库里 pack.yaml 的注释就是包作者的文档契约**
+    （elevator/pack.yaml 有 12 行注释：字段含义、"分享给同事 = 复制目录（不含
+    private/ 即不带商业信息）"这类约定）。点一次界面上的「标记为已校对」就把
+    它们永久抹掉，而且是不可逆的内容丢失 —— 运行依赖里没有 ruamel.yaml
+    （见 requirements-runtime.txt），为一个键引入新依赖也不值。
+
+    实现是**行级**改写，只动 `draft:` 那一行的值，行尾注释原地保留：
+        draft: true   # true 时界面显示"草稿·需人工校对"角标
+      → draft: false   # true 时界面显示"草稿·需人工校对"角标
+
+    约束：
+      · 只认**零缩进**的 `draft:`（YAML 里那才是顶层键），注释行不算；
+      · 同名键出现多次时全部改掉 —— 否则留下一个 `draft: true` 在后面，
+        PyYAML 取最后一个，"已校对"会静默失效；
+      · 没有这个键时追加一行（老包 / 手工写漏的包）；
+      · 换行风格（\\r\\n / \\n）与 BOM 都按原文件保持。
+    """
+    bom = "\ufeff" if text.startswith("\ufeff") else ""
+    body = text[len(bom):]
+    nl = "\r\n" if "\r\n" in body else "\n"
+    lines = body.split(nl)
+    hits = 0
+    for i, ln in enumerate(lines):
+        if ln[:1].isspace() or ln.startswith("#"):
+            continue
+        m = _DRAFT_KEY_RE.match(ln)
+        if not m:
+            continue
+        indent, rest = m.group(1), m.group(2)
+        # 行尾注释：值与 `#` 之间必须有空白，`http://x#y` 那种不是注释。
+        cm = re.match(r"(.*?)([ \t]+#.*)?$", rest)
+        comment = (cm.group(2) or "") if cm else ""
+        lines[i] = f"draft:{indent}false{comment}"
+        hits += 1
+    if hits:
+        return bom + nl.join(lines)
+    tail = "" if (not body or body.endswith(nl)) else nl
+    return bom + body + tail + "draft: false" + nl
+
 
 
 class ConfigIn(BaseModel):
@@ -221,7 +411,20 @@ def _renderer_dir(root: Path) -> Path:
 def create_app(root: Path, token: str | None = None,
                data_dir: Path | None = None,
                bind_host: str | None = None,
-               version: str | None = None) -> FastAPI:
+               version: str | None = None,
+               packs_dir: Path | None = None) -> FastAPI:
+    """起一个引擎实例。
+
+    `packs_dir`（缺陷 8，打包版由 Electron 指到 `%APPDATA%\\TalkScript\\packs`）：
+    **可写**的行业包根目录。不传时它就是 `root/packs`，行为与以前完全一致。
+    之所以需要这一层：打包后 `root` 在安装目录（默认
+    `%LOCALAPPDATA%\\Programs\\TalkScript\\resources\\engine`），
+    那里既可能被升级 / 卸载整个抹掉，也可能根本没有写权限 ——
+    于是用户新建的行业包、手改的 banwords.yaml、填进去的 private/ 资料
+    都会在一次应用更新后消失，而 README 只承诺了 config 与 generated/ 会保留。
+    安装目录里那份现在退化为**只读的种子源**：首次运行拷进用户目录，
+    之后不覆盖用户的改动（`app/packseed.py`）。
+    """
     token = token or new_token()
     # 打包版由 Electron 传入（--version）；开发态回落到读 desktop/package.json
     version = version or read_version(root)
@@ -233,7 +436,17 @@ def create_app(root: Path, token: str | None = None,
     # 用户可以走设置界面，也可以直接改这个文件。
     ensure_config_template(root, data_dir)
     renderer = _renderer_dir(root)
-    pipeline = Pipeline(root, load_config(root, data_dir), data_dir=data_dir)
+
+    # ── 行业包的两个路径（务必分清，见上面的说明）
+    #   packs_root      包目录本身：packs/<name>/pack.yaml 的 packs/
+    #   root_for_packs  交给 knowledge.Pack / list_packs / Pipeline 的那个 root
+    #                   —— 它们都自己拼 `root / "packs"`，所以必须正好对上
+    packs_root = Path(packs_dir).resolve() if packs_dir else (root / "packs")
+    root_for_packs = packs_root.parent if packs_dir else root
+    if packs_dir:
+        # 只拷不覆盖；失败不拦引擎启动（顶多用不到出厂包，界面上会少几个行业）
+        seed_bundled_packs(root / "packs", packs_root, version)
+    pipeline = Pipeline(root_for_packs, load_config(root, data_dir), data_dir=data_dir)
 
     def _cfg():
         """每次现读配置：设置里改完 Key，/api/meta 要立刻反映出来。"""
@@ -255,6 +468,38 @@ def create_app(root: Path, token: str | None = None,
             raise HTTPException(400, "当前没有启用任何模型 —— 请在「设置 → 模型接口」里打开一个模型的开关")
         if not cfg.llm.api_key:
             raise HTTPException(400, "当前模型还没配 API Key，请在「设置 → 模型接口」里填写")
+
+    def _link_warnings(cfg) -> list[str]:
+        """把每条模型地址里「合法但不体面」的问题汇总成一句句能照着做的话（缺陷 5）。
+
+        为什么常驻 GET /api/config 也要下发，而不是只在「保存」那次返回：
+        明文 HTTP 这件事是**每一次生成**都在发生的（Key 与私有资料以明文出网），
+        而保存后的提示条几秒就消失、刷新界面就什么都看不到了。
+        只警告不拦截：本机跑 Ollama / LM Studio 的用户用的就是 `http://<ip>:9200/v1`，
+        硬拦等于把人家在用的配置改坏 —— 这是本地优先工具，不是公网服务。
+        """
+        out: list[str] = []
+        seen = set()
+        for m in cfg.models:
+            seen.add(m.base_url)
+            try:
+                ws = check_base_url(m.base_url)
+            except BaseUrlError as e:
+                # 已经写在文件里的坏地址也要说 —— 这道闸只管新写的，
+                # 老配置不会因此跑不起来，但用户得知道它为什么连不上。
+                out.append(f"模型「{m.label}」的请求地址不合法：{e}")
+                continue
+            out.extend(f"模型「{m.label}」：{w}" for w in ws)
+        if cfg.llm.base_url and cfg.llm.base_url not in seen:
+            # 环境变量 TALKSCRIPT_BASE_URL 覆盖出来的地址不在任何条目里。
+            # 不单独判一次的话，「界面上看着一切正常、实际在往明文远端发 Key」
+            # 这个组合就完全隐身了。
+            try:
+                out.extend(f"（来自环境变量 TALKSCRIPT_BASE_URL）{w}"
+                           for w in check_base_url(cfg.llm.base_url))
+            except BaseUrlError as e:
+                out.append(f"环境变量 TALKSCRIPT_BASE_URL 的地址不合法：{e}")
+        return out
 
     # 中间件的令牌那道只管 `/api/*`（见下面 guard 的 startswith），而 FastAPI 默认就把
     # /docs、/redoc、/openapi.json 挂在中间件之内、令牌范围之外 —— 实测默认参数下
@@ -309,19 +554,26 @@ def create_app(root: Path, token: str | None = None,
     # ── 异常 → HTTP 状态码 ──────────────────────────────────
     # 顺序无关：Starlette 沿 `type(exc).__mro__` 找第一个注册的处理器，
     # 所以子类 PackBrokenError 会命中下面那条，不会被 PackError 抢走。
+    # 每一条都给 detail（人话）+ code（机器可读，见上面的 ERR_* 常量）：
+    # 状态码分不开的两个 409，靠 code 分开 —— 渲染层从此不再凭 409 猜原因。
     @app.exception_handler(PackError)
     async def _pack_error(_req, exc: PackError):
-        return JSONResponse({"detail": str(exc)}, status_code=404)
+        return _error_json(str(exc), 404, ERR_PACK_MISSING)
 
     @app.exception_handler(PackBrokenError)
     async def _pack_broken(_req, exc: PackBrokenError):
         # 409 而不是 404：包**就在那儿**，是内容要人去修。给 404 会让用户
         # 在列表里反复找一个明明看得见的包（这是 P1-5/P1-6 的修复之一）。
-        return JSONResponse({"detail": str(exc)}, status_code=409)
+        return _error_json(str(exc), 409, ERR_PACK_BROKEN)
 
     @app.exception_handler(StateConflict)
     async def _conflict(_req, exc: StateConflict):
-        return JSONResponse({"detail": str(exc)}, status_code=409)
+        # 同一个异常类挂着两种完全不同的意思（额度满 / 状态不对），
+        # 所以 code 按消息分桶 —— 两者都该 409，但界面上一个是「等一拍」
+        # 一个是「这条作业已经不是那个状态了」，说错的那一句会让人去查错地方。
+        msg = str(exc)
+        return _error_json(msg, 409,
+                           ERR_QUOTA if _QUOTA_MARK in msg else ERR_STATE_CONFLICT)
 
     # ── 静态资源（渲染层同源提供）───────────────────────────
     if renderer.exists():
@@ -347,10 +599,14 @@ def create_app(root: Path, token: str | None = None,
     @app.get("/api/meta")
     def meta():
         cfg = _cfg()          # 现读：设置里改完模型，这里要立刻反映
-        packs = list_packs(root)
+        packs = list_packs(root_for_packs)
         return {
             "packs": [p.model_dump() for p in packs],
             "default_pack": cfg.default_pack,
+            # 行业包目录（**可写的那份**）。设置页要把它摊出来 ——
+            # 用户手改 pack.yaml / 放 private 资料时必须知道去哪儿改；
+            # 打包版尤其要紧，因为那里已经不是安装目录了。
+            "packs_dir": str(packs_root),
             "model": cfg.llm.model,
             # 模型名是不是内置默认（用户没配过）。输入区右侧的模型选择器靠它
             # 把「glm-4.7」标成「glm-4.7（默认）」—— 不标的话，未配置状态下
@@ -378,8 +634,8 @@ def create_app(root: Path, token: str | None = None,
         # `_safe_name` 的 `..` 与 `/` 检查正好堵住它（`%2f` 因路由不匹配进不来，
         # 但 `%2e%2e` 是单段，能进来）。
         name = _safe_name(name)
-        pack = Pack(root, name)                  # 不存在 → PackError → 404
-        base = root / "packs" / name
+        pack = Pack(root_for_packs, name)        # 不存在 → PackError → 404
+        base = packs_root / name
         files = []
         for f in sorted(base.rglob("*")):
             if f.is_file() and "__pycache__" not in str(f):
@@ -397,22 +653,48 @@ def create_app(root: Path, token: str | None = None,
     def pack_file(name: str, rel: str = ""):
         """读行业包内单个文件的内容（知识库面板的只读查看器用）。
 
-        三道闸都必须有：
+        四道闸都必须有：
           1. 包名走 `_safe_name`、`rel` 解析后必须仍在包目录内 ——
              `rel=../../config.yaml` 会把含明文 API Key 的配置读出去；
-          2. 后缀白名单 —— 包里可能有图片/字体，读出来是一堆乱码不说，
+          2. `private/` 一律拒绝（见下面的说明）；
+          3. 后缀白名单 —— 包里可能有图片/字体，读出来是一堆乱码不说，
              直接塞进 <pre> 还可能带出不可见字符；
-          3. 体积上限 —— 包目录理论上可以放任意大文件，全量读进内存没必要。
+          4. 体积上限 —— 包目录理论上可以放任意大文件，全量读进内存没必要。
+
+        为什么单独挡 `private/`（缺陷 4）
+        --------------------------------
+        安装包刻意**不携带** `packs/*/private/**`（`desktop/package.json` 的
+        extraResources 排除规则，`tests/test_runtime_requirements.py` 钉着），
+        导出技能也默认不带（`/api/packs/{name}/export-skill`）。这个端点原先却是
+        200 明文返回 `private/products.yaml` —— 一条数据「不许出厂」却又「随时可
+        经 HTTP 读走」，两者只能留一个。选择关这个口子而不是放宽打包规则，理由：
+          · 界面**从来不需要**它的内容才能工作：包详情把文件列出来（只有名字与
+            体积）已经足够定位，正文要读就打开本地文件读 —— 这个项目里改包内容
+            本来就是「开编辑器 + Ctrl+S + 回来点刷新」（见 settings.js 顶部说明），
+            只读预览对 private/ 只是少一个便利，泄露的代价却是产品型号 / 报价 /
+            客户案例整份外流；
+          · 拿到令牌的客户端**不止**我们自己的界面：令牌每次启动经 URL 交给页面，
+            任何一处渲染层 XSS、任何一次日志里漏出令牌，都会把 private/ 全量带走。
+            同源判定与令牌是同一套凭证，挡不住"凭证被用掉"这一类；
+          · 关掉不需要新配置项也不需要开关 —— 留一个界面能传的 `?include_private=`
+            等于没关（那个参数本身就是攻击者能猜到的字符串）。
+
+        返回 403 而不是 404：文件**确实在那儿**，包详情也列出了它；
+        给 404 会诱导用户去"修好"一个其实没坏的东西（本项目最忌讳的误导）。
+        detail 里带上本地路径，让界面可以直接照抄成一句「请用编辑器打开 …」。
         """
         name = _safe_name(name)
-        Pack(root, name)                       # 不存在 → PackError → 404
-        base = (root / "packs" / name).resolve()
+        Pack(root_for_packs, name)               # 不存在 → PackError → 404
+        base = (packs_root / name).resolve()
         try:
             target = (base / rel).resolve()
         except Exception:                      # noqa: BLE001
             raise HTTPException(400, "文件路径不合法")
         if "__pycache__" in target.parts or not target.is_relative_to(base):
             raise HTTPException(404, "文件不存在")
+        if _is_private_rel(target.relative_to(base).as_posix()):
+            raise HTTPException(403, f"私有资料不经界面浏览（{base / 'private'} 下的内容）。"
+                                    "要查看或修改，请直接用编辑器打开本地文件。")
         if not target.is_file():
             raise HTTPException(404, "文件不存在")
         if target.suffix.lower() not in _TEXT_SUFFIXES:
@@ -452,7 +734,11 @@ def create_app(root: Path, token: str | None = None,
         # 否则 `%2e%2e` 这类编码会一路走到 Pack(root, "..")。
         _safe_name(name)
         try:
-            return export_agent_skill(root, name, include_private=include_private)
+            # root_for_packs：包**在它里面**，而导出目标也按 `root/agent-skills` 拼。
+            # 传 root 的话，打包版就是往安装目录里写（Program Files 不可写 → 500），
+            # 现在落到数据目录，与 generated/ 同一处。
+            return export_agent_skill(root_for_packs, name,
+                                      include_private=include_private)
         except PackBrokenError as e:
             # 必须先于 PackError 捕获（它是子类），否则「包坏了」会被报成 404。
             raise HTTPException(409, str(e))
@@ -463,14 +749,38 @@ def create_app(root: Path, token: str | None = None,
 
     @app.post("/api/packs/{name}/undraft")
     def packs_undraft(name: str):
-        """人工校对完成后，把 draft 改为 false"""
+        """人工校对完成后把 `draft` 改为 false —— **就地改那一行**。
+
+        原实现是 `yaml.safe_load` → 改一个键 → `yaml.safe_dump` 整体写回，
+        代价是把 pack.yaml 的**全部注释**永久抹掉（PyYAML 不保留注释）。
+        这些注释是包作者的文档契约（elevator/pack.yaml 有 12 行：字段含义、
+        "分享给同事 = 复制目录（不含 private/ 即不带商业信息）"这类约定），
+        而触发点只是界面上一个「标记为已校对」的按钮 —— 一次点击、不可逆、
+        还在响应里回 `{"ok": true}`。详见 `undraft_yaml_text`。
+        """
         _safe_name(name)
-        p = root / "packs" / name / "pack.yaml"
+        p = packs_root / name / "pack.yaml"
         if not p.exists():
             raise HTTPException(404, "行业包不存在")
-        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-        data["draft"] = False
-        write_atomic(p, yaml.safe_dump(data, allow_unicode=True, sort_keys=False))
+        try:
+            text = p.read_text(encoding="utf-8")
+        except OSError as e:
+            raise HTTPException(500, f"pack.yaml 读取失败：{e}")
+        new = undraft_yaml_text(text)
+        # 写之前先确认改完**仍然是合法 YAML 且 draft 真的是 false**。
+        # 不这么做的后果是：一个键名写法出乎意料（例如整份文件是一个列表、
+        # 或 draft 出现在 flow 风格里）时会写出一个坏包 —— 坏 pack.yaml 会让
+        # 这个行业的参数条、词表、私有资料全部退回默认（knowledge.Pack 为此
+        # 专门抛 PackBrokenError）。宁可报 500 也不写坏。
+        try:
+            check = yaml.safe_load(new)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(500, f"pack.yaml 本来就不是合法 YAML，未做任何修改：{e}")
+        if not isinstance(check, dict) or check.get("draft") is not False:
+            raise HTTPException(500, "pack.yaml 结构异常（改完 draft 仍不是 false），"
+                                     "已放弃修改，请手工编辑该文件")
+        if new != text:
+            write_atomic(p, new)
         return {"ok": True, "name": name, "draft": False}
 
     # ── 脚本生成 ────────────────────────────────────────────
@@ -621,10 +931,22 @@ def create_app(root: Path, token: str | None = None,
                 # 于是改后端默认值时界面还按老值填（同一信息两份表示的经典后果）。
                 "defaults": {"base_url": DEFAULT_MODEL["base_url"],
                              "model": DEFAULT_MODEL["model"]},
+                # 地址的「合法但不体面」问题（明文 http 打到远端等）。
+                # 常驻下发而不是只在保存那次回一句：见 `_link_warnings`。
+                "base_url_warnings": _link_warnings(cfg),
                 "env_override": bool(os.environ.get("TALKSCRIPT_API_KEY"))}
 
     @app.post("/api/config")
     def set_config(body: ConfigIn):
+        # 地址校验排在**所有写入之前**：数值项先落盘、地址后报错的话，
+        # 这一次保存就成了「一半生效」，而界面只会显示一句 400。
+        if body.base_url not in ("", None):
+            try:
+                link_warnings = check_base_url(str(body.base_url))
+            except BaseUrlError as e:
+                raise HTTPException(400, str(e))
+        else:
+            link_warnings = []
         # 数值项必须在这里卡边界：越界的 0 / 负数一旦写进 config.yaml，
         # `load_config` 是**照单全收**的（P0-2 之后 `_num` 只在键缺失或值为空时
         # 才取默认，不再把 0 当「没填」），于是界面显示保存成功、实际值就是那个
@@ -675,7 +997,9 @@ def create_app(root: Path, token: str | None = None,
             if "api_key" in link:
                 it["api_key"] = str(link["api_key"])
             save_models(root, raw, active, config_dir=data_dir)
-        return {"ok": True}
+        # warnings：界面据此在地址那一行挂一条黄字。回 200 是诚实的 ——
+        # 值存下了、能用，只是不安全；不安全到必须让用户每次看得见。
+        return {"ok": True, "warnings": link_warnings}
 
     @app.post("/api/config/reset")
     def reset_config(body: ConfigResetIn):
@@ -723,11 +1047,18 @@ def create_app(root: Path, token: str | None = None,
         base_url = body.base_url.strip().rstrip("/")
         if not model:
             raise HTTPException(400, "模型 ID 不能为空")
-        if base_url and not base_url.startswith(("http://", "https://")):
-            # 用户最常见的漏填是「api.openai.com/v1」少了协议头 ——
-            # 不拦的话，这个值会一路存到生成时才在 urllib 里炸，报错完全指不到根因。
-            # ⚠ 只拦「填了但不对」的：**留空**是另一回事，见下面。
-            raise HTTPException(400, "请求地址要以 http:// 或 https:// 开头")
+        # 地址校验（缺陷 5）。原来这里只看 `startswith(("http://","https://"))`，
+        # 于是 `file:///C:/x`、`http://user:pass@host`（httpx 会替你把凭据变成
+        # Basic 头，设置页上看不见）、带空格/换行的粘贴内容都能存进去。
+        # 分工：**存了必然出错**的拒；**存了能用但不体面**的（明文 http 打到
+        # 远端）只警告并随响应回显 —— 本机 Ollama / 内网网关的用户正在用 http，
+        # 硬拦等于把已经在工作的配置改坏。
+        url_warnings: list[str] = []
+        if base_url:
+            try:
+                url_warnings = check_base_url(base_url)
+            except BaseUrlError as e:
+                raise HTTPException(400, str(e))
 
         if mid:
             it = next((x for x in raw if x["id"] == mid), None)
@@ -764,7 +1095,8 @@ def create_app(root: Path, token: str | None = None,
         if body.api_key.strip():
             it["api_key"] = body.api_key.strip()
         save_models(root, raw, active, config_dir=data_dir)
-        return {"ok": True, "id": mid, "models": public_models(_cfg())}
+        return {"ok": True, "id": mid, "models": public_models(_cfg()),
+                "warnings": url_warnings}
 
     @app.post("/api/models/delete")
     def delete_model(body: ModelIdIn):
@@ -816,6 +1148,7 @@ def create_app(root: Path, token: str | None = None,
         这样用户填完就能测，不必先点保存。
         """
         fresh = _cfg()
+        test_warnings: list[str] = []
         if body:
             # 先落到「要测的那条模型」上：编辑一条**非当前**模型时，密钥框是空的，
             # 不指明 id 就会错拿当前模型的 Key 去测 —— 测出来的结果与用户以为的
@@ -827,6 +1160,10 @@ def create_app(root: Path, token: str | None = None,
                     fresh.llm.api_key = m.api_key
                     fresh.llm.model = m.model
             if body.base_url:
+                try:
+                    test_warnings = check_base_url(str(body.base_url))
+                except BaseUrlError as e:
+                    raise HTTPException(400, str(e))
                 fresh.llm.base_url = str(body.base_url).rstrip("/")
             if body.api_key:
                 fresh.llm.api_key = str(body.api_key)
@@ -834,9 +1171,13 @@ def create_app(root: Path, token: str | None = None,
                 fresh.llm.model = str(body.model)
         if not (fresh.llm.api_key or fresh.mock):
             raise HTTPException(400, "未配置模型 API Key，请先填写")
+        if not test_warnings:
+            # 「测试连接」没带地址覆盖时，测的就是存着的那条 —— 警告同样要说，
+            # 否则用户点完只看到「连接正常」，永远不知道该把它换成 https。
+            test_warnings = _link_warnings(fresh)
         ok, detail = LLMClient(fresh.llm, mock=fresh.mock).ping()
         return {"ok": ok, "detail": detail, "model": fresh.llm.model,
-                "base_url": fresh.llm.base_url}
+                "base_url": fresh.llm.base_url, "warnings": test_warnings}
 
     return app
 
@@ -921,7 +1262,13 @@ def main():
     ap.add_argument("--data-dir", default=None,
                     help="可写数据目录（config.yaml 与 generated/）；默认同 --root。"
                          "打包后安装目录通常不可写，由 Electron 指到用户数据目录。")
-    ap.add_argument("--token", default=None, help="访问令牌（默认随机生成）")
+    ap.add_argument("--packs-dir", default=None,
+                    help="可写行业包目录（打包版 = %%APPDATA%%\\TalkScript\\packs）。"
+                         "默认同 --root/packs（开发态）。给了它就把 --root/packs 当只读种子。")
+    ap.add_argument("--token", default=None,
+                    help="访问令牌。**只给手工起引擎时用**：Electron 改走环境变量 "
+                         f"{TOKEN_ENV}（命令行会被同机任何进程读到，见 desktop/main.js）。"
+                         "两者都不给则随机生成。")
     ap.add_argument("--version", default=None,
                     help="版本号（打包版由 Electron 传入；不传则读 desktop/package.json）")
     ap.add_argument("--open", action="store_true", help="启动后自动打开浏览器")
@@ -933,9 +1280,18 @@ def main():
     import uvicorn
     root = Path(args.root).resolve()
     data_dir = Path(args.data_dir).resolve() if args.data_dir else None
-    token = args.token or new_token()
+    packs_dir = Path(args.packs_dir).resolve() if args.packs_dir else None
+    # 令牌来源的优先级：显式 --token > 环境变量 > 随机。
+    # 环境变量这条是**唯一**Electron 用的通道（缺陷 1）：Windows 上任何本机进程都能
+    # 用 `wmic process get commandline` / Get-CimInstance 读到别人的命令行，
+    # 于是原来的 `--token <值>` 等于把访问令牌贴在了进程表里。拿到令牌的进程
+    # 可以把 base_url 改成自己的服务器（POST /api/config），下一次生成就会把
+    # `Bearer <API Key>` 连同整段私有资料一起发过去。
+    # 子进程的环境块只能被同一用户的进程（且通常需调试权限）读到，比 argv 高一个量级。
+    token = args.token or os.environ.get(TOKEN_ENV) or new_token()
     app = create_app(root, token=token, data_dir=data_dir,
-                     bind_host=args.host, version=args.version)
+                     bind_host=args.host, version=args.version,
+                     packs_dir=packs_dir)
     VERSION = args.version or read_version(root)
     url = f"http://127.0.0.1:{args.port}/?token={token}"
     print("=" * 62)

@@ -1,0 +1,82 @@
+# 模板包（`packs/_template/`）—— 行业包生成器的骨架来源
+#
+# 这个包**不代表任何行业**：`app/packgen.py` 建包时从这里的 GENERIC_FILES /
+# PRIVATE_TEMPLATES 复制骨架，再由模型填入新行业的知识。
+# 因此本包的每一句话都必须与具体行业无关 —— 出现任何一个行业的名字或事实就是回归
+# （钉在 tests/test_template_pack.py）。
+#
+# 为什么需要它（P0）：以前 `TEMPLATE_PACK` 找不到 `_template` 就静默回退到某个
+# 成熟行业包，于是新建的行业包里带着**那个行业**的 patterns/growth.md（标题就写着
+# 是某行业特有的取舍）与填好的 private/faq.yaml —— 这两份**每轮撰写都注入**，
+# 模型收到的完播建议与"私有事实"全是别行业的。现在模板缺失直接抛错，不再回退。
+#
+# 名称以下划线开头 → `list_packs` 跳过它（引擎内部骨架，不是一份可选的行业包）。
+
+name: _template
+display_name: 模板包（不注入任何行业）
+draft: false
+version: 1
+description: 行业包生成器的中立骨架：无行业事实，仅供 packs/ 建包时复制
+
+params:
+  segment:
+    label: 细分领域
+    options: ["{{细分一}}", "{{细分二}}"]
+    default: "{{细分一}}"
+  audience:
+    label: 受众
+    options: ["{{受众一}}", "{{受众二}}"]
+    default: "{{受众一}}"
+  duration:
+    label: 时长（秒）
+    options: [15, 30, 60, 90, 180]
+    default: 60
+  style:
+    label: 风格
+    options: [权威科普, 亲和接地气, 幽默玩梗, 严肃警示, 销售转化]
+    default: 亲和接地气
+  platform:
+    label: 平台
+    options: [抖音, 视频号, 小红书, B站]
+    default: 抖音
+  persona:
+    label: 人设
+    options: ["{{人设一}}", "{{人设二}}"]
+    default: "{{人设一}}"
+  cta:
+    label: 结尾引导
+    options: [关注, 私信, 留资, 到店, 评论关键词]
+    default: 关注
+
+# 语速与配额是「口播」这件事的物理量，与行业无关，直接沿用（新包会复制这些表）。
+rate_by_style:
+  权威科普: 4.5
+  亲和接地气: 4.5
+  幽默玩梗: 5.0
+  严肃警示: 4.2
+  销售转化: 5.0
+
+# 字数配额表（基准语速 5.0 字/秒；其他语速按 rate/5.0 折算，见 rules/duration.md）
+quota_table:
+  15:  { total: 70,  hook: 15, body: 40,  cta: 15 }
+  30:  { total: 145, hook: 25, body: 90,  cta: 30 }
+  60:  { total: 290, hook: 45, body: 190, cta: 55 }
+  90:  { total: 430, hook: 60, body: 300, cta: 70 }
+  180: { total: 820, hook: 90, body: 600, cta: 130 }
+
+points_by_duration:
+  15: 1
+  30: 2
+  60: 3
+  90: 3
+  180: 4
+
+# 模板包没有 knowledge/topics.md 与 audience.md（这两份由模型按新行业生成），
+# 所以映射表留空：pack_info/param_audit 对模板包不做章节对账。
+topics_map: {}
+audience_map: {}
+
+files:
+  private: [private/products.yaml, private/service.yaml, private/cases.yaml, private/faq.yaml]
+
+banwords: banwords.yaml

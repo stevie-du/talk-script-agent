@@ -36,7 +36,7 @@ objections:
   - category: 安全
     question: "电梯会不会掉下去"
     answer: "讲多重保护：抱闸、限速器与安全钳联动、缓冲器。不做绝对承诺"
-    note: "统一口径见 compliance/industry.md 反谣言库"
+    note: "统一口径见本提示词的【行业红线】段（引擎每轮注入，含救援话术与谣言纠正）"
 
   - category: 安全
     question: "加装会不会影响楼体安全"
@@ -63,7 +63,7 @@ objections:
   - category: 售后
     question: "坏了多久能到"
     answer: ""
-    note: "填 private/service.yaml 的真实响应时效，写不到的不要写"
+    note: "填本包私有资料「服务与质保」那一段的真实响应时效，写不到的不要写"
 
   - category: 售后
     question: "保修多久，保什么"

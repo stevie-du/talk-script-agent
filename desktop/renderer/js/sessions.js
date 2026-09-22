@@ -21,7 +21,7 @@
 import { $, el, fmtClock, fmtStamp, dayGroupKey, toast, bindOnce } from "./util.js";
 import { api } from "./api.js";
 import { state, setResult, detachJob } from "./store.js";
-import { setLeftFolded } from "./ui.js";
+import { setLeftFolded, syncBusyAffordance } from "./ui.js";
 import { attach, openRecord } from "./jobs.js";
 import { STATE_LABEL, BUSY_STATES } from "./progress.js";
 import { appConfirm } from "./overlays.js";
@@ -129,6 +129,14 @@ export async function loadSessions() {
   return items;
 }
 
+/** 当前仍在后台跑的记录（新 → 旧）。
+ *  「几条在跑 / 谁在跑」的**唯一**来源：后端没有 GET /api/jobs 列表端点，
+ *  在跑的作业是 /api/history 把内存快照并进摘要里给出的（app/server.py 的 history()）。
+ *  排除掉当前正看着的那条 —— 那一条界面上已经有进度与「停止」键，不该再算「后台」。 */
+export function busyRecords() {
+  return allItems.filter(it => BUSY_STATES.has(it.state || ""));
+}
+
 function paint(items) {
   const list = $("session-list");
   Array.from(list.children).forEach(n => { if (!n.dataset.key) n.remove(); });
@@ -188,6 +196,9 @@ function paint(items) {
     else list.insertBefore(node, cursor);
   }
   old.forEach(n => n.remove());
+  applyRovingTabindex();
+  // 「几条还在后台跑」是这张表算出来的，读数就跟着这张表更新（见 ui.js 的 syncBusyAffordance）。
+  syncBusyAffordance();
 }
 
 /** 分组标签：可点击折叠 + 一个「更多」菜单（删整组，以后还有重命名等）。
@@ -242,14 +253,18 @@ function updateGroup(n, sp) {
  *  于是标题文字的左边缘 = 分组标签文字的左边缘 = 搜索框/新建/设置的文字左边缘
  *  —— 旧的「标题 + 副标题」两行式里，副标题从 20px 起、标题从 34px 起，
  *  同一行内两个左边缘，读起来就是「没对齐」。
- *  行上没有状态字：只有异常才落记号，理由见 updateRow 里那张三档表。 */
+ *  行上没有状态字：只有异常才落记号，理由见 updateRow 里那张三档表。
+ *  ⚠ 焦点：行与行内的删除键都**不进** Tab 序（tabIndex=-1），整列只留一个停靠点，
+ *  方向键在行之间走 —— 见下面 applyRovingTabindex 的说明。 */
 function buildRow() {
   const row = el("div", "sess-item");
-  row.tabIndex = 0;
   row.setAttribute("role", "button");
+  row.tabIndex = -1;
   row.innerHTML = `<span class="dot"></span><span class="sess-topic"></span>`
     + `<span class="sess-time"></span>`;
-  row.appendChild(el("button", "sess-del", DEL_SVG));
+  const del = el("button", "sess-del", DEL_SVG);
+  del.tabIndex = -1;             // 鼠标仍然悬停可见；键盘走 Delete 键（见 bindSessionList）
+  row.appendChild(del);
   return row;
 }
 
@@ -272,6 +287,8 @@ function updateRow(row, it) {
     : (!!state.job && it.id === state.job.id);
   row.dataset.id = it.id;
   row.classList.toggle("active", isCur);
+  // 当前那条就是键盘停靠点（Tab 从正文回到左栏时，落在用户认识的那一行上）
+  if (isCur) rovingId = it.id;
 
   const clock = fmtClock(it.created_at);
   // sig 要覆盖行上**看得见**的每一项，漏一项就是「数据变了但那一格不重画」。
@@ -313,6 +330,45 @@ function updateRow(row, it) {
   del.dataset.act = done ? "del" : "cancel";
 }
 
+/** ── 键盘：整列只有一个 Tab 停靠点（roving tabindex）────────────
+ *
+ *  为什么必须做：一列 100 条历史记录，原来**每行**是一个 tabIndex=0 的 role=button，
+ *  行里还各带一个删除按钮 —— 也就是 200+ 个 Tab 停靠点。键盘用户按 Tab 走进会话栏
+ *  就出不来了（要按两百多次才到得了正文），读屏用户的 Tab 序同样被淹没。
+ *  标准做法（WAI-ARIA Authoring Practices 的 list / grid 都是这一套）：
+ *  Tab 只停**一个**点，↑↓/Home/End 在行之间走，Enter 打开、Delete 删。
+ *  ⚠ 删除键没有从键盘上消失：焦点在某一行时按 Delete/Backspace 就是删那一行
+ *     （走的仍是 appConfirm 二次确认，与鼠标点删除完全同一条路）。
+ *  ⚠ 停靠点选「当前正在看的那条」，没有就在第一条 —— 从正文 Tab 回来时，
+ *     焦点落在用户认识的那一行上，而不是列表开头。 */
+let rovingId = "";
+
+function rowNodes() {
+  return Array.from($("session-list").querySelectorAll(".sess-item"));
+}
+
+function applyRovingTabindex() {
+  const rows = rowNodes();
+  if (!rows.length) { rovingId = ""; return; }
+  const cur = rows.find(r => r.dataset.id === rovingId)
+    || rows.find(r => r.classList.contains("active"))
+    || rows[0];
+  rovingId = cur.dataset.id;
+  rows.forEach(r => { r.tabIndex = r === cur ? 0 : -1; });
+}
+
+function moveRoving(delta) {
+  const rows = rowNodes();
+  if (!rows.length) return;
+  const i = Math.max(0, rows.findIndex(r => r.dataset.id === rovingId));
+  const next = rows[Math.min(rows.length - 1, Math.max(0, i + delta))];
+  if (!next) return;
+  rows.forEach(r => { r.tabIndex = r === next ? 0 : -1; });
+  rovingId = next.dataset.id;
+  next.focus();
+  next.scrollIntoView({ block: "nearest" });
+}
+
 /** 整个列表只在容器上挂一个监听器：行被刷新换掉后绑定不会错位。 */
 export function focusSessionSearch() {
   const box = $("sess-search");
@@ -349,10 +405,19 @@ function bindSearch() {
 export const bindSessionList = bindOnce(function bindSessionList() {
   bindSearch();
   const list = $("session-list");
+  // 提示写在容器上、不逐行重复：一百行都念一遍「按 Delete 删除」是噪声。
+  list.setAttribute("aria-label", "会话记录：方向键选择，Enter 打开，Delete 删除所选");
   const activate = (row) => {
     const it = index.get(row.dataset.id);
     if (!it) return;
-    (it.state || "done") === "done" ? openRecord(it.id) : attach(it.id);
+    // 分流判据是「它还在跑吗」，**不是**「它的 state 是不是 done」。
+    // 修前写的是 `state === "done" ? openRecord : attach`：failed / cancelled
+    // 以及索引里残留的旧状态全被送去 attach() —— 那里读的是**内存里的作业**，
+    // 应用重启后必然 404，于是磁盘上明明有 job.json 摘要（含失败原因），
+    // 界面上只留下一条 3.5 秒的「无法回到这次生成」，jobs.js 里那张
+    // 「这次失败了 · 用同样参数重来」的卡片从此没人能画出来（死代码）。
+    // 现在：在跑的（含排队）才值得接轮询，其余一律回读落盘的记录。
+    BUSY_STATES.has(it.state || "") ? attach(it.id) : openRecord(it.id);
   };
   list.addEventListener("click", ev => {
     // 「更多」与它的菜单优先：两者都 stopPropagation，避免下面那句
@@ -398,9 +463,33 @@ export const bindSessionList = bindOnce(function bindSessionList() {
     // 否则一次按键折叠两次 = 看起来「点了没反应」。
     if (ev.target.closest(".group-lbl") || ev.target.closest(".grp-more")
         || ev.target.closest(".grp-menu-item")) return;
-    if (ev.key !== "Enter" && ev.key !== " ") return;
     const row = ev.target.closest(".sess-item");
     if (!row) return;
+    // 方向键在行之间走（整列只有一个 Tab 停靠点，见 applyRovingTabindex 的说明）
+    if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+      ev.preventDefault();
+      moveRoving(ev.key === "ArrowDown" ? 1 : -1);
+      return;
+    }
+    if (ev.key === "Home" || ev.key === "End") {
+      ev.preventDefault();
+      const rows = rowNodes();
+      const n = ev.key === "Home" ? rows[0] : rows[rows.length - 1];
+      if (n) { rows.forEach(r => { r.tabIndex = r === n ? 0 : -1; });
+               rovingId = n.dataset.id; n.focus(); n.scrollIntoView({ block: "nearest" }); }
+      return;
+    }
+    // 删除键从行上按：行内的删除按钮不在 Tab 序里（否则一百条就是两百个停靠点），
+    // 键盘用户要能删，就得有一条等价路径。走的仍是同一个 deleteSession + 二次确认。
+    if (ev.key === "Delete" || ev.key === "Backspace") {
+      ev.preventDefault();
+      const it = index.get(row.dataset.id);
+      if (!it) return;
+      const del = row.querySelector(".sess-del");
+      if (del) { del.focus(); del.click(); }
+      return;
+    }
+    if (ev.key !== "Enter" && ev.key !== " ") return;
     ev.preventDefault();
     activate(row);
   });

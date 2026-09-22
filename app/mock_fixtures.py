@@ -48,12 +48,21 @@ _SECTIONS_CLEAN = [
     {"type": "cta", "text": "有人担心会缺氧。／别慌，轿厢不是密封的，有通风口。／记住这三步，转发给家里人，真遇上了能救命。／关注我，电梯的事少踩坑。", "subtitle": "转发给家人"},
 ]
 
+# 夹具把 `StoryboardShot` 的四个契约槽一并填上：真实模型现在被 `skill.yaml`
+# 要求输出它们，夹具不跟着走 = mock 产物里 `transition` 恒 cut、`shot_type` 恒空，
+# 那条投影就只在单测里被验过。最后一行的 `style` 故意留空：
+# `_build_scenes` 要能回落到本次生成的风格参数（两分支都得有活样本）。
 _STORYBOARD = [
-    {"time": "0-4s", "shot": "轿厢内·近景，灯光偏暗", "subtitle": "第一反应多半是错的", "sfx": "低频提示音", "note": "口播直面镜头"},
-    {"time": "4-14s", "shot": "电梯运行示意·动画", "subtitle": "停梯是在保护你", "sfx": "BGM 收敛", "note": "用示意图，不用事故画面"},
-    {"time": "14-24s", "shot": "井道剖视·动画示意", "subtitle": "千万别扒门", "sfx": "警示音一记", "note": "动画示意，禁实拍扒门"},
-    {"time": "24-48s", "shot": "三屏分镜：警铃/电话/原地等", "subtitle": "正确三步", "sfx": "节奏上扬", "note": "文字动画逐步弹出"},
-    {"time": "48-57s", "shot": "博主口播·近景", "subtitle": "转发给家人", "sfx": "BGM 收尾", "note": "语速放缓"},
+    {"time": "0-4s", "shot": "轿厢内·近景，灯光偏暗", "subtitle": "第一反应多半是错的", "sfx": "低频提示音", "note": "口播直面镜头", "bgm": "低鼓点铺底",
+     "transition": "cut", "shot_type": "closeup", "style": "纪实冷光"},
+    {"time": "4-14s", "shot": "电梯运行示意·动画", "subtitle": "停梯是在保护你", "sfx": "BGM 收敛", "note": "用示意图，不用事故画面",
+     "transition": "dissolve", "shot_type": "medium", "style": "示意图·扁平"},
+    {"time": "14-24s", "shot": "井道剖视·动画示意", "subtitle": "千万别扒门", "sfx": "警示音一记", "note": "动画示意，禁实拍扒门",
+     "transition": "cut", "shot_type": "wide", "style": "示意图·扁平"},
+    {"time": "24-48s", "shot": "三屏分镜：警铃/电话/原地等", "subtitle": "正确三步", "sfx": "节奏上扬", "note": "文字动画逐步弹出",
+     "transition": "fade", "shot_type": "detail", "style": "文字动画"},
+    {"time": "48-57s", "shot": "博主口播·近景", "subtitle": "转发给家人", "sfx": "BGM 收尾", "note": "语速放缓",
+     "transition": "cut", "shot_type": "closeup", "style": ""},
 ]
 
 

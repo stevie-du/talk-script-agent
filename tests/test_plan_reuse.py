@@ -25,15 +25,19 @@ from __future__ import annotations
 import shutil
 import sys
 import tempfile
+import threading
 import time
+from types import SimpleNamespace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app.config import load_config                  # noqa: E402
+from app.jobs import Job                             # noqa: E402
+from app.knowledge import Pack                       # noqa: E402
 from app.pipeline import Pipeline, wait_job         # noqa: E402
-from app.schemas import GenerateRequest             # noqa: E402
+from app.schemas import GenerateRequest, TopicPlan   # noqa: E402
 
 
 def _pipeline(tmp: Path) -> Pipeline:
@@ -177,3 +181,105 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+# ── single-flight：同一指纹并发时只让一条去调模型 ──────────────
+class _GateClient:
+    """假客户端：第一条卡在 gate 上，第二条必须复用它的结果而不是再打一次。"""
+
+    def __init__(self, gate):
+        self.cfg = SimpleNamespace(model="fake-model", temperature=0.7,
+                                   max_tokens=1000, base_url="http://fake/v1")
+        self.gate = gate
+        self.calls = 0
+        self.entered = threading.Event()
+
+    def chat_json(self, task, system, user, model_cls, **kw):
+        self.calls += 1
+        self.entered.set()
+        self.gate.wait(5)
+        return TopicPlan(angle=f"角度{self.calls}", hook_type="h", hook_line="l",
+                         points=["p"], cta="c")
+
+
+def _flight(tmp, client_cls=_GateClient):
+    """起两条同参数并发生成，返回 (pipeline, 假客户端, 结果, 两条作业)。"""
+    pl = _pipeline(tmp)
+    pack = Pack(tmp, "elevator")
+    skill = pack.skill()
+    p = pl._normalize(pack, {"topic": "家用电梯怎么选", "duration": 60,
+                             "platform": "抖音"})
+    gate = threading.Event()
+    client = client_cls(gate)
+    out, jobs = {}, [Job("f-1", "generate", {}), Job("f-2", "generate", {})]
+
+    def run(tag, job):
+        try:
+            out[tag] = pl._select(job, pack, skill, p, client)
+        except Exception as e:   # noqa: BLE001
+            out[tag] = e
+    t1 = threading.Thread(target=run, args=("a", jobs[0]))
+    t1.start()
+    assert client.entered.wait(2), "第一条没进入选题调用"
+    t2 = threading.Thread(target=run, args=("b", jobs[1]))
+    t2.start()
+    time.sleep(0.3)                       # 让第二条走到等待
+    gate.set()
+    t1.join(10); t2.join(10)
+    return pl, client, out, jobs
+
+
+def test_concurrent_same_fingerprint_only_calls_once():
+    """白烧一次 4000 token 的调用是这条缓存存在的理由，并发路径不能漏。"""
+    tmp = _tmp()
+    try:
+        pl, client, out, jobs = _flight(tmp)
+        assert client.calls == 1, f"同一指纹打了 {client.calls} 次模型，single-flight 失效"
+        assert out["a"].angle == out["b"].angle == "角度1"
+        keys = _steps(jobs[1].snapshot())
+        assert "select_reuse" in keys, "复用别人选题的那条必须在日志里说出来"
+        assert "select" not in keys, "记一步「选题策划」等于告诉用户它又想了一遍"
+        assert _steps(jobs[0].snapshot()).count("select") == 1
+        assert pl._plan_flight == {}, "飞行槽没释放"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_flight_released_when_leader_fails():
+    """leader 抛错时等待者退回自己打一次，且不留下卡死的飞行槽。"""
+    class Boom(_GateClient):
+        def chat_json(self, task, system, user, model_cls, **kw):
+            self.calls += 1
+            self.entered.set()
+            self.gate.wait(5)
+            raise ValueError("上游炸了")
+
+    tmp = _tmp()
+    try:
+        pl, client, out, jobs = _flight(tmp, Boom)
+        assert client.calls >= 2, "leader 失败后等待者该自己打一次"
+        assert all(isinstance(v, Exception) for v in out.values()), out
+        assert pl._plan_flight == {}, "leader 抛错也必须释放飞行槽"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_reroll_never_joins_a_flight():
+    """「换一版」的语义就是要一个新角度：不参与缓存、也不许搭别人的飞行槽。"""
+    tmp = _tmp()
+    try:
+        pl = _pipeline(tmp)
+        pack = Pack(tmp, "elevator")
+        skill = pack.skill()
+        p = pl._normalize(pack, {"topic": "家用电梯怎么选", "duration": 60,
+                                 "platform": "抖音", "reroll": True})
+        gate = threading.Event()
+        gate.set()
+        client = _GateClient(gate)
+        j = Job("f-3", "generate", {})
+        pl._select(j, pack, skill, p, client)
+        pl._select(j, pack, skill, p, client)
+        assert client.calls == 2, "reroll 走缓存了"
+        assert pl._plan_cache == {} and pl._plan_flight == {}
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)

@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -238,9 +239,17 @@ def _case_export_skill(tmp: Path):
     demo = exp_dir / "_demo.txt"
     demo.write_text((ROOT / "examples" / "demo-60s.txt").read_text(encoding="utf-8"),
                     encoding="utf-8")
+    # 子进程的输出**两边都要钉死为 utf-8**：`text=True` 用的是**本机 locale**
+    # 解码（中文 Windows = cp936），而校验器打印的是中文。外层一旦设了
+    # PYTHONIOENCODING=utf-8（在 Windows 上看中文输出的常规做法），子进程按
+    # utf-8 写、父进程按 gbk 读 → `_readerthread` 抛 UnicodeDecodeError、
+    # `run.stdout` 变成 None，本用例于是以
+    # `TypeError: argument of type 'NoneType' is not a container` 收场 ——
+    # 一个和真实缺陷毫无关系的错。第 6 轮复核实测：带该变量必红、不带必绿。
     run = subprocess.run([sys.executable, str(exp_dir / "tools" / "check.py"),
                           str(demo), "--duration", "60", "--rate", "4.5"],
-                         capture_output=True, text=True)
+                         capture_output=True, text=True, encoding="utf-8",
+                         env={**os.environ, "PYTHONIOENCODING": "utf-8"})
     assert run.returncode == 0, run.stdout + run.stderr
     assert "244" in run.stdout, run.stdout
     demo.unlink(missing_ok=True)

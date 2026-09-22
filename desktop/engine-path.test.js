@@ -83,14 +83,36 @@ test('全都没有 → PATH 里的 python（此时依赖装没装只能听天由
   assert.strictEqual(r.via, 'PATH');
 });
 
-test('参数齐全：port / root / data-dir / token / version', () => {
+test('参数齐全：port / root / data-dir / version（**不含 token**）', () => {
   const { args } = resolveEngine(base({ exists: only(PY) }));
   const at = (k) => args[args.indexOf(k) + 1];
   assert.strictEqual(at('--port'), '12345');
   assert.strictEqual(at('--root'), ROOT);
   assert.strictEqual(at('--data-dir'), 'C:\\userData');
-  assert.strictEqual(at('--token'), 'tk');
   assert.strictEqual(at('--version'), '9.9.9');
+  assert.ok(!args.includes('--token'), `命令行里出现了 --token：${args.join(' ')}`);
+  // 整条 argv 里不许出现令牌值本身 —— 拼成一行才是 Windows 上被
+  // `wmic process get commandline` 读走的那个东西。
+  assert.ok(!args.join(' ').includes('tk'), `argv 泄漏令牌：${args.join(' ')}`);
+});
+
+test('令牌只经子进程环境变量交付（缺陷 1：argv 在同机任何进程面前是透明的）', () => {
+  for (const over of [{ exists: only(PY) }, { exists: only(EXE) }, { exists: () => false }]) {
+    const r = resolveEngine(base(over));
+    assert.strictEqual(r.env.TALKSCRIPT_TOKEN, 'tk', `${r.via} 没把令牌放进 env`);
+    assert.ok(!r.args.join(' ').includes('tk'), `${r.via} 的 argv 里还有令牌`);
+  }
+  // 没有令牌时不要凭空造一个空的环境变量（引擎会自己随机生成）
+  assert.deepStrictEqual(resolveEngine(base({ exists: only(PY), token: '' })).env, {});
+});
+
+test('packsDir 传了才带 --packs-dir（开发态行为必须与改动前完全一致）', () => {
+  const withIt = resolveEngine(base({ exists: only(PY), packsDir: 'C:\\userData\\packs' }));
+  const i = withIt.args.indexOf('--packs-dir');
+  assert.notStrictEqual(i, -1, '打包版没拿到可写包目录，用户包会被升级抹掉');
+  assert.strictEqual(withIt.args[i + 1], 'C:\\userData\\packs');
+  const without = resolveEngine(base({ exists: only(PY) }));
+  assert.ok(!without.args.includes('--packs-dir'), without.args.join(' '));
 });
 
 test('非 Windows 走 py/bin/python3，不认 .exe', () => {

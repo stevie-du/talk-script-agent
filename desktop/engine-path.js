@@ -32,15 +32,29 @@ const fs = require('fs');
  * @param {string} o.rootDir       引擎根目录（打包后 = resources/engine）
  * @param {string} o.resourcesDir  Electron 的 resources 目录
  * @param {string} o.dataDir       可写数据目录（打包后 = userData）
+ * @param {string} [o.packsDir]    可写行业包目录（打包后 = userData/packs）。
+ *                                 不传 = 用 --root 里那份（开发态的原样行为）
  * @param {string} o.version       版本号（唯一来源是 desktop/package.json）
  * @param {number} o.port
- * @param {string} o.token
+ * @param {string} o.token         访问令牌 —— **只进 env，绝不进 argv**（见下）
  * @param {number} [o.parentPid]   Electron 主进程 PID；传了引擎就会在它退出时自杀
  *                                 （不传 = 不启用看门狗，命令行手动起引擎时用）
  * @param {string} [o.platform]    默认 process.platform
  * @param {object} [o.env]         默认 process.env
  * @param {function} [o.exists]    默认 fs.existsSync —— 测试用，避免真建文件
- * @returns {{cmd: string, args: string[], via: string}} via 是命中了哪一条（日志/断言用）
+ * @returns {{cmd: string, args: string[], env: object, via: string}}
+ *          via 是命中了哪一条（日志/断言用），env 是要并给子进程的环境变量
+ *
+ * 为什么令牌走 env 而不是 `--token`
+ * ---------------------------------
+ * Windows 上同机**任何**进程都能读到别人的命令行
+ * （`wmic process get commandline` / PowerShell `Get-CimInstance Win32_Process`，
+ * 不需要任何特权）。于是原来写在 argv 里的 `--token <值>` 等于把访问令牌贴在
+ * 进程表里：拿到它的进程可以 `POST /api/config` 把 base_url 改成自己的服务器，
+ * 下一次生成就把 `Bearer <API Key>` 连同整段 private/ 资料一起发出去。
+ * 子进程的环境块由父进程构造、只能被同用户且通常需调试权限的进程读到，
+ * 比 argv 高一个量级；它同时也**不进命令行**，所以截图 / 任务管理器 / 崩溃
+ * 转储都不会带出去。看门狗的 `--parent-pid` 不是凭证，继续走 argv。
  */
 function resolveEngine(o) {
   const platform = o.platform || process.platform;
@@ -49,8 +63,8 @@ function resolveEngine(o) {
   const win = platform === 'win32';
 
   const engineArgs = ['--port', String(o.port), '--root', o.rootDir,
-                      '--data-dir', o.dataDir, '--token', o.token,
-                      '--version', o.version];
+                      '--data-dir', o.dataDir, '--version', o.version];
+  if (o.packsDir) engineArgs.push('--packs-dir', o.packsDir);
   // 看门狗：主进程被强杀/崩溃时 Windows 不会连带杀掉 python.exe，
   // 于是每次崩溃都留一份引擎常驻（占端口 + 占内存，而且 /api/health 还会回 200，
   // 下一次启动可能被**旧引擎**应答）。传了 parent-pid，引擎自己就会退。
@@ -58,26 +72,28 @@ function resolveEngine(o) {
   // 用 `python -m app.server` 跑时参数要多一个 `-m app.server`；
   // engine.exe 是已经封好的可执行文件，不带。
   const moduleArgs = ['-m', 'app.server', ...engineArgs];
+  // 令牌：交给子进程的环境变量（app/server.py 的 TOKEN_ENV = TALKSCRIPT_TOKEN）
+  const childEnv = o.token ? { TALKSCRIPT_TOKEN: o.token } : {};
 
   const custom = env.TALKSCRIPT_PYTHON;
-  if (custom) return { cmd: custom, args: moduleArgs, via: 'TALKSCRIPT_PYTHON' };
+  if (custom) return { cmd: custom, args: moduleArgs, env: childEnv, via: 'TALKSCRIPT_PYTHON' };
 
   const bundledPy = win
     ? path.join(o.resourcesDir, 'engine', 'py', 'python.exe')
     : path.join(o.resourcesDir, 'engine', 'py', 'bin', 'python3');
   if (exists(bundledPy)) {
-    return { cmd: bundledPy, args: moduleArgs, via: 'engine/py（出厂运行时）' };
+    return { cmd: bundledPy, args: moduleArgs, env: childEnv, via: 'engine/py（出厂运行时）' };
   }
 
   const bundled = path.join(o.resourcesDir, 'engine', 'engine.exe');
-  if (exists(bundled)) return { cmd: bundled, args: engineArgs, via: 'engine.exe' };
+  if (exists(bundled)) return { cmd: bundled, args: engineArgs, env: childEnv, via: 'engine.exe' };
 
   const venvPy = win
     ? path.join(o.rootDir, '.venv', 'Scripts', 'python.exe')
     : path.join(o.rootDir, '.venv', 'bin', 'python');
-  if (exists(venvPy)) return { cmd: venvPy, args: moduleArgs, via: '.venv' };
+  if (exists(venvPy)) return { cmd: venvPy, args: moduleArgs, env: childEnv, via: '.venv' };
 
-  return { cmd: win ? 'python' : 'python3', args: moduleArgs, via: 'PATH' };
+  return { cmd: win ? 'python' : 'python3', args: moduleArgs, env: childEnv, via: 'PATH' };
 }
 
 module.exports = { resolveEngine };

@@ -89,8 +89,13 @@ function beginEdit(m, onEdit) {
   bub.querySelector('[data-a="cancel"]').onclick = () => done(false);
   bub.querySelector('[data-a="go"]').onclick = () => done(true);
   ta.addEventListener("keydown", e => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); done(true); }
-    if (e.key === "Escape") { e.preventDefault(); done(false); }
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); e.stopPropagation(); done(true); }
+    // ⚠ stopPropagation 不能省（P2-6）：document 上那个全局 Esc 分派
+    // 的顺序是「收菜单 → 收浮层 → 关设置 → **停止生成**」，就地编辑框不拦事件的话，
+    // 用户按 Esc 只想关掉这个输入框，实测同时把正在跑的那条作业停了
+    // （cancels=1 + 「已停止本次生成」）。编辑框是**局部**浮层，
+    // 与自绘下拉的 Esc 同一条规矩：谁开的谁收，收完就把事件吃掉。
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); done(false); }
   });
 }
 

@@ -32,16 +32,50 @@ class PromptRenderer:
     def __init__(self, pack: Pack):
         self.pack = pack
         self.skill = pack.skill() or {}
+        # 本轮「模板引用了、但注入回来是空的」知识占位符：{stage: [名字]}。
+        # 为什么单独记：`safe_substitute` 只认「ctx 里有没有这个键」，
+        # 值为空串也算填过了 —— 于是 `## 核心术语` 被改名后 `$terms` 是 ""，
+        # 提示词剩一个光秃秃的【术语…】标题，`unfilled()` 报空、作业步里没有
+        # `tpl_*`、`pack_error=''`，作业照报 done（P1-3 的探针现象）。
+        self.blank: dict[str, list[str]] = {}
 
     # ── 基础 ────────────────────────────────────────────────
+    def _note(self, stage: str, key: str, value: str) -> None:
+        """登记某个占位符本轮有没有内容（后写覆盖前写，允许注入方纠正自己）。"""
+        seen = self.blank.setdefault(stage, [])
+        empty = not str(value or "").strip()
+        if empty and key not in seen:
+            seen.append(key)
+        elif not empty and key in seen:
+            seen.remove(key)
+
     def render(self, stage: str, ctx: dict) -> tuple[str, str]:
         cfg = self.skill["stages"][stage]
-        system = Template(cfg["system"]).safe_substitute(ctx)
-        user = Template(cfg["user_template"]).safe_substitute(ctx)
+        system = Template(self._deblank(stage, cfg["system"])).safe_substitute(ctx)
+        user = Template(self._deblank(stage, cfg["user_template"])).safe_substitute(ctx)
         return system, user
 
+    def _deblank(self, stage: str, text: str) -> str:
+        """注入为空的占位符，连同它**上一行的【标签】**一起去掉。
+
+        模板习惯写成「【术语 → 口语解释…】\n$terms」：`$terms` 空时那行标签
+        还在，模型读到的是一个对空内容的强调 —— 比整段没有更坏（它会以为
+        「术语口径 = 我自己编」）。只在真为空时删，正常包渲染结果一字不变。
+        """
+        for key in self.blank.get(stage, ()):
+            text = re.sub(r"[^\S\n]*【[^】]*】\n[^\S\n]*\$\{?" + re.escape(key) + r"\}?[ \t]*\n",
+                          "", text)
+            text = re.sub(r"[^\S\n]*\$\{?" + re.escape(key) + r"\}?[ \t]*\n", "", text)
+        return text
+
     def unfilled(self, stage: str, ctx: dict) -> list[str]:
-        """模板里引用、但上下文没提供的占位符（去重、保序）。空列表 = 对得上。
+        """模板里引用了、但这轮**没有**拿到内容的占位符（去重、保序）。空列表 = 对得上。
+
+        两种拿不到：ctx 里根本没这个键（拼错名字、files 漏配），以及键在、值为空串
+        （章节被改名/删空、选项在 `topics_map` 里没有落点）。后者以前完全隐形 ——
+        `safe_substitute` 把空串当已填充，占位符被替换成nothing，作业日志一片干净。
+        报出来的名字直接进 `pipeline._render_stage` 的 `tpl_*` 步骤（既有降级通道），
+        建包期则由 `_placeholder_audit` 走同一条路，两边一本账。
 
         检查的是**模板原文**而不是渲染结果：知识文件会被注入进 user 提示词，
         里面完全可能出现 `$` 开头的字样（价格写法、模板变量示例），
@@ -49,20 +83,28 @@ class PromptRenderer:
         """
         cfg = (self.skill.get("stages") or {}).get(stage) or {}
         out: list[str] = []
+        referenced: set[str] = set()
         for text in (cfg.get("system", ""), cfg.get("user_template", "")):
             for name in _PLACEHOLDER.findall(text or ""):
+                referenced.add(name)
                 if name not in ctx and f"${name}" not in out:
                     out.append(f"${name}")
+        for name in self.blank.get(stage, ()):
+            if name in referenced and f"${name}" not in out:
+                out.append(f"${name}")
         return out
 
     def stage_files(self, stage: str, ctx: dict) -> None:
         """把 stage.files 声明的知识文件内容填进对应占位符（缺失文件→空串）。
 
         取值支持 `路径` 与 `路径#章节关键词`（后者只注入那一节，见 `Pack.file_slice`）。
+        空内容不会被改成"不注入"：那会让占位符以字面量形式发给模型，更糟；
+        这里只做一件事 —— 记进 `self.blank`，让 `unfilled()` 与模板标签清理看见。
         """
         files = (self.skill.get("stages", {}).get(stage, {}).get("files") or {})
         for key, rel in files.items():
             ctx[key] = self.pack.file_slice(rel)
+            self._note(stage, key, ctx[key])
 
     def voice_parts(self, level: str) -> tuple[str, str]:
         """按人味档位组装 (anti_ai_rule, voice_block)。"""
@@ -95,12 +137,18 @@ class PromptRenderer:
     def select_ctx(self, p: dict) -> dict:
         ctx = self.base_ctx(p)
         self.stage_files("select", ctx)
+        # 细分/受众切片是「引擎按参数值注入」的三块知识，不走 stages.files，
+        # 所以也得手工登记空不空（P1-1：`维保` 在 topics_map 里没有落点时，
+        # 选题拿到的是空串，与拼错占位符是同一种失效，必须同样可见）。
         ctx["topics_slice"] = self.pack.topics_slice(p["segment"])
+        self._note("select", "topics_slice", ctx["topics_slice"])
         ctx["audience_slice"] = self.pack.audience_slice(p["audience"])
+        self._note("select", "audience_slice", ctx["audience_slice"])
         # 钩子库按风格切片（一份文件 5 套语气模板，每轮只用 1 套）。
         # 引擎负责切，所以 skill.yaml 的 select.files 里**不该**再声明 hooks ——
         # 声明了也会被这里覆盖成切片。
         ctx["hooks"] = self.pack.hooks_slice(p["style"])
+        self._note("select", "hooks", ctx["hooks"])
         return ctx
 
     def write_ctx(self, p: dict, plan_dump: dict, feedback: str) -> dict:

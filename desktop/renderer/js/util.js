@@ -49,11 +49,25 @@ export function esc(s) {
 }
 
 let toastTimer = null;
+let lastToast = "";        // 上一次写了什么（重复提示要强制再念一遍）
+let toastFlip = false;     // 零宽字符开关：只在重复文案上交替，别的场合不动文本
+// U+200B：不可见，不影响任何文案匹配，只是让「同一句再说一遍」成为一次真实变更。
+const ZWSP = "";
 export function toast(msg, ms = 2200) {
   const t = $("toast");
   if (!t) return;
-  t.textContent = msg;
+  // 顺序：先让它出现在无障碍树里，再写文字。
+  // `#toast` 平时挂着 .hidden（display:none），节点那时是**不在无障碍树上**的 ——
+  // 先写字后现身，读屏看不到任何"变化"，一句提示就静默地丢了（它是全站唯一的
+  // 反馈出口：停止 / 失败 / 保存 / 复制…十几条话只有这一个落点）。
   t.classList.remove("hidden");
+  // 同一句连点两次（例如连按两次停止）文本没变，实时区就不会再念一遍 ——
+  // 补一个交替的零宽字符，让它成为一次真实的变更。
+  // ⚠ 只在**重复**时补：别的场合保持文本原样，读屏与断言读到的都是那句话。
+  const repeated = String(msg) === lastToast;
+  toastFlip = !toastFlip;
+  t.textContent = repeated && toastFlip ? msg + ZWSP : String(msg);
+  lastToast = String(msg);
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => t.classList.add("hidden"), ms);
 }
@@ -80,11 +94,24 @@ export function download(filename, text, mime = "text/plain;charset=utf-8") {
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
-/** 把 **加粗** 与 {{占位}} 渲染成 HTML（先转义再替换，顺序不能反）。 */
+/** 把 **加粗** 与 {{占位}} 渲染成 HTML（先转义再替换，顺序不能反）。
+ *
+ *  ⚠ 「待补：」这个前缀是**占位符自己带的**（引擎的约定写在 app/knowledge.py
+ *  与 export_skill.py 的提示词里：模型输出的就是 `{{待补：主力机型载重}}`）。
+ *  修复前这里无条件再拼一次，屏幕上是
+ *      {{待补：待补：主力机型载重}}
+ *  而复制出去 / 导出的 Markdown 走的是原文，**一个字都不错** ——
+ *  于是「屏幕上看到的」与「拿走的」是两份文本，读屏与截图都跟着错（P3-8）。
+ *  现在只在**没有**这个前缀时才补（模型偶尔只写 `{{主力机型载重}}`，
+ *  那一种要标出来，否则用户不知道那对花括号是"这里缺事实"而不是排版符号）。 */
 export function fmtText(s) {
   let h = esc(s);
   h = h.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-  h = h.replace(/\{\{([^}]+)\}\}/g, (m, k) => `<span class="over jumpable">{{待补：${k}}}</span>`);
+  h = h.replace(/\{\{([^}]+)\}\}/g, (m, k) => {
+    const inner = k.trim();
+    const label = /^待补\s*[：:]/.test(inner) ? inner : `待补：${inner}`;
+    return `<span class="over jumpable">{{${label}}}</span>`;
+  });
   return h;
 }
 

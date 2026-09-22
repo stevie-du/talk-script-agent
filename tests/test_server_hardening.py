@@ -11,6 +11,8 @@
   5 建包失败不留半成品目录 —— 否则重试会被 409「已存在」挡死。
   6 导出技能默认不带 private/ —— 商业信息不外带。
   7 渲染层下发 CSP 且没有 'unsafe-inline' 后门（纵深防御，P2-5）。
+  8 交付路径复审的五个缺陷：令牌经 env 而非 argv、private/ 不经 HTTP 读走、
+    「标记已校对」不吃注释、base_url 的拒/警分工、行业包住在可写目录。
 """
 import json
 import re
@@ -906,6 +908,411 @@ def test_renderer_sends_csp(tmp_path=None):
     assert js.status_code == 200, js.status_code
     assert js.headers.get("content-security-policy") == csp, "子资源没带 CSP"
     shutil.rmtree(data, ignore_errors=True)
+
+
+# ── 8 交付路径：令牌通道 / 私有资料 / 注释 / 地址 / 可写包根 ──
+#
+# 这一组来自 2026-09-22 的「出厂 / 交付路径」复审，逐条对应一个已复现的缺陷。
+# 每条都**先看行为**（起真进程 / 读真字节），不看代码顺不顺眼。
+
+def test_engine_token_comes_from_env_not_argv(tmp_path=None):
+    """缺陷 1：令牌经**子进程环境变量**交给引擎，命令行上一个字都不留。
+
+    为什么必须真起进程：这条缺陷的全部内容就是「Windows 上同机任何进程能读到
+    别人的 argv」，用 TestClient 直接 `create_app(token=...)` 是**同义反复**——
+    它证明不了 Electron 传参那条路不写令牌。所以这里两头都钉：
+      · 引擎侧：只给 `TALKSCRIPT_TOKEN` 也能起来，并且认这个令牌；
+      · 参数侧：argv 里出现 `--token` 或令牌值本身 = 失败。
+    （Electron 侧的 argv 由 `desktop/engine-path.test.js` 钉，那里能断到 args 数组。）
+    """
+    import os
+    import socket
+    import subprocess
+    import urllib.error
+    import urllib.request
+
+    def _free_port() -> int:
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        return port
+
+    def _get(port: int, path: str, token: str = ""):
+        req = urllib.request.Request(f"http://127.0.0.1:{port}{path}")
+        if token:
+            req.add_header("X-TalkScript-Token", token)
+        try:
+            with urllib.request.urlopen(req, timeout=3) as r:
+                return r.status, r.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode("utf-8", "replace")
+
+    tmp = _tmp_root()
+    port = _free_port()
+    env_token = "env-only-token-4242"
+    args = [sys.executable, "-m", "app.server", "--port", str(port),
+            "--root", str(tmp), "--data-dir", str(tmp),
+            "--parent-pid", str(os.getpid())]      # 看门狗照旧走 argv（不是凭证）
+    eng = subprocess.Popen(
+        args, cwd=str(ROOT),
+        env={**os.environ, "PYTHONIOENCODING": "utf-8", "TALKSCRIPT_MOCK": "1",
+             "TALKSCRIPT_TOKEN": env_token},
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        assert "--token" not in args and not any(env_token in a for a in args), \
+            "测试自己就把令牌写进 argv 了，那这条断言是空的"
+        deadline = time.time() + 40
+        while time.time() < deadline:
+            try:
+                if _get(port, "/api/health")[0] == 200:
+                    break
+            except OSError:
+                time.sleep(0.3)
+        else:
+            raise AssertionError("引擎没起来 —— 环境变量 TALKSCRIPT_TOKEN 没被认？")
+
+        assert _get(port, "/api/meta")[0] == 401, "无令牌本该 401"
+        code, body = _get(port, "/api/meta", env_token)
+        assert code == 200, (code, body[:200])
+        assert _get(port, "/api/meta", "wrong-token")[0] == 401
+
+        # /docs 那条（缺陷 2）在这里顺手也验一次：它一直就在令牌之外，
+        # 关掉之后连"带对令牌"都不该给出接口结构。
+        for p in ("/docs", "/redoc", "/openapi.json"):
+            assert _get(port, p, env_token)[0] in (401, 404), p
+    finally:
+        eng.kill()
+        try:
+            eng.wait(timeout=5)
+        except Exception:                           # noqa: BLE001
+            pass
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_private_pack_files_are_not_served_over_http(tmp_path=None):
+    """缺陷 4：`/api/packs/{name}/file?rel=private/...` 不再回明文。
+
+    与「安装包排除 private/」是同一份产品立场，两件事不能互相矛盾。
+    这里同时钉住**别把整个查看器一起弄坏**：非 private 的文件照旧 200。
+    """
+    tmp = _tmp_root()
+    priv = tmp / "packs" / "elevator" / "private"
+    priv.mkdir(parents=True, exist_ok=True)
+    (priv / "products.yaml").write_text(
+        "型号: SECRET-MODEL-9000\n报价: 128000\n", encoding="utf-8")
+    c = _client(tmp)
+
+    for rel in ("private/products.yaml", "private/", "Private/products.yaml",
+                "./private/products.yaml", "private\\products.yaml",
+                "knowledge/../private/products.yaml"):
+        r = c.get("/api/packs/elevator/file", params={"rel": rel})
+        assert r.status_code == 403, (rel, r.status_code, r.text[:200])
+        assert "SECRET-MODEL-9000" not in r.text, f"{rel} 把私有资料读出去了"
+        assert "私有资料" in r.json()["detail"], r.text      # 要说清去哪儿看
+
+    ok = c.get("/api/packs/elevator/file", params={"rel": "pack.yaml"})
+    assert ok.status_code == 200, (ok.status_code, ok.text[:200])
+    assert ok.json()["text"], "非 private 的预览被一起挡掉了"
+    # 列表仍然**看得见**私有文件（只有名字与体积）—— 界面靠它分组，
+    # 而"存在一个 private/"这件事本来就不是秘密（安装包排除规则也承认它在）。
+    files = [f["rel"] for f in c.get("/api/packs/elevator").json()["files"]]
+    assert any(f.startswith("private/") for f in files), files
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_undraft_preserves_comments(tmp_path=None):
+    """缺陷 3：「标记为已校对」不许吃掉 pack.yaml 的注释。
+
+    这条断的是**字节**，不是 `yaml.safe_load` 后的等价 ——
+    safe_load 看不出注释丢了（注释在数据模型里根本不存在），所以原来的
+    `test_undraft_clears_flag_and_keeps_rest` 全绿而注释照样没了。
+    用仓库里那份真 pack.yaml（含 12 行注释 + 行尾注释）。
+    """
+    tmp = Path(tempfile.mkdtemp(prefix="talkscript-undraft-"))
+    shutil.copytree(ROOT / "packs", tmp / "packs")
+    (tmp / "config.yaml").write_text("llm:\n  api_key: MOCK\n", encoding="utf-8")
+    y = tmp / "packs" / "elevator" / "pack.yaml"
+    before = y.read_text(encoding="utf-8")
+    # 前置：真包里 draft 当前是 false，先手动翻成 true 才像在走这条路径
+    assert "\ndraft: false" in before, "前提变了：仓库包不再是 draft: false"
+    y.write_text(before.replace("draft: false", "draft: true", 1), encoding="utf-8")
+
+    c = _client(tmp)
+    r = c.post("/api/packs/elevator/undraft")
+    assert r.status_code == 200, (r.status_code, r.text)
+    after = y.read_text(encoding="utf-8")
+
+    def comments(t):
+        return [ln for ln in t.split("\n") if ln.strip().startswith("#")]
+    whole_line, inline = comments(before), comments(after)
+    assert len(whole_line) > 8, f"这个包没有注释可比对，断言是空的：{len(whole_line)}"
+    assert whole_line == inline, "整行注释少了 —— safe_dump 往返又回来了"
+    # 行尾注释（"true 时界面显示…" 那类）同样要在，且贴在同一行上
+    draft_line = [ln for ln in after.split("\n") if ln.startswith("draft:")]
+    assert len(draft_line) == 1 and "#" in draft_line[0], draft_line
+    # 最强的一条：false → true → 再点「已校对」回到 false，
+    # 除值本身以外**一个字节都不该变**（注释、空行、对齐全部原地）。
+    assert after == before, "就地改写后与原始字节不一致 —— 逐行贴出差异再改：\n" \
+        + repr([(x, y) for x, y in zip(before.split("\n"), after.split("\n"))
+                if x != y][:4])
+    assert c.get("/api/packs/elevator").json()["draft"] is False
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_base_url_rejects_and_warns(tmp_path=None):
+    """缺陷 5：地址校验只管「存了必然出错」的，其余只警告但必须常驻可见。
+
+    ⚠ 不许拦明文 http 的本机 / 内网地址 —— 用户正在用 `http://<ip>:9200/v1`
+    跑本地模型，拦了就是把他能跑的配置改坏（这条同时是回归守卫）。
+    """
+    tmp = _tmp_root()
+    c = _client(tmp)
+    bad = {
+        "file:///C:/Users/me/secrets": "协议",
+        "javascript:alert(1)": "协议",
+        "ftp://host/v1": "协议",
+        "http://user:pass@host/v1": "内嵌账号密码",
+        "http://host /v1": "空格",
+        "https://": "主机名",
+        "api.openai.com/v1": "http://",
+    }
+    for url, hint in bad.items():
+        r = c.post("/api/models", json={"id": "", "base_url": url, "model": "m"})
+        assert r.status_code == 400, (url, r.status_code, r.text)
+        assert hint in r.json()["detail"], (url, r.text)
+    # 旧入口 /api/config 也不能绕（界面上改不到，但 curl 与老渲染层会用）
+    r = c.post("/api/config", json={"base_url": "http://user:pass@host/v1"})
+    assert r.status_code == 400, r.text
+
+    # 本机明文 http：过，且**不警告**
+    r = c.post("/api/models", json={"id": "", "base_url": "http://127.0.0.1:9200/v1",
+                                    "model": "local"})
+    assert r.status_code == 200, r.text
+    assert r.json()["warnings"] == [], r.text
+
+    # 远端明文 http：过，但随响应回警告
+    r = c.post("/api/models", json={"id": "", "base_url": "http://192.168.1.20:9200/v1",
+                                    "model": "lan"})
+    assert r.status_code == 200, r.text
+    assert any("明文" in w and "192.168.1.20" in w for w in r.json()["warnings"]), r.text
+    # 而且**不是只在保存那一刻说一次**：GET /api/config 常驻下发
+    got = c.get("/api/config").json()
+    assert any("明文" in w for w in got["base_url_warnings"]), got["base_url_warnings"]
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_user_packs_live_in_writable_dir_and_survive_update(tmp_path=None):
+    """缺陷 8：可写行业包目录 = 用户数据目录，安装目录那份退化成只读种子。
+
+    钉的四件事：
+      1. 出厂包被播种过去，列表里**合起来**看得到（用户目录一份就是全部）；
+      2. 引擎写包（undraft、向导建包）落在用户目录，安装目录一个字节都不改；
+      3. 出厂包升级会同步到没被用户改过的包，并保住其中的 private/；
+      4. 用户改过的包**绝不覆盖**（这正是原缺陷的反面：一次更新抹掉一切）。
+    """
+    install = Path(tempfile.mkdtemp(prefix="ts-install-"))
+    user = Path(tempfile.mkdtemp(prefix="ts-user-"))
+    shutil.copytree(ROOT / "packs", install / "packs")
+    (install / "config.yaml").write_text("llm:\n  api_key: MOCK\n", encoding="utf-8")
+    packs_dir = user / "packs"
+
+    c = _client_packs(install, packs_dir)
+    names = [p["name"] for p in c.get("/api/meta").json()["packs"]]
+    assert "elevator" in names, names
+    assert (packs_dir / "elevator" / "pack.yaml").exists(), "没播种过去"
+    assert (packs_dir / ".packseed.json").exists(), "没留台账"
+
+    # 出厂那份不许被写：undraft 必须落在用户目录
+    (packs_dir / "elevator" / "private").mkdir(parents=True, exist_ok=True)
+    (packs_dir / "elevator" / "private" / "products.yaml").write_text("a: 1\n",
+                                                                      encoding="utf-8")
+    inst_elevator = (install / "packs" / "elevator" / "pack.yaml").read_text(encoding="utf-8")
+    y = packs_dir / "elevator" / "pack.yaml"
+    y.write_text(y.read_text(encoding="utf-8").replace("draft: false", "draft: true", 1),
+                 encoding="utf-8")
+    assert c.post("/api/packs/elevator/undraft").status_code == 200
+    assert "draft: false" in y.read_text(encoding="utf-8"), "用户目录那份没被改"
+    assert (install / "packs" / "elevator" / "pack.yaml").read_text(encoding="utf-8") \
+        == inst_elevator, "写回到安装目录里了 —— 那正是会被升级抹掉的位置"
+
+    # 模拟"一次自动更新"：安装目录的包换了内容（加了个新文件），重开引擎
+    (install / "packs" / "elevator" / "knowledge" / "new-after-update.md").write_text(
+        "出厂新增\n", encoding="utf-8")
+    # 用户**没改过**内容（只加了 private/，而 private 不参与"改过"判定）→ 该同步
+    c2 = _client_packs(install, packs_dir)
+    assert c2.get("/api/meta").status_code == 200
+    assert (packs_dir / "elevator" / "knowledge" / "new-after-update.md").exists(), \
+        "出厂更新没进来（用户没改过这个包，同步是安全的）"
+    assert (packs_dir / "elevator" / "private" / "products.yaml").exists(), \
+        "同步把用户的 private/ 一起删了 —— 那是比丢注释更贵的错误"
+
+    # 用户改过的包：绝不覆盖，并且要留下话（不静默）
+    (packs_dir / "elevator" / "banwords.yaml").write_text(
+        "groups:\n- name: 我的\n  words: [自留词]\n", encoding="utf-8")
+    before = (packs_dir / "elevator" / "banwords.yaml").read_text(encoding="utf-8")
+    (install / "packs" / "elevator" / "knowledge" / "another.md").write_text(
+        "又一次出厂改动\n", encoding="utf-8")
+    c3 = _client_packs(install, packs_dir)
+    assert c3.get("/api/meta").status_code == 200
+    assert (packs_dir / "elevator" / "banwords.yaml").read_text(encoding="utf-8") == before, \
+        "用户手改的词表被出厂版本覆盖了"
+    assert not (packs_dir / "elevator" / "knowledge" / "another.md").exists(), \
+        "既然决定不覆盖，就不该出现半覆盖（这个词表改动会跟着新文件一起被抹）"
+
+    # 用户自己建的包在安装目录里根本不存在，也不该被"清理"掉
+    mine = packs_dir / "my-industry"
+    mine.mkdir(exist_ok=True)
+    (mine / "pack.yaml").write_text("name: my-industry\ndisplay_name: 我的行业\n"
+                                    "draft: false\nparams: {}\n", encoding="utf-8")
+    c4 = _client_packs(install, packs_dir)
+    names4 = [p["name"] for p in c4.get("/api/meta").json()["packs"]]
+    assert "my-industry" in names4 and "elevator" in names4, names4
+
+    for d in (install, user):
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _client_packs(install_root: Path, packs_dir: Path):
+    """带可写包根的客户端（`--packs-dir` 的 TestClient 形态）。"""
+    app = create_app(install_root, token=TOKEN, data_dir=install_root,
+                     packs_dir=packs_dir)
+    c = TestClient(app, base_url=LOOPBACK, raise_server_exceptions=False)
+    c.headers.update({"X-TalkScript-Token": TOKEN})
+    return c
+
+
+# ── 9 两个 409 必须分得开（P1-1）───────────────────────────────
+# 「并发额度满」与「行业包坏了」都归 409 Conflict（两者确实都是
+# "请求与资源当前状态冲突"），但用户要做的两件完全不同的事：
+#   额度满 = 等一拍再发；包坏了 = 去修那个文件，不修则永远发不出去。
+# 修复前渲染层判的是 `status === 409`，于是坏包被念成「同时进行的生成已达上限」，
+# 而引擎那句「pack.yaml 语法有误（第 4 行第 6 列）」整句丢掉 ——
+# 两句一模一样的话，两种完全不同的病。
+#
+# 修法不是换状态码（409 对两者都成立，且 tests/test_pack_yaml_integrity.py 已把
+# 坏包这条钉在 409 上），而是**每条应答都同时给人话与机器码**：
+# detail 继续是字符串原话，code 是给程序看的稳定标识。
+BROKEN_PACK_YAML = "hard:\n  - 绝对安全\n  bad: [unclosed\n"
+_POS_RE = re.compile(r"第 \d+ 行第 \d+ 列")
+
+
+def _mock_root():
+    """一个「配好了模型」的临时根目录：生成请求要能走到验包那一步。"""
+    return _tmp_root_mock()
+
+
+def test_broken_pack_409_carries_its_own_code(tmp_path=None):
+    """坏包：状态码仍是 409，但 code 说清是谁，detail 仍是引擎那句**原话**。"""
+    if TestClient is None:
+        return
+    tmp = _mock_root()
+    try:
+        (tmp / "packs" / "elevator" / "pack.yaml").write_text(
+            BROKEN_PACK_YAML, encoding="utf-8")
+        body = _client(tmp).post(
+            "/api/generate", json={"pack": "elevator", "topic": "随便一个话题"})
+        assert body.status_code == 409, body.text
+        j = body.json()
+        assert j.get("code") == "pack_broken", j
+        # detail **必须还是字符串**：别的测试与渲染层都按「一句人话」读它，
+        # 把它换成对象会让 "pack.yaml" in detail 这类断言静默读到键名。
+        assert isinstance(j["detail"], str), type(j["detail"])
+        assert "pack.yaml" in j["detail"] and _POS_RE.search(j["detail"]), j
+        # 这句里不许混进额度的说法 —— 那正是这次要分开的两件事
+        assert "已达上限" not in j["detail"] and "额度" not in j["detail"], j
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_quota_409_carries_its_own_code(tmp_path=None):
+    """额度满：同一道闸，另一个 code；detail 是 pipeline 那句原话。"""
+    if TestClient is None:
+        return
+    from unittest.mock import patch
+    from app.jobs import StateConflict
+    from app.pipeline import Pipeline
+
+    tmp = _mock_root()
+    try:
+        msg = "同时进行的生成已达上限（4 个），请等其中一条完成后再试"
+        with patch.object(Pipeline, "start_generate", side_effect=StateConflict(msg)):
+            r = _client(tmp).post(
+                "/api/generate", json={"pack": "elevator", "topic": "随便一个话题"})
+        assert r.status_code == 409, r.text
+        j = r.json()
+        assert j.get("code") == "quota_exceeded", j
+        assert j["detail"] == msg, j                      # 原话，一个字都不许换
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_the_two_409_replies_are_distinguishable_by_machine(tmp_path=None):
+    """把这次的核心缺陷正面钉住：同一状态码，两次应答**必须**分得开。
+
+    只测「各自都有 code」是不够的 —— 病灶是两个 409 在界面上说同一句话。
+    这里把两份应答摆在一起比：状态码可以相同（都对），code 与 detail 都必须不同。
+    """
+    if TestClient is None:
+        return
+    from unittest.mock import patch
+    from app.jobs import StateConflict
+    from app.pipeline import Pipeline
+
+    tmp = _mock_root()
+    try:
+        (tmp / "packs" / "elevator" / "pack.yaml").write_text(
+            BROKEN_PACK_YAML, encoding="utf-8")
+        broken = _client(tmp).post(
+            "/api/generate", json={"pack": "elevator", "topic": "随便一个话题"}).json()
+        with patch.object(Pipeline, "start_generate",
+                          side_effect=StateConflict("同时进行的生成已达上限（4 个），请等其中一条完成后再试")):
+            quota = _client(tmp).post(
+                "/api/generate", json={"pack": "elevator", "topic": "随便一个话题"}).json()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    assert broken.get("code") and quota.get("code"), (broken, quota)
+    assert broken["code"] != quota["code"], (broken, quota)
+    assert broken["detail"] != quota["detail"], \
+        f"两种 409 说了同一句话：{broken['detail']!r}"
+
+
+def test_state_conflict_that_is_not_quota_is_not_labelled_quota(tmp_path=None):
+    """StateConflict 还挂在「作业状态不允许这个操作」上（app/jobs.py）。
+    它同是 409，但既不是额度也不是包坏了 —— 各自一个 code，别互相冒充。"""
+    if TestClient is None:
+        return
+    from unittest.mock import patch
+    from app.jobs import StateConflict
+    from app.pipeline import Pipeline
+
+    tmp = _mock_root()
+    try:
+        with patch.object(Pipeline, "start_generate",
+                          side_effect=StateConflict("作业状态为 done，无法执行该操作")):
+            j = _client(tmp).post(
+                "/api/generate", json={"pack": "elevator", "topic": "随便一个话题"}).json()
+        assert j.get("code") == "state_conflict", j
+        assert j["detail"] == "作业状态为 done，无法执行该操作", j
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_missing_pack_404_also_gets_a_code(tmp_path=None):
+    """包不存在 → 404 照旧，只是也多给一个 code：整套错误都用同一份约定，
+    不是「谁想到了才加」。"""
+    if TestClient is None:
+        return
+    tmp = _mock_root()
+    try:
+        c = _client(tmp)
+        r = c.get("/api/packs/no-such-pack-at-all")
+        assert r.status_code == 404, r.text
+        assert r.json().get("code") == "pack_missing", r.json()
+        assert isinstance(r.json()["detail"], str)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 # ── runner ──────────────────────────────────────────────────

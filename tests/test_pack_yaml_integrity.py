@@ -358,6 +358,26 @@ def test_broken_banwords_is_visible_from_the_list_too(tmp_path):
     assert "banwords.yaml" in info.pack_error
 
 
+def test_scalar_hard_wordlist_is_a_structure_error_not_dropped_short(tmp_path):
+    """P1-25：标量 `hard` 必须被当成「结构坏词表」亮出来（pack_error / 抛错），
+    而不是把字符串拆成单字计入 dropped_short —— 否则界面横幅会把结构错误
+    伪装成正常的「N 个单字被忽略」降级，命中归零还没人知道。"""
+    root = _root(tmp_path)
+    (root / "packs" / "elevator" / "banwords.yaml").write_text(
+        "hard: 政府补贴\n", encoding="utf-8")
+
+    info = pack_info(root / "packs" / "elevator")
+    assert "hard" in info.pack_error, f"要指明键路径，实际：{info.pack_error}"
+    assert "banwords.yaml" in info.pack_error
+
+    # 生成路径：Banwords 直接构造也必须炸（带文件名与键路径），不许静默降级
+    from app.checker import Banwords
+    with pytest.raises(Exception) as ei:
+        Banwords({"hard": "政府补贴"})
+    msg = str(ei.value)
+    assert "banwords.yaml" in msg and "hard" in msg, msg
+
+
 def test_param_audit_says_the_whole_word_list_failed(tmp_path):
     """坏词表时，每个平台选项都要说「整个词表失效」，
     而不是「本平台没配」—— 后者会让人以为只有这一个平台有问题。"""

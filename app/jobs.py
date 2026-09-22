@@ -28,12 +28,22 @@
 """
 from __future__ import annotations
 
+import copy
 import threading
+import time
 import uuid
 from datetime import datetime
 
 # 终态：进入后不再流转。同时用于「停止」的幂等判断。
 TERMINAL_STATES = frozenset({"done", "failed", "cancelled"})
+
+# P1-5「整作业预算」：修复前只有**逐层**的重试上限（回炉轮 × chat_json 重试 ×
+# 请求层重试），没有任何一处管「一条作业最多花多长时间」。按默认配置
+# (1+2)×(1+1)×(1+3) 的最坏形态，一次生成可以一路重试到几十分钟而不被叫停，
+# 用户只能干等或在界面上看着「已用 N 秒」变长。
+# 这里给一个宽到不会误伤正常作业的上界：正常路径实测 3 次调用、几十秒到几分钟，
+# 触到这条线的都是「上游卡住 / 重试层叠乘」这类真正需要人看一眼的情况。
+JOB_BUDGET_SECONDS = 1200.0
 
 # 真正占用模型资源的作业状态 —— **并发额度只看这些**。
 BUSY_STATES = frozenset({"queued", "selecting", "writing", "checking", "rewriting",
@@ -57,7 +67,10 @@ TRANSITIONS: dict[str, frozenset[str]] = {
     # 不再是「唯一一个走同步长 HTTP 请求的耗时操作」。
     "packing": frozenset({"done", "failed", "cancelled"}),
     "done": frozenset({"rewriting", "cancelled"}),
-    "failed": frozenset({"writing", "cancelled"}),      # failed 允许「重试」原作业
+    # failed → rewriting：done 作业重写失败后，用户还能再点一次「重写本段」。
+    # 修复前 failed 只允许 {writing, cancelled}，失败记录在重试原作业之外
+    # 永久得不到单段重写 —— 界面只有一句 409「作业状态为 failed」。
+    "failed": frozenset({"writing", "rewriting", "cancelled"}),
     "cancelled": frozenset(),
 }
 
@@ -72,6 +85,22 @@ class JobCancelled(Exception):
 
 class StateConflict(RuntimeError):
     """并发发起的操作与当前状态冲突（HTTP 层映射为 409）。"""
+
+
+class JobBudget(RuntimeError):
+    """整作业时间预算用尽（P1-5）。
+
+    与 JobCancelled 分开：取消是用户主动停的（状态落 cancelled、不算失败），
+    超预算是「我们等不下去了」，必须落成 failed 并把原因说清楚 ——
+    合并成一种会让界面把上游卡死报成「用户点了停止」。
+    """
+
+    def __init__(self, seconds: float):
+        super().__init__(
+            f"本次任务超过 {seconds / 60:.0f} 分钟仍未完成，已停止（模型响应过慢或接口反复重试）。"
+            f"可在设置里降低 llm.retries、或降低行业包 skill.yaml 的 limits.recheck_rounds，"
+            f"推理型模型频繁空内容时建议换非推理档。")
+        self.seconds = seconds
 
 
 class Job:
@@ -139,6 +168,33 @@ class Job:
     def is_cancelled(self) -> bool:
         return self.cancel_event.is_set()
 
+    def overdue(self) -> bool:
+        """整作业预算是否用尽（P1-5）。终态作业永不超时（不该事后翻成 failed）。"""
+        if self.state in TERMINAL_STATES:
+            return False
+        return time.time() - self.started_at > JOB_BUDGET_SECONDS
+
+    def deadline(self) -> float | None:
+        """整作业预算的**绝对到期时刻**（epoch 秒）；终态作业返回 None。
+
+        给网络层收缩读超时用（P2-48）：取消/预算的检查点长在"收到一行"上，
+        一条**一个字都不吐**的流永远不会走到那些检查点，而 httpx 的读超时
+        是 `timeout × STREAM_READ_TIMEOUT_MULT`（180×2=360s）再乘上重试次数 ——
+        实测最坏 ≈48 分钟，是预算的 2.4 倍。把剩余预算喂给读超时，卡死的上游
+        就会在预算到点时以超时收工，而不是继续占着槽。
+        """
+        if self.state in TERMINAL_STATES:
+            return None
+        return self.started_at + JOB_BUDGET_SECONDS
+
+    def reset_budget(self) -> None:
+        """重新计时：在已完成的老记录上发起单段重写时用。
+
+        不重置的话 `started_at` 还是当初建作业那一刻 —— 打开一条昨天的记录点
+        「重写本段」会立刻被判超预算，把一次正常的重写报成失败。
+        """
+        self.started_at = time.time()
+
     def request_cancel(self) -> None:
         """置取消标志并立即落到 cancelled 终态。
 
@@ -189,13 +245,30 @@ class Job:
         with self._lock:
             snap = {
                 "id": self.id, "kind": self.kind, "state": self.state,
-                "params": self.params, "steps": self.steps,
+                # 交**副本**而不是活动引用：HTTP 层是在锁外把这些字典序列化成 JSON 的，
+                # 期间工作线程可能继续 `steps.append(...)` 或改 params。
+                # 修复前实测同一个快照里能同时出现"第 3 轮回炉"和只有 2 条的步骤，
+                # 偶发但真实（快照是给界面看的"某一时刻"，不是活对象的别名）。
+                "params": dict(self.params),
+                # 每条步骤连它的 `data` 一起深拷贝：`dict(data)` 只有一层，
+                # `data["report"]` 交活动引用等于让已发出的"某一时刻"再变
+                # （第 6 轮复核实测：改 `steps[0]["data"]["report"]["hard_hits"]`
+                # 会串进上一份快照）。整步深拷贝 0.08ms/次，相对 0.9s 轮询可忽略。
+                "steps": copy.deepcopy(self.steps),
                 "error": self.error,
                 "created_at": self.created_at,
             }
             if include_result or self.state in TERMINAL_STATES:
-                snap["result"] = self.result
-            if self.stream_reasoning_len or self.stream_content_len:
+                # 深拷贝：`dict(self.result)` 只有一层，`result["sections"][0]` 与
+                # `result["check"]` 仍是活引用（批次 10 复核实测：改它们会串进已发出的
+                # 快照）。产物只在 done 这一次带上，量过成本：几十 KB 的 deepcopy
+                # 远小于 0.9s 的轮询间隔。
+                snap["result"] = copy.deepcopy(self.result) if self.result else self.result
+            # P1-7 修正：阶段一开始（begin_stream 置了 phase）就要下发 stream 键，
+            # 前端据此显示「等待模型首个 token…」。修复前门禁挂在两个计数字段上，
+            # 而 begin_stream 恰好清零它们 —— 于是首字节前的整个静默期都没有
+            # stream 键，思考块被 progress.js 隐藏，静默几十秒的问题从未真正消失。
+            if self.stream_phase:
                 snap["stream"] = {
                     "phase": self.stream_phase,
                     "reasoning_tail": self.stream_reasoning[-STREAM_TAIL:],
@@ -247,6 +320,25 @@ class JobRegistry:
             if sum(1 for j in self._jobs.values() if j.state in BUSY_STATES) >= limit:
                 return False
             self._jobs[job.id] = job
+            return True
+
+    def transition_if_room(self, job: Job, new_state: str, limit: int) -> bool:
+        """单段重写在**原作业**上进行（不新增条目），所以额度要在这里补一道闸。
+
+        修复前 `rewrite_segment` 只做迁移、从不看额度 —— 实测 12 条并发重写
+        同时在飞（上限 4），`running_count` 事后报 12 只是陈述现状，拦不住。
+        与 `add_if_room` 同款收口：**计数检查与迁移在同一把 registry 锁内**，
+        并发重写不同作业时不会双双通过检查。
+
+        注意锁序：拿 registry 锁 → 调 `Job.transition_or_raise`（作业自身锁）。
+        全库没有反向（先作业锁再 registry 锁）的路径，不会死锁。
+        """
+        with self._lock:
+            busy = sum(1 for j in self._jobs.values()
+                       if j.state in BUSY_STATES and j.id != job.id)
+            if busy >= limit:
+                return False
+            job.transition_or_raise(new_state, error=None)
             return True
 
     def get(self, jid: str) -> Job:

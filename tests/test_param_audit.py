@@ -4,7 +4,8 @@
 背景
 ----
 这些值不会报错，只会静默走通用默认 —— 用户加了个「快手」以为照常查平台红线，
-实际平台差异化校验整个不生效；加了新细分领域，注入的却是「通用」章节。
+实际平台差异化校验整个不生效；加了新细分领域，注进来的却是别的章节（修好之前的
+`topics_slice`）或者干脆什么都没有（修好之后：不注入，见 P2-4）。
 **静默降级比报错更危险**，所以这里要钉住两件事：
 
 1. 每种缺口都能被抓到（不能漏报）；
@@ -94,7 +95,9 @@ def test_flags_missing_tables(tmp_path):
         (pack_dir / "pack.yaml").read_text(encoding="utf-8")))
 
     assert audit["platform"]["快手"].startswith("平台分级词表未定义")
-    assert "通用" in audit["segment"]["新领域X"]
+    # P2-4：越界取值**不再退回「通用」章节 / 整份文件**，所以说明也不能再说谎。
+    assert "不注入" in audit["segment"]["新领域X"]
+    assert "通用" not in audit["segment"]["新领域X"]
     assert "rate_by_style" in audit["style"]["rap风"]
     assert "插值" in audit["duration"]["45"] and "默认 3" in audit["duration"]["45"]
     assert "audience_map" in audit["audience"]["外星人"]
@@ -116,7 +119,7 @@ def test_persona_is_never_audited(tmp_path):
 
 
 def test_flags_mapped_but_missing_heading(tmp_path):
-    """映射写了、章节却不存在 —— slice_heading 会退化成注入整份文件，同样要报。
+    """映射写了、章节却不存在 —— 切片为空（**不退回整份**），但必须报出来。
 
     这条容易漏：配置看起来是「配了」的，实际知识切片根本没生效。
     """
@@ -127,7 +130,10 @@ def test_flags_mapped_but_missing_heading(tmp_path):
     pack_dir = _pack(tmp_path, mutate)
     audit = param_audit(pack_dir, yaml.safe_load(
         (pack_dir / "pack.yaml").read_text(encoding="utf-8")))
-    assert "不存在" in audit["segment"]["没写章节的领域"]
+    msg = audit["segment"]["没写章节的领域"]
+    assert "不存在" in msg
+    # 说明必须与真实行为一致：曾经写"将注入整份文件"，而代码早已改成不注入
+    assert "整份" in msg and "不注入" in msg, msg
 
 
 def test_pack_info_exposes_audit(tmp_path):

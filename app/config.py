@@ -144,7 +144,8 @@ CONFIG_TEMPLATE = """# TalkScript 配置
 #   想改哪一项，把该行的 `#` 去掉并填值，保存后重启（或点「保存」）即可。
 #
 # 三种配置方式，优先级从高到低：
-#   1. 环境变量（密钥不落盘时用；注意它**没有区间校验**，填 100 就真用 100）
+#   1. 环境变量（密钥不落盘时用；数值项会**夹逼**回合法区间，与界面同一道闸，
+#      见 app/config.py 的 _ENV_NUM_BOUNDS）
 #   2. 本文件（保存走界面时会校验区间，见 app/server.py 的 NUMERIC_BOUNDS）
 #   3. 内置默认值
 #
@@ -187,8 +188,9 @@ CONFIG_TEMPLATE = """# TalkScript 配置
 #   timeout: 180
 #   # 单次输出预算，**只对撰写阶段生效**（选题/分镜固定 4000、单段重写固定 3000）。
 #   # 推理型模型的「思考」token 也计入这里，给太小会导致 content 返回空串。
-#   # ⚠ 但它不是越大越稳：实测思考量随这一项单调上涨（6000 → 思考 6~9k，
-#   #   16000 → 17~19k），调大只会更慢、也更容易想满预算而正文为空。
+#   # ⚠ 但它不是越大越稳：实测思考量随这一项单调上涨（deepseek-v4-flash：
+#   #   6000 → 思考 6.4~9.4k，16000 → 17.4~18.9k），调大只会更慢、
+#   #   也更容易想满预算而正文为空。
 #   #   频繁遇到空内容时，先降低回炉次数或换非推理档，而不是先调大这里。
 #   max_tokens: 16000
 
@@ -242,14 +244,13 @@ def _env_num(name: str, fallback, cast):
         v = cast(raw)
     except (TypeError, ValueError):
         return fallback
-    # P2-11 的本意：环境变量路径绕过了 server.set_config 的 NUMERIC_BOUNDS 那道闸，
-    # TALKSCRIPT_MAX_TOKENS=100 / TALKSCRIPT_RETRIES=999 会静默生效
-    # （每次生成必然空内容 / attempts=1000），所以要夹逼 + 留日志。
-    # ⚠ 但**下面这段目前永远不会执行**：调用点传进来的 `name` 是环境变量名
-    # （TALKSCRIPT_MAX_TOKENS），而 `_ENV_NUM_BOUNDS` 的键是字段名（max_tokens），
-    # `.get(name)` 恒为 None。实测设 TALKSCRIPT_MAX_TOKENS=100 / TALKSCRIPT_RETRIES=999
-    # 仍然原样生效。修法是把键换成环境变量名、或在调用点传字段名 —— 还没做，
-    # 别照着这段注释以为环境变量那一路也有闸。
+    # P2-11：环境变量路径绕过了 server.set_config 的 NUMERIC_BOUNDS 那道闸，
+    # TALKSCRIPT_MAX_TOKENS=100 / TALKSCRIPT_RETRIES=999 曾会静默生效
+    # （每次生成必然空内容 / attempts=1000），所以这里夹逼 + 留日志。
+    # ⚠ 键必须是**环境变量名**（调用点传进来的是它）——修复前表里写的是字段名
+    # （max_tokens），`.get(name)` 恒为 None，夹逼从未执行过（实测
+    # TALKSCRIPT_MAX_TOKENS=100 / RETRIES=999 / TIMEOUT=0 / TEMPERATURE=-5
+    # 全部原样生效）。区间与 server.py 的 NUMERIC_BOUNDS 逐项一致。
     bounds = _ENV_NUM_BOUNDS.get(name)
     if bounds and not (bounds[0] <= v <= bounds[1]):
         log.warning("环境变量 %s=%r 超出合法区间 [%s, %s]，已夹逼为 %s",
@@ -259,15 +260,16 @@ def _env_num(name: str, fallback, cast):
     return v
 
 
-# 环境变量数值项的合法区间。**注意区间与 server.set_config 的 NUMERIC_BOUNDS
-# 并不同口径**（那边 retries 0~10、timeout 5~1800、max_tokens 上限 200000）：
-# 两边各夹一次、夹到不同的值，本身就是一处待收敛的漂移。
-# 而且因为上面 `_env_num` 的查键缺陷，这张表当前一次都没生效过。
+# 环境变量数值项的合法区间。**键是环境变量名**（`_env_num` 收到的就是它）。
+# 区间与 `server.set_config` 的 NUMERIC_BOUNDS（app/server.py）**逐项一致**
+# （retries 0~10、timeout 5~1800、max_tokens 256~200000、temperature 0.0~2.0）
+# —— 环境变量夹逼与设置页保存是同一道闸，两端不许漂移：
+# tests/test_env_bounds.py 把这张表与 server 的 NUMERIC_BOUNDS 比对钉住。
 _ENV_NUM_BOUNDS: dict[str, tuple[float, float]] = {
-    "temperature": (0.0, 2.0),
-    "retries": (0, 20),
-    "timeout": (1.0, 600.0),
-    "max_tokens": (256, 100000),
+    "TALKSCRIPT_TEMPERATURE": (0.0, 2.0),
+    "TALKSCRIPT_RETRIES": (0, 10),
+    "TALKSCRIPT_TIMEOUT": (5.0, 1800.0),
+    "TALKSCRIPT_MAX_TOKENS": (256, 200000),
 }
 
 

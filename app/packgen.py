@@ -3,7 +3,8 @@
 
 草稿保护：
   - 生成包 pack.yaml 标 draft: true，界面显示"草稿·需人工校对"角标
-  - 广告法/平台通用词表直接复用模板包成熟版本，仅追加行业增补词
+  - 广告法/平台通用词表直接复用**模板包 packs/_template**（不含任何行业事实），
+    仅追加行业增补词；模板缺失时直接抛 `TemplateMissingError`，不再回退到某个行业包
   - 标准/法规编号一律不生成，只写"待核实清单"（防编造监管依据）
 
 三处修复：
@@ -27,7 +28,7 @@ from pydantic import BaseModel, Field
 
 from .fileio import rmtree_resilient, write_atomic
 from .jobs import JobCancelled
-from .knowledge import Pack
+from .knowledge import Pack, name_matches
 from .llm import LLMClient
 
 # P2-46：同名 slug 并发建包的 TOCTOU —— `d.exists()` 检查与写入分两段，
@@ -44,11 +45,9 @@ _creating: set[str] = set()
 log = logging.getLogger(__name__)
 
 # 建包时从模板包**原样复制**的文件（不走模型）。
-# ⚠ 模板包目前回退到电梯包（`packs/_template` 还不存在，见 TEMPLATE_PACK），
-# 而 `patterns/growth.md` 的标题就是「电梯口播特有的取舍」、`hooks.md`/`voice.md` 同理 ——
-# 它们会经 `$growth` / `$hooks` **每轮注入**给新行业的模型。
-# 也就是说新建包自带的这三份内容是**别的行业**的，必须在校对清单里改掉；
-# 真要根治，得把这三份拆成「通用骨架 + 行业段」或建出 `_template` 包。
+# 这些文件在新包里会被**每轮注入**（$hooks / $growth / $voice_block），
+# 所以模板包必须与任何具体行业无关 —— 出现别行业的事实就是 P0 回归
+# （tests/test_template_pack_neutral.py 钉住这件事）。
 GENERIC_FILES = [
     "skill.yaml",
     "patterns/hooks.md", "patterns/growth.md",
@@ -56,15 +55,52 @@ GENERIC_FILES = [
     "rules/duration.md", "rules/output-template.md",
     "compliance/ad-law.md", "compliance/platform.md",
 ]
+# 文风 tell 词表：不注入提示词，只被 `app/ai_tells.py` 读来做校验。
+# 不带给新包 = 新包的人味检测**静默关闭**（`Pack.ai_tells_data()` 找不到文件返回 None
+# → 报告里 `ai_tells: null`，界面上什么迹象都没有），所以它和 banwords 一样算骨架件。
+STYLE_FILES = ["ai_tells.yaml"]
+
 PRIVATE_TEMPLATES = [
     "private/README.md", "private/products.yaml", "private/service.yaml",
     "private/cases.yaml", "private/faq.yaml", "private/raw/README.md",
 ]
 
-# 模板包：优先用 packs/_template（若存在），否则退回这个包。
-# 原来硬编码 "elevator"：该包一旦改名或删除，建包功能整体失效。
+# 模板包必须自带的文件。缺一个就意味着新包缺一份骨架：
+# 复制循环是 `if src.exists()`（静默跳过），所以这里必须先验一遍，
+# 否则"包少了 voice.md"这种事要等到用户第一次生成才看得出来。
+REQUIRED_IN_TEMPLATE = (GENERIC_FILES + PRIVATE_TEMPLATES + STYLE_FILES
+                       + ["pack.yaml", "banwords.yaml"])
+
+# 模板包：**只有** packs/_template 一个来源。
+# 原来它找不到 `_template` 就静默回退到电梯包（`FALLBACK_TEMPLATE_PACK`），
+# 于是"给宠物医院建的包"里带着《电梯口播特有的取舍》和填好的电梯异议话术 ——
+# 这两份每轮都注入。回退这条路已经删掉：缺模板就抛，让用户去把模板补回来。
 TEMPLATE_PACK = "_template"
-FALLBACK_TEMPLATE_PACK = "elevator"
+
+
+class TemplateMissingError(RuntimeError):
+    """模板包缺失或不完整 —— 建包功能不可用，且**没有安全的退路**。"""
+
+
+def template_pack(root: Path) -> Pack:
+    """取模板包（`packs/_template`）。缺失或骨架文件不齐就直接抛。
+
+    这里不抛的代价是**静默产出带别行业事实的包**：建包流程照样"成功"、
+    作业照样 done、用户照样能选到新包 —— 要等到某次生成的稿子里冒出
+    别的行业的装置名，才会发现模板三年前就不在了。
+    """
+    d = root / "packs" / TEMPLATE_PACK
+    if not (d / "pack.yaml").exists():
+        raise TemplateMissingError(
+            f"模板包缺失：{d.relative_to(root)}（没有它就不能建新行业包，"
+            "否则会产出带着别的行业事实的包）。请恢复 packs/_template/ 后重试。")
+    missing = [rel for rel in REQUIRED_IN_TEMPLATE if not (d / rel).exists()]
+    if missing:
+        raise TemplateMissingError(
+            f"模板包 {TEMPLATE_PACK} 缺少骨架文件：{'、'.join(missing)}"
+            " —— 补齐后再建包，缺的文件不会进新包（复制时静默跳过）。")
+    return Pack(root, TEMPLATE_PACK)
+
 
 PACKGEN_SYSTEM = """你是行业知识包编辑，为口播脚本智能体制作新行业的知识包初稿。
 铁律：
@@ -104,34 +140,62 @@ class PackGenOut(BaseModel):
 
 
 def slugify(industry: str) -> str:
-    s = re.sub(r"[^\w\u4e00-\u9fff]+", "-", industry).strip("-")
-    return s or "custom"
+    """目录名：保留中文与字母数字，其余（`/`、空格、全角符号…）折成 `-`。
 
+    **一个可用字符都没有时返回空串**，不再回落到 `"custom"` —— 那会让
+    「？？？」与「！！！」这类输入共用同一个目录名，第二个永远建不出来，
+    而报错说的是「行业包已存在」（实测过的形态，主报告 §15）。
+    判空由调用方负责：入口 `pipeline.start_packgen` 在花钱之前就拒掉。
+    """
+    return re.sub(r"[^\w一-鿿]+", "-", industry).strip("-")
 
-def template_pack(root: Path) -> Pack:
-    """取模板包。"""
-    if (root / "packs" / TEMPLATE_PACK / "pack.yaml").exists():
-        return Pack(root, TEMPLATE_PACK)
-    return Pack(root, FALLBACK_TEMPLATE_PACK)
 
 
 def preview_slug(industry: str) -> str:
     """作业入口用的目录名预演：动手之前就能回答「这个行业包已经存在」。
 
     与 `create_pack` 同一套 slugify 口径（P2-51：目录名跟**用户输入**走）。
-    输入全是符号时 slugify 为空串 —— 那时取的是模型给的 display_name，
-    预演不出来，交给 `create_pack` 里的正式判定（仍然 409）。
+    返回空串 = 这个名字起不出目录（纯符号），调用方必须就地拒掉，
+    **不许**退到模型给的 display_name 上（那正是 P2-51 的原始缺陷形态）。
     """
     return slugify(industry.strip())
 
 
+def claim_slug(slug: str) -> bool:
+    """P2-46 的后半：**在花钱之前**把目录名占住。
+
+    修复前 `_creating` 的占用发生在 `create_pack` 里（唯一那次模型调用之后），
+    而入口的同步检查只有 `(packs/slug).exists()` —— 目录还没建出来，于是两条
+    同名请求双双通过检查、双双起作业：双份 token，且第二条是以"作业失败"的形态
+    告诉用户的（等了一两分钟才知道重名）。现在作业入口先占位，占不到就直接同步 409。
+    """
+    if not slug:
+        return True                       # 空 slug（符号名）走 create_pack 里的正式判定
+    with _creating_lock:
+        if slug in _creating:
+            return False
+        _creating.add(slug)
+        return True
+
+
+def release_slug(slug: str) -> None:
+    if not slug:
+        return
+    with _creating_lock:
+        _creating.discard(slug)
+
+
 def create_pack(root: Path, llm: LLMClient, industry: str, description: str, *,
-                on_retry=None, on_delta=None, should_abort=None) -> dict:
+                on_retry=None, on_delta=None, on_attempt=None, should_abort=None,
+                deadline: float | None = None,
+                slug_preclaimed: bool = False) -> dict:
     """按用户的行业名 + 一句话描述生成一个行业包初稿（草稿态）。
 
-    P1-43 起它跑在后台作业里，三个回调就是作业的三件套：
-    - `on_retry(note, attempt, total)` / `on_delta(kind, text)` 原样透传给
-      `chat_json`，界面因此能看到重试与思考流（以前是一个哑的长请求）；
+    P1-43 起它跑在后台作业里，下面几个回调就是作业的三件套：
+    - `on_retry(note, attempt, total)` / `on_delta(kind, text)` / `on_attempt()`
+      原样透传给 `chat_json`，界面因此能看到重试与思考流（以前是一个哑的长请求）；
+      `on_attempt` 是 llm 侧的「每次 HTTP 尝试前清零流式缓冲」回调（P2-13），
+      `pipeline._run_packgen` 一直在传，这里漏收就是 `TypeError` → 建包作业必失败。
     - `should_abort()` 在**唯一那次模型调用返回之后、写盘之前**检查 ——
       用户点了取消，就不该再往 `packs/` 里落一个没人要的目录
       （token 已经花掉，收不回来；目录至少可以不落）。
@@ -150,19 +214,50 @@ def create_pack(root: Path, llm: LLMClient, industry: str, description: str, *,
 - topics: [{"heading": "...", "core": "核心知识点2~4句", "myths": [{"myth": "...", "fact": "..."}], "placeholders": ["需用户提供的事实"]}]
   —— topics 覆盖全部 segments，heading 与 segments 一致
 - audience_details: [{"name": "与 audiences 一致", "fears": ["深层恐惧"], "questions": ["高频疑问"], "cta": "..."}]
-- ideas: ≥30 条可直接用的选题
+- ideas: ≥30 条可直接用的选题。**每条一行，格式固定**：
+  `标题 — <audiences 里的一个受众> · <钩子类型>`，
+  钩子类型只能从这 10 类里选：反常识/场景代入/悬念提问/损失厌恶/身份背书/数据冲击/对比反差/直接痛点/故事开场/误解纠正
+  （选题阶段要求 hook_type 从中选，写"清单钩子""权威科普"这类名字模型会照着自造）
 - redlines: 5~8 条行业红线（广告法之外的行业特有雷区）
 - banwords_extra_hard / banwords_extra_soft: 行业特有禁用词增补
 - verify_list: 需人工核实的标准/法规/政策清单（只写名称，不写编号）"""
     )
 
     out: PackGenOut = llm.chat_json("packgen", PACKGEN_SYSTEM, user, PackGenOut,
-                                    on_retry=on_retry, on_delta=on_delta)
+                                    on_retry=on_retry, on_delta=on_delta,
+                                    on_attempt=on_attempt, should_abort=should_abort,
+                                    deadline=deadline)
+
+    # display_name 会被写进 pack.yaml、校对清单，以及导出的 SKILL.md ——
+    # frontmatter 之后那是**正文**，模型在这里换行就能凭空造出一节 `---` / `# 标题`
+    # （批次 10 复核实测：`\n---\nname: evil` 原样进了正文，而自检只看 fence）。
+    # 行业显示名本来就是一行文字的事，先折行再往下走。
+    out.display_name = " ".join(str(out.display_name or "").split()) or industry.strip()
 
     # 空数组兜底：模型偶尔会返回 []，直接下标访问会 IndexError → 500
-    segments = [s for s in (out.segments or []) if str(s).strip()]
-    audiences = [a for a in (out.audiences or []) if str(a).strip()]
-    personas = [p for p in (out.personas or []) if str(p).strip()]
+    def _dedupe(vals, field):
+        """选项列表去重（P3-13）：重复项不是"多一个选项"，而是**第二份永远命中不到**。
+
+        `params.<field>.options` 是下拉框的取值域，`topics_map` / `audience_map`
+        按名字查 —— 两个同名选项只能指向同一节。这里保留第一份并**在报告里说**，
+        而不是静默生成两份 `## N. 维保` 让第二份不可达。
+        """
+        out, seen, dup = [], set(), []
+        for v in vals:
+            key = str(v).strip()
+            if key in seen:
+                dup.append(key)
+                continue
+            seen.add(key)
+            out.append(v)
+        return out, dup
+
+    segments, seg_dupes = _dedupe([s for s in (out.segments or []) if str(s).strip()], "segment")
+    audiences, aud_dupes = _dedupe([a for a in (out.audiences or []) if str(a).strip()], "audience")
+    personas, per_dupes = _dedupe([p for p in (out.personas or []) if str(p).strip()], "persona")
+    dupes = [f"选项「{k}」在 {f} 里重复出现，已合并成一个（重复项在界面上同名，"
+             f"第二份的规则永远命中不到）" for f, vals in
+             (("segments", seg_dupes), ("audiences", aud_dupes), ("personas", per_dupes)) for k in vals]
     if not segments or not audiences or not personas:
         raise ValueError(
             "模型返回的行业结构不完整（细分领域/受众/人设存在空项）。"
@@ -172,22 +267,30 @@ def create_pack(root: Path, llm: LLMClient, industry: str, description: str, *,
     # 修复前取模型返回的 display_name —— 模型自由发挥时（实测 mock 返回
     # 「全屋定制/装修」），用户输「门窗定制」却得到目录「全屋定制-装修」，
     # 找不到自己刚建的包，重试还必撞「行业包已存在」。
-    slug = slugify(industry.strip()) or slugify(out.display_name or industry)
+    slug = slugify(industry.strip())
+    if not slug:
+        # 走到这里说明调用方没在花钱之前拦（`start_packgen` 会拦）。
+        # 宁可现在报错，也不把目录名交给模型的 display_name（P2-51）。
+        raise ValueError("行业名称里没有任何可用作目录名的字符，请换成含文字或数字的名称")
     if should_abort and should_abort():
         # 检查点放在这里：上面那次模型调用是全部开销所在，往下就该建目录了。
         raise JobCancelled("已取消")
     with _creating_lock:
-        if slug in _creating:
+        if slug in _creating and not slug_preclaimed:
             raise FileExistsError(f"行业包正在创建中：{slug}")
-        _creating.add(slug)
+        # 作业入口（`pipeline.start_packgen`）已经用 `claim_slug` 在**花钱之前**占好了名字，
+        # 这里就不能再占一次（否则自己跟自己撞），也不能在结束时释放别人的占位。
+        owns_claim = not slug_preclaimed
+        if owns_claim:
+            _creating.add(slug)
     try:
         d = root / "packs" / slug
         if d.exists():
             raise FileExistsError(f"行业包已存在：{slug}")
 
         try:
-            _materialize(d, base, out, slug, industry, description,
-                         segments, audiences, personas)
+            match_notes = _materialize(d, base, out, slug, industry, description,
+                                       segments, audiences, personas)
         except Exception:
             # 中途失败就把半成品收走：否则重试会被上面的 FileExistsError 挡成 409，
             # 用户只能自己去文件管理器里删目录。
@@ -202,9 +305,12 @@ def create_pack(root: Path, llm: LLMClient, industry: str, description: str, *,
 
         checklist = _checklist(out, slug)
         # P1-44：生成完必须体检 —— 模型输出的包能不能用，不能等用户第一次
-        # 生成才发现（生成时已付过费）。加载 Pack(slug)（结构坏 → 抛）+ 
+        # 生成才发现（生成时已付过费）。加载 Pack(slug)（结构坏 → 抛）+
         # param_audit 全量（切片/配额/词表降级逐项列出），体检结果并进校对清单。
-        audit_notes = _pack_audit(root, slug)
+        # 再加两份**只有建包期知道**的事实（P1-2 / P3-13）：
+        #   match_notes  哪个选项没配上章节、被哪些同名/近名标题挤掉
+        #   dupes        模型把同一个选项写了两遍（合并后的那一份才有内容）
+        audit_notes = _pack_audit(root, slug) + match_notes + dupes
         if audit_notes:
             checklist += ("\n\n## 引擎体检发现（生成时自动检测，逐项核实后重跑或用前确认）\n"
                           + "\n".join(f"- [ ] {t}" for t in audit_notes))
@@ -213,6 +319,7 @@ def create_pack(root: Path, llm: LLMClient, industry: str, description: str, *,
         # 产物摘要随返回下发：结果页据此渲染「生成了什么」（细分/受众/人设/选题），
         # 而不是只给一份待核实的校对清单 —— 用户此前「不知道生成了啥」。
         # ⚠ 只回短字符串列表，不回 topics 全文（body 里没有消费方）。
+        # ⚠ 别在这里加"顺手算的"字段：`topic_count` 就没人消费（P3-11 已删）。
         return {"name": slug, "display_name": out.display_name,
                 "dir": str(d), "draft": True,
                 "checklist": checklist,
@@ -220,22 +327,26 @@ def create_pack(root: Path, llm: LLMClient, industry: str, description: str, *,
                 "segments": [str(x) for x in segments],
                 "audiences": [str(x) for x in audiences],
                 "personas": [str(x) for x in personas],
-                "topic_count": len(out.topics or []),
                 "ideas": [str(x) for x in (out.ideas or [])],
                 "redlines": [str(x) for x in (out.redlines or [])],
                 "banwords_extra_hard": [str(x) for x in (out.banwords_extra_hard or [])],
                 "banwords_extra_soft": [str(x) for x in (out.banwords_extra_soft or [])]}
     finally:
-        with _creating_lock:
-            _creating.discard(slug)
+        if owns_claim:            # 入口预占的那份由 `pipeline._run_packgen` 释放
+            with _creating_lock:
+                _creating.discard(slug)
 
 
 def _pack_audit(root: Path, slug: str) -> list[str]:
-    """生成包的自体检（P1-44）：加载 + param_audit 全量，返回人话说明列表。
+    """生成包的自体检（P1-44）：加载 + 切片对账 + param_audit 全量，返回人话说明列表。
 
     返回空列表 = 体检通过。模型输出的包常有「segment 与 topics 章节标题对不上」
     「风格没配语速」「平台没配词表」这类静默降级 —— param_audit 把它们逐项列出；
     结构坏（YAML 解析不了等）则 Pack 直接抛，捕捉后给一句指向性的说明。
+
+    **切片对账**是这里补上的一格：`路径#章节` 找不到章节时返回空串（不退回整份），
+    而仓库里的对账测试只跑 `list_packs()` 看到的包 —— 生成的草稿包根本不在其中。
+    于是"红线/术语/选题库注入不到东西"这种失效在生成时完全无声（P0-18 的同一形态）。
     """
     from .knowledge import Pack, param_audit
     notes: list[str] = []
@@ -243,15 +354,113 @@ def _pack_audit(root: Path, slug: str) -> list[str]:
         pk = Pack(root, slug)
     except Exception as e:                       # noqa: BLE001
         return [f"行业包加载失败：{e} —— 请检查生成的文件结构"]
+    skill = pk.skill() or {}
+    for stage, cfg in (skill.get("stages", {}) or {}).items():
+        for key, spec in ((cfg or {}).get("files") or {}).items():
+            spec = str(spec)
+            if "#" not in spec:
+                continue
+            path = spec.partition("#")[0].strip()
+            if not pk.file_text(path).strip():
+                notes.append(f"{stage}.{key}：文件读不到 → {path}")
+            elif not pk.file_slice(spec).strip():
+                notes.append(f"{stage}.{key}：章节切片为空 → {spec}"
+                             "（该知识一个字都不会注入；`#章节` 找不到时不退回整份）")
     for key, mapping in (param_audit(pk.dir, pk.data) or {}).items():
         for value, text in mapping.items():
             notes.append(f"参数「{key}={value}」：{text}")
+    notes.extend(_placeholder_audit(root, pk))
     return notes
+
+
+def _placeholder_audit(root: Path, pk) -> list[str]:
+    """模板占位符对账（P1-44 缺的第三条腿）。
+
+    `safe_substitute` 对认不出的 `$foo` **原样保留**：模型收到一段字面量，
+    而本该从那格里注入的知识一个字都没有 —— 生成期只在作业日志里留一条
+    `tpl_*`，建包这一步什么都没说。拼错的占位符因此可以静默活到第一次付费生成。
+
+    这里刻意**复用生产路径**（`Pipeline._normalize` + `PromptRenderer.*_ctx` +
+    `unfilled`）而不是另抄一份"引擎提供哪些占位符"的表：那张表就是第二本账，
+    引擎加了新占位符而这里没同步，就会把合法的占位符报成错的（本项目反复出过
+    这类"守卫本身说谎"的问题）。对账自身跑不起来时（缺默认参数等），
+    如实说明"没跑成"而不是静默通过。
+    """
+    notes: list[str] = []
+    try:
+        from .config import load_config
+        from .pipeline import Pipeline
+        from .prompts import PromptRenderer
+
+        cfg = load_config(root)
+        cfg.mock = True
+        pl = Pipeline(root, cfg)
+        p = pl._normalize(pk, {"topic": "（新建行业包自检用主题）"})
+        pr = PromptRenderer(pk)
+        plan = {"angle": "a", "hook_type": "h", "hook_line": "l",
+                "points": ["1"], "cta": ""}
+        contexts = {
+            "select": pr.select_ctx(p),
+            "write": pr.write_ctx(p, plan, ""),
+            "storyboard": pr.storyboard_ctx(
+                [{"type": "point", "text": "自检段落"}],
+                [{"start": 0.0, "end": 1.0}]),
+            "rewrite_segment": pr.rewrite_ctx(
+                [{"type": "point", "text": "自检段落"}], 0,
+                p["quota"].get("body", 100), ""),
+        }
+        for stage, ctx in contexts.items():
+            if not (pk.skill() or {}).get("stages", {}).get(stage):
+                continue
+            missing = pr.unfilled(stage, ctx)
+            if missing:
+                notes.append(f"{stage} 模板有引擎不提供的占位符：{'、'.join(missing)}"
+                             "（会被原样发给模型，对应知识不会注入）")
+    except Exception as e:                       # noqa: BLE001
+        notes.append(f"占位符对账没跑成：{type(e).__name__}: {e}"
+                     "—— 不影响建包，但请人工核对 skill.yaml 的 $占位符")
+    return notes
+
+
+
+def _match_by_name(items, used: set, option: str, attr: str,
+                   notes: list[str] | None = None, kind: str = "细分领域"):
+    """在模型给的条目里为某个选项值找出**没有歧义**的那一条（就地标记已用）。
+
+    匹配规则在 `knowledge.name_matches`（逐字相等 → 包含匹配取对称差最小者 →
+    并列即放弃），这里只加两件建包期才有的事：
+
+    - `used`：一条内容不能被两个选项抢走（剩下的那条又没人认领）；
+    - `notes`：没配上时把**原因**写下来（被哪些近名标题挤掉了 / 模型根本没给），
+      由 `create_pack` 并进校对清单 —— 空骨架 + 「待补」是结果，说明是账。
+
+    旧实现按 `items` 的**列表顺序**取第一个包含关系：`segments=["别墅","别墅电梯"]`
+    配模型标题 `["别墅电梯加装","独栋别墅"]` 时，「别墅」先撞上「别墅电梯加装」，
+    于是别墅电梯的知识挂到了别墅名下、`## 2. 别墅电梯` 只剩空骨架 —— 错的口径
+    静默进模型，比什么都没有更坏（P1-2）。
+    """
+    pool = [(i, it) for i, it in enumerate(items) if i not in used]
+    hit, rivals = name_matches([it for _i, it in pool], option, key=lambda it: getattr(it, attr, "") or "")
+    if hit is None:
+        if notes is not None:
+            if rivals:
+                notes.append(f"{kind}「{option}」没配上模型给的段落：这几个标题与它同样接近（"
+                             f"{'、'.join(str(getattr(r, attr, '')) for r in rivals)}）—— "
+                             "无法判定该给谁，已留空骨架，请改选项名或模型给的标题")
+            else:
+                # 文档承诺过"模型根本没给"这一种也要说；只报歧义的话，
+                # 缺内容这种最常见的形态反而没有账。
+                notes.append(f"{kind}「{option}」在模型返回的内容里没有对应段落 —— "
+                             "已留空骨架（章节在、内容待补），别让这个细分领域裸奔")
+        return None
+    used.add(next(i for i, it in pool if it is hit))
+    return hit
 
 
 def _materialize(d: Path, base: Pack, out: PackGenOut, slug: str, industry: str,
                  description: str, segments: list[str], audiences: list[str],
-                 personas: list[str]) -> None:
+                 personas: list[str]) -> list[str]:
+    """把模型输出落成包文件；返回**没配上章节的选项**说明（并进校对清单）。"""
     for sub in ("knowledge", "compliance", "patterns", "rules", "private/raw"):
         (d / sub).mkdir(parents=True, exist_ok=True)
 
@@ -261,7 +470,12 @@ def _materialize(d: Path, base: Pack, out: PackGenOut, slug: str, industry: str,
         if src.exists():
             (d / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(src, d / rel)
-    # 2. 私有资料模板
+    # 2. 词表类骨架（人味 tell 集）
+    for rel in STYLE_FILES:
+        src = base.dir / rel
+        if src.exists():
+            shutil.copyfile(src, d / rel)
+    # 3. 私有资料模板
     for rel in PRIVATE_TEMPLATES:
         src = base.dir / rel
         if src.exists():
@@ -269,10 +483,34 @@ def _materialize(d: Path, base: Pack, out: PackGenOut, slug: str, industry: str,
             shutil.copyfile(src, d / rel)
 
     # 3. 知识文件（draft 内容）
+    #
+    # ⚠ 章节标题以**选项表为准**写，不按模型给的 heading 原样落盘。
+    # `topics_map` / `audience_map` 是 identity 映射（选项 → 同名章节），
+    # 而模型返回的 `topics[].heading`、`audience_details[].name` 未必逐字等于
+    # segments / audiences（提示词要求过对齐，但那是"要求"不是"保证"）。
+    # 一旦不一致：切片为空 → 这个细分领域的选题知识**一个字都不注入**，
+    # 而界面上一切正常（P1-44 点名的裸奔、P0-18 的同一形态在新包里重演）。
+    # 现在按选项生成标题，模型那份内容用名称匹配挂上去；对不上就留待补骨架，
+    # 章节仍然存在 —— 注入路径是通的，缺的是内容，而缺内容有校对清单指着它。
     topic_lines = ["# 分领域内容知识库（向导生成初稿，draft：需人工校对）", "",
-                   "> ⚠️ 本文件由模型生成。core 与 myth/fact 需对照行业实际核实后删除本提示。", ""]
-    for i, t in enumerate(out.topics or [], 1):
-        topic_lines += [f"## {i}. {t.heading}", "", "### 核心知识点", t.core, ""]
+                   "> ⚠️ 本文件由模型生成。core 与 myth/fact 需对照行业实际核实后删除本提示。",
+                   "> 章节标题 = pack.yaml 的 segment 选项（注入按标题切片，不要改标题）。", ""]
+    topics = list(out.topics or [])
+    used = set()
+    # 匹配账：哪个选项没配上章节、被哪些近名标题挤掉。由 `create_pack` 并进
+    # 校对清单（P1-2：留空骨架是"结果"，这份账是"原因"，两者都要有）。
+    match_notes: list[str] = []
+    for i, seg in enumerate(segments or [], 1):
+        t = _match_by_name(topics, used, seg, "heading",
+                           notes=match_notes, kind="细分领域")
+        if t is None:
+            # 空章节也写出来：切片解析得到内容，param_audit 才分得清
+            # "标题不存在"与"标题在、内容待补"这两种完全不同的缺。
+            topic_lines += [f"## {i}. {seg}", "", "### 核心知识点",
+                            "（模型没给这个细分领域的内容 → 待补）", "",
+                            "### 需占位的事实", "{{待补}}", "", "---", ""]
+            continue
+        topic_lines += [f"## {i}. {seg}", "", "### 核心知识点", t.core, ""]
         if t.myths:
             topic_lines += ["### 常见误区", "| 误区 | 事实 |", "|---|---|"]
             topic_lines += [f"| {m.get('myth', '')} | {m.get('fact', '')} |" for m in t.myths]
@@ -280,20 +518,50 @@ def _materialize(d: Path, base: Pack, out: PackGenOut, slug: str, industry: str,
         if t.placeholders:
             topic_lines += ["### 需占位的事实", "、".join(t.placeholders) + " → `{{待补}}`", ""]
         topic_lines += ["---", ""]
+    # 模型多给了没匹配上的 topics（标题写得与选项不同）：不丢，挂在末尾标出来
+    extras = [t for j, t in enumerate(topics) if j not in used]
+    if extras:
+        topic_lines += ["## 附：模型另给的段落（标题与 segment 选项不一致，待人工并回）", ""]
+        for t in extras:
+            topic_lines += [f"### {t.heading}", t.core, ""]
     write_atomic(d / "knowledge/topics.md", "\n".join(topic_lines))
 
-    aud_lines = ["# 受众痛点库与话术适配（向导生成初稿，draft：需人工校对）", ""]
-    for a in out.audience_details or []:
-        aud_lines += [f"## {a.name}", "", "### 深层恐惧（痛点）",
+    aud_lines = ["# 受众痛点库与话术适配（向导生成初稿，draft：需人工校对）", "",
+                 "> 章节标题 = pack.yaml 的 audience 选项（注入按标题切片，不要改标题）。", ""]
+    details = list(out.audience_details or [])
+    used_a = set()
+    for a_opt in audiences or []:
+        a = _match_by_name(details, used_a, a_opt, "name",
+                           notes=match_notes, kind="受众")
+        if a is None:
+            aud_lines += [f"## {a_opt}", "", "### 深层恐惧（痛点）", "（待补充）", "",
+                          "### 高频疑问（选题金矿）", "- （待补充）", "",
+                          "### 推荐 CTA：（待补充）", "", "---", ""]
+            continue
+        aud_lines += [f"## {a_opt}", "", "### 深层恐惧（痛点）",
                       "、".join(a.fears) or "（待补充）", "",
                       "### 高频疑问（选题金矿）"]
         aud_lines += [f"- {q}" for q in a.questions]
         aud_lines += ["", f"### 推荐 CTA：{a.cta or '（待补充）'}", "", "---", ""]
+    extras_a = [a for j, a in enumerate(details) if j not in used_a]
+    if extras_a:
+        aud_lines += ["## 附：模型另给的受众段（名称与 audience 选项不一致，待人工并回）", ""]
+        for a in extras_a:
+            aud_lines += [f"### {a.name}", "、".join(a.fears), ""]
     write_atomic(d / "knowledge/audience.md", "\n".join(aud_lines))
 
-    idea_lines = ["# 选题库（向导生成初稿，draft：需人工校对）", ""]
+    idea_lines = ["# 选题库（向导生成初稿，draft：需人工校对）", "",
+                  "> 注入契约：只有下面「## 选题库」这一节进选题阶段提示词"
+                  "（`skill.yaml` 的 `select.files.ideas`）。",
+                  "> 每行的可用取值：**钩子类型**只能取 `patterns/hooks.md` 钩子库的 10 类，"
+                  "**受众**只能取 `pack.yaml` 的 audience 选项；不带这两项时按本节默认。",
+                  "", "## 选题库", ""]
     idea_lines += [f"{i}. {t}" for i, t in enumerate(out.ideas or [], 1)]
+    idea_lines += ["", "## 扩展公式与禁忌（人工参考，不注入）", "",
+                   "- 同一主题按不同受众各拆一条；误区=反常识选题；评论区高频疑问=痛点选题",
+                   "- 禁忌选题以 `compliance/industry.md` 的「红线速查」为准"]
     write_atomic(d / "knowledge/ideas.md", "\n".join(idea_lines))
+
 
     std_lines = ["# 标准、法规与术语库（占位）", "",
                  "> ⚠️ 向导不生成任何标准/法规编号（防编造）。引用前逐条核实后手工补录。",
@@ -307,10 +575,22 @@ def _materialize(d: Path, base: Pack, out: PackGenOut, slug: str, industry: str,
                   "| （待补录） | （待补录） |", ""]
     write_atomic(d / "knowledge/standards.md", "\n".join(std_lines))
 
+    # 行业红线：**必须**带「## 红线速查」这一节 —— select 与 write 两个阶段注入的
+    # 就是它（`compliance/industry.md#红线速查`）。写成整篇散列表的话，
+    # `Pack.file_slice` 找不到章节会返回空串（故意不退回整份），红线就又没了。
     red = ["# 行业红线（向导生成初稿，draft：需人工校对）", "",
-           "> ⚠️ 以下红线由模型按行业常识生成，发布相关内容前务必人工核实补全。", ""]
+           "> ⚠️ 以下红线由模型按行业常识生成，发布相关内容前务必人工核实补全。",
+           "> 本节「## 红线速查」会被注入选题与撰写的每一轮；下面的细则只给人和 checker 看。",
+           "", "## 红线速查（引擎注入用）", ""]
     red += [f"- {r}" for r in out.redlines or []]
+    red += ["", "## 细则（人工补充：本行业的应急处置口径、禁用表述清单、术语规范、敏感话题）", "",
+            "- [ ] 安全与效果类承诺的禁用表述与合规替换",
+            "- [ ] 紧急/危险场景的唯一标准口径（模型每轮都按它写）",
+            "- [ ] 不得演示、不得描述的操作清单",
+            "- [ ] 规范术语 → 口语解释（同步进 knowledge/standards.md 的「核心术语」）",
+            "- [ ] 敏感话题（纠纷、事故、政策补助）的处理方式", ""]
     write_atomic(d / "compliance/industry.md", "\n".join(red))
+
 
     # 4. 词表：复用模板包通用词表 + 行业增补
     bw = dict(base.banwords_data())
@@ -360,6 +640,7 @@ def _materialize(d: Path, base: Pack, out: PackGenOut, slug: str, industry: str,
     # pack.yaml 是这个包在列表里的身份证：写坏了不是这一个包不可用，
     # list_packs 会连带把整个首页的行业包列表一起带崩，所以必须原子替换。
     write_atomic(d / "pack.yaml", yaml.safe_dump(pack_yaml, allow_unicode=True, sort_keys=False))
+    return match_notes
 
 
 def _checklist(out: PackGenOut, slug: str) -> str:
@@ -370,7 +651,18 @@ def _checklist(out: PackGenOut, slug: str) -> str:
     lines += ["", "## 红线核实", ""]
     lines += [f"- [ ] {r}" for r in out.redlines or []]
     lines += ["", "## 知识核实", "", "- [ ] topics.md 各细分的核心知识点与误区表",
-              "- [ ] audience.md 受众痛点与 CTA", "- [ ] ideas.md 选题是否符合本行业实际",
-              "- [ ] banwords.yaml 行业增补词是否恰当", "",
+              "- [ ] audience.md 受众痛点与 CTA",
+              "- [ ] ideas.md 选题是否符合本行业实际（受众名与钩子类型是否还在取值域内）",
+              "- [ ] banwords.yaml 行业增补词是否恰当",
+              "- [ ] compliance/industry.md 的「细则」几节补上本行业的应急处置/术语/敏感话题口径",
+              "      （只注进提示词的是「## 红线速查」那一节，细则是给 checker 和人看的）",
+              "", "## 从模板包复制来的骨架（**不含任何行业内容，需要你填实例**）", "",
+              "- [ ] patterns/hooks.md 的钩子实例列（现在是通用问句）",
+              "- [ ] patterns/growth.md 的「信任/节奏/CTA」三节（现在是通用取舍）",
+              "- [ ] knowledge/voice.md 的口语化范例与人设开场（三处 {{待补}}）",
+              "- [ ] private/ 四个 yaml：现在**全是空白**，不填就没有任何私有事实可注入",
+              "- [ ] compliance/ad-law.md 的「本行业专用高危区」表",
+              "",
               "核实完成后：把 pack.yaml 中 `draft: true` 改为 `false`，角标即消失。"]
     return "\n".join(lines)
+

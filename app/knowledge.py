@@ -17,7 +17,7 @@ from pathlib import Path
 
 import yaml
 
-from .checker import DEFAULT_RATE
+from .checker import DEFAULT_RATE, quota_table_errors, tolerance_error, validate_banwords
 from .fileio import read_yaml_file
 from .schemas import PackInfo
 
@@ -135,6 +135,12 @@ def list_packs(root: Path) -> list[PackInfo]:
         return out
     for d in entries:
         try:
+            # 下划线开头的目录是**引擎内部骨架**（`packs/_template`），不是一份行业：
+            # 它的 segment/audience 都是 {{占位}}，选它生成只会产出带花括号的稿子。
+            # 过滤放在这里（而不是让 Pack 拒绝加载）—— packgen 与导出仍要能直接
+            # 用 Pack(root, "_template") 取骨架文件。
+            if d.name.startswith("_"):
+                continue
             if d.is_dir() and (d / "pack.yaml").exists():
                 out.append(pack_info(d))
         except OSError as e:
@@ -171,7 +177,23 @@ def pack_info(pack_dir: Path) -> PackInfo:
     # 词表坏掉同样要摊到列表上：它会让合规校验静默全过，是本组问题里最严重的，
     # 不该只在点进参数条时才被发现。
     if not err:
-        _, err = read_yaml_cached(pack_dir / str(data.get("banwords", "banwords.yaml")))
+        bw_rel = str(data.get("banwords", "banwords.yaml"))
+        bw, bw_err = read_yaml_cached(pack_dir / bw_rel)
+        err = bw_err
+        if not err:
+            # 「能解析但结构不符合约定」与 YAML 语法错是两类坏法（同 P2-7）。
+            # 标量 hard 会被 Banwords 拆成单字再被 MIN_WORD_LEN 全丢 → 命中归零，
+            # 而横幅还在报「N 个单字被忽略」—— 结构错误必须在这里就以
+            # pack_error 亮出来（含词表文件名与键路径），不进入生成。
+            fatal, _advisory = validate_banwords(bw, bw_rel)
+            if fatal:
+                err = "；".join(fatal)
+    if not err:
+        # 容差写错 = 静默改变「合格」的定义（0 → 永远不合格；字符串 → 校验处 TypeError
+        # 冒成"包配置不完整"）。同一类坏法同一处收口：加载时就摊成 pack_error。
+        terr = tolerance_error(data.get("duration_tolerance_pct"))
+        if terr:
+            err = terr
     try:
         return PackInfo(
             name=str(data.get("name", dir_name)),
@@ -197,6 +219,120 @@ def pack_info(pack_dir: Path) -> PackInfo:
         )
 
 
+# ── 文风 tell 词表的结构校验（P2-5）────────────────────────────
+# 一本账：`pack_info`（列表/设置页）与 `Pack.ai_tells_data`（生成期）都读这里，
+# 免得两边各判一次、结论还不一样。
+# 形状由 `app/ai_tells.py` 决定：`strong` / `weak` 是**tell 名列表**，
+# `lexicon` 是 **{{tell名: [词…]}}**。别的地方改这两个名字，这里跟着一起改。
+_TELL_TIERS = ("strong", "weak")
+
+
+def _tell_names() -> tuple:
+    """引擎认识的 tell 名（用来判断「字符串当列表写」那种笔误要不要抢救）。"""
+    from .ai_tells import AITells
+    return AITells.ALL
+
+
+def resolve_ai_tells(pack_dir: Path, pack_data: dict) -> tuple[dict | None, list[str]]:
+    """读包的文风 tell 词表 → (可用的词表 | None=关闭, 给包作者看的说明)。
+
+    **坏在结构上就只关那一格，绝不抛**（与 `banwords_data` 相反，理由是危害不对称）：
+    词表空 = 合规校验一条都查不出（伪装成「没问题」），必须挡住生成；
+    tell 词表空 = 提示词少一段，而它被读到的时机在 select **之后** —— 那里已经
+    付过一次钱了。实测两种笔误都会炸：
+
+        strong: [[no_specific, 通篇零具体]]   → severity[列表] → TypeError: unhashable
+        lexicon: [bookish_connective]        → .items()       → AttributeError
+
+    作业停在 `steps=['select']` + failed，钱花了、产物没有。
+    所以这里的形状是：**能用的留下、坏掉的丢掉并写进 warnings**；一条都不剩时
+    返回 None（= 关闭），让校验报告的 `ai_tells` 落 null，而不是「人味 100 分」。
+    """
+    rel = str((pack_data or {}).get("ai_tells", "ai_tells.yaml"))
+    notes: list[str] = []
+    if not (pack_dir / rel).exists():
+        return None, []
+    data, err = read_yaml_cached(pack_dir / rel)
+    if err:
+        return None, [f"{rel} 读不出来：{err} —— 本次生成的人味提示词已关闭"
+                      "（不影响合规校验与时长判定，但请修好这份词表）"]
+    if data in (None, "", []):
+        return None, []
+    if not isinstance(data, dict):
+        return None, [f"{rel} 顶层必须是映射（现在是 {type(data).__name__}）"
+                      " —— 人味提示词已关闭"]
+    # ⚠ `read_yaml_cached` 给的是**进程级缓存里的同一个对象**：就地改会把修好的形状
+    # 留给下一个加载者，于是第二次加载时警告自己消失了。一律先浅拷贝。
+    out: dict = dict(data)
+    lex = out.get("lexicon", {})
+    if isinstance(lex, list):
+        notes.append(f"{rel} 的 lexicon 需要 {{类别: [词…]}} 映射，现在写成了列表"
+                     " —— 词汇类提示已关闭")
+        out["lexicon"] = {}
+    elif not isinstance(lex, dict):
+        if lex not in (None, "", []):
+            notes.append(f"{rel} 的 lexicon 需要 {{类别: [词…]}} 映射，现在是 "
+                         f"{type(lex).__name__} —— 词汇类提示已关闭")
+        out["lexicon"] = {}
+    else:
+        fixed = {}
+        for cat, words in lex.items():
+            if isinstance(words, str):
+                # `AITells` 会 `[str(w) for w in words]` → 拆成单字 → `_scan_words`
+                # 按 len>=2 全丢 → 这一类**永远零命中**，看起来却像「没这个词」。
+                notes.append(f"{rel} 的 lexicon.{cat} 是字符串（会被拆成单字而全部失效）"
+                             " —— 本类已忽略，要写词请写成列表")
+                continue
+            if not isinstance(words, list):
+                notes.append(f"{rel} 的 lexicon.{cat} 需要字符串列表，现在是 "
+                             f"{type(words).__name__} —— 本类已忽略")
+                continue
+            keep = [w for w in words if isinstance(w, str) and len(w) >= 2]
+            if len(keep) != len(words):
+                notes.append(f"{rel} 的 lexicon.{cat} 里有非字符串或单字词（{[w for w in words if w not in keep][:3]}）"
+                             " —— 这些词已丢掉，剩下的照常生效")
+            if keep:
+                fixed[cat] = keep
+        out["lexicon"] = fixed
+    for key in _TELL_TIERS:
+        val = out.get(key, [])
+        if val in (None, "", []):
+            out[key] = []
+            continue
+        if isinstance(val, str):
+            # 「strong: no_specific」这种笔误最阴：`for tid in "no_specific"` 不报错，
+            # 只是把每个字母当成一个 tell 名 → 一个都不认识 → **全部 tell 静默关掉**，
+            # 而 score 照样 100。字符串在这里唯一说得通的读法就是「漏了列表括号」。
+            only = val.strip()
+            if only in _tell_names():
+                notes.append(f"{rel} 的 {key} 写成了字符串 {only!r}，已按 {key}: [{only}] 收编"
+                             " —— 这一档需要的是列表")
+                out[key] = [only]
+            else:
+                notes.append(f"{rel} 的 {key} 是字符串而不是 tell 名列表 —— 这一档已关闭")
+                out[key] = []
+            continue
+        if not isinstance(val, list):
+            notes.append(f"{rel} 的 {key} 需要 tell 名列表，现在是 {type(val).__name__}"
+                         " —— 这一档已关闭")
+            out[key] = []
+            continue
+        good = []
+        for i, item in enumerate(val):
+            if isinstance(item, str) and item.strip():
+                good.append(item.strip())
+            else:
+                notes.append(f"{rel} 的 {key}[{i}] 需要 tell 名字符串，现在是 {item!r}"
+                             " —— 这一条不生效（写 [名, 说明] 是错的，档位由 strong/weak 决定）")
+        out[key] = good
+    kept = sum(len(out[k]) for k in _TELL_TIERS if isinstance(out.get(k), list))
+    if not kept and not any(out.get("lexicon") or {}):
+        notes.append(f"{rel} 一条能用的规则都没有 —— 人味提示词已关闭"
+                     "（校验报告里 ai_tells 会落 null 而不是「满分」）")
+        return None, notes
+    return out, notes
+
+
 def _heading_slice(text: str, level: int, keyword: str) -> str:
     """取第 `level` 级标题里含 keyword 的那一节，**找不到就返回空串**。
 
@@ -213,15 +349,138 @@ def _heading_slice(text: str, level: int, keyword: str) -> str:
     if start is None:
         return ""
     end = next((j for j in range(start + 1, len(lines)) if upper.match(lines[j])), len(lines))
-    return "\n".join(lines[start:end])
+    body = "\n".join(lines[start + 1:end])
+    # 「## 红线速查」下面什么都没有 ≠ 有内容：那种标题给模型的是一个空承诺
+    # （P2-7 —— 模板正文还写着「口径见本提示词的【行业红线】段」）。
+    # 与「章节被改名」同一种失效形状，所以同样返回空串，让 unfilled / 体检去说。
+    return "\n".join([lines[start], body]).strip() if body.strip() else ""
 
 
-def _heading_exists(pack_dir: Path, rel: str, keyword: str) -> bool:
-    """知识文件里是否存在标题含 keyword 的 `##` 章节。"""
+def _heading_lines(text: str, level: int = 2) -> list[str]:
+    """文件里所有 `level` 级标题行（原样，含 `## ` 前缀）。"""
+    head = re.compile(rf"^#{{{level}}}(?!#)\s")
+    return [ln for ln in (text or "").split("\n") if head.match(ln)]
+
+
+def _pick_heading_line(text: str, key: str, level: int = 2) -> str:
+    """挑与 `key` 对应的标题行：先要标题正文逐字相等，再退到包含匹配，都没有 → 空串。
+
+    为什么不能只有包含匹配（P1-1 的根因）：`维保` 是 `维保合同` 的子串，
+    按文件顺序取第一个命中就把「维保」的口径换成了合同的口径，
+    而两个细分在界面上都是正常选项 —— 包看起来完全健康。
+    """
+    key = str(key or "").strip()
+    if not key:
+        return ""
+    lines = _heading_lines(text, level)
+    norm = lambda s: str(s).lstrip("#").strip().replace(" ", "")  # noqa: E731
+    for ln in lines:
+        if norm(ln) == norm(key):
+            return ln.rstrip()
+    for ln in lines:                       # 「## 2. 维保」这类带序号的写法
+        if key in ln:
+            return ln.rstrip()
+    return ""
+
+
+def split_heading_sections(text: str, keywords, level: int = 2) -> dict:
+    """按标题逐字切开：`{keyword: 该节正文}`，命不中或整节为空 → 空字符串。
+
+    与 `_heading_slice` 的差别就是「相等 vs 包含」，见 `_pick_heading_line`。
+    正文为空也算空 —— 「有标题但内容删空」与「章节没了」对注入结果是同一件事（P2-7）。
+    """
+    out: dict[str, str] = {}
+    for kw in (keywords or ()):
+        line = _pick_heading_line(text, str(kw), level)
+        out[str(kw)] = _heading_body_of(text, line, level) if line else ""
+    return out
+
+
+def _norm_name(s) -> str:
+    """名称归一：去 `1. ` 这类序号前缀与空白、统一小写，用于逐字比对。"""
+    t = str(s or "").strip()
+    return re.sub(r"^\d+[.、)\]]\s*", "", t).replace(" ", "").lower()
+
+
+def name_matches(items, option: str, key=lambda it: it) -> tuple[object | None, list]:
+    """在 `items`（章节标题 / 模型给的条目名）里为 `option` 找一个**没有歧义**的匹配。
+
+    返回 `(命中项 | None, 判为歧义时的全部竞争者)`。
+
+    规则（由严到宽，宁缺不滥）：
+      1. 归一后**逐字相等** —— 唯一才认，出现两个同名标题就是包自己写坏了，谁也不给；
+      2. 否则取**互为包含**的候选，「最优」= 标题与选项的**字数对称差最小**
+         （`维保` vs `维保与责任` 差 3 字、vs `维保合同` 差 2 字 → 合同更近）；
+         对称差并列 → **两边都不匹配**，把竞争者原样交给调用方去报；
+      3. 都没有 → `(None, [])`。
+
+    为什么不能按列表顺序取第一个包含关系（P1-1 / P1-2 的根因）：
+    `segments=["维保合同","维保"]` 时「维保」会先撞上「维保合同」，真正的维保知识
+    对每个选项都不可达，而包看起来完全健康；`["别墅","别墅电梯"]` 配
+    `["别墅电梯加装","独栋别墅"]` 时，按顺序取第一个会把「别墅电梯」的口径
+    挂到「独栋别墅」那一节。**错的口径比空的更危险** —— 空会被体检报出来，
+    错的会一路进模型。歧义时返回竞争者，就是为了让它变成看得见的一条说明。
+    """
+    want = _norm_name(option)
+    if not want:
+        return None, []
+    named = [(it, _norm_name(key(it))) for it in items]
+    exact = [it for it, norm in named if norm and norm == want]
+    if len(exact) == 1:
+        return exact[0], []
+    if len(exact) > 1:
+        return None, list(exact)
+    subs = [(it, norm) for it, norm in named
+            if norm and (want in norm or norm in want)]
+    if not subs:
+        return None, []
+    best = min(abs(len(norm) - len(want)) for _it, norm in subs)
+    top = [it for it, norm in subs if abs(len(norm) - len(want)) == best]
+    return (top[0], []) if len(top) == 1 else (None, top)
+
+
+def _section_has_body(pack_dir: Path, rel: str, keyword: str, level: int = 2) -> bool:
+    """`rel` 里是否有一节标题含 `keyword` **且正文非空**（P2-7 的判据）。
+
+    以前 `param_audit` 问的是「标题在不在」，于是「有标题、内容删空」被当成健康 ——
+    模型收到的是一段光秃秃的标题。对注入来说这两种情况是同一件事。
+    """
+    try:
+        text = read_text_cached(pack_dir / rel)
+    except OSError:
+        return False
+    return bool(_heading_body_of(text, _pick_heading_line(text, keyword, level), level))
+
+
+def _heading_body_of(text: str, heading_line: str, level: int = 2) -> str:
+    """取 `heading_line`（一整行标题）那一节的正文，含标题行本身。
+
+    只有标题、正文为空 → 返回空串：与 `_heading_slice` 同一判据（P2-7）。
+    「这一节存在」不等于「这一节有知识」，空标题发给模型只是一个空承诺。
+    """
+    if not heading_line:
+        return ""
+    lines = text.split("\n")
+    start = next((i for i, ln in enumerate(lines) if ln.rstrip() == heading_line), None)
+    if start is None:
+        return ""
+    upper = re.compile(rf"^#{{1,{level}}}(?!#)\s")
+    end = next((j for j in range(start + 1, len(lines)) if upper.match(lines[j])), len(lines))
+    body = "\n".join(lines[start + 1:end])
+    return "\n".join([lines[start], body]).strip() if body.strip() else ""
+
+
+def _heading_exists(pack_dir: Path, rel: str, keyword: str, level: int = 2) -> bool:
+    """知识文件里是否存在 `level` 级标题含 keyword 的章节（默认 `##`）。
+
+    hooks.md 的风格模板是 `### 风格名`（三级），audience/topics 的章节是 `##`（二级），
+    所以 level 由调用方按文件层级传，不能写死。
+    """
     if not keyword:
         return False
     text = read_text_cached(pack_dir / rel)
-    return any(re.match(r"^##\s", ln) and keyword in ln for ln in text.split("\n"))
+    return any(re.match(rf"^#{{{level}}}(?!#)\s", ln) and keyword in ln
+               for ln in text.split("\n"))
 
 
 def param_audit(pack_dir: Path, data: dict) -> dict[str, dict[str, str]]:
@@ -250,35 +509,51 @@ def param_audit(pack_dir: Path, data: dict) -> dict[str, dict[str, str]]:
     def as_keys(table: dict) -> set[str]:
         return {str(k) for k in (table or {})}
 
-    # 受众：audience_map 无该值 → audience_slice 退化成注入整份 audience.md
+    # 受众：audience_map 缺该值、或映射到的章节不存在/正文为空 → 切片为空、**不注入**
+    # （P1-22：曾退回整份 2167 字，里面 5 个别的受众章节会把话术带偏）。这里把它摊出来。
     amap = data.get("audience_map", {}) or {}
     for v in options("audience"):
         kw = amap.get(str(v))
         if not kw:
-            note("audience", v, "未配 audience_map：将注入整份受众知识，而非对应章节")
-        elif not _heading_exists(pack_dir, "knowledge/audience.md", str(kw)):
+            note("audience", v, "未配 audience_map：本次不注入受众知识（切片为空）")
+        elif not _section_has_body(pack_dir, "knowledge/audience.md", str(kw)):
             note("audience", v,
-                 f"映射的章节「{kw}」在 audience.md 中不存在：将注入整份文件")
+                 f"映射的章节「{kw}」在 audience.md 中不存在或正文为空：本次不注入受众知识"
+                 "（切片为空，不会退回整份 —— 请改映射或补内容）")
 
-    # 细分领域：topics_map 无该值 → 退到「通用」，注入的是别的章节
+    # 细分领域：topics_map 无该值 → **不注入**（P2-4）。旧文案说「将改用「通用」章节」，
+    # 那是当时 `topics_slice` 真会退回整份；现在不退了，文案跟着改准 ——
+    # 说谎的降级说明比没有说明更坏。
     tmap = data.get("topics_map", {}) or {}
     for v in options("segment"):
         kw = tmap.get(str(v))
         if not kw:
-            g = tmap.get("通用", "")
             note("segment", v,
-                 f"未配 topics_map：将改用「通用」章节（{g or '整份文件'}），"
-                 "与所选细分领域不匹配")
-        elif not _heading_exists(pack_dir, "knowledge/topics.md", str(kw)):
+                 "topics_map 没有这个取值：本次不注入该细分领域的选题知识"
+                 "（切片为空，不退回整份 —— 整份里是别的细分领域，会把选题带偏）")
+        elif not _section_has_body(pack_dir, "knowledge/topics.md", str(kw)):
             note("segment", v,
-                 f"映射的章节「{kw}」在 topics.md 中不存在：将注入整份文件")
+                 f"映射的章节「{kw}」在 topics.md 中不存在或正文为空：本次不注入选题知识"
+                 "（切片为空，不退回整份 —— 请改映射或补内容）")
+
+    # 文风 tell 词表（P2-5）：结构写坏只关闭提示词，不拦生成 —— 但它必须被看见，
+    # 否则「这次没测人味」与「测了、很好」在界面上是同一个样子。
+    _tells, tell_notes = resolve_ai_tells(pack_dir, data)
+    for n in tell_notes:
+        note("ai_tells", str(data.get("ai_tells", "ai_tells.yaml")), n)
 
     # 时长：quota_table 缺该键 → 配额按相邻键插值；points_by_duration 缺 → 默认 3
     quota, points = as_keys(data.get("quota_table", {})), as_keys(
         data.get("points_by_duration", {}))
+    # P1-26：表里写了非数字（如 `total: "约290"`）→ 该键在 Quota.target() 被静默
+    # 丢掉 → 渲染成「总计≈ 字」。解析失败影响**所有**时长档位（target() 整体降级），
+    # 所以每个 duration 选项都要带上具体是哪张表哪一项。
+    qerrs = quota_table_errors(data.get("quota_table", {}))
     for v in options("duration"):
         missing = []
-        if str(v) not in quota:
+        if qerrs:
+            missing.append("quota_table 解析失败：" + "；".join(qerrs))
+        elif str(v) not in quota:
             # ⚠ 这三条是**三条不同的降级路径**，说成同一句会把人引到错的方向：
             #   整表缺失 → 按 时长×语速 估一个通用值，补一档没用，得把表建起来；
             #   只有一档 → 任何时长都取这一档（180 秒拿到的是 60 秒的配额）；
@@ -298,24 +573,44 @@ def param_audit(pack_dir: Path, data: dict) -> dict[str, dict[str, str]]:
         if missing:
             note("duration", v, "；".join(missing))
 
-    # 风格：rate_by_style 缺该键 → 语速默认 4.5 字/秒，字数配额随之变化
+    # 风格：rate_by_style 缺该键 → 语速默认 4.5 字/秒；hooks.md 没写该风格 →
+    # 钩子库切片退回整份（宁多勿缺，但该告诉包作者——实测退整份 2062 字）。
     rates = as_keys(data.get("rate_by_style", {}))
+    hooks_rel = "patterns/hooks.md"
+    hooks_text = read_text_cached(pack_dir / hooks_rel)
     for v in options("style"):
+        missing = []
         if str(v) not in rates:
-            note("style", v, "rate_by_style 无该风格：语速按默认 4.5 字/秒，"
-                             "字数配额随之变化")
+            missing.append("rate_by_style 无该风格：语速按默认 4.5 字/秒，"
+                           "字数配额随之变化")
+        if hooks_text and not _heading_exists(pack_dir, hooks_rel, str(v), level=3):
+            missing.append(f"钩子库没写「{v}」风格模板：本次退回整份钩子库"
+                           f"（{len(hooks_text)} 字）")
+        if missing:
+            note("style", v, "；".join(missing))
 
     # 平台：banwords 的平台分级词表缺该键 → 只走基础词表
-    ban, bw_err = read_yaml_cached(pack_dir / str(data.get("banwords", "banwords.yaml")))
+    bw_rel = str(data.get("banwords", "banwords.yaml"))
+    ban, bw_err = read_yaml_cached(pack_dir / bw_rel)
+    # P1-25/P5-3：词表结构写错（标量 hard / platform.*.extra_soft 不读）也要摊到
+    # 平台选项上 —— 结构错 = 整个词表不可信（对应生成路径的 ValueError / pack_error）。
+    bw_fatal, bw_advisory = validate_banwords(ban, bw_rel)
     rules = as_keys((ban or {}).get("platform", {}) or {})
     for v in options("platform"):
         if bw_err:
             # 词表整个读不出来时，「缺某个平台」已经是最小的问题了 ——
             # 要说清楚是「整个词表都失效」，否则用户会以为只有这一个平台没配。
             note("platform", v, f"{bw_err}：整个禁用词表都失效，平台红线校验不生效")
+        elif bw_fatal:
+            note("platform", v, "；".join(bw_fatal)
+                 + "：整个禁用词表都失效，平台红线校验不生效")
         elif str(v) not in rules:
             note("platform", v, "平台分级词表未定义该平台：只按通用词表校验，"
                                 "平台差异化红线不生效")
+        else:
+            soft = [a for a in bw_advisory if f"platform.{v}." in a]
+            if soft:
+                note("platform", v, "；".join(soft))
 
     return out
 
@@ -367,6 +662,28 @@ class Pack:
         # 词表空 → 合规校验全过。生成照样跑得完，只是产出与这个行业无关。
         if self.info.pack_error:
             raise PackBrokenError(f"行业包「{name}」的 {self.info.pack_error}")
+        # P1-3 加载期体检的产出（`_audit` 填），设置页与作业都读它。
+        # `warnings` 与 `pack_error` 的分工照旧：error 阻断加载，warning 只说明。
+        self.warnings: list[str] = []
+        self._ai_tells_cache: tuple | None = None   # None=未解析（见 `_resolve_ai_tells`）
+        # P3-13：pack.yaml 的选项列表不去重 → 同名两节、第二节的规则永远不可达，
+        # 全程无警告。选项名是参数的取值域，重复就是包自己写坏了。
+        params = self.data.get("params", {}) or {}
+        for key in params:
+            opts = (params.get(key) or {}).get("options", [])
+            if not isinstance(opts, list):
+                continue
+            seen: set[str] = set()
+            for o in opts:
+                one = str(o.get("name", "") if isinstance(o, dict) else o).strip()
+                if one and one in seen:
+                    raise PackBrokenError(
+                        f"行业包「{name}」的 params.{key}.options 里选项「{one}」重复出现："
+                        "重复的取值在界面上同名，第二份的规则永远命中不到")
+                seen.add(one)
+        # P1-3：注入回来是空的，运行期也要看得见 —— `Pack` 是每条注入路径的必经之地，
+        # 体检因此跟着加载走（模板包与设置页都在加载它）。
+        self._audit()
 
     # ── 基础 ────────────────────────────────────────────────
     @property
@@ -388,20 +705,84 @@ class Pack:
     def file_text(self, rel: str) -> str:
         return read_text_cached(self.dir / rel)
 
+    # ── 加载期体检（P1-3）────────────────────────────────────
+    def stage_files_map(self) -> dict[str, str]:
+        """各阶段 `stages.*.files` 的并集：{占位符名: 路径[#章节]}（首个声明者为准）。"""
+        out: dict[str, str] = {}
+        skill = self.skill() or {}
+        for cfg in (skill.get("stages", {}) or {}).values():
+            for key, spec in ((cfg or {}).get("files") or {}).items():
+                out.setdefault(str(key), str(spec))
+        return out
+
+    def _audit(self) -> None:
+        """把「注入回来是空的」这类降级收进 `warnings`：加载期一次，只读缓存。
+
+        为什么挂在 `Pack` 上：它是每条注入路径的必经之地，模板包与设置页都在加载它，
+        所以警告不依赖作业有没有跑过。为什么只收 warning 而不抛：结构坏
+        （`PackError` / `PackBrokenError`）已经在构造时处理掉了，这里再抛会让
+        设置页的包列表整页变红。
+
+        探针实测的空注入是**完全静默**的：把 `## 核心术语` 改名后 `$terms` 是空串，
+        提示词留着一个光秃秃的小标题，作业里没有 `tpl_*`、`pack_error=''`、报 done。
+        运行期那一半由 `PromptRenderer.unfilled` 补上（同一份名单，同一套判据）。
+        """
+        notes: list[str] = []
+        for key, spec in sorted(self.stage_files_map().items()):
+            rel, _, section = str(spec).partition("#")
+            rel = rel.strip()
+            if not self.file_text(rel).strip():
+                notes.append(f"{rel} 读不到内容：${key} 注入为空")
+                continue
+            if section.strip() and not self.file_slice(spec).strip():
+                notes.append(f"{rel}#{section.strip()} 切片为空：${key} 注入为空"
+                             "（多半是那节被改名或删空了；`#章节` 找不到时不退回整份）")
+        for rel, key, kind, getter, marker in (
+                ("knowledge/topics.md", "segment", "细分", self.topics_slice, "$topics_slice"),
+                ("knowledge/audience.md", "audience", "受众", self.audience_slice,
+                 "$audience_slice")):
+            text = self.file_text(rel)
+            titles = [ln.lstrip("#").strip() for ln in _heading_lines(text)]
+            for option in self.param_options(key):
+                if getter(str(option)).strip():
+                    continue
+                # 把竞争的标题一起点名：只说「切片为空」，作者还得自己去猜是哪两个
+                # 名字打架了（P1-2 要求的「naming the option and the competing headings」）。
+                _hit, rivals = name_matches(titles, str(option))
+                why = (f"与这些章节歧义：{'、'.join(str(r) for r in rivals)}" if rivals
+                       else f"{rel} 里没有对应章节")
+                notes.append(f"{kind}「{option}」{marker} 注入为空（{why}；"
+                             "不退回整份，越界取值会把选题带偏）")
+        _, tells_notes = self._resolve_ai_tells()
+        notes.extend(tells_notes)
+        self.warnings = list(dict.fromkeys(notes))
+
     # ── 知识切片 ────────────────────────────────────────────
     def slice_heading(self, rel: str, keyword: str) -> str:
-        """取文件中包含 keyword 的 `##` 章节全文；找不到则返回整个文件。"""
+        """取 `##` 标题里含 keyword 的那一节全文；找不到则返回整个文件。
+
+        ⚠ 这里是**子串**匹配且取第一个命中：「维保」会命中「## 维保合同」。
+        所以细分/受众切片**不走这条路**（见 `topics_slice` / `_heading_body`），
+        `audience_map` 里也没人靠它区分两个相近的标题。
+        留着的用处只有 `hooks_slice` 那类「一个关键词只可能落一处」的场合。
+        """
         text = self.file_text(rel)
         if not text:
             return ""
         if not keyword:
             return text
         lines = text.split("\n")
+        want = f"## {keyword}"
         start = None
         for i, line in enumerate(lines):
-            if re.match(r"^##\s", line) and keyword in line:
+            if line.strip() == want:                      # 先认「标题就是这个词」
                 start = i
                 break
+        if start is None:
+            for i, line in enumerate(lines):
+                if re.match(r"^##\s", line) and keyword in line:
+                    start = i
+                    break
         if start is None:
             return text
         end = len(lines)
@@ -411,11 +792,58 @@ class Pack:
                 break
         return "\n".join(lines[start:end])
 
+    def _heading_body(self, text: str, heading_line: str) -> str:
+        """按**整行标题**取那一节（含标题行本身）；`heading_line` 空 → 空串。"""
+        return _heading_body_of(text, heading_line)
+
     def topics_slice(self, segment: str | None) -> str:
+        """按细分领域取 `knowledge/topics.md` 的那一节。
+
+        **命中不了就是空串，绝不退回整份文件。** 与 `audience_slice`（P1-22）同口径：
+        整份 topics.md 装着**别的一些细分**（实测 805 字符、还含 `pack.yaml` 这个字样），
+        注入进来不是「信息多一点」，而是把模型的注意力拉去讲另一个细分。
+        旧写法那句 `target = key or mapping.get("通用", "")` 在生成包里没有落点
+        —— 生成包根本没有 `## 通用` 节，于是每个越界取值都等价于「整份灌进去」。
+        `segment` 在 `app/schemas.py` 里不校验取值域，越界是常态而不是意外。
+        降级本身由 `param_audit` 与 `_audit` 标出，不靠这里兜底。
+        """
         mapping = self.data.get("topics_map", {}) or {}
         key = mapping.get(segment or "", "")
-        target = key or mapping.get("通用", "")
-        return self.slice_heading("knowledge/topics.md", target)
+        if not key:
+            return ""
+        text = self.file_text("knowledge/topics.md")
+        # 逐字相等优先：子串匹配会把「维保」送到「维保合同」那一节去，
+        # 于是真正的「维保」知识对每个选项都不可达，而包看起来完全健康（P1-1）。
+        # 只有 `## 2. 维保` 这种带序号的写法才落到包含匹配（本项目两种都有）。
+        return self._heading_body(text, _pick_heading_line(text, key))
+
+    def audience_section_body(self, audience: str) -> str:
+        """按**小节标题逐字相等**取 audience.md 的那一节（不走 audience_map）。
+
+        与 `audience_slice` 的区别：后者查 pack.yaml 自己声明的映射（生成包与手写包
+        都靠它），这里给建包期的对账用 —— 需要「选项 X 到底命中了哪一节」这个事实
+        本身，而不是又一层映射。命中不了 → 空串（与 `audience_slice` 同口径）。
+        """
+        text = self.file_text("knowledge/audience.md")
+        return self._heading_body(text, _pick_heading_line(text, str(audience or "")))
+
+    def topics_section_body(self, segment: str) -> str:
+        """按**章节标题**取 topics.md 的那一节；映射里没有这个细分 → 空串。"""
+        key = (self.data.get("topics_map", {}) or {}).get(segment or "", "")
+        if not key:
+            return ""
+        text = self.file_text("knowledge/topics.md")
+        return self._heading_body(text, _pick_heading_line(text, key))
+
+    def heading_bodies(self, rel: str, keywords) -> dict:
+        """把文件按**标题逐字相等**切成 `{keyword: 正文}`（建包期对账用）。
+
+        为什么需要它：`slice_heading` 是子串匹配 + 取第一个命中，`通用` 之类的
+        短词会把相邻章节一起吞进来；建包期的体检要逐节判断「这一节到底有没有内容」，
+        就必须按标题逐字切开，不能靠猜。
+        """
+        text = self.file_text(rel)
+        return split_heading_sections(text, keywords)
 
     def audience_slice(self, audience: str | None) -> str:
         mapping = self.data.get("audience_map", {}) or {}
@@ -504,6 +932,43 @@ class Pack:
         except (TypeError, ValueError):
             return 3
 
+    def duration_tolerance(self) -> float | None:
+        """时长偏差容差（百分比），`pack.yaml` 的 `duration_tolerance_pct`（P2-27 的后半）。
+
+        None = 本包不覆盖，走 `checker.check_script` 的「时长自适应」口径
+        （`±max(10%, 3秒÷目标时长)`，15 秒档因此放宽到 ±20%）。
+        取值合法性由 `pack_info` 在**加载时**判死（`tolerance_error`），
+        所以这里只兜"包绕过列表直接来取"的情况：坏值一律退回 None，
+        而不是带着一个能把每次生成都判死的数字去校验。
+        """
+        v = self.data.get("duration_tolerance_pct")
+        if tolerance_error(v):
+            return None
+        return float(v) if v not in (None, "") else None
+
+    def ai_tells_data(self) -> dict | None:
+        """文风 tell 词表（`pack.yaml` 的 `ai_tells` 键指定文件名）；结构坏了返回 None。
+
+        与 `banwords_data` 的两处关键差别，都是故意的：
+
+        1. **没配就是不开**，返回 None 而不是空表。空表会让 `AITells.report()`
+           打出「人味 100 分」—— 把"根本没测"读成"很好"，比缺一个字段更坏。
+        2. **读坏 / 写坏也不抛**（词表那边必须抛，因为空表等于合规校验一条都查不出；
+           这边空 = 提示词关闭，危害小得多）。为什么不能抛：调用方是
+           `pipeline._load_tells()` → `checker.check_script(tells=...)`，它在 select
+           **之后**，而 select 是真金白银 —— 实测这里抛 PackError 会让花钱跑完的作业
+           停在 failed，用户什么产物都拿不到。关闭 + 一条 warning 是唯一允许的降级。
+
+        结构与缓存都在 `resolve_ai_tells`（与 `pack_info` 同一本账）。
+        """
+        return self._resolve_ai_tells()[0]
+
+    def _resolve_ai_tells(self) -> tuple[dict | None, list[str]]:
+        """(词表或 None, 说明列表)。"""
+        if self._ai_tells_cache is None:
+            self._ai_tells_cache = resolve_ai_tells(self.dir, self.data)
+        return self._ai_tells_cache
+
     def banwords_data(self) -> dict:
         """行业包禁用词表（`pack.yaml` 的 `banwords` 键指定文件名）。
 
@@ -553,19 +1018,42 @@ class Pack:
                 continue
             slim = strip_empty(data)
             if slim:
-                blocks.append(f"=== {rel} ===\n"
+                # 段名用**去扩展名的文件基名**而不是 `=== private/service.yaml ===`：
+                # 模型没有文件系统，一个像路径的东西就是在让它去找不存在的文件
+                # （`tests/test_dangling_refs.py` 现在把 `*.md`/`*.yaml` 路径一律判为悬空引用）。
+                # 来源信息保留（它决定"这段是私有资料、优先当事实来源"），路径形态去掉。
+                stem = rel.replace("\\", "/").rsplit("/", 1)[-1].split(".")[0]
+                blocks.append(f"=== 私有资料 · {stem} ===\n"
                               + yaml.safe_dump(slim, allow_unicode=True, sort_keys=False))
         return "\n".join(blocks)
 
 
+# 溯源字段：包作者写了这两个键，就是在声明"这条有出处、我核过"。
+PROVENANCE_KEYS = ("source", "verified")
+UNVERIFIED_KEY = "_未核实"
+UNVERIFIED_NOTE = ("这条没有出处（source/verified 为空）：只能写成 "
+                   "{{待补：…}} 占位，不许当既成事实播报，也不要替它编一个来源")
+
+
 def strip_empty(data):
-    """递归剔除空值/示例占位（value 含"示例："的条目视为未填）"""
+    """递归剔除空值/示例占位（value 含"示例："的条目视为未填）。
+
+    另外补一件原来漏掉的事（P0-17 修 ③）：**条目声明了 `source`/`verified`
+    却没填值**时，就地打一个 `_未核实` 标记。这批资料是以
+    【私有知识库（优先作为事实来源）】的标题注入的，模型看到的就是"可信事实"；
+    清空示例数字只解决了"仓库里不许有假数字"，解决不了
+    "用户填了真数字但没写出处" —— 那条同样会被当成既成事实念出去。
+    只有出处键、别的全空的条目不打标记（否则会凭空多出一条内容）。
+    """
     if isinstance(data, dict):
         out = {}
         for k, v in data.items():
             v2 = strip_empty(v)
             if v2 not in (None, "", [], {}):
                 out[k] = v2
+        declared = [k for k in PROVENANCE_KEYS if k in data]
+        if declared and out and not any(k in out for k in declared):
+            out[UNVERIFIED_KEY] = UNVERIFIED_NOTE
         return out
     if isinstance(data, list):
         out = []

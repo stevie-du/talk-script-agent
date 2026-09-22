@@ -91,6 +91,7 @@ const RESULT = {
 const META = {
   default_pack: "elevator", model: "glm-4.7", base_url: "https://x/v4",
   has_api_key: true, mock: false, max_concurrent: 4, version: "0.2.0",
+  packs_dir: "C:/Users/test/AppData/Roaming/TalkScript/packs",
   packs: [
     { name: "elevator", display_name: "电梯行业包", draft: false,
       params: {
@@ -163,6 +164,19 @@ window.__addCount = 0;
     _p0.param_audit = {};
   }
   var RESULT = ${JSON.stringify(RESULT)};
+  // ── 带占位符的那份产物（P3-8 / P3-9 的现场，由 /api/jobs/jobph 返回）
+  // 两张卡各带一种 .over，而且**文档顺序相反于该跳的那个**：
+  //   第 2 张卡头：字数超配额 → span class="quota over" 120/85 字
+  //   第 3 张卡正文：一个真占位 → span class="over jumpable"
+  // 「点击定位首处」原来找的是 .script-card .over，抓到的是字数胶囊（P3-9）。
+  // 占位符本身按引擎的约定写成带「待补：」前缀的形式（app/knowledge.py 与
+  // export_skill.py 的提示词就是要模型这么写），于是屏幕上会不会多印一层
+  // 「待补：」也正好是这条夹具能量的东西（P3-8）。
+  var PH_RESULT = JSON.parse(JSON.stringify(RESULT));
+  PH_RESULT.sections[2].text = '第三，载重按{{待补：主力机型载重}}来定，别听口头报数。';
+  PH_RESULT.sections[2].subtitle = '载重怎么定';
+  PH_RESULT.check.segments[1] = { type: 'point', chars: 120, quota: 85 };
+  PH_RESULT.placeholders = ['{{待补：主力机型载重}}'];
   // 字数配额降级的情形：&quotadeg=1（P2-8）。
   // 行业包没配 quota_table 时引擎按「时长×语速」估一个通用配额 ——
   // 算出来的 quota 数字与真配额**长得一模一样**，只有这个标记能区分。
@@ -173,6 +187,10 @@ window.__addCount = 0;
   // config.yaml 读坏的情形：&cfgerr=1（文案由后端 _yaml_error_brief 生成，
   // 这里只取形态：原因 + 中文行列号，且**不含**配置正文）
   var CFGERR = /(^|[?&])cfgerr=1/.test(location.search);
+  // 取消建包作业失败的情形：&pgcancelfail=1（P3-10）。
+  // 「取消中…」是一句关于后端的承诺：请求本身失败时它必须收回去，
+  // 不能永久停在「取消中…」并且 disabled —— 那时用户既停不掉它，也退不回表单。
+  var PGCANCELFAIL = /(^|[?&])pgcancelfail=1/.test(location.search);
   // 哪些 LLM 字段还是内置默认（config.yaml 里没写、环境变量也没有）。
   //
   // ⚠ 桩必须**有状态**，且状态要按「文件里存了什么」来算 —— 不能写成
@@ -225,9 +243,24 @@ window.__addCount = 0;
     return d;
   }
   function hasKey(){ return !!activeRaw().api_key; }
+  // 后端 GET /api/config 常驻 base_url_warnings、保存/测试回 warnings。
+  // 桩**固定给一条**：这里验的是「后端给了字段，界面有没有人读」，
+  // 判定逻辑（哪个地址该警、哪个不该）由后端自己的
+  // tests/test_server_hardening.py::test_base_url_rejects_and_warns 守，
+  // 不在渲染层重算一遍 —— 那只会让两边一起错。
+  var WARN_HTTP = ['当前模型地址走明文 http（http://192.168.2.10:9200/v1）：'
+                   + '密钥与整段提示词会明文穿过网络，请只在可信内网这样用。'];
   function err(code, detail) {
     return Promise.resolve(new Response(JSON.stringify({ detail: detail }),
       { status: code, headers: { 'Content-Type': 'application/json' } }));
+  }
+  // 带**机器可读码**的错误（app/server.py 的 _error_json 就是 detail + code 两份）。
+  // 桩必须给得出 code，否则渲染层「按 code 判、不按状态码判」这条路径
+  // 在本文件里永远是空转 —— 桩只回 {detail} 时，任何 409 都只能凭文案认，
+  // 于是坏包被说成队列满也测不出来（P1-1）。
+  function errc(status, detail, code) {
+    return Promise.resolve(new Response(JSON.stringify({ detail: detail, code: code }),
+      { status: status, headers: { 'Content-Type': 'application/json' } }));
   }
   function configBody() {
     var r = activeRaw();
@@ -242,15 +275,50 @@ window.__addCount = 0;
              models: publicModels(), active_model: ACTIVE,
              config_error: CFGERR
                ? "config.yaml 语法有误（mapping values are not allowed here，第 2 行第 44 列）"
-               : "" };
+               : "",
+             base_url_warnings: WARN_HTTP };
   }
   var calls = { gen:0, job:0, cancel:0, rewrite:0, pg:0 };
+  // created_at 在一个作业的生命周期里是**固定**的（真引擎取的是 Job.created_at）。
+  // 原来两处作业分支各自现算一个"多久以前"，等于每次轮询都把作业重新出生一次
+  // —— 于是「已用 N 秒」被钉死在桩自己给的那个常数上，计时器相关的断言红的是桩、
+  // 不是实现。第一个答案进来时记账，之后一律复用同一个值。
+  var born = {};
+  var PG_CLAIMED = [];   // 建包占位**目录名**集合：与 app/packgen.claim_slug 同一口径
+  // ⚠ 引擎按 slugify 之后的目录名占位，不是按用户输入的那串字：
+  //   「全屋定制/装修」与「全屋定制 装修」都会落成 packs/全屋定制-装修/，
+  //   真引擎第二次直接 409。桩原来按原文比，等于桩比后端宽容 ——
+  //   「界面对重名提交做了什么」又变成量不出来的东西。
+  //   ⚠ 本函数整体是模板字符串：这里不许出现反引号，也不许写带反斜杠的正则，
+  //     所以逐字符判（反斜杠在这里会被吃掉一层，正则里的 w 类不能用）。
+  function pgSlug(t) {
+    var s = String(t || ''), out = '';
+    for (var i = 0; i < s.length; i++) {
+      var c = s.charAt(i), code = s.charCodeAt(i);
+      var keep = (code >= 48 && code <= 57) || (code >= 65 && code <= 90)
+                 || (code >= 97 && code <= 122) || (code >= 0x4e00 && code <= 0x9fff)
+                 || c === '_';
+      out += keep ? c : '-';
+    }
+    return out.replace(/-+/g, '-').replace(/^-+|-+$/g, '');
+  }
+  function bornAt(id, backMs) {
+    if (!born[id]) born[id] = new Date(Date.now() - backMs).toISOString();
+    return born[id];
+  }
   // 建包作业（P1-43）的桩：POST /api/packs/create 只回 job_id，
   // 结果挂在 GET /api/jobs/jobpg 上。第一拍必须是 packing ——
   // 若桩一上来就 done，界面里那段轮询/进度代码永远不会被执行（空转）。
   var PG_RESULT = {
     name: 'fitment', display_name: '全屋定制/装修', dir: 'C:/packs/fitment', draft: true,
-    checklist: '1. 核对细分领域 / 2. 核对禁用词',
+    // 与 app/packgen._checklist 同形状：H1 + 说明 + 一批 "- [ ]" 条目 + 一个 "## " 小节。
+    // 原来这里是一行 "1. 核对… / 2. 核对…"，界面拿到什么都在"通过"，
+    // 于是清单渲染（P3-50）改成行级结构后桩测不出任何事 —— 桩比后端宽容就是假绿。
+    checklist: '# 新行业包校对清单\\n\\n行业：全屋定制/装修（目录 packs/fitment/，**草稿状态**）\\n\\n'
+      + '使用前请逐项核实：\\n\\n- [ ] 人造板甲醛释放量分级标准现行编号\\n'
+      + '- [ ] 当地加装/改造审批口径\\n- [ ] 主力板材品牌与供货周期\\n\\n'
+      + '## 引擎体检发现（生成时自动检测，逐项核实后重跑或用前确认）\\n'
+      + '- [ ] 细分领域「预算报价」在模型返回的内容里没有对应段落 —— 已留空骨架\\n',
     verify_list: ['人造板甲醛释放量分级标准现行编号'],
     segments: ['板材环保', '空间规划', '预算报价'],
     audiences: ['装修业主', '二手房翻新业主'],
@@ -261,6 +329,8 @@ window.__addCount = 0;
     banwords_extra_soft: ['最环保'],
   };
   var ELEVATOR_DRAFT = true;   // 有状态：转正后变 false，才能验证按钮消失
+  var DRAFTS = {};             // 其它包（如建包用例的 fitment）默认草稿，转正后记 false
+  function isDraft(n) { return n === 'elevator' ? ELEVATOR_DRAFT : DRAFTS[n] !== false; }
   window.__calls = calls;
   // window.__shown 已删：它存在的唯一理由是「hero 两套文案都在 DOM 里，读
   // textContent 会把两态拼在一起，两个正则都匹配得上」。[data-when] 那一态
@@ -401,11 +471,80 @@ window.__addCount = 0;
       if (!hasKey()) {
         return err(400, '当前模型还没配 API Key，请在「设置 → 模型接口」里填写');
       }
+      var gbody = {};
+      try { gbody = JSON.parse(o && o.body || '{}'); } catch (_) {}
+      var gtopic = String(gbody.topic || '');
+      // ── 真后端在这条路上会给的三种**开跑前**拒绝（都是 409/404，都不起作业）。
+      // 桩原来一个都不给：于是渲染层「409 到底是谁」的判据在本文件里从没被跑过，
+      // 坏包被说成「队列满了」（P1-1）也就一直绿着。文案与 code 都按
+      // app/pipeline.py + app/knowledge.py + app/server.py 的真形态给。
+      if (gtopic.indexOf('额度') >= 0) {
+        return errc(409, '同时进行的生成已达上限（4 个），请等其中一条完成后再试',
+          'quota_exceeded');
+      }
+      if (gtopic.indexOf('坏包') >= 0) {
+        // knowledge.PackBrokenError 的原话形态：文件名 + 行列号都在。
+        return errc(409, '行业包「elevator」的 pack.yaml 语法有误'
+          + '（while parsing a block collection，第 4 行第 6 列）', 'pack_broken');
+      }
+      if (gtopic.indexOf('结构坏了') >= 0) {
+        // 同一个 409、另一种坏法：给一个**没有 code** 的应答（老服务形态），
+        // 界面既不能说成额度满、也不能编出一个占位原因。
+        return err(409, '行业包 elevator 的结构不符合约定（version 必须是数字）');
+      }
       // 主题里带「失败」就返回一个必然失败的作业，用来覆盖失败态渲染
-      var body = {};
-      try { body = JSON.parse(o && o.body || '{}'); } catch (_) {}
-      window.__lastJobId = /失败/.test(body.topic || '') ? 'jobfail' : 'job1';
+      window.__lastJobId = /失败/.test(gtopic) ? 'jobfail'
+        : /停不掉/.test(gtopic) ? 'jobrun'
+        : /占位/.test(gtopic) ? 'jobph' : 'job1';
       return mk({ job_id: window.__lastJobId });
+    }
+    // 一条**永远在跑**的作业：用来验「界面接回它之后，别的作业不许把它解锁」。
+    // 取消按 id 分开，是因为两条测试要的失败不同：
+    //   jobrun/cancel   → 500（P2-3：停止失败 + 重新连接），
+    //   jobkeep/cancel  → 正常 cancelled（P1-2：正在看的这一条确实能被 Esc 停掉）。
+    if (s.indexOf('/api/jobs/jobrun/cancel') >= 0) {
+      // 单独的计数器：不许去动 calls.cancel —— 前面那几条「停止会真正通知后端」
+      // 的断言读的就是它，混在一起会让一条新测试悄悄改变老断言的量到的东西。
+      calls.failcancel = (calls.failcancel || 0) + 1;
+      return err(500, '引擎拒绝取消：作业正在写盘，请稍后重试');
+    }
+    if (s.indexOf('/api/jobs/jobrun') >= 0) {
+      calls.job++;
+      return mk({ id: 'jobrun', state: 'writing',
+        created_at: bornAt('jobrun', 9000),
+        params: { topic: '停不掉的作业', pack: 'elevator', duration: 60 },
+        steps: [{ key: 'select', title: '选题策划', ts: '2026-09-13T10:00:01', data:{} }],
+        stream: { phase: '文案撰写', reasoning_tail: '先想清楚这个钩子怎么说……',
+                  reasoning_len: 88, content_len: 0 } });
+    }
+    // 一条**永远在跑**的作业，专门给「切走之后 busy 归谁」那组断言当接手对象。
+    // 桩原来没有这种分支：未知 id 落到最后的兜底 mk({}) → 界面读到
+    // 「认不出来的状态」而直接收工，于是那条作业上根本挂不住 busy（桩与后端不符）。
+    // ⚠ 这个 id **刻意不在 histStub 那六条里**：boot() 会把历史里第一条 BUSY 记录
+    //   自动接回界面（jobs.js 的 reattachBusyJob），拿现成的 s2 来用的话，
+    //   首页那一整组 landing 断言会从第 1 节开始就不是 landing 态了。
+    //   真实引擎里"在跑的作业"必然同时出现在 /api/history 与 /api/jobs 两处，
+    //   这是桩把两份数据各自编出来的既有妥协，不是本组断言要验的东西。
+    if (s.indexOf('/api/jobs/jobkeep/cancel') >= 0) {
+      calls.keepcancel = (calls.keepcancel || 0) + 1;
+      return mk({ id: 'jobkeep', state: 'cancelled', params: {} });
+    }
+    if (s.indexOf('/api/jobs/jobkeep') >= 0) {
+      calls.keepjob = (calls.keepjob || 0) + 1;
+      return mk({ id: 'jobkeep', state: 'writing',
+        created_at: bornAt('jobkeep', 6000),
+        params: { topic: '另一条还在跑的作业', pack: 'elevator', duration: 60 },
+        steps: [], stream: { phase: '文案撰写', reasoning_tail: '正在想救援步骤……',
+                             reasoning_len: 40, content_len: 0 } });
+    }
+    // 带占位符 + 超配额胶囊的那份产物（P3-8 / P3-9 的现场，见 /api/jobs/jobph）。
+    if (s.indexOf('/api/jobs/jobph') >= 0) {
+      return mk({ id: 'jobph', state: 'done', created_at: bornAt('jobph', 30000),
+        params: { topic: '占位与超配额', pack: 'elevator', duration: 60 },
+        steps: [{ key: 'select', title: '选题策划', ts: '2026-09-13T10:00:01', data:{} },
+                { key: 'write_r1', title: '文案撰写', ts: '2026-09-13T10:00:05', data:{} },
+                { key: 'check_r1', title: '校验·第 1 轮', ts: '2026-09-13T10:00:09', data:{} }],
+        result: PH_RESULT });
     }
     if (s.indexOf('/api/jobs/job1/cancel') >= 0) {
       calls.cancel++;
@@ -432,13 +571,14 @@ window.__addCount = 0;
       //   后端根本产不出的组合去截图和断言，量到的都是假东西。
       //   rewriting（第 2 轮回炉）才是「已有 select + write 两步、仍在跑」的合法形态。
       if (calls.job <= 2) return mk({ id:'job1', state:'rewriting',
-        created_at: new Date(Date.now() - 8000).toISOString(),
+        created_at: bornAt('job1', 8000),
         params:{ topic:'家用电梯怎么挑？', pack:'elevator', duration:60 },
         steps:[{ key:'select', title:'选题策划', ts:'2026-09-13T10:00:01', data:{} },
                { key:'write_r1', title:'文案撰写', ts:'2026-09-13T10:00:05', data:{} }],
         stream:{ phase:'回炉改写', reasoning_tail:'正在斟酌开场钩子……',
                  reasoning_len:136, content_len:12 } });
       return mk({ id:'job1', state:'done',
+        created_at: bornAt('job1', 8000),
         params:{ topic:'家用电梯怎么挑？', pack:'elevator', duration:60 },
         steps:[{ key:'select', title:'选题策划', ts:'2026-09-13T10:00:01', data:{} },
                { key:'write_r1', title:'文案撰写', ts:'2026-09-13T10:00:05', data:{} },
@@ -446,6 +586,7 @@ window.__addCount = 0;
         result: RESULT });
     }
     if (s.indexOf('/api/jobs/jobfail') >= 0) return mk({ id:'jobfail', state:'failed',
+      created_at: bornAt('jobfail', 12000),
       error:'模型接口连接失败（已重试 3 次）：Server disconnected',
       params:{ topic:'会失败的作业', pack:'elevator', duration:60 }, steps:[] });
     // 删记录：DELETE 必须排在下面那条「/api/history/{id} → 返回产物」之前 ——
@@ -465,20 +606,49 @@ window.__addCount = 0;
     // 这里按「今天 / 昨天 / 3 天前 / 10 天前」各造一条，覆盖 dayGroupKey 的
     // 三个分支（相对词、带星期的近一周、只留日期的更早）。
     if (s.indexOf('/api/history') >= 0) return mk(histStub());
-    if (s.indexOf('/api/config/test') >= 0) return mk({ ok:true, model:'glm-4.7', detail:'延迟 320ms' });
+    if (s.indexOf('/api/config/test') >= 0) return mk({ ok:true, model:'glm-4.7', detail:'延迟 320ms',
+      warnings: WARN_HTTP });
     // 必须在 /api/config 的通用匹配之前：indexOf('/api/config') 也会命中 reset
     if (s.indexOf('/api/config/reset') >= 0) return mk({ ok:true, fields:['base_url'] });
     // 知识库只读查看器：包文件清单 + 文件内容
     if (s.indexOf('/api/packs/elevator/export-skill') >= 0) return mk(
       { path:'C:/tmp/agent-skills/elevator', name:'elevator', files:12,
         include_private:false, hints:['已按安全默认排除 private/ 目录（商业信息不外带）。'] });
-    // 匹配任意包名的转正：实际请求可能是 fitment（测试里切过包）
+    // 匹配任意包名的转正：实际请求可能是 fitment（测试里切过包）。
+    // ⚠ 名字要**回显请求里那一个**，并且只在真的是 elevator 时才动 ELEVATOR_DRAFT：
+    //   原来恒回 name:'elevator'，等于桩替界面把"改错了包"这件事掩盖掉（批次 10 复核指出）。
     if (s.indexOf('/undraft') >= 0) {
-      ELEVATOR_DRAFT = false;                 // 服务端状态真的变了
-      return mk({ ok:true, name:'elevator', draft:false });
+      // ⚠ 这段在模板字符串里：注释里不许出现反引号，也不许写带反斜杠的正则
+      //   （反斜杠会被模板吃掉一层，注进页面就是非法正则 —— 这条陷阱本项目踩过三次）。
+      //   所以这里用 split 取包名。
+      var segUnd = (s.split('/api/packs/')[1] || '');
+      var undName = decodeURIComponent(segUnd.split('/undraft')[0] || 'elevator');
+      window.__und = { url: s, name: undName };        // 诊断：断言失败时看得见的入口
+      if (undName === 'elevator') ELEVATOR_DRAFT = false;   // 服务端状态真的变了
+      else DRAFTS[undName] = false;
+      // 回给界面的 draft 位必须与桩自己刚改过的状态一致：原来非 elevator 一律回
+      // true，等于"服务端说它还是草稿"而注册表里已经转正 —— 只是界面当前不看
+      // 响应体才没暴露（settings.js 的 undraftPack 走的是重新拉详情）。
+      return mk({ ok:true, name:undName, draft: isDraft(undName) });
     }
-    if (s.indexOf('/api/packs/elevator/file') >= 0) return mk(
-      { rel:'knowledge/topics.md', size:1024, text:'# 选题库 /  / - 家用电梯怎么挑？' });
+    if (s.indexOf('/api/packs/') >= 0 && s.indexOf('/file') >= 0) {
+      // 真实后端对 private/ 一律 403（安装包与导出都排除它，界面也不该能读全文），
+      // 且**与包名无关**。桩原来只认 elevator：前面有用例建出第二个包之后，
+      // 请求落到通用的 /api/packs/ 清单分支、拿回一份没有 size/text 的东西，
+      // 于是这条断言量到空 body —— 红得像是实现的错（实测踩过）。
+      // ⚠ 这段在模板字符串里：不许出现反引号；也不许写带反斜杠的正则
+      //   （反斜杠会被模板字符串吃掉一层，注进页面就成了非法正则 —— 实测踩过两次）。
+      if (/rel=([^&]*)private/i.test(s)) {
+        return err(403, '私有资料不经界面浏览（packs/elevator/private 下的内容）。'
+                        + '要查看或修改，请直接用编辑器打开本地文件。');
+      }
+      // 文件名也要**按请求回显**：原来无论点哪个文件都回 topics.md，界面把
+      // 「读到的内容」标成别的文件名这类错就量不出来。
+      var req2 = (s.split('rel=')[1] || '').split('&')[0];
+      var relQ = req2 ? decodeURIComponent(req2) : 'knowledge/topics.md';
+      return mk({ rel: relQ, size: 1024,
+                  text: relQ + ' 的内容（桩）— 家用电梯怎么挑？' });
+    }
     // 只在**有 body** 时记录：GET /api/config 会把 __lastConfigBody 覆盖成空，
     // 而 saveSettings 在 POST 之后还会走一次 preloadSettings（内含 GET）。
     if (s.indexOf('/api/config') >= 0) {
@@ -499,9 +669,29 @@ window.__addCount = 0;
       return mk(configBody());
     }
     // 建包 = 后台作业（P1-43）：只回 job_id，摘要在 /api/jobs/jobpg 的 result 里。
-    if (s.indexOf('/api/packs/create') >= 0) { calls.pg = 0; return mk({ job_id: 'jobpg' }); }
+    // 真引擎在**花钱之前**用 claim_slug 占名（app/packgen.claim_slug），同名并发
+    // 第二次直接 FileExistsError → 409「行业包正在创建中」。桩原来恒成功，
+    // 于是"界面对并发提交做了什么"这件事全绿也量不出来（批次 10 复核指出）。
+    if (s.indexOf('/api/packs/create') >= 0) {
+      var pgBody = {};
+      try { pgBody = JSON.parse((o && o.body) || '{}'); } catch (_) {}
+      var ind = String(pgBody.industry || '');
+      var indKey = pgSlug(ind);
+      if (PG_CLAIMED.indexOf(indKey) >= 0) {
+        calls.pgdup = (calls.pgdup || 0) + 1;
+        return err(409, '行业包正在创建中：' + indKey);
+      }
+      PG_CLAIMED.push(indKey);
+      calls.pg = 0;
+      return mk({ job_id: 'jobpg' });
+    }
     if (s.indexOf('/api/jobs/jobpg/cancel') >= 0) {
+      if (PGCANCELFAIL) {
+        calls.failpgcancel = (calls.failpgcancel || 0) + 1;
+        return err(500, '引擎没有接受这次取消：作业正在写文件');
+      }
       calls.cancel++;
+      PG_CLAIMED = PG_CLAIMED.filter(function(x){ return x !== pgSlug('全屋定制/装修'); });
       return mk({ id: 'jobpg', state: 'cancelled', kind: 'packgen', params: {} });
     }
     if (s.indexOf('/api/jobs/jobpg') >= 0) {
@@ -514,10 +704,33 @@ window.__addCount = 0;
           stream: { phase: '行业包生成', reasoning_tail: '先想这个行业的细分领域……',
                     reasoning_len: 512, content_len: 0 } });
       }
+      PG_CLAIMED = PG_CLAIMED.filter(function(x){ return x !== pgSlug('全屋定制/装修'); });  // finally 归还
       return mk({ id: 'jobpg', kind: 'packgen', state: 'done', result: PG_RESULT });
     }
-    if (s.indexOf('/api/packs/') >= 0) return mk({ display_name:'电梯行业包', description:'电梯行业口播脚本包',
-      draft:ELEVATOR_DRAFT, checklist:'1. 核对参数 / 2. 核对禁用词',
+    if (s.indexOf('/api/packs/') >= 0) {
+      // 详情必须**按请求的包名**回：原来无论问哪个包都回「电梯行业包」，
+      // 于是「看着 A 包点了按钮、实际改的是 B 包」这类错误在桩上量不出来
+      // （批次 10 复核抓到 settings.js 的 undraft 正是读错了对象）。
+      var segDet = (s.split('/api/packs/')[1] || '');
+      var detName = decodeURIComponent(segDet.split(/[/?#]/)[0] || 'elevator');
+      var DET_DISPLAY = { elevator: '电梯行业包', fitment: '全屋定制/装修' };
+      var detDn = DET_DISPLAY[detName] || detName;   // 没登记的包名就**原样回显**，不再一律冒充 fitment
+      // 校对清单：真实后端按**盘上有没有 校对清单.md** 回（app/server.py 读那个文件，
+      // 只有 packgen 建包时写过；「转正」也不删它）。原来这里恒回一句
+      // '1. 核对参数 / 2. 核对禁用词' —— 既不是 markdown 形状（P3-50 的渲染器在桩上
+      // 量不出任何事），也从不为空（「这个包没有清单」那一支界面代码从没被执行过）。
+      // 形状与 app/packgen._checklist 逐段对齐：H1 / 说明 / 一批待勾项 / "## " 小节 /
+      // 一条缩进续行。⚠ 这段在模板字符串里：不写反引号、换行只能写 \\n。
+      var HAS_CL = { fitment: true };
+      var CL_MD = '# 新行业包校对清单\\n\\n行业：全屋定制/装修（目录 packs/fitment/，**草稿状态**）\\n\\n'
+        + '使用前请逐项核实：\\n\\n- [ ] 人造板甲醛释放量分级标准现行编号\\n\\n'
+        + '## 红线核实\\n\\n- [ ] 绝对化用语不得出现在口播正文\\n\\n'
+        + '## 从模板包复制来的骨架（**不含任何行业内容，需要你填实例**）\\n\\n'
+        + '- [ ] knowledge/voice.md 的口语化范例与人设开场（三处 {{待补}}）\\n'
+        + '      （只注进提示词的是「红线速查」那一节，细则是给 checker 和人看的）\\n';
+      return mk({ display_name: detDn,
+      description: detDn + '口播脚本包',
+      draft: isDraft(detName), checklist: HAS_CL[detName] ? CL_MD : null,
       // ⚠ 2026-09-17：桩里的文件清单必须**覆盖全部角色**。桩只有 3 个文件时，
       // 「行业包面板覆盖知识 / 技能 / 合规 / 私有等所有角色」这条断言验的是
       // 桩的贫瘠，不是实现的正确 —— 属于空转。真实包（elevator）有 22 个文件，
@@ -534,6 +747,7 @@ window.__addCount = 0;
         {rel:'rules/duration.md',size:1024},
         {rel:'private/pricing.md',size:896},
       ] });
+    }
     if (s.indexOf('/api/history') >= 0) return mk([]);
     return mk({});
   };
@@ -543,6 +757,10 @@ window.__addCount = 0;
 
 // ── 断言工具 ────────────────────────────────────────────────
 const results = [];
+// 崩溃时把**页面侧**的异常一起打出来：以前 evalIn 只说
+// `Cannot read properties of undefined (reading 'rebind')`，根因（渲染层启动时抛的那一句）
+// 全程没露过面，每次都得靠猜。断言与页面异常本来就在两个进程里，这里只是把它们一起报出来。
+const pageErrs = [];
 function check(name, ok, detail) { results.push([name, !!ok, detail || ""]); }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -558,7 +776,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const wsUrl = await waitTarget(CDP_PORT);
   cdp = await connect(wsUrl);
 
-  const errs = [];
+  const errs = pageErrs;
   cdp.on(o => {
     if (o.method === "Runtime.exceptionThrown") {
       errs.push(o.params.exceptionDetails?.exception?.description ||
@@ -829,9 +1047,23 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       greetGap: Math.round(r(card).top - (document.querySelector('.empty').getBoundingClientRect().bottom)),
       // 首页没有「浮在滚动内容之上」的固定层语义 —— 输入区不该再挂玻璃底
       glass: getComputedStyle(comp).backdropFilter,
+      // 「后台还有几条在跑」那一行在**首页必须不占位**：桩的左栏里就有一条
+      // writing 记录，所以这一条量的是"有后台作业时的首页"，正是它最容易漏出来
+      // 把 hero 挤歪的场合（实测漏出来时 chipsGap 16 → 44）。
+      footText: document.getElementById('composer-gen-hint').textContent,
+      footH: Math.round(document.getElementById('composer-gen-hint').parentNode
+        .getBoundingClientRect().height),
+      stopAllHidden: document.getElementById('btn-stop-all').classList.contains('hidden'),
+      bgCount: (window.__ts.busyRecords ? window.__ts.busyRecords().length : -1),
     }; })()`);
   check("首页为 landing 态：问候语与起手胶囊同时在场",
     landing.isLanding && landing.emptyShown && landing.chipsShown, JSON.stringify(landing));
+  // 前提要先钉住：这一屏**确实**有后台作业（否则"没占位"是空转出来的假绿）。
+  check("首页：确有后台作业在跑（下一条断言的前提）", landing.bgCount >= 1,
+    JSON.stringify({ bgCount: landing.bgCount }));
+  check("首页：后台作业那一行不写进输入卡下方（留空且零高度、按钮收起）",
+    landing.footText === "" && landing.footH === 0 && landing.stopAllHidden,
+    JSON.stringify(landing));
   check("hero 只剩标识 + 一句问候（副标题、底注、深色图标砖都下线了）",
     landing.heroKids === 2 && landing.extraLines === 0
       && landing.markShown && !landing.inkTile, JSON.stringify(landing));
@@ -897,6 +1129,14 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     userMsg: !!document.querySelector('.msg.msg-user .bubble.user'),
     steps: document.querySelectorAll('.msg-assistant .steps .step').length,
     thinkShown: !document.querySelector('#think-stream')?.classList.contains('hidden'),
+    sess: (function () {
+      var ids = Array.prototype.slice.call(
+        document.querySelectorAll('#session-list .sess-item'))
+        .map(function (r) { return r.dataset.id || ''; });
+      var seen = {}, dup = [];
+      ids.forEach(function (v) { if (seen[v]) dup.push(v); seen[v] = 1; });
+      return { n: ids.length, dup: dup };
+    })(),
     btnTitle: document.getElementById('btn-generate').title,
     topicCleared: document.getElementById('topic').value === '',
     hint: (() => { const h = document.getElementById('composer-gen-hint');
@@ -988,6 +1228,12 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   };`);
   check("发送后进入生成态（用户气泡 + 助手气泡）",
     running.busy && running.jobId === "job1" && running.userMsg, JSON.stringify(running));
+  // 20260917 那轮留下的 P1-2：生成期间「左栏列表 + 聊天区」同屏两处状态，
+  // 从来没有一条断言守过「同一条 id 在左栏只出现一次」。桩里本来就有一条
+  // writing 记录，真作业收尾后前端还会把它并进列表 —— 并进与轮询各加一次
+  // 就是两条一模一样的行，用户看到的是「我生成了两遍」。
+  check("生成中：左栏会话列表没有重复 id",
+    running.sess.dup.length === 0, JSON.stringify(running.sess));
   check("步骤时间线渲染出已完成步骤", running.steps >= 2, `steps=${running.steps}`);
   check("生成中展示流式思考过程", running.thinkShown, "");
 
@@ -1087,16 +1333,43 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     dropBanner: !!Array.from(document.querySelectorAll('.banner')).find(b => /单字禁用词/.test(b.textContent)),
     quotaDegBanner: !!Array.from(document.querySelectorAll('.banner')).find(b => /字数配额/.test(b.textContent)),
     verBar: document.querySelectorAll('.ver-bar').length,
+    sess: (function () {
+      var ids = Array.prototype.slice.call(
+        document.querySelectorAll('#session-list .sess-item'))
+        .map(function (r) { return r.dataset.id || ''; });
+      var seen = {}, dup = [];
+      ids.forEach(function (v) { if (seen[v]) dup.push(v); seen[v] = 1; });
+      return { n: ids.length, dup: dup };
+    })(),
   };`);
+  // 收尾再量一次：本次作业最多只能给列表添**一条**行（多出来的一条
+  // 就是「并进 + 轮询」双计的那条），且不许出现任何重复 id。
+  check("完成后：左栏仍无重复 id，且本次作业最多并入一条",
+    done.sess.dup.length === 0 && done.sess.n - running.sess.n <= 1,
+    JSON.stringify({ running: running.sess, done: done.sess }));
   check("完成后渲染出结果", done.hasResult && !done.busy, JSON.stringify(done));
   // 非生成态：这一行必须留空**且不占高度**。它空着却占一条缝的话，
   // 卡片下方会凭空多出一块、看着像没对齐 —— 键盘提示并进 placeholder 之后，
   // 「空着不占位」就是这条规则的唯一可见后果，得有人守着。
+  // 原来的「非生成态：状态行留空且不占高度」在这里已不成立：**后台真有作业时
+  // 这行就该说话**（左栏被切走时没人看得见那几颗呼吸点）。所以按两态拆开守：
+  //   首页 —— 不占位（上面那两条）；对话态 —— 说话、且只说一行、并给出动作。
+  // "空着不许占位"这条规则本身没有放松：它搬到了首页那一屏去量，
+  // 那里才是它真正会破的地方。
   const idleHint = await evalIn(`const h = document.getElementById('composer-gen-hint');
-    return { text: h.textContent, display: getComputedStyle(h).display,
-             footH: Math.round(h.parentNode.getBoundingClientRect().height) };`);
-  check("非生成态：状态行留空且不占高度",
-    idleHint.text === "" && idleHint.display === "none" && idleHint.footH === 0,
+    const b = document.getElementById('btn-stop-all');
+    return { text: h.textContent, h: Math.round(h.getBoundingClientRect().height),
+             footH: Math.round(h.parentNode.getBoundingClientRect().height),
+             btnShown: !b.classList.contains('hidden'), btnText: b.textContent,
+             btnTitle: b.title,
+             bg: (window.__ts.busyRecords ? window.__ts.busyRecords().length : -1) };`);
+  check("对话态：后台作业时状态行说清楚有几条，并且只占一行",
+    /后台进行/.test(idleHint.text) && idleHint.bg >= 1
+    && idleHint.footH > 0 && idleHint.footH - idleHint.h <= 12,
+    JSON.stringify(idleHint));
+  check("对话态：「停止全部后台生成」按钮在场、带条数、title 里点出是哪几条",
+    idleHint.btnShown && /停止全部后台生成（\d+）/.test(idleHint.btnText)
+    && idleHint.btnTitle.indexOf('仍在后台进行') >= 0,
     JSON.stringify(idleHint));
   check("分段卡片 4 张", done.cards === 4, `cards=${done.cards}`);
   check("指标速览 4 项", done.metrics === 4, `metrics=${done.metrics}`);
@@ -1113,6 +1386,41 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       return !document.querySelector('.res-pane[data-tab="subs"]').classList.contains('hidden')
         && document.querySelector('.res-pane[data-tab="script"]').classList.contains('hidden');`)) === true,
     "字幕 tab");
+  // 结果出来后线程自动滚到底，页签条曾被整条推出滚动容器（实测它的 top 为负），
+  // 用户以为产物只有一屏口播文案、不知道还有分镜/字幕/合规/数据。
+  // ⚠ 桩里产物短，两次尝试都假绿过：直接 scrollTop 被钳回 0；用 height 压容器又被
+  //    `flex: 1` 忽略。这里用 max-height（flex 项会认）+ 给产物区垫高，
+  //    造出"产物比视口长、且已滚到底"的真状态，量完必须还原（后面还有断言在跑）。
+  const tabGeo = await evalIn(`return (() => {
+    const s = document.getElementById('chat-stream');
+    const wrap = document.querySelector('.res-tabs');
+    const pane = document.querySelector('.res-pane.on') || wrap.parentElement;
+    const prevMax = s.style.maxHeight, prevH = pane.style.height, prevScroll = s.scrollTop;
+    try {
+      s.style.maxHeight = '160px';
+      pane.style.height = '1200px';               // 产物比容器长得多 → 滚到底时页签条在上方
+      void s.offsetHeight;
+      s.scrollTop = 999999;
+      const sr = s.getBoundingClientRect();
+      const tr = wrap.getBoundingClientRect();
+      return { sticky: getComputedStyle(wrap).position,
+               scrollable: s.scrollHeight > s.clientHeight + 40,
+               atBottom: s.scrollHeight - s.scrollTop - s.clientHeight < 4,
+               streamTop: Math.round(sr.top), streamBottom: Math.round(sr.bottom),
+               top: Math.round(tr.top), bottom: Math.round(tr.bottom) };
+    } finally {
+      s.style.maxHeight = prevMax; pane.style.height = prevH; s.scrollTop = prevScroll;
+    }
+  })();`);
+  check("页签条声明为 sticky（吸顶的前提）",
+    tabGeo.sticky === "sticky", tabGeo.sticky);
+  check("产物比容器长且滚到底时，页签条被吸在容器上沿（四档页签可点）",
+    tabGeo.scrollable && tabGeo.atBottom
+      // 吸附位 = 容器上沿 + 容器内边距（实测 48 + 24 = 72），所以只能判"贴在上沿一带"，
+      // 判"贴齐边框"是错的（我第一版就这么写死，红得很冤枉）。
+      && tabGeo.top >= tabGeo.streamTop - 1 && tabGeo.bottom <= tabGeo.streamBottom + 1
+      && tabGeo.top - tabGeo.streamTop <= 40,
+    JSON.stringify(tabGeo));
   // 关键：字幕 tab 预览的**内容**必须与导出的一致且干净。
   // SRT 曾出过「关键词当字幕、句子被砍断」的 bug，而以前只能导出成文件
   // 打开才发现 —— 现在界面里就能看见。
@@ -1426,12 +1734,45 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("packgen 结果页双出口齐备：返回（回来源）+ 完成（去工作台），清单在折叠块内",
     pgDone.hasBack && pgDone.hasDone && pgDone.checklistInDetails,
     JSON.stringify(pgDone));
+  // P3-50：清单是这次生成唯一需要人看的东西，原来它是一份 markdown 原文塞进 <pre>。
+  const pgCl = await evalIn(`return (function(){
+    var box = document.getElementById('pg-checklist');
+    var rows = [].slice.call(box.querySelectorAll('.pg-summary-row'));
+    var texts = rows.map(function(r){ return r.textContent; });
+    return { rows: rows.length,
+      rawMarks: texts.filter(function(t){ return t.indexOf('- [') === 0
+        || t.indexOf('##') === 0 || t.trim() === '---'; }).length,
+      boxes: rows.filter(function(r){ return r.children[0].textContent === '□'; }).length,
+      first: texts.length ? texts[0].slice(0, 40) : '',
+      tag: box.tagName.toLowerCase() };
+  })()`);
+  check("校对清单按行画成可勾的条目，不是一面 markdown 文本墙（P3-50）",
+    pgCl.rows > 3 && pgCl.rawMarks === 0 && pgCl.boxes > 0 && pgCl.tag === 'div',
+    JSON.stringify(pgCl));
   await evalIn(`document.getElementById('pg-back').click(); return true;`);
   await sleep(200);
   const afterPgBack = await evalIn(`return [...document.getElementById('settings-screen').querySelectorAll('.stg-pane')]
     .find(p => !p.classList.contains('hidden'))?.id;`);
   check("packgen 结果页「返回」回到来源面板（packinfo，与「取消」一致）",
     afterPgBack === 'pane-packinfo', afterPgBack);
+
+  // 「完成」原来**永远**跳工作台，与「返回 / 取消」的去向不一致（P2-47）：
+  // 从行业包面板进来的人，紧接着要看的就是新包的校对清单与文件，
+  // 却被系统替他决定了"建完就走"。现在三个出口共用同一个来源判断。
+  await evalIn(`document.getElementById('pi-newpack').click(); return true;`);
+  await sleep(200);
+  await evalIn(`document.getElementById('pg-run').click(); return true;`);
+  await sleep(3200);          // 桩里第 3 拍才 done
+  await evalIn(`document.getElementById('pg-done').click(); return true;`);
+  await sleep(500);
+  const afterPgDone = await evalIn(`return [...document.getElementById('settings-screen').querySelectorAll('.stg-pane')]
+    .find(p => !p.classList.contains('hidden'))?.id;`);
+  check("packgen「完成」回到来源面板（从 packinfo 进来的，别再扔回工作台）",
+    afterPgDone === 'pane-packinfo', afterPgDone);
+  // 收尾：把面板切回工作台，后面的断言都在量 .stg-main / pane-gen 的几何
+  await evalIn(`const n = document.querySelector('.stg-nav-item[data-pane="gen"]');
+    if (n) n.click(); return true;`);
+  await sleep(200);
 
   // 滚动容器上提到 .stg-main 后的两条守护。修复前滚动容器是 .stg-pane 自身，
   // 它带 max-width + margin-inline:auto（限宽居中），于是滚动条出现在**居中盒子**
@@ -1593,6 +1934,45 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       && piLoaded.bodyLen !== piLoaded.bodyBefore.length
       && piLoaded.size.length > 0,
     JSON.stringify(piLoaded));
+
+  // private/ 文件卡：后端现在对它回 **403**（安装包与导出都排除 private/，
+  // 界面这个口子也必须关）。这里验两件事：整条路走得通（不崩、有内容），
+  // 并且说的是「不经界面浏览」而不是「读取失败」—— 后者会把人引去查没坏的东西。
+  const privFile = await evalIn(`return (function(){
+    var rows = Array.prototype.slice.call(document.querySelectorAll('#pi-groups .kb-item'));
+    var target = null;
+    rows.forEach(function(r){
+      var n = r.querySelector('.kb-name');
+      if (!target && n && /private/i.test(n.textContent)) target = r;
+    });
+    if (!target) return { err: 'no private row' };
+    target.click();
+    return { clicked: true, rel: target.querySelector('.kb-name').textContent };
+  })()`);
+  await sleep(900);
+  const privBody = await evalIn(`return {
+    body: document.getElementById('pi-file-body').textContent,
+    size: document.getElementById('pi-file-size').textContent,
+  };`);
+  check("点 private/ 文件卡：给的是「不经界面浏览」的说明，不是「读取失败」",
+    privFile.clicked === true && /不经界面浏览/.test(privBody.body)
+    && !/读取失败/.test(privBody.body) && privBody.size === "不经界面浏览",
+    JSON.stringify({ privFile, privBody }));
+
+  // 可写包目录要摊出来：打包版里包住在 %APPDATA%，安装目录那份会被覆盖安装重写。
+  // 用户自建包 / 手改的词表去哪儿改，界面原来一个字都不说。
+  // 只许有**一个**节点：这行是每次刷新包列表时重画的，重复叠加就是漏了清理。
+  const packsDir = await evalIn(`return (function(){
+    var n = document.querySelectorAll('#pi-packs-dir');
+    var first = n[0];
+    return { n: n.length, text: first ? first.textContent : '',
+             inDetail: first ? !!first.closest('#pane-packinfo .pane-detail') : false,
+             dir: (window.__ts && window.__ts.meta && window.__ts.meta.packs_dir) || '' };
+  })()`);
+  check("行业包详情里给出可写包目录（读 /api/meta 的 packs_dir，且不重复叠加）",
+    packsDir.n === 1 && packsDir.inDetail && packsDir.dir
+      && packsDir.text.indexOf(packsDir.dir) >= 0,
+    JSON.stringify(packsDir));
 
   // .kb-item 家族一致性（kb / skills / packinfo 三处共用同一族）——
   // 既然 kb / skills 面板已并到行业包面板里，这条断言只在新位置复核一遍。
@@ -2130,14 +2510,21 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
         h2FontSize: h2 ? getComputedStyle(h2).fontSize : null,
       };
     }
+    // 判据比对的是**页面级标题档**的解析值，不是手抄的 px：
+    // 2026-09-21 这一档从 --f-xl(20) 提为 --f-display(24)，写死 '20px'
+    // 会让换档变成"改断言"，而这条想守的是「三个 h2 吃同一档」。
+    out['__display'] = getComputedStyle(document.documentElement)
+      .getPropertyValue('--f-display').trim();
     return out;
   })()`);
-  const h2Sizes = new Set(Object.values(pageHeadUnified)
+  const pageHeadPanes = Object.values(pageHeadUnified)
+    .filter(v => v && typeof v === 'object');
+  const h2Sizes = new Set(pageHeadPanes
     .filter(p => !p.missing && p.h2FontSize)
     .map(p => p.h2FontSize));
   check("三个设置面板的 page-head 结构与字号统一（.page-head-titles > h2 + hint）",
-    Object.values(pageHeadUnified).every(p => !p.missing && p.hasTitlesWrap && p.hasH2 && p.hasHint)
-      && h2Sizes.size === 1 && [...h2Sizes][0] === '20px',
+    pageHeadPanes.every(p => !p.missing && p.hasTitlesWrap && p.hasH2 && p.hasHint)
+      && h2Sizes.size === 1 && [...h2Sizes][0] === pageHeadUnified.__display,
     JSON.stringify(pageHeadUnified));
 
   // 右列（.pane-detail）顶部 h3 字号一致（2026-09-17）：
@@ -2240,16 +2627,64 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   check("草稿包才显示「标记为已校对」按钮（非草稿包不显示）",
     beforeUndraft.hidden === false, JSON.stringify(beforeUndraft));
 
+  // P3-50 的另一半：结果页的清单改了行级渲染，**包详情这一屏没改** —— 同一个
+  // 校对清单.md 在两个界面一份是清单、一面是 markdown 文本墙。判据只看"行首"，
+  // 因为正文里可以合法出现 "## " 这个词（清单的续行就在引用它）。
+  const clRows = await evalIn(`var box = document.getElementById('pi-checklist');
+    var rows = [].slice.call(box.children);
+    var val = function(r){ return r.lastElementChild ? r.lastElementChild.textContent : ''; };
+    return { wrap: document.getElementById('pi-checklist-wrap').classList.contains('hidden'),
+      tag: box.tagName, title: document.getElementById('pi-title').textContent,
+      n: rows.length,
+      allRows: rows.every(function(r){ return r.className === 'pg-summary-row'; }),
+      hasMark: rows.every(function(r){ var k = r.firstElementChild;
+        return !!k && k.className === 'pg-summary-k'; }),
+      unchecked: rows.filter(function(r){ return r.firstElementChild.textContent === '□'; }).length,
+      h1: rows.filter(function(r){ return val(r).indexOf('#') === 0; }).length,
+      rawTodo: rows.filter(function(r){ return val(r).indexOf('- [') === 0; }).length,
+      rawHead: rows.filter(function(r){ return val(r).indexOf('## ') === 0; }).length,
+      text: box.textContent.slice(0, 24) };`);
+  check("草稿包详情的校对清单是行级清单（□ 一栏 + 正文），不是 markdown 原文",
+    clRows.wrap === false && clRows.tag === 'DIV' && clRows.n >= 6 && clRows.allRows
+      && clRows.hasMark && clRows.unchecked === 3
+      && clRows.h1 === 0 && clRows.rawTodo === 0 && clRows.rawHead === 0,
+    JSON.stringify(clRows));
+
+  // 先在列表里**点开 elevator 的详情**（下拉的 change 只管生成参数，不刷新右列），
+  // 然后把下拉漂到 fitment 但不刷新右列：这时点「标记为已校对」必须转正 elevator，
+  // 而不是下拉里的 fitment（修复前 settings.js 读 `$("pack").value`；
+  // 桩原来无论问哪个包都回电梯的草稿位，两件事一起被掩盖）。
+  const openedElevator = await evalIn(`var it = [].slice.call(
+      document.querySelectorAll('#pi-list .pl-item'))
+      .find(function(n){ return n.dataset.id === 'elevator'; });
+    if (it) it.click(); return !!it;`);
+  check("行业包列表里能点到 elevator（上一条的前提，列表没渲染就别往下量）",
+    openedElevator === true, String(openedElevator));
+  await sleep(400);
+  // 上一条的桩改忠实之后立刻多出来的分支：仓库里手写包（elevator）没有 校对清单.md，
+  // 真实后端回 checklist:null → 整块区域必须收起。原来桩恒回一句非空文本，
+  // 这一支界面代码在整个门禁里从没跑过。
+  const clElev = await evalIn(`return {
+    wrap: document.getElementById('pi-checklist-wrap').classList.contains('hidden'),
+    title: document.getElementById('pi-title').textContent };`);
+  check("没有校对清单文件的手写包：整块清单区收起，不留一个空壳标题",
+    clElev.wrap === true && clElev.title.indexOf('电梯') >= 0, JSON.stringify(clElev));
+  await evalIn(`var sDrift = document.getElementById('pack');
+    sDrift.value = 'fitment'; return true;`);
   await evalIn(`document.getElementById('pi-undraft').click(); return true;`);
   await sleep(300);
   await evalIn(`document.getElementById('cd-yes').click(); return true;`);   // 确认弹窗
   await sleep(700);
   const afterUndraft = await evalIn(`return {
     hidden: document.getElementById('pi-undraft').classList.contains('hidden'),
-    title: document.getElementById('pi-title').textContent };`);
+    title: document.getElementById('pi-title').textContent,
+    und: window.__und || 'NO-REQUEST' };`);
   check("转正后「标记为已校对」按钮消失（刷新生效）",
     afterUndraft.hidden === true && !/草稿/.test(afterUndraft.title),
     JSON.stringify(afterUndraft));
+  check("「标记为已校对」作用于**右列正在看的那个包**，不是下拉里漂移的另一个（P3-51）",
+    !!afterUndraft.und && afterUndraft.und.name === 'elevator',
+    JSON.stringify(afterUndraft.und));
   await evalIn(`const sel = document.getElementById('pack');
     sel.value = 'elevator'; sel.dispatchEvent(new Event('change', {bubbles:true}));
     return true;`);
@@ -3053,7 +3488,7 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   // 线两侧各留 16 —— 那时搜索框距按钮 32、距列表 16，「更近列表」是有层次的。
   // 2026-09-16 删掉 .left-sep 后只靠一个 16px gap 区分，两段变成**等距**（都 16）。
   // 2026-09-21 改 A：新建对话与搜索框同属「开始一段工作」的动作区，两个 16
-  // 读成"三块等距、没有分组" —— 组内收到 8（--s2），组间保持 16（--s4）。
+  // 读成"三块等距、没有分组" —— 组内收到 12（--s3，8 实测太挤），组间保持 16（--s4）。
   // 断言守的是「组内 < 组间 且各自精确」。组内 12 = --s3、组间 16 = --s4。
   check("按钮→搜索 12 / 搜索→列表 16（动作区内收、组间保持 16）",
     headOrder.gapUp === 12 && headOrder.gapToLbl === 16,
@@ -3486,10 +3921,10 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       && colGeo.块[0].pad === "0px/12px" && colGeo.块[0].图标左 === 12
       && colGeo.块[0].图标宽 === 16 && colGeo.块[0].文字左 === 36,
     JSON.stringify(colGeo.块[0]));
-  // 竖向节奏的分组约定：按钮→搜索 8（动作区内），其余段都是 16（= --s4），
+  // 竖向节奏的分组约定：按钮→搜索 12（动作区内，--s3），其余段都是 16（= --s4），
   // 列表内部 1px 是密集行的既定节奏（另一条守）。
-  // 2026-09-21 改 A：此前「头部线→新建→搜索→列表」三 段全是 16，动作区两件事
-  // 与「组→列表」边界等距 → 三块等距没有分组。组内收到 8，其余 16 不动。
+  // 2026-09-21 改 A：此前「头部线→新建→搜索→列表」三段全是 16，动作区两件事
+  // 与「组→列表」边界等距 → 三块等距没有分组。组内收到 12，其余 16 不动。
   // 这里连底部「分隔线→设置」一起量 —— 它曾被 .nav-item 的 1px margin 顶成 17。
   // 「设置→窗口底边」也钉在同一条 16 上：.left-foot 与 .left-top 是同列上下两个
   // 固定区，必须用同一套 padding。下边曾停在 --s2，于是上 16 下 8 —— 用户报
@@ -4283,6 +4718,21 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   // 两个条件各自吃劲：颜色证明用的是 --warn 而不是普通 hint 灰；
   // status 证明警示是**追加**的，没有把状态行整行换掉 ——
   // 换掉的话用户就看不到「当前用的是哪条模型」了。
+  // 后端每次保存 / 测试都回 warnings、GET /api/config 常驻 base_url_warnings，
+  // 修复前渲染层**一个字都没读**：明文 http 这件事只活在一次性 toast 里。
+  const urlWarn = await evalIn(`return (function(){
+    var n = document.getElementById('md-warn');
+    if (!n) return { missing: true };
+    var cs = getComputedStyle(n);
+    return { hidden: n.classList.contains('hidden'), display: cs.display,
+             text: n.textContent, color: cs.color };
+  })()`);
+  check("明文地址警告常驻在模型页（不是被顶掉的一次性提示）",
+    !urlWarn.missing && urlWarn.hidden !== true && urlWarn.display !== 'none'
+      && /明文|http/.test(urlWarn.text),
+    JSON.stringify(urlWarn));
+  check("警告行用 warn 色（与配置读坏那行同一族）",
+    urlWarn.color === 'rgb(178, 94, 0)', JSON.stringify(urlWarn));
   check("警示用 warn 色且不顶掉原状态行",
     cfgErr.color === 'rgb(178, 94, 0)' && /模型/.test(cfgErr.status),
     JSON.stringify(cfgErr));
@@ -4750,6 +5200,352 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   await sleep(1600);
   await evalIn(`document.getElementById('settings-screen').classList.add('hidden'); return true;`);
 
+  // ── 12h) 409 有两种，屏幕上必须是两句话（P1-1）─────────────────
+  // 真后端在**开跑前**就能给两种 409：并发额度满（app/pipeline.py 的 StateConflict）
+  // 与行业包坏了（app/knowledge.py 的 PackBrokenError，状态码由 app/server.py 映射）。
+  // 修复前渲染层判的是 `status === 409`，于是坏包被说成「同时进行的生成已达上限」，
+  // 而服务端那句带行列号的原话**整句丢掉** —— 两句一模一样的话，两种完全不同的病。
+  // 现在判据读 code，所以桩也必须给得出 code（上面 errc 那一段），否则这组断言
+  // 量到的是"桩里没有 code"，全绿而什么都没验证。
+  const typeAndSend = async (topic) => {
+    await evalIn(`window.__ts.newChat();
+      const el0 = document.getElementById('topic');
+      el0.value = ${JSON.stringify(topic)};
+      el0.dispatchEvent(new Event('input', { bubbles: true }));
+      document.getElementById('btn-generate').click(); return true;`);
+    await sleep(500);
+    return evalIn(`return { toast: document.getElementById('toast').textContent,
+      busy: window.__ts.busy, jobId: window.__ts.jobId,
+      hint: document.getElementById('composer-gen-hint').textContent };`);
+  };
+  const quotaCase = await typeAndSend('额度测试：这条应该被队列挡住');
+  check("额度满的 409 说的是队列，且界面立刻可用",
+    /额度/.test(quotaCase.toast) && !/pack\.yaml/.test(quotaCase.toast)
+      && !quotaCase.busy && !quotaCase.jobId, JSON.stringify(quotaCase));
+  const brokenCase = await typeAndSend('坏包测试：这条应该说出是哪个包坏了');
+  check("坏包的 409 把引擎那句原话说全（包名 + 文件名 + 行列号）",
+    /pack\.yaml/.test(brokenCase.toast) && /第 4 行第 6 列/.test(brokenCase.toast)
+      && /行业包/.test(brokenCase.toast), JSON.stringify(brokenCase));
+  check("坏包没有被说成队列满（这两句话必须不同）",
+    !/已达上限/.test(brokenCase.toast) && !/额度/.test(brokenCase.toast)
+      && brokenCase.toast !== quotaCase.toast, JSON.stringify(brokenCase));
+  // 对照：**认不出 code** 的 409（老服务 / 第三种原因）谁都不许冒充。
+  // 这一条钉的是修法的另一半 —— 不是把「不是额度」一律改说成「包坏了」，
+  // 而是没有证据时就把服务端那句话原样递出去。
+  const noCodeCase = await typeAndSend('结构坏了：这条应答里没有 code');
+  check("没有 code 的 409 两条现成话都不套，只回服务端原话",
+    /结构不符合约定/.test(noCodeCase.toast) && !/已达上限/.test(noCodeCase.toast)
+      && !/pack\.yaml 语法有误/.test(noCodeCase.toast), JSON.stringify(noCodeCase));
+
+  // ── 12i) 被遗弃的单段重写不许解锁**别人**的作业（P1-2）──────────
+  // 现场：一条重写在轮询中，用户切到另一条**还在跑**的作业。
+  // 修复前 waitRewriteDone 遇到切走是「静默 return」，调用方于是照常
+  // setBusy(false) + stopTicker() —— 把刚接上的那条作业的按下键、参数锁、
+  // 计时器全松掉了，而后台还在跑；同时 toast 一句「已重写并复检」。
+  // 现在所有权跟着**正在被轮询的那条**走：切走的那条一行都不许碰。
+  await evalIn(`window.__ts.newChat();
+    const el0 = document.getElementById('topic');
+    el0.value = '家用电梯怎么挑？';
+    el0.dispatchEvent(new Event('input', { bubbles: true }));
+    document.getElementById('btn-generate').click(); return true;`);
+  await sleep(3000);                       // 等这一条跑完（桩第 3 拍落 done）
+  const rwReady = await evalIn(`return { busy: window.__ts.busy,
+    jobId: window.__ts.jobId, cards: document.querySelectorAll('.script-card').length,
+    rw: !!document.querySelector('.card-foot .rw') };`);
+  check("前提：有一条已完成且可局部重写的作业", rwReady.busy === false
+    && rwReady.jobId === 'job1' && rwReady.cards >= 3 && rwReady.rw, JSON.stringify(rwReady));
+  const rwBefore = await evalIn(`return { rewrite: window.__calls.rewrite || 0,
+    job: window.__calls.job || 0 };`);
+  await evalIn(`document.querySelector('.card-foot .rw').click();
+    const i = document.querySelector('.card-foot .rw-feedback');
+    i.value = '短一点'; i.dispatchEvent(new KeyboardEvent('keydown',
+      { key: 'Enter', bubbles: true })); return true;`);
+  await sleep(150);
+  // 在重写自己的下一拍轮询（700ms）之前切到另一条**在跑**的作业
+  await evalIn(`return (async () => { return await window.__ts.reattachBusyJob('jobkeep'); })();`);
+  const toastSamples = [];
+  for (let i = 0; i < 6; i++) {
+    await sleep(450);
+    toastSamples.push(await evalIn(`return document.getElementById('toast').textContent;`));
+  }
+  const detached = await evalIn(`return (function(){
+    var body = document.querySelector('.msg.msg-assistant:last-of-type .msg-body');
+    var gs = body && body.querySelector('#gen-status');
+    var ge = gs && gs.querySelector('#gen-elapsed');
+    var btn = document.getElementById('btn-generate');
+    return { busy: window.__ts.busy, jobId: window.__ts.jobId,
+      uiState: (document.getElementById('rh-state')||{}).textContent,
+      genStatus: !!gs, elapsed: ge ? ge.textContent : '',
+      stopping: btn.classList.contains('stopping'), btnDisabled: btn.disabled,
+      topicLocked: document.getElementById('topic').disabled,
+      paramLocked: !!document.querySelector('#quick-params.locked'),
+      hint: document.getElementById('composer-gen-hint').textContent,
+      rewriteSent: (window.__calls.rewrite || 0) - ${rwBefore.rewrite} };
+  })()`);
+  check("切走后仍在轮询的那条作业保持「生成中」（被遗弃的重写没解锁它）",
+    detached.busy === true && detached.jobId === 'jobkeep' && detached.genStatus
+      && detached.stopping && !detached.btnDisabled && detached.topicLocked
+      && detached.paramLocked && /Esc 可停止/.test(detached.hint),
+    JSON.stringify(detached));
+  check("被遗弃的重写不报「已重写并复检」",
+    detached.rewriteSent === 1 && !toastSamples.some(s => /已重写/.test(s)),
+    JSON.stringify({ sent: detached.rewriteSent, seen: toastSamples.filter(s => /已重写/.test(s)) }));
+  await sleep(1200);
+  const elapsedLater = await evalIn(`return (document.querySelector('.msg.msg-assistant:last-of-type #gen-elapsed')||{}).textContent;`);
+  check("重挂着的作业计时器还在走（不是冻住的读数）",
+    /^已用 [0-9]+ 秒$/.test(detached.elapsed) && /^已用 [0-9]+ 秒$/.test(elapsedLater)
+      && elapsedLater !== detached.elapsed,
+    JSON.stringify({ t1: detached.elapsed, t2: elapsedLater }));
+  // Esc 停的必须是**正在被轮询的那一条**（修复前 busy 已被清成 false → 停掉 0 条）
+  await evalIn(`document.dispatchEvent(new KeyboardEvent('keydown',
+    { key: 'Escape', bubbles: true })); return true;`);
+  await sleep(900);
+  const escKeep = await evalIn(`return { keepcancel: window.__calls.keepcancel || 0,
+    busy: window.__ts.busy, jobId: window.__ts.jobId };`);
+  check("Esc 停掉的正是界面上在跑的那一条（jobkeep）",
+    escKeep.keepcancel === 1 && escKeep.busy === false && !escKeep.jobId,
+    JSON.stringify(escKeep));
+
+  // ── 12j) 就地编辑主题里按 Esc 不许停掉作业（P2-6）───────────────
+  await evalIn(`window.__ts.newChat();
+    const el0 = document.getElementById('topic');
+    el0.value = '停不掉的作业';
+    el0.dispatchEvent(new Event('input', { bubbles: true }));
+    document.getElementById('btn-generate').click(); return true;`);
+  await sleep(500);
+  const inlineEsc = await evalIn(`return (function(){
+    var before = window.__calls.failcancel || 0;
+    var m = document.querySelector('.msg.msg-user');
+    m.querySelector('.msg-edit').click();
+    var ta = m.querySelector('.bub-edit');
+    var had = !!ta;
+    ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    return { had: had, closed: !m.querySelector('.bub-edit'),
+      busy: window.__ts.busy, jobId: window.__ts.jobId,
+      newCancels: (window.__calls.failcancel || 0) - before };
+  })()`);
+  check("编辑框里的 Esc 只收编辑器，不停掉正在跑的作业",
+    inlineEsc.had && inlineEsc.closed && inlineEsc.busy && inlineEsc.jobId === 'jobrun'
+      && inlineEsc.newCancels === 0, JSON.stringify(inlineEsc));
+
+  // ── 12k) 停止失败之后「重新连接并查看状态」要把 DOM 也接回去（P2-3）
+  await evalIn(`document.getElementById('btn-generate').click(); return true;`);  // 停止（注定失败）
+  await sleep(700);
+  const stopFail = await evalIn(`return (function(){
+    var b = Array.prototype.slice.call(document.querySelectorAll('.fail-actions button'))
+      .filter(function(x){ return /重新连接/.test(x.textContent); })[0];
+    return { card: /停止失败，后台可能仍在运行/.test(document.body.innerText),
+      hasReconnect: !!b, busy: window.__ts.busy,
+      hint: document.getElementById('composer-gen-hint').textContent };
+  })()`);
+  check("停止失败给出失败卡与「重新连接并查看状态」，并把界面解锁",
+    stopFail.card && stopFail.hasReconnect && stopFail.busy === false,
+    JSON.stringify(stopFail));
+  await evalIn(`Array.prototype.slice.call(
+      document.querySelectorAll('.fail-actions [data-act="retry"]'))
+    .filter(function(x){ return /重新连接/.test(x.textContent); })[0].click();
+    return true;`);
+  await sleep(500);
+  const reconnected = await evalIn(`return (function(){
+    var body = document.querySelector('.msg.msg-assistant:last-of-type .msg-body');
+    var gs = body && body.querySelector('#gen-status');
+    return { busy: window.__ts.busy, jobId: window.__ts.jobId,
+      genStatus: !!gs, genStatusHidden: gs ? gs.classList.contains('hidden') : null,
+      steps: body ? body.querySelectorAll('#step-track .step').length : -1,
+      stillFailCard: /停止失败，后台可能仍在运行/.test((body||{}).innerText || ''),
+      topicLocked: document.getElementById('topic').disabled,
+      hint: document.getElementById('composer-gen-hint').textContent,
+      elapsed: (body && body.querySelector('#gen-elapsed'))
+        ? body.querySelector('#gen-elapsed').textContent : '' };
+  })()`);
+  check("重连之后卡片与状态行同源：失败卡没了、进度骨架回来了",
+    reconnected.busy === true && reconnected.jobId === 'jobrun' && reconnected.genStatus
+      && reconnected.genStatusHidden === false && reconnected.steps >= 1
+      && reconnected.stillFailCard === false && reconnected.topicLocked === true
+      && /生成中，参数已锁定/.test(reconnected.hint), JSON.stringify(reconnected));
+  await sleep(1400);
+  const reconnected2 = await evalIn(`return (document.querySelector('.msg.msg-assistant:last-of-type #gen-elapsed')||{}).textContent;`);
+  check("重连后「已用 N 秒」继续走（计时器一起接回来了）",
+    /^已用 [0-9]+ 秒$/.test(reconnected2) && reconnected2 !== reconnected.elapsed,
+    JSON.stringify({ a: reconnected.elapsed, b: reconnected2 }));
+  await evalIn(`window.__ts.newChat(); return true;`);   // 放手这条永远在跑的作业
+
+  // ── 12l) 占位符只标一层「待补：」，定位跳到占位符本身（P3-8 / P3-9）
+  await evalIn(`window.__ts.newChat();
+    const el0 = document.getElementById('topic');
+    el0.value = '占位与超配额';
+    el0.dispatchEvent(new Event('input', { bubbles: true }));
+    document.getElementById('btn-generate').click(); return true;`);
+  await sleep(900);
+  const phCase = await evalIn(`return (function(){
+    var jump = document.querySelector('.script-card .over.jumpable');
+    var chip = document.querySelector('.script-card .quota.over');
+    var banner = document.querySelector('[data-jump="placeholder"]');
+    var r = window.__ts.result;
+    var md = r ? window.__ts.exportMd(r) : '';
+    if (!jump || !banner) return { missing: true, jump: !!jump, banner: !!banner };
+    banner.click();
+    var flashed = document.querySelectorAll('.over.flash');
+    return { screen: jump.textContent,
+      chipText: chip ? chip.textContent : '',
+      chipBeforeJump: !!chip && !!(jump.compareDocumentPosition
+        && (chip.compareDocumentPosition(jump) & Node.DOCUMENT_POSITION_FOLLOWING)),
+      jumped: jump.classList.contains('flash'),
+      flashedIsChip: !!document.querySelector('.quota.over.flash'),
+      flashedN: flashed.length,
+      mdHasDouble: /待补：待补：/.test(md), mdHasIt: md.indexOf('待补：主力机型载重') >= 0,
+      engineLabel: (r.placeholders || [])[0] };
+  })()`);
+  check("卡片上的占位符只有一层「待补：」，与引擎给的那份一字不差",
+    !phCase.missing && phCase.screen === '{{待补：主力机型载重}}'
+      && phCase.engineLabel === '{{待补：主力机型载重}}', JSON.stringify(phCase));
+  check("屏幕与导出（Markdown）说的是同一份文本（导出不曾错，错的是屏幕）",
+    !phCase.missing && phCase.mdHasIt && !phCase.mdHasDouble, JSON.stringify(phCase));
+  check("「点击定位首处」跳到占位符，不是文档里更靠前的字数胶囊",
+    !phCase.missing && phCase.chipBeforeJump && phCase.jumped
+      && phCase.flashedIsChip === false && phCase.flashedN === 1,
+    JSON.stringify(phCase));
+
+  // ── 12m) 设置页是一张**焦点圈内**的模态（P2-7）──────────────────
+  // ⚠ 先 focus 再 click：程序化的 .click() 在 Chrome 里**不**移动焦点，
+  //   而「关掉设置把焦点还给打开它的那颗按钮」这条断言要的就是那个落点。
+  await evalIn(`var g = document.getElementById('btn-open-settings');
+    g.focus(); g.click(); return true;`);
+  await sleep(400);
+  const modal = await evalIn(`return (function(){
+    var s = document.getElementById('settings-screen');
+    var onOpen = document.activeElement ? document.activeElement.id : '';
+    var inPanelOnOpen = s.contains(document.activeElement);
+    document.dispatchEvent(new KeyboardEvent('keydown',
+      { key: 'k', ctrlKey: true, bubbles: true }));
+    var afterK = document.activeElement ? document.activeElement.id : '';
+    var inPanelAfterK = s.contains(document.activeElement);
+    // 把焦点人工丢到模态**背后**，再按一次 Tab：焦点圈必须把它拉回来
+    document.getElementById('btn-open-settings').focus();
+    document.getElementById('btn-open-settings')
+      .dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+    var pulled = s.contains(document.activeElement);
+    // 这份选择器必须与 settings.js 的 FOCUSABLE 逐项一致，否则"最后一个"
+    // 量的就不是焦点圈里的最后一个，绕回第一条也就无从谈起。
+    var tabbable = Array.prototype.slice.call(document.querySelectorAll(
+      '#settings-screen a[href], #settings-screen button:not([disabled]), '
+      + '#settings-screen input:not([disabled]), #settings-screen select:not([disabled]), '
+      + '#settings-screen textarea:not([disabled]), '
+      + '#settings-screen [tabindex]:not([tabindex="-1"])'))
+      .filter(function(x){ return x.getClientRects().length > 0; });
+    var last = tabbable[tabbable.length - 1];
+    last.focus();
+    last.dispatchEvent(new KeyboardEvent('keydown',
+      { key: 'Tab', bubbles: true, cancelable: true }));
+    var wrappedFirst = document.activeElement === tabbable[0];
+    return { role: s.getAttribute('role'), modalAttr: s.getAttribute('aria-modal'),
+      label: s.getAttribute('aria-label'), onOpen: onOpen, inPanelOnOpen: inPanelOnOpen,
+      afterK: afterK, inPanelAfterK: inPanelAfterK, pulled: pulled,
+      wrappedFirst: wrappedFirst, n: tabbable.length,
+      toast: document.getElementById('toast').textContent };
+  })()`);
+  check("设置页声明成模态（role=dialog + aria-modal + 名字）",
+    modal.role === 'dialog' && modal.modalAttr === 'true' && !!modal.label,
+    JSON.stringify(modal));
+  check("打开设置时焦点进面板（不再留在背后那颗齿轮上）",
+    modal.inPanelOnOpen && modal.onOpen === 'btn-close-settings', JSON.stringify(modal));
+  check("设置页开着按 Ctrl+K 不把焦点丢到背后的会话搜索框",
+    modal.afterK !== 'sess-search' && modal.inPanelAfterK && /返回工作区/.test(modal.toast),
+    JSON.stringify(modal));
+  check("Tab 圈在面板里：背后的控件被拉回来、末尾那一个绕回第一个",
+    modal.pulled && modal.wrappedFirst && modal.n > 3, JSON.stringify(modal));
+  await evalIn(`document.getElementById('btn-close-settings').click(); return true;`);
+  await sleep(300);
+  const afterClose = await evalIn(`return { open: window.__ts.settingsOpen,
+    active: document.activeElement ? document.activeElement.id : '',
+    inSettings: document.getElementById('settings-screen').contains(document.activeElement) };`);
+  check("关掉设置：焦点还给打开它的那颗齿轮",
+    afterClose.open === false && afterClose.active === 'btn-open-settings'
+      && afterClose.inSettings === false, JSON.stringify(afterClose));
+  await evalIn(`document.dispatchEvent(new KeyboardEvent('keydown',
+    { key: 'k', ctrlKey: true, bubbles: true })); return true;`);
+  await sleep(200);
+  const kWorks = await evalIn(`return document.activeElement ? document.activeElement.id : '';`);
+  check("对照：工作区里 Ctrl+K 仍然聚焦会话搜索（没被一并修死）",
+    kWorks === 'sess-search', kWorks);
+
+  // ── 12n) 「停止全部」的计数句不能再漏字（P2-4）──────────────────
+  // 原来写的是 failed.length===1 ? "" : "共 " → 两条失败时读成
+  // 「2 条没停成（共 可稍后重试）」。这条断言把这句话钉住。
+  const stopAllCase = await evalIn(`return (async () => {
+    window.__ts.newChat();
+    var pad = function(n){ return String(n).padStart(2,'0'); };
+    var d = new Date();
+    var iso = d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate()) + 'T09:00:00';
+    var base = { created_at: iso, pack: 'elevator', platform: '抖音',
+                 duration: null, chars: null, passed: null, error: null };
+    var two = [ Object.assign({}, base, { id:'st1', topic:'停不掉的甲', state:'writing' }),
+                Object.assign({}, base, { id:'st2', topic:'停不掉的乙', state:'writing' }) ];
+    var orig = window.fetch;
+    window.fetch = function (u, o) {
+      var s = String(u).split('?')[0];
+      if (s.indexOf('/api/history') >= 0) {
+        return Promise.resolve(new Response(JSON.stringify(two),
+          { status:200, headers:{ 'Content-Type':'application/json' } }));
+      }
+      if (s.indexOf('/cancel') >= 0) {
+        return Promise.resolve(new Response(JSON.stringify({ detail:'引擎没接这个取消' }),
+          { status:500, headers:{ 'Content-Type':'application/json' } }));
+      }
+      return orig.call(window, u, o);
+    };
+    await window.__ts.loadSessions();
+    var n = window.__ts.busyRecords().length;
+    await window.__ts.stopAll();
+    var t = document.getElementById('toast').textContent;
+    window.fetch = orig;
+    await window.__ts.loadSessions();
+    return { n: n, toast: t };
+  })();`);
+  check("「N 条没停成」这句里没有孤零零的「共」字（也不许有别的漏字）",
+    stopAllCase.n === 2 && /2 条没停成/.test(stopAllCase.toast)
+      && !/共/.test(stopAllCase.toast) && /可稍后重试/.test(stopAllCase.toast),
+    JSON.stringify(stopAllCase));
+
+  // ── 12o) 建包取消失败后按钮必须收回「取消中…」（P3-10）───────────
+  await cdp.send("Page.navigate",
+    { url: `http://127.0.0.1:${PORT}/?token=stubtoken&pgcancelfail=1` });
+  await sleep(1800);
+  await evalIn(`document.getElementById('btn-open-settings').click(); return true;`);
+  await sleep(300);
+  await evalIn(`window.__ts.setPane('packinfo'); return true;`);
+  await sleep(300);
+  await evalIn(`document.getElementById('pi-newpack').click(); return true;`);
+  await sleep(200);
+  await evalIn(`document.getElementById('pg-industry').value = '全屋定制/装修';
+    document.getElementById('pg-desc').value = '全屋定制家居品牌，面向新房装修业主获客';
+    document.getElementById('pg-run').click(); return true;`);
+  await sleep(1200);
+  const pgCancelOptimistic = await evalIn(`return (function(){
+    document.getElementById('pg-close').click();
+    var b = document.getElementById('pg-run');
+    return { label: b.textContent, disabled: b.disabled };
+  })()`);
+  await sleep(600);
+  const pgCancelFailed = await evalIn(`return (function(){
+    var b = document.getElementById('pg-run');
+    return { label: b.textContent, disabled: b.disabled,
+      fails: window.__calls.failpgcancel || 0,
+      toast: document.getElementById('toast').textContent };
+  })()`);
+  check("点「取消」那一拍先给乐观反馈（取消中…）",
+    /取消中/.test(pgCancelOptimistic.label), JSON.stringify(pgCancelOptimistic));
+  check("取消请求失败后按钮收回「取消中…」、重新可用，并说清还在生成",
+    pgCancelFailed.fails === 1 && !/取消中/.test(pgCancelFailed.label)
+      && /生成中/.test(pgCancelFailed.label) && pgCancelFailed.disabled === false
+      && /取消失败/.test(pgCancelFailed.toast) && /仍在生成/.test(pgCancelFailed.toast),
+    JSON.stringify(pgCancelFailed));
+  await cdp.send("Page.navigate", { url: `http://127.0.0.1:${PORT}/?token=stubtoken` });
+  await sleep(1600);
+  await evalIn(`if (window.__ts.settingsOpen) document.getElementById('btn-close-settings').click();
+    window.__ts.newChat(); return true;`);
+  await sleep(300);
+
   // ── 13) 布局 ─────────────────────────────────────────────
   const layout = await evalIn(`return {
     overflowX: document.documentElement.scrollWidth > window.innerWidth + 1,
@@ -5043,6 +5839,11 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     for (const [name, ok, detail] of results) {
       console.error(`${ok ? "✅" : "❌"}  ${name}${detail ? "  — " + detail : ""}`);
     }
+  }
+  if (pageErrs.length) {
+    console.error(`
+──────── 页面侧异常（崩溃根因常在这里） ────────`);
+    for (const m of pageErrs.slice(0, 8)) console.error(`· ${String(m).split(String.fromCharCode(10))[0]}`);
   }
   console.error(e.stack);
   cleanupAll();

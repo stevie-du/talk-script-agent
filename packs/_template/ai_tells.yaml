@@ -1,0 +1,83 @@
+# 人味 tell 词表（app/ai_tells.py 读本文件）
+#
+# 这是**行业无关的起点词表**（书面连接词、口号收尾、排比/清单体…）。
+# 新包带着它出生：删掉本文件 = 这个人味检测在新包里静默关闭
+# （`Pack.ai_tells_data()` 找不到文件就返回 None，报告里 `ai_tells` 落 null，
+# 界面上不会有任何提示）。要按行业补词，直接往 lexicon 里加。
+#
+# 与 banwords.yaml 的分工：这里管**像不像人说话**，不管合不合规。
+# 命中**不进 passed 判定** —— 一把没校准过的尺子不该拦发布
+# （banwords 的 soft 当年 169/175 轮假命中就是这条教训）。
+#
+# tell 名必须是引擎认识的那 10 个（写错了引擎会把它报成 config_warnings，
+# 而不是静默不跑）：
+#   结构类 parallel_triple 排比三连 · list_enumeration 清单体递增
+#         uniform_para_len 每段等长 · repeat_opening 句首重复 · no_specific 通篇零具体
+#   词表类 bookish_connective 书面连接词 · abstract_noun_ending 抽象名词尾
+#         slogan_closing 口号收尾 · opening_ban 开场禁区 · filler_stack 堆词
+# 没列在这里的 tell 名 = 引擎不跑（默认关，而不是默认开）。
+strong:
+  - no_specific          # 通篇没有一个具体数字/时间：voice.md 自己标为最致命
+  - slogan_closing       # 口号式收尾出现即问题
+  - opening_ban          # 「大家好今天聊」这类模板开场出现即问题
+weak:
+  - parallel_triple
+  - list_enumeration
+  - uniform_para_len
+  - repeat_opening
+  - bookish_connective
+  - abstract_noun_ending
+  - filler_stack
+
+# 词表类 tell 的取词。两个约束：
+#   1. 单字收不住（引擎按 len>=2 过一遍，与 banwords 的 MIN_WORD_LEN 同口径）；
+#   2. 词表内互不重叠，同一位置只算最长那个（见 _scan_words）。
+lexicon:
+  bookish_connective:
+    - 综上所述
+    - 总而言之
+    - 与此同时
+    - 在此基础上
+    - 值得一提的是
+    - 不难发现
+    - 显而易见
+    - 由此可见
+    - 另一方面
+    - 首先
+    - 其次
+    - 最后
+  abstract_noun_ending:
+    # 单字后缀（性/度/化）不收：引擎按 len>=2 过一遍，写了也不匹配，
+    # 只会得到一个永远为 0 的 tell。要拦就写成具体的抽象名词。
+    - 高效性
+    - 安全性
+    - 便利性
+    - 舒适性
+    - 体验度
+    - 智能化
+    - 规范化
+    - 标准化
+    - 专业化
+  filler_stack:
+    - 其实
+    - 真的
+    - 非常
+    - 特别
+    - 一般来说
+    - 通常情况下
+    - 众所周知
+  slogan_closing:
+    - 让生活更美好
+    - 为你保驾护航
+    - 值得拥有
+    - 选择没错
+    - 品质保证
+  opening_ban:
+    - 大家好
+    - 今天我们来聊
+    - 今天给大家
+    - 本期视频
+    - 话不多说
+
+# 人读的解释文档（分数怎么读、怎么改）
+md: patterns/anti-ai-smell.md

@@ -123,10 +123,16 @@ def export_agent_skill(root: Path, pack_name: str, out_dir: Path | None = None,
     private_index = ("| `private/` | 私有资料（分享技能时删除此目录） |\n"
                      if include_private else "")
 
+    # frontmatter 一律交给 yaml 自己序列化：`name` / `description` 里混着行业名、
+    # 细分领域列表与用户可控文本，只要其中出现「: 」或开头是 `-`/`#`，
+    # f-string 拼出来的就是**非法 YAML**（实测含 `": "` 的选项让导出直接抛
+    # ScannerError → 界面得到一个 500）。safe_dump 会该引就引，不靠运气。
+    front_matter = yaml.safe_dump(
+        {"name": fm_name, "description": desc},
+        allow_unicode=True, sort_keys=False, default_flow_style=False, width=10 ** 6)
+
     skill_md = f"""---
-name: {fm_name}
-description: {desc}
----
+{front_matter}---
 
 # {info.display_name}行业口播脚本生成器
 
@@ -215,8 +221,15 @@ python tools/check.py <脚本文件> --duration <目标秒数> --rate <语速> -
 """
     (out / "SKILL.md").write_text(skill_md, encoding="utf-8")
 
-    fm = yaml.safe_load((out / "SKILL.md").read_text(encoding="utf-8").split("---")[1])
-    assert fm.get("name") and fm.get("description"), "SKILL.md frontmatter 校验失败"
+    # 自检要按**前两道 fence**取 frontmatter：`split("---")[1]` 在正文里出现 `---`
+    # （表格分隔、markdown 水平线）时会切错，而这是导出流程唯一的把关点。
+    text = (out / "SKILL.md").read_text(encoding="utf-8")
+    if not text.startswith("---\n"):
+        raise RuntimeError("导出的 SKILL.md 开头不是 frontmatter，导出结果不可用")
+    parts = text.split("\n---\n", 1)
+    fm = yaml.safe_load(parts[0][4:])
+    if not (isinstance(fm, dict) and fm.get("name") and fm.get("description")):
+        raise RuntimeError("导出的 SKILL.md frontmatter 缺 name / description，导出结果不可用")
 
     hints = [
         "把整个目录复制到目标 agent 的技能目录即可使用：",

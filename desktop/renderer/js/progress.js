@@ -40,15 +40,6 @@ export const BUSY_STATES = new Set([
 ]);
 
 
-function stepKind(key = "") {
-  if (key.startsWith("select")) return "select";
-  if (key.startsWith("write")) return "write";
-  if (key.startsWith("check")) return "check";
-  if (key.startsWith("rewrite")) return "rewrite";
-  if (key.startsWith("retry")) return "retry";
-  return "other";
-}
-
 function fmtDur(ms) {
   if (ms === null || ms === undefined || ms < 0) return "";
   const s = ms / 1000;
@@ -97,11 +88,10 @@ export function renderProgress(body, snap) {
     const t0 = cur.ts ? new Date(cur.ts).getTime() : null;
     const t1 = next?.ts ? new Date(next.ts).getTime() : null;
     const dur = (t0 !== null && t1 !== null && t1 >= t0) ? t1 - t0 : null;
-    const kind = stepKind(cur.key);
     const note = cur.data?.note || "";
     const badge = note ? `<span class="step-note">${esc(note)}</span>` : "";
     const durHtml = dur !== null ? `<span class="step-dur">${fmtDur(dur)}</span>` : "";
-    parts.push(`<li class="step done k-${kind}">
+    parts.push(`<li class="step done">
         <span class="step-dot"></span>
         <span class="step-t">${esc(cur.title)}</span>${badge}${durHtml}
       </li>`);

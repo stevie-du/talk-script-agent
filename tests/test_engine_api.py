@@ -256,10 +256,14 @@ def test_segment_quota_divided_by_points():
     assert rep["points"] == 2
     assert rep["segments"][1]["quota"] == body // 2, rep["segments"][1]
     assert rep["segments"][2]["quota"] == body // 2
-    # 超出 1.3 倍的段必须能被回炉反馈捕捉到
-    from app.pipeline import Pipeline
-    fb = Pipeline._violation_feedback(rep)
-    assert "段落超配额" in fb, fb
+    # 超出 1.3 倍的段必须能被回炉反馈捕捉到。
+    # 断言从「段落超配额」这句旧措辞改成「点名第几段 + 带字数与配额」：
+    # 反馈现在写的是「第 2 段（point）超配额：134 字（配额≈85）」——
+    # 只认旧短语会把「说清了是哪一段」这个改进误判成回归，
+    # 而"必须捕捉到超配额段"这条要守的东西一个字都没松。
+    fb = Pipeline._violation_feedback(rep, sections)
+    assert "超配额" in fb and "第 2 段" in fb, fb
+    assert "134 字" in fb, fb
 
 
 def test_count_chars_is_the_single_source_of_truth():
@@ -384,6 +388,7 @@ def test_failed_job_visible_after_restart(tmp_path):
             temperature = 0.7
             max_tokens = 100
             model = 'fake-model'
+            base_url = 'http://fake/v1'      # 选题缓存指纹要读它（_plan_key）
         def chat_json(self, *a, **kw):
             raise RuntimeError("模拟接口故障")
     pl.llm = Boom()
@@ -418,11 +423,13 @@ def test_cancel_does_not_write_artifact(tmp_path):
             temperature = 0.7
             max_tokens = 100
             model = 'fake-model'
+            base_url = 'http://fake/v1'      # 选题缓存指纹要读它（_plan_key）
         def __init__(self):
             self.started = threading.Event()
         def chat_json(self, task, system, user, model_cls, max_retries=1,
                       on_retry=None, temperature=None, on_delta=None,
-                      max_tokens=None):
+                      max_tokens=None, on_attempt=None, should_abort=None,
+                      usage=None, deadline=None):
             if task == "select":
                 from app.schemas import TopicPlan
                 return TopicPlan(angle="a", hook_type="h", hook_line="l",
@@ -498,6 +505,7 @@ def test_concurrency_cap(tmp_path):
             temperature = 0.7
             max_tokens = 100
             model = 'fake-model'
+            base_url = 'http://fake/v1'      # 选题缓存指纹要读它（_plan_key）
         def chat_json(self, *a, **kw):
             time.sleep(30)
     pl.llm = Hang()
@@ -576,13 +584,15 @@ def test_cancelled_job_stays_cancelled_even_if_worker_raises(tmp_path):
             temperature = 0.7
             max_tokens = 100
             model = 'fake-model'
+            base_url = 'http://fake/v1'      # 选题缓存指纹要读它（_plan_key）
 
         def __init__(self):
             self.started = _t.Event()
 
         def chat_json(self, task, system, user, model_cls, max_retries=1,
                       on_retry=None, temperature=None, on_delta=None,
-                      max_tokens=None):
+                      max_tokens=None, on_attempt=None, should_abort=None,
+                      usage=None, deadline=None):
             if task == "select":
                 return TopicPlan(angle="a", hook_type="h", hook_line="l",
                                  points=["p"], cta="c")

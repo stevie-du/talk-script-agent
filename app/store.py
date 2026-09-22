@@ -37,8 +37,16 @@ INDEX_NAME = "index.json"
 # 版本不符会走 _rebuild()，从 result.json/job.json 重新摘一次。
 INDEX_VERSION = 2
 
-# 墓碑只用于拦住「删除后仍在跑的作业」，不需要长期留存
-_TOMBSTONE_CAP = 512
+# 墓碑只用于拦住「删除后仍在跑的作业」，不需要长期留存。
+# ⚠ 但它**有上限就等于有一个洞**：被挤掉的 id 若还有一趟在飞的作业，
+# 它随后的 write_result 会把用户删掉的记录重新建出来（批次 10 复核实测：
+# 再删 512 条之后就能复现）。桌面端一次会话删不满这个数，所以取一个
+# "实际不可达"的量而不是换更复杂的机制：8192 个 id 常驻约 **1 MB**
+# （tracemalloc 实测 1031 KB，一条 id 22 字符 —— 早先按 250 KB 估是把它
+# 当成了纯字符串总量，忘了 set 的槽位开销）。这比给删除路径加持久化标记
+# 的代价小得多。真要彻底闭合，得让作业侧在落盘前问一次注册表
+# "这条还在不在"，那是另一件事。
+_TOMBSTONE_CAP = 8192
 
 
 def _day_dir(created_at: str) -> str:
@@ -88,10 +96,36 @@ class ArtifactStore:
         with self._lock:
             if job_dir.name in self._tombstones:
                 return False
-            write_atomic(job_dir / "result.json",
-                         json.dumps(result, ensure_ascii=False, indent=1))
-            self._upsert(self._summary_from_result(result))
-            write_atomic(job_dir / "脚本.md", render_script_md(result))
+            # 先把**所有**要写的内容算完，再动磁盘：修复前 result.json 先落盘，
+            # 随后 `_summary_from_result` / `render_script_md` 里任何一个 KeyError
+            # 都会留下"状态是 failed、盘上却有一份完整 result.json"的记录
+            # —— 而 `result.json 存在 ⟺ done` 是历史索引与左栏判断的不变量。
+            summary = self._summary_from_result(result)
+            md = render_script_md(result)
+            payload = json.dumps(result, ensure_ascii=False, indent=1)
+            # 覆盖之前先把**旧内容**留在手里。`write_result` 不只被"新建"调用：
+            # 单段重写与"取消后回滚到重写前"两条路径都是在**一份已经存在的合格产物**
+            # 上覆盖写（pipeline.py 的两处调用点）。那时第二个文件写失败如果直接
+            # 把第一个删掉，用户手上就什么都没有了 —— 撤错东西比不撤更糟。
+            prev: dict[Path, str | None] = {}
+            try:
+                for name, body in (("result.json", payload), ("脚本.md", md)):
+                    f = job_dir / name
+                    prev[f] = f.read_text(encoding="utf-8") if f.exists() else None
+                    write_atomic(f, body)
+            except Exception:
+                # 两个文件是分开的原子写：中途失败就回到这次调用开始前的样子，
+                # 索引还没动，所以不用回滚索引。
+                for f, old in prev.items():
+                    try:
+                        if old is None:
+                            f.unlink(missing_ok=True)
+                        else:
+                            write_atomic(f, old)
+                    except OSError:
+                        log.warning("落盘失败后的回滚也没成功，%s 可能处于半成品状态", f)
+                raise
+            self._upsert(summary)
             return True
 
     def write_job(self, snap: dict, job_dir: Path) -> bool:
@@ -110,7 +144,13 @@ class ArtifactStore:
             # 终态才进索引：运行中的作业由内存里的注册表提供，不落索引，
             # 否则会在「已落盘的记录」和「内存里的作业」之间重复计数。
             if snap.get("state") in ("failed", "cancelled"):
-                self._upsert(self._summary_from_job(snap))
+                # 索引 state 的权威源：result.json 已在盘 = 这条有完整产物，
+                # state 必须保持 done。修复前这里无条件按 snap.state 覆盖索引，
+                # 而失败/取消路径可能在 write_result 之后才走到 write_job ——
+                # 一条能正常打开的完成记录被翻成 failed，chars/passed 变 null，
+                # 左栏忽而「失败」忽而「完成」（实测两种都出现过）。
+                if not (job_dir / "result.json").exists():
+                    self._upsert(self._summary_from_job(snap))
             return True
 
     # ── 读取 ────────────────────────────────────────────────

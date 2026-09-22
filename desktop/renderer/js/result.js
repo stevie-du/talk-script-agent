@@ -446,9 +446,15 @@ export function renderFailure(body, { title, message, detail, retryLabel = "重�
     copyText(errorText(title, message, detail), "错误信息已复制");
 }
 
+/** 停止 / 中断态。
+ *  ⚠ 「产物未落盘」这一句是**有前提的**：只有后端确认作业落在 cancelled 时才成立
+ *  （app/pipeline.py 的 `_stop_check` 让取消永远走不到写产物那一步）。
+ *  同一秒里其实已经跑完的那种，后端回的是 done + 产物 —— 那一条由 jobs.js 的
+ *  abort() 直接画结果并说「产物已保存」，不进这个函数。 */
 export function renderStopped(body, opts = {}) {
+  const title = opts.title || "已停止本次生成";
   body.innerHTML = `
-    <div class="banner info">已停止本次生成。已产生的 token 不会退回，产物未落盘。</div>
+    <div class="banner info">${esc(title)}。已产生的 token 不会退回，产物未落盘。</div>
     <div class="fail-actions">
       <button class="ghost" data-act="retry">用同样的参数再来一次</button>
       <button class="ghost" data-act="revary">换个表达重掷</button>
@@ -599,8 +605,14 @@ export function resultSrt(r) {
   return lines.join("\r\n");
 }
 
+/** 「点击定位首处」跳到**第一个占位符本身**。
+ *  ⚠ 选择器必须带 `.jumpable`：`.script-card .over` 会先命中卡片头上的
+ *  字数胶囊 `<span class="quota over">120/85 字</span>` —— 那只是"超配额"，
+ *  不是"这里缺事实"，两个 `.over` 是巧合同名（P3-9 实测跳到了字数胶囊上）。
+ *  真正可跳的那个由 util.fmtText 打上 `.over.jumpable`。 */
 export function jumpToFirstPlaceholder(body) {
-  const hit = body.querySelector(".script-card .over");
+  const hit = body.querySelector(".script-card .over.jumpable")
+    || body.querySelector(".over.jumpable");
   if (!hit) { toast("未找到占位事实"); return; }
   hit.scrollIntoView({ behavior: "smooth", block: "center" });
   hit.classList.remove("flash");

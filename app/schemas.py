@@ -54,10 +54,11 @@ class TopicPlan(BaseModel):
     angle: str                        # 一句话角度
     hook_type: str                    # 钩子类型（来自钩子库 10 类）
     hook_line: str                    # 钩子句
-    # P3-29：模型会给出远超包配置的条数（主题写「5 个坑」却给 8 条 point），
-    # 而 write 提示词按 pack 的 points 数告知 —— 无上限时两处口径漂移。
-    # 6 条是 pack 配置上限（180s→4 点）的 1.5 倍余量，超了触发解析重试。
-    points: list[str] = Field(max_length=6)
+    # P1-27：上限从 6 提到 12 —— `points_by_duration` 配到 8 点、模型照配 8 条时，
+    # max_length=6 直接 ValidationError，每次生成必炸（实测）。12 是包配置合理上界
+    # 的余量；select/write 模板用的是同一个 `$points` 占位符（口径天然一致），
+    # max_length 只兜「模型跑飞」这类情况，不再当口径约束。
+    points: list[str] = Field(max_length=12)
     cta: str                          # 结尾引导
 
 
@@ -68,12 +69,24 @@ class ScriptSection(BaseModel):
 
 
 class StoryboardShot(BaseModel):
+    """分镜阶段的结构契约（模型输出）。
+
+    后四个字段是 `SceneItem` 的直供位：修复前 `_build_scenes` 已经在读
+    `shot.get("bgm"/"transition"/"shot_type"/"style")`，而这几个键在本模型里
+    根本不存在 —— 于是 `scenes[].audio.bgm` 恒为空、转场恒为 cut，
+    skill.yaml 让模型写的「音效/BGM」永远进不了场景序列（P2-31 后半）。
+    现在契约与投影两端对齐，模型给了就落进 scenes，没给仍按默认。
+    """
     time: str = ""
     shot: str = ""                    # 画面/景别
     subtitle: str = ""
     sfx: str = ""
     note: str = ""
     voiceover: str = ""               # 缺省由组装器按段落填充
+    bgm: str = ""                     # 背景音乐提示（空 = 沿用上一镜）
+    transition: str = ""              # cut / dissolve / fade，缺省组装器补 cut
+    shot_type: str = ""               # closeup / medium / wide / detail
+    style: str = ""                   # 视觉风格标签
 
 
 # ── 场景序列契约（Scene[]）─────────────────────────────────
