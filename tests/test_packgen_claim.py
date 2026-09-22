@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import random
 import re
 import shutil
 import sys
@@ -569,6 +570,31 @@ def test_the_slug_length_cap_has_one_authority_and_the_message_shows_what_the_us
     msg = packgen.slug_problem("CON", "CON.")
     assert "CON." in msg, f"报错只回显折叠后的目录名，用户会对不上自己输入的那串字：{msg}"
     assert "保留设备名" in msg, msg
+
+
+def test_slugify_never_grows_the_name_the_request_layer_capped():
+    """`INDUSTRY_MAX` 能同时当目录名上限，靠的是"折叠不会把名字折长"这条性质。
+
+    它一点也不显然：`slugify` 现在是"连续非法字符折成一个 `-` + 去首尾 `-`"，
+    只会等长或变短，所以上一条测试才敢说"走 HTTP 到不了长度分支"。
+    谁往里面加转写（`ä`→`ae`、emoji→名字、繁简转换），请求层放行的 40 码元
+    就能折出更长的目录名 —— 那时唯一还守着的判据是 `slug_problem`，而它只在
+    直调路径上守（HTTP 已经被 schema 放行）。这一条把性质本身钉住。
+    """
+    from app.schemas import utf16_units
+
+    corpus = [chr(c) for c in range(1, 0x10000) if not 0xD800 <= c <= 0xDFFF]
+    corpus += [chr(c) for c in range(0x10000, 0x110000, 997)]
+    hazards = [" ", "-", "_", ".", "？", "…", "\U0001F600", "ä", "　",
+               "0", "中", "\n", "\t", "/", "\\", "*", ":"]
+    rnd = random.Random(20260922)
+    corpus += ["".join(rnd.choice(hazards) for _ in range(rnd.randint(1, 9)))
+               for _ in range(4000)]
+    grew = [(s, packgen.slugify(s)) for s in corpus
+            if utf16_units(packgen.slugify(s)) > utf16_units(s)]
+    assert not grew, (f"slugify 把名字折长了 {len(grew)} 例（共扫 {len(corpus)} 例）："
+                      "请求层的上限不再约束目录名，长度判据得挪到建包路径上重做"
+                      f" —— 前几例 {grew[:4]}")
 
 
 def _stub_result_keys():

@@ -57,6 +57,10 @@ class RewriteSegmentRequest(BaseModel):
 
 
 class PackCreateRequest(BaseModel):
+    # 下界按**码点**、上界按 **UTF-16 码元**，这不是漂移而是两件事：
+    # "至少两个字"是人的计数单位（`'𠀀'` 一个字符不算名字），
+    # "最长多少"是 NTFS 的 255 码元约束（见 `utf16_units`）。把两边统一成一种单位
+    # 都会错：都按码元 → 单个 emoji 成合法行业名；都按码点 → `'𠀀' * 40` 放行到建包才拒。
     industry: str = Field(min_length=2, description="行业名，如：全屋定制/装修")
     description: str = Field(min_length=4, max_length=500,
                              description="一句话业务描述，如：全屋定制家居品牌，面向新房装修业主获客")
