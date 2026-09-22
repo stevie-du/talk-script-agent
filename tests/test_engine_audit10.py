@@ -1397,6 +1397,28 @@ def test_packgen_admission_failure_after_the_slot_is_taken_settles_the_job(tmp_p
     release_slug("猫咖丁", t3)
 
 
+def _literal_leaves(node):
+    """`a + b + c` 里的各字面量片段（**按书写顺序**），拼不出来的叶子记 None。"""
+    import ast
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _literal_leaves(node.left) + _literal_leaves(node.right)
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return [node.value]
+    return [None]
+
+
+def _fold_str_concat(node):
+    """整个 `+` 表达式都是字面量时返回拼好的串，否则 None。
+
+    顺序必须与书写一致 —— 折错顺序会拼出一条**作者并没写**的正则，
+    那会让守卫去报一个不存在的模式（假红比假绿更难查）。
+    """
+    parts = _literal_leaves(node)
+    if any(p is None for p in parts):
+        return None
+    return "".join(parts)
+
+
 def _whole_second_regex_offenders(sources):
     r"""挑出"读「N 秒后重试」却只认整数"的正则 —— 扫**所有字符串常量**，不看调用形状。
 
@@ -1407,11 +1429,15 @@ def _whole_second_regex_offenders(sources):
     —— 而它们都是本仓库真会写出来的形状。
 
     所以这一版换成**行为判据**，与调用形状彻底解耦：
-    1. 候选 = 任意字符串常量（文档串除外），且同时含「后重试」与数字类（`\d` 或 `[0-9]`）；
+    1. 候选 = 任意字符串常量（文档串除外），**以及**整条都是字面量的 `+` 拼接
+       （`r"(\d+)" + "s 后重试"` 这种任何一片单独看都不完整）；f-string 的字面片段
+       本身就是常量，天然在候选里；
     2. 拿它去搜真实通知原文「上游限流(429)，4.7s 后重试」，取第一个捕获组（没有组就用整段）；
     3. 读出来的值必须含 `4.7`。只认整数的写法在这里必然读到 `7` —— 不管它写成
        `(\d+)`、`([0-9]+)`、`(\d{1,2})`、`[0-9][0-9]*` 还是 `\d+`。
     编译不过的（不是正则）跳过；压根搜不中的（不是读这句通知的）跳过。
+    已知仍然放过：把数字类藏进变量/函数返回值再拼起来的模式 —— 那要跑起来才知道，
+    静态扫不做第二遍解释器；这种写法今天全库没有一处。
     """
     import ast
     import re as _re
@@ -1432,12 +1458,26 @@ def _whole_second_regex_offenders(sources):
                     and isinstance(body[0].value, ast.Constant) \
                     and isinstance(body[0].value.value, str):
                 docs.add(id(body[0].value))               # 文档串是散文，不是代码
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
-                continue
-            if id(node) in docs:
-                continue
-            pat = node.value
+        # 候选 = 每个字符串常量，**加上**用 `+` 把字面量拼起来的模式（第 19 轮自查：
+        # `"(\d+)" + "s 后重试"` 这种写法任何一片单独看都不含完整判据，只看常量会漏）。
+        # f-string 的字面片段本身就是 ast.Constant，走的是同一条路。
+        cands = [(n.lineno, n.value) for n in ast.walk(tree)
+                 if isinstance(n, ast.Constant) and isinstance(n.value, str)
+                 and id(n) not in docs]
+        for n in ast.walk(tree):
+            if isinstance(n, ast.BinOp) and isinstance(n.op, ast.Add):
+                folded = _fold_str_concat(n)
+                if folded is None or "后重试" not in folded:
+                    continue
+                # 只有"跨片才拼得出完整判据"的那种才需要额外报一次；某一片自己就
+                # 同时含「后重试」与数字类的情况，常量那一轮已经报过了（去重的判据
+                # 必须与常量那一轮的过滤一致 —— 写成"这片含 后重试 就算"会漏：
+                # 单独一片 `s 后重试` 不算候选，拼出来的 `(\d+)s 后重试` 才是）
+                leaves = _literal_leaves(n)
+                if all(not ("后重试" in (p or "")
+                            and ("\\d" in p or "[0-9]" in p)) for p in leaves):
+                    cands.append((n.lineno, folded))
+        for lineno, pat in cands:
             if "后重试" not in pat or ("\\d" not in pat and "[0-9]" not in pat):
                 continue
             try:
@@ -1449,7 +1489,7 @@ def _whole_second_regex_offenders(sources):
                 continue
             got = m.group(1) if m.groups() else m.group(0)
             if "4.7" not in (got or ""):
-                out.append(f"{name}:{node.lineno}: {pat!r} 读到 {got!r}（应为 '4.7'）")
+                out.append(f"{name}:{lineno}: {pat!r} 读到 {got!r}（应为 '4.7'）")
     return out
 
 
@@ -1475,11 +1515,12 @@ def test_no_test_reads_the_retry_note_with_a_whole_second_regex():
             + 'R.fullmatch(t)\n'
             + 're.match(pattern=r"' + bad + '", string=t)\n'
             + 're.finditer(r"([0-9][0-9]*)s 后重试", t)\n'
+            + 're.search(r"(' + bs + 'd+)" + "s 后重试", t)\n'
             + 're.findall(r"([' + bs + 'd.]+)s 后重试", t)\n'
             + 'note = "60s 后重试"\n')
     caught = _whole_second_regex_offenders([("demo.py", demo)])
-    assert len(caught) == 5, (
-        f"应抓到 5 条（4 种 indirect 形状 + 一条 [0-9][0-9]*），实抓 {caught}")
+    assert len(caught) == 6, (
+        f"应抓到 6 条（4 种 indirect 形状 + [0-9][0-9]* + 用 + 拼出来的模式），实抓 {caught}")
     assert _whole_second_regex_offenders([("c.py", "import re\nx = re\n")]) == []
 
 
