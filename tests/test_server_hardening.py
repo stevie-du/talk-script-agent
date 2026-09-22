@@ -646,6 +646,40 @@ def test_packgen_audit_failure_does_not_delete_the_finished_pack():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_packgen_unusable_pack_is_not_reported_as_success():
+    """`Pack()` 都过不去的生成包：作业必须失败、目录要被回收，不能报 done（第 21 轮 P1-1）。
+
+    复量到的原形态：模型产出的 `skill.yaml` 语法坏 → `_pack_audit` 把 `PackBrokenError`
+    吞成一句"说明"，于是 `create_pack` 正常返回、作业 **done**、盘上留着一个谁也打不开的包、
+    清单里还写着「这不是包结构错误」。钱确实已经花了，这点改不了，但界面上说"成功"
+    就是第二层伤害，而那个半成品目录会把同名重试永久挡在 409（应用里没有删包入口）。
+    """
+    tmp = _tmp_root()
+    from app import packgen
+
+    real = packgen._materialize
+
+    def broken(d, *a, **k):
+        notes = real(d, *a, **k)
+        (d / "skill.yaml").write_text("stages:\n  write:\n    files: [\n", encoding="utf-8")
+        return notes
+
+    slug = packgen.slugify("体检结构坏")
+    packgen._materialize = broken
+    msg = ""
+    try:
+        packgen.create_pack(tmp, _FakeLLM(Partial), "体检结构坏", "测试描述文本")
+        raise AssertionError("打不开的包不该被当成成功")
+    except ValueError as e:
+        msg = str(e)
+    finally:
+        packgen._materialize = real
+    assert "连加载都过不去" in msg, msg
+    assert not (tmp / "packs" / slug).exists(), \
+        "包打不开却留在盘上：作业失败了，下次同名提交还会被 409 永久挡住"
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_history_route_rejects_a_jid_with_trailing_whitespace():
     """`_JID_RE` 那半边的 fullmatch 迁移也得有用例（第 18 轮复核 P2-2）。
 

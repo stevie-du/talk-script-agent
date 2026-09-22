@@ -476,7 +476,9 @@ def _pack_audit(root: Path, slug: str) -> list[str]:
 
     返回空列表 = 体检通过。模型输出的包常有「segment 与 topics 章节标题对不上」
     「风格没配语速」「平台没配词表」这类静默降级 —— param_audit 把它们逐项列出；
-    结构坏（YAML 解析不了等）则 Pack 直接抛，捕捉后给一句指向性的说明。
+    而**结构坏到 `Pack()` 都过不去**时不在这里兜：直接抛，让作业失败、半成品被回收
+    （第 21 轮复核 P1-1：以前这里吞掉异常只留一句说明，于是作业报 done、盘上是一个
+    谁也打不开的包，清单还写着"这不是包结构错误"）。
 
     ⚠ "捕捉后给一句说明"必须覆盖**整个体检**，不是只盖住 `Pack(...)` 那一行
     （第 20 轮复核 P2）：体检后半段的 `pk.skill()` / `file_text` / `file_slice` /
@@ -493,6 +495,16 @@ def _pack_audit(root: Path, slug: str) -> list[str]:
     notes: list[str] = []
     try:
         pk = Pack(root, slug)
+    except Exception as e:                       # noqa: BLE001
+        # 加载都过不去 ≠ "体检某一步没跑完"。以前这里吞掉异常、只留一句说明，
+        # 于是**作业报 done、盘上是一个谁也打不开的包、清单还叫用户去核对参数**
+        #（第 21 轮复核实测：skill.yaml 语法坏时清单写着「这不是包结构错误」）。
+        # 现在如实失败：钱已经花了这点改不了，但半成品目录由 `created_here` 那圈
+        # 回收走，下次同名提交不会被 409 永久挡住，用户看到的是"生成失败 + 原因"。
+        raise ValueError(
+            f"模型生成的行业包连加载都过不去：{type(e).__name__}: {e}"
+            " —— 本次目录已回收，请补充或换个更具体的业务描述再试一次") from None
+    try:
         skill = pk.skill() or {}
         for stage, cfg in (skill.get("stages", {}) or {}).items():
             for key, spec in ((cfg or {}).get("files") or {}).items():
@@ -510,10 +522,12 @@ def _pack_audit(root: Path, slug: str) -> list[str]:
                 notes.append(f"参数「{key}={value}」：{text}")
         notes.extend(_placeholder_audit(root, pk))
     except Exception as e:                       # noqa: BLE001
-        # 体检自己跑不成 ≠ 包是坏的：把"没跑成"如实写进清单，让包留在盘上。
+        # 走到这里说明 `Pack()` 已经加载成功了（加载失败在上面如实抛出），
+        # 所以"包能打开、体检的某一步没跑完"这个措辞才是真的 ——
+        # 第 21 轮复核抓的就是这一句曾经过度承诺：它当时连"结构坏"一起说成"不是结构错误"。
         return [*notes,
                 f"引擎体检未能跑完：{type(e).__name__}: {e}"
-                " —— 上面那些说明可能不完整，请自行核对切片与参数（这不是包结构错误）"]
+                " —— 包能加载，但上面那些自动说明可能不完整，切片与参数请自行核对"]
     return notes
 
 
