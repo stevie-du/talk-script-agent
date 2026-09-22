@@ -1240,7 +1240,7 @@ class Pipeline:
                             log.warning("作业 %s 收口时二次出错，但状态已落定，保持原状",
                                         job.id)
                         else:
-                            kept = _safe_str(getattr(job, "error", "") or "")
+                            kept = _safe_str(getattr(job, "error", "") or "", swallow_all=True)
                             job.transition("failed", force=True,
                                            error=kept or
                                            f"作业失败（{type(e).__name__}）·详情看引擎日志")
@@ -1277,21 +1277,29 @@ def _readable(text: str) -> str:
     return re.sub(r"[\s、，。：:；;！!？?\-—·.。,]+", "", t)
 
 
-def _safe_str(obj) -> str:
+def _safe_str(obj, swallow_all: bool = False) -> str:
     """取异常的可读文本，取不到就当没有。
 
     第 7 轮复核实测：`str()` 本身可以抛（自定义异常的 `__str__` 里再出错），
     而 `_readable_error` 是在**收尾失败的收尾代码**里被调用的 —— 它一抛，
     `_guarded` 就没机会把作业落到终态，于是忙态永久占着一个并发额度
     （`prune()` 只回收终态）。归因是"锦上添花"，绝不能反过来把收口挡住。
+
+    ⚠ 两处调用要的是相反的东西，第 9 轮复核把这一点证出来了：
+      - 最外层那次（`msg = _safe_str(e)`）宁可放行：`KeyboardInterrupt` /
+        `SystemExit` 是"用户或解释器在说话"，吞掉等于 Ctrl-C 失灵；
+      - **异常链里**那些环节必须一律吞掉：链上一句 `__str__` 抛 `SystemExit`
+        若往外传，整段归因就半路作废，作业虽然仍落到 failed（第 8 轮的兜底管住了槽），
+        但 `error` 从「产物落盘失败」退化成「详情看引擎日志」—— 那正是第 8 轮
+        立誓要保护的"可执行的原因"。所以链内传 `swallow_all=True`。
     """
     try:
         return str(obj).strip()
     except Exception:  # noqa: BLE001
         return ""
     except BaseException:
-        # KeyboardInterrupt / SystemExit 是"用户或解释器在说话"，不许当成
-        # "这句话取不出来"吞掉（第 8 轮复核抓到：原来连 Ctrl-C 都会被吞成空串）。
+        if swallow_all:
+            return ""
         raise
 
 
@@ -1323,7 +1331,7 @@ def _readable_error(e: Exception) -> str:
             break
         chain.append(node)
     for c in chain:
-        cs = _safe_str(c)
+        cs = _safe_str(c, swallow_all=True)
         if not cs:
             continue
         head = cs[:120]

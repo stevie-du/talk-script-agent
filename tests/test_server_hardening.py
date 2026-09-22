@@ -1366,3 +1366,37 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+def test_every_reachable_validation_error_reads_in_chinese():
+    """本项目请求模型能触发的每一种 422，界面都不能露英文整句。
+
+    上一轮只覆盖了 `string_too_short` 与数值区间两类（第 9 轮复核指出：11 类里
+    只测了 2 类）。这里穷举**实际可达**的形状：两个 Literal 下拉、一个布尔、
+    一个 query 参数、以及畸形 JSON。判据不抄文案：只要求每一段都以中文标签开头
+    —— 英文原句直出时它是 [A-Za-z] 开头，一定会红。
+    """
+    import re
+    tmp = _tmp_root_mock()
+    try:
+        c = _client(tmp)
+        cases = [
+            ("voice 写错", c.post("/api/generate", json={"topic": "家用电梯怎么选", "voice": "很浓"}), "人味档位"),
+            ("format 写错", c.post("/api/generate", json={"topic": "家用电梯怎么选", "format": "视频"}), "输出内容"),
+            ("reroll 非布尔", c.post("/api/generate", json={"topic": "家用电梯怎么选", "reroll": "abc"}), "换一版"),
+            ("query 参数写错", c.get("/api/jobs/whatever", params={"full": "maybe"}), "完整快照"),
+            ("畸形 JSON", c.post("/api/generate", content=b"{oops",
+                                 headers={"Content-Type": "application/json"}), None),
+        ]
+        for name, r, label in cases:
+            assert r.status_code == 422, f"{name}: 期望 422，实得 {r.status_code} {r.text[:90]}"
+            detail = r.json().get("detail")
+            assert isinstance(detail, str), f"{name}: detail 不是人话字符串，而是 {type(detail).__name__}：{detail}"
+            assert r.json().get("code") == "field_invalid", f"{name}: 没给机器可读码 {r.json()}"
+            if label:
+                assert detail.startswith(label), f"{name}: 没点名是哪个框 → {detail}"
+            for seg in detail.split("；"):
+                assert not re.match(r"^\s*[A-Za-z]", seg), f"{name}: 这一段是英文原句 → {seg}"
+            assert "Input should be" not in detail, f"{name}: 仍然直出 pydantic 英文 → {detail}"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)

@@ -161,6 +161,9 @@ _FIELD_LABELS = {
     "audience": "受众", "style": "风格", "persona": "人设", "platform": "平台",
     "cta": "结尾引导", "facts": "补充资料", "segment": "段落", "index": "段落序号",
     "feedback": "修改意见", "industry": "行业名称", "description": "业务描述",
+    # 第 9 轮复核补的：这三类控件在界面上有中文名，之前一律露出裸字段名
+    "voice": "人味档位", "format": "输出内容", "reroll": "换一版",
+    "full": "完整快照", "include_private": "包含私有资料",
 }
 
 
@@ -206,13 +209,25 @@ def _humanize_validation(errors: list) -> str:
             parts.append(f"{label}要小于 {_num(ctx.get('lt', '?'))}")
         elif kind == "missing":
             parts.append(f"{label}不能为空")
+        elif kind == "bool_parsing" or kind == "bool_type":
+            parts.append(f"{label}只能是要或不是（true / false）")
+        elif kind == "literal_error":
+            # 枚举值写错：pydantic 给的是 "Input should be 'strong', 'standard' or 'off'"，
+            # 中文界面里露这句等于没说话（第 9 轮实测：voice / format 两个下拉都走这里）。
+            allowed = str((ctx.get("expected") or "")).replace("'", "").strip()
+            parts.append(f"{label}只能是这几个值之一：{allowed}" if allowed
+                         else f"{label}的值不在允许的范围内")
+        elif kind in ("json_invalid", "json_load_failed"):
+            parts.append(f"{label}不是合法的 JSON" +
+                         (f"（{e.get('msg')}）" if e.get("msg") else ""))
         elif kind.endswith("_parsing"):
             parts.append(f"{label}要填数字")
         elif kind == "string_type":
             parts.append(f"{label}要填文字")
         else:
-            # 认不出的类型不猜：把字段名与原文一起给，至少知道是哪个框出了问题。
-            parts.append(f"{label}：{e.get('msg') or kind or '字段不合格'}")
+            # 认不出的类型不猜，但也不把英文原句直接当界面用语：至少先说清是哪个框，
+            # 原文跟在后面供排查（第 9 轮：末支原来整句都是英文）。
+            parts.append(f"{label}填写有误：{e.get('msg') or kind or '字段不合格'}")
     return "；".join(p for p in parts if p) or "请求里有字段不合格"
 
 

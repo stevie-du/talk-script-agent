@@ -379,7 +379,7 @@ class LLMClient:
                     # 通知与真正要睡的秒数同源：夹逼与下限都算在内，两边共用同一个值
                     wf = 0.0 if should_abort else 0.2
                     wait = self._clamped_wait(wait, deadline, wf)
-                    note = (f"上游限流(429)，{wait:.0f}s 后重试" if e.code == 429
+                    note = (f"上游限流(429)，{self._fmt_wait(wait)}s 后重试" if e.code == 429
                             else f"接口返回 {e.code}")
                     self._notify(on_retry, note, attempt + 1, attempts)
                     self._interruptible_sleep(wait, should_abort, deadline, floor=wf)
@@ -409,7 +409,7 @@ class LLMClient:
                                                   if rate_limited else None))
                 wf = 0.0 if should_abort else 0.2      # 通知与实睡同一个口径
                 wait = self._clamped_wait(wait, deadline, wf)
-                note = (f"上游限流(429)，{wait:.0f}s 后重试" if rate_limited
+                note = (f"上游限流(429)，{self._fmt_wait(wait)}s 后重试" if rate_limited
                         else f"接口返回 {resp.status_code}")
                 self._notify(on_retry, note, attempt + 1, attempts)
                 self._interruptible_sleep(wait, should_abort, deadline, floor=wf)
@@ -588,11 +588,25 @@ class LLMClient:
         """
         wait = max(0.0, float(seconds))
         if not deadline:
-            return wait
+            # ⚠ 没有预算可夹的时候，下限同样要生效（第 9 轮实测：原来这里直接 return，
+            #   floor 一次都没参与）—— 而 `ping()` 恰好是**唯一**不带 deadline 也不带
+            #   闸门的重试入口：`Retry-After: 0` + retries=10 时 11 个请求 0.001s 发完、
+            #   一次都没睡，这条下限在它唯一为之而写的调用点上贡献为 0。
+            return max(wait, float(floor))
         left_budget = float(deadline) - time.time()
         if left_budget <= 0:
             return max(0.0, float(floor))   # 到点：有闸门交给闸门，没闸门也别空转
         return max(min(wait, left_budget), float(floor))
+
+    @staticmethod
+    def _fmt_wait(seconds: float) -> str:
+        """退避秒数的展示：不到 1 秒也要说真数，不许印成「0s」。
+
+        第 9 轮实测：`:.0f` 遇上 floor 的 0.2 就印「0s 后重试」，界面写着 0 秒、
+        实际睡了 0.2 秒 —— 与这组函数存在的理由（通知与实睡同源）正好相反。
+        """
+        w = max(0.0, float(seconds))
+        return f"{w:.1f}" if 0 < w < 1 else f"{w:.0f}"
 
     @staticmethod
     def _interruptible_sleep(seconds: float, should_abort=None,

@@ -31,7 +31,7 @@ from app.jobs import (JOB_BUDGET_SECONDS, Job, JobBudget, JobCancelled,  # noqa:
 from app.llm import RETRY_UPGRADE_CAP, LLMClient, LLMError, _brief    # noqa: E402
 from app.packgen import claim_slug, preview_slug, release_slug       # noqa: E402
 from app.pipeline import (MAX_CONCURRENT_JOBS, Pipeline, ScriptDraft,  # noqa: E402
-                          SegmentRewrite, _readable_error, wait_job)
+                          SegmentRewrite, _readable_error, _safe_str, wait_job)
 from app.schemas import GenerateRequest, RewriteSegmentRequest    # noqa: E402
 
 
@@ -985,6 +985,45 @@ def test_the_backoff_floor_reaches_the_actual_sleep(tmp_path, monkeypatch):
     client._interruptible_sleep(60.0, lambda: None, past, floor=0.2)
 
 
+def test_floor_applies_without_a_deadline_and_the_note_never_says_zero(tmp_path, monkeypatch):
+    """没预算可夹时，下限同样要生效；而且通知里不许印「0s」。
+
+    第 9 轮复核实测到的两处：
+      - `_clamped_wait` 在 `deadline is None` 时直接 `return wait`，floor 一次都没参与 ——
+        而 `ping()` 恰是**唯一**不带 deadline 也不带闸门的重试入口：
+        `Retry-After: 0` + retries=10 → 11 个请求 0.001s 发完、一次都没睡。
+        也就是说第 8 轮那条下限在它唯一为之而写的调用点上贡献为 0（同族第二次安慰剂）。
+      - 修完之后 `:.0f` 又把 0.2 印成「0s 后重试」：界面写着 0 秒、实际睡了 0.2 秒。
+    """
+    import re
+    import httpx
+    assert LLMClient._clamped_wait(0.0, None, 0.2) >= 0.2, "没 deadline 时下限被丢弃"
+
+    stamps: list[float] = []
+
+    def handler(req):
+        stamps.append(time.monotonic())
+        return httpx.Response(429, headers={"Retry-After": "0"}, text="slow down")
+
+    notes: list[str] = []
+    client = _client()
+    client.cfg = dataclasses.replace(client.cfg, retries=2)
+    real = httpx.Client
+    monkeypatch.setattr("app.llm.get_client",
+                        lambda *a, **k: real(transport=httpx.MockTransport(handler)))
+    with pytest.raises(Exception):
+        # ping 的形状：没有 deadline、没有 should_abort
+        client.chat_json("write", "s", "u", ScriptDraft,
+                         on_retry=lambda note, i, n: notes.append(note))
+    gaps = [b - a for a, b in zip(stamps, stamps[1:])]
+    assert len(stamps) == 3, stamps
+    assert min(gaps) >= 0.15, f"重试之间没有下限（安慰剂形态）：{gaps}"
+    quoted = [float(m) for n in notes for m in re.findall(r"([\d.]+)s 后重试", n)]
+    assert quoted and min(quoted) > 0, f"通知里印着 0s：{notes}"
+    for q, g in zip(quoted, gaps):
+        assert abs(q - g) <= 0.35, f"通知说 {q}s、实际隔了 {g:.3f}s：{notes}"
+
+
 def test_expired_budget_without_a_gate_still_spaces_its_retries(tmp_path, monkeypatch):
     """429 一路 + 预算已过 + 没闸门：重试之间必须有间隔（不许 0 秒连打）。"""
     import httpx
@@ -1042,3 +1081,27 @@ def test_guarded_fallback_does_not_turn_a_cancel_into_a_failure(tmp_path, monkey
         pl._guarded(job, lambda: (_ for _ in ()).throw(RuntimeError("worker")))()
     assert job.state == "cancelled", job.state
     assert not (job.error or ""), f"取消被写成了失败：{job.error}"
+
+
+class _NoStr(Exception):
+    """`__str__` 抛 BaseException 的异常：链上出现它，归因不许半路作废。"""
+
+    def __str__(self):
+        raise SystemExit(2)
+
+
+def test_read_error_survives_a_cause_that_raises_base_exception():
+    """链上某环节 `__str__` 抛 SystemExit 时，外层那句可执行的原因要留着。
+
+    第 8 轮为了"别吞掉 Ctrl-C"把 `_safe_str` 改成放行 BaseException，第 9 轮
+    复核立刻发现它的另一面：链里一句 `__str__` 抛 SystemExit 会让 `_readable_error`
+    半路抛出，`error` 于是从「产物落盘失败」退化成「详情看引擎日志」—— 槽没漏
+    （兜底管住了），但**归因被抹掉了**，而那正是第 8 轮兜底立誓要保护的东西。
+    两个诉求是真的：直接对异常放行、链内一律吞。
+    """
+    outer = RuntimeError("产物落盘失败")
+    outer.__cause__ = _NoStr()
+    assert _readable_error(outer) == "产物落盘失败"
+    # 直接对象那侧仍然放行：Ctrl-C / SystemExit 不该被当成"这句话取不出来"
+    with pytest.raises(SystemExit):
+        _safe_str(_NoStr())
