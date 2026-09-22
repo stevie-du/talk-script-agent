@@ -14,6 +14,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -528,7 +529,12 @@ def test_stub_pack_name_check_agrees_with_the_engine():
             + "const BS = String.fromCharCode(92);\n"
             + "const W = new RegExp('[' + BS + 'p{L}' + BS + 'p{N}_]$', 'u');\n"
             + "process.stdout.write(JSON.stringify({ ok: ins.map(function (s) { return ok(s); }),\n"
-            + "  word: ins.map(function (s) { return W.test(s); }) }));\n",
+            + "  word: ins.map(function (s) { return W.test(s); }),\n"
+            + "  accept: (function () { const all = [];\n"
+            + "    for (let cp = 0x21; cp <= 0x10FFFF; cp++) {\n"
+            + "      if (cp >= 0xD800 && cp <= 0xDFFF) continue;\n"
+            + "      if (ok(String.fromCodePoint(cp))) all.push(cp); }\n"
+            + "    return all; })() }));\n",
             encoding="utf-8")
         r = subprocess.run([node, str(tmp / "run.js"), str(tmp / "name.js"), str(tmp / "in.json")],
                            capture_output=True, text=True, encoding="utf-8")
@@ -565,6 +571,39 @@ def test_stub_pack_name_check_agrees_with_the_engine():
     assert not strict, ("桩比引擎严（引擎合法的包名被桩拒了）—— 这类差异会让界面永远"
                         "量不到「点了一个引擎真会接受的包」：\n"
                         + "\n".join(f"  {n!r}: 引擎={e} 桩={s}" for n, e, s in strict[:8]))
+
+    # 逐码点对账**扫到全非代理区**（第 18 轮复核 P2-6：原来只扫到 0x2000，
+    # 于是 BMP 以上那 4600+ 个差异今天没有任何人量过，我还在报告里把窗口里的数当成了全库的数）。
+    # 一次 node 扫描 ~60ms、一次 Python 全量 `_safe_name` ~0.8s，跑得动就别只跑一个窗口。
+    stub_yes = set(out["accept"])
+    eng_yes = set()
+    compared = 0
+    for cp in range(0x21, 0x110000):
+        if 0xD800 <= cp <= 0xDFFF:
+            continue                       # 代理区不能单独成为一个字符
+        compared += 1
+        try:
+            _safe_name(chr(cp))
+            eng_yes.add(cp)
+        except Exception:
+            pass
+    # 对齐哨兵：桩那侧的枚举是"跳过代理区后压进数组"，Python 这侧独立重新枚举 ——
+    # 任何一侧的索引/范围写错，这个数就会变（我自己写错过一次：用 enumerate 反推码点，
+    # 跳过代理区之后整体错位，量出来的"差异"从 4657 变成 29369）。
+    assert compared == 1112031, f"逐码点扫描的范围不对（比较了 {compared} 个码点）"
+    assert len(stub_yes) > 100000, f"桩那侧一个字母表都没接受？扫描本身坏了：{len(stub_yes)}"
+    only_eng = sorted(eng_yes - stub_yes)
+    assert not only_eng, (
+        "引擎接受而桩拒的单字符包名（不可接受的方向）："
+        + ", ".join(f"U+{c:04X}" for c in only_eng[:8]))
+    only_stub = stub_yes - eng_yes
+    cats = {unicodedata.category(chr(c)) for c in only_stub}
+    assert only_stub, (
+        "两侧现在逐码点完全一致 —— 这条对账在本机上已经空转，"
+        "要么把判据换成'不许出现引擎更宽'之外的事实，要么删掉它，别留着假装在测")
+    assert cats <= {"Cn"}, (
+        f"桩比引擎宽的 {len(only_stub)} 个码点里出现了已分配的类别 {sorted(cats)} —— "
+        "那就不是两个运行时 Unicode 版本差可以解释的了，判据本身要重看")
 
 
 def test_stub_slug_agrees_with_the_engine_over_a_unicode_sweep(tmp_path):
