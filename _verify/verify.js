@@ -307,6 +307,9 @@ window.__addCount = 0;
   // 超时的作业按"预算用尽"落 failed 并归还 —— 与引擎那条路径同形
   // （失败 + 额度还回来），至少不会永久 409。窗口远大于任何一条断言的轮询间隔。
   var PG_CLAIM_MS = 60000;
+  // 页面侧要能读到这个出厂值（断言用它钉值域）：PG_CLAIM_MS 是桩这段 IIFE 的局部变量，
+  // 注入脚本之外看不见，所以显式挂出去 —— 与 __pgclaimms（注入用的旋钮）是两回事。
+  window.PG_CLAIM_MS_DEFAULT = PG_CLAIM_MS;
   function pgJobId(u) {
     var tail = String(u || '').split('/api/jobs/')[1] || '';
     return tail.split(/[/?#]/)[0];
@@ -894,9 +897,13 @@ window.__addCount = 0;
       pgSweepStale();
       var pj = PG_JOBS[pid];
       if (!pj) {
-        // 不认识这个作业 id：GET 与 cancel 两条路由的原文不同（server.py 的
-        // job_status / job_cancel），按路由发对应的那句。
-        return err(404, ERR_JOB_GONE_GET);
+        // 未知建包作业：两句原文**按路由**发（server.py 的 job_status / job_cancel）。
+        // 原来这里的注释写着"按路由发对应的那句"，代码却不分路由都发 GET 那句 ——
+        // 而门禁的探针用的 id 不含 jobpg，压根进不到这一支，所以改错也没人知道
+        // （第 16 轮复核 P1-3；本轮自己复量到：cancel 一条已回收的建包作业，
+        // 界面看到的是"作业不存在或已随重启释放"，与它该看到的那句不同）。
+        return s.indexOf('/cancel') >= 0 ? err(404, ERR_JOB_GONE_CANCEL)
+                                        : err(404, ERR_JOB_GONE_GET);
       }
       if (pj.state !== 'packing') return pgSnap(pid);   // 已收工：同一份终态快照，幂等可轮询
       calls.pg++;             // 全局"建包被轮询了几次"的观测值（断言用它判"少传参数时不许开轮询"）
@@ -5894,6 +5901,13 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     var c404 = await api('/api/jobs/20260101-000000-abcdef/cancel', {});
     out.getCode = g404.st + ':' + g404.b.detail;
     out.cancelCode = c404.st + ':' + c404.b.detail;
+    // 同一件事在**建包那两条路由**上也要量一次：桩里带 jobpg 前缀的 id 走的是另一支
+    // 分支（PG_JOBS 查不到就当场 404），探针不含 jobpg 就永远打不到那一支
+    // —— 那一支写错（两句互换、或都发同一句）今天没人知道（第 16 轮复核 P1-3）。
+    var gpg = await api('/api/jobs/jobpg-nope');
+    var cpg = await api('/api/jobs/jobpg-nope/cancel', {});
+    out.pgGet = gpg.st + ':' + gpg.b.detail;
+    out.pgCancel = cpg.st + ':' + cpg.b.detail;
     // 终态快照的字段集必须与引擎一致（缺一个键，界面那条"读不到就算了"的分支永不跑）
     var sub = await api('/api/packs/create', { industry: '推拿所戊', description: '社区推拿，面向上班族' });
     var sid = sub.b.job_id;
@@ -5906,6 +5920,21 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     out.termKeys = Object.keys(term.b || {}).sort().join(',');
     out.termResult = 'result' in (term.b || {}) ? String(term.b.result) : 'ABSENT';
     out.termStream = term.b && term.b.stream ? term.b.stream.phase : '';
+    // 出厂值那一档也得走一遍：不注入旋钮时（默认 PG_CLAIM_MS = 60s）刚提交的作业**不该**
+    // 被回收、名字该还占着；把旋钮注入成 0 之后同一条才落 failed 并归还。
+    // 原来只有 lim=0 那一支被量过，于是"把 PG_CLAIM_MS 改成 600000000"（当场判死）
+    // 这类改动手感上是红的、实际上门禁照绿（第 16 轮复核 P2-7）。
+    var sLive = await api('/api/packs/create', { industry: '推拿所己', description: '社区推拿，面向上班族' });
+    var live = await api('/api/jobs/' + sLive.b.job_id);
+    out.liveState = live.b.state;
+    out.claimMs = window.PG_CLAIM_MS_DEFAULT;   // 出厂值本身也要被看住（见下面那条 check）
+    out.liveResub = (await api('/api/packs/create',
+      { industry: '推拿所己', description: '社区推拿，面向上班族' })).st;
+    window.__pgclaimms = 0;
+    var liveSwept = await api('/api/jobs/' + sLive.b.job_id);
+    out.liveSweptState = liveSwept.b.state;
+    out.liveAfter = (await api('/api/packs/create',
+      { industry: '推拿所己', description: '社区推拿，面向上班族' })).st;
     // 占位回收线：把时限注入成 0，让它当场触发 —— 否则这句永远没有断言覆盖
     window.__pgclaimms = 0;
     var s2 = await api('/api/packs/create', { industry: '宠物医院庚', description: '社区医院，面向养宠家庭' });
@@ -5926,6 +5955,10 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   check("桩：未知作业按路由发各自的 404 原文，终态快照带齐引擎那 9 个键",
     pgFileGate.getCode === '404:作业不存在或已随重启释放'
       && pgFileGate.cancelCode === '404:作业不存在'
+      // 建包那两条路由走桩里的另一支分支（jobpg 前缀 + PG_JOBS 查不到）：
+      // 探针不含 jobpg 就永远打不到那一支，两句互换或都发同一句都没人知道（第 16 轮 P1-3）。
+      && pgFileGate.pgGet === '404:作业不存在或已随重启释放'
+      && pgFileGate.pgCancel === '404:作业不存在'
       && pgFileGate.termKeys === 'created_at,error,id,kind,params,result,state,steps,stream'
       && pgFileGate.termResult === 'null' && pgFileGate.termStream === '行业包生成'
       // 在途那一份：引擎轮询走 include_result=False，所以是同一套键**少 result**；
@@ -5937,6 +5970,16 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   check("桩：占位回收时限可注入，到点落 failed 并归还名字（不会永久 409）",
     pgFileGate.sweptState === 'failed' && pgFileGate.sweptErr === '作业超时未收工'
       && /^409:行业包正在创建/.test(pgFileGate.resub) === false && /^200:/.test(pgFileGate.resub),
+    JSON.stringify(pgFileGate));
+  // 出厂值那一档也得有人量：默认 60s 之内不许回收（否则"回收时限"其实是"当场判死"），
+  // 而注入成 0 之后同一条作业要能落 failed 并把名字还回来（第 16 轮复核 P2-7）。
+  check("桩：不注入旋钮时按出厂时限回收（刚提交的作业不被当场判死）",
+    pgFileGate.liveState === 'packing' && pgFileGate.liveResub === 409
+      && pgFileGate.liveSweptState === 'failed' && pgFileGate.liveAfter === 200
+      // 值域那一格是诚实的极限：门禁只有两三分钟，"设成 600000000 = 永不回收"这种改动
+      // 在行为上量不到，只能把常量本身钉在一个说得过去的区间里（0 = 当场判死、
+      // 超过十分钟 = 与界面「正在创建中」的可等范围脱节）。
+      && pgFileGate.claimMs >= 1000 && pgFileGate.claimMs <= 600000,
     JSON.stringify(pgFileGate));
 
   // ── 13) 布局 ─────────────────────────────────────────────
