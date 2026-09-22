@@ -5893,6 +5893,10 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       priv: await st('/api/packs/elevator/file?rel=private/pricing.md'),
       noRel: await st('/api/packs/elevator/file'),
       badName: await st('/api/packs/%2e%2e/file?rel=pack.yaml'),
+      // 详情路由（不带 /file）问的是同一个 packNameOk，但它是**第二个调用点**：
+      // 只钉 /file 那一侧时，把详情那一侧的判据删掉/改错，门禁照绿（第 16 轮复核 P2-5）。
+      badNameDet: await st('/api/packs/%2e%2e'),
+      unkDet: await st('/api/packs/mei-you-zhe-ge-bao'),
       listed: Object.keys(window.__tsMeta.packs.reduce(function (m, p) { m[p.name] = 1; return m; }, {})).length
     };
     // 未知 id 的两句 404 分属两条路由，文案不同（server.py 的 job_status / job_cancel）：
@@ -5950,6 +5954,7 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     pgFileGate.realYaml === 200 && pgFileGate.noPack === 404
       && pgFileGate.noPackPriv === 404 && pgFileGate.priv === 403
       && pgFileGate.noRel === 404 && pgFileGate.badName === 400
+      && pgFileGate.badNameDet === 400 && pgFileGate.unkDet === 404
       && pgFileGate.listed === 2,
     JSON.stringify(pgFileGate));
   check("桩：未知作业按路由发各自的 404 原文，终态快照带齐引擎那 9 个键",
