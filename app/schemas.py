@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # 时长上下限：低于下限配额会退化成 0，高于上限没有实际业务意义（口播短视频）
 DURATION_MIN = 5.0
@@ -21,6 +21,16 @@ TOPIC_MAX = 200
 # 原来那里另写了一个 120（"码元"），而这个字段限 40 字 —— 40 字的输入永远撞不到 120，
 # 那道检查是死的，却长得像有人在守（第 20 轮复核 P3-5）。
 INDUSTRY_MAX = 40
+
+
+def utf16_units(s: str) -> int:
+    """目录名/输入名占多少个 UTF-16 码元 —— NTFS 的 255 上限是按码元算的。
+
+    第 21 轮复核 P2：`max_length` 按**码点**计数，而 `slug_problem` 按**码元**计数，
+    `'𠀀' * 40` 是 40 个码点 / 80 个码元 —— 两边数字统一了、单位还差一倍，
+    于是请求层放行的名字会在建包时被拒。单位也得只有一个出处，就是这个函数。
+    """
+    return len(s.encode("utf-16-le")) // 2
 FACTS_MAX = 20000
 
 
@@ -47,9 +57,22 @@ class RewriteSegmentRequest(BaseModel):
 
 
 class PackCreateRequest(BaseModel):
-    industry: str = Field(min_length=2, max_length=INDUSTRY_MAX, description="行业名，如：全屋定制/装修")
+    industry: str = Field(min_length=2, description="行业名，如：全屋定制/装修")
     description: str = Field(min_length=4, max_length=500,
                              description="一句话业务描述，如：全屋定制家居品牌，面向新房装修业主获客")
+
+    @field_validator("industry")
+    @classmethod
+    def _industry_units_within_cap(cls, v: str) -> str:
+        """长度按 **UTF-16 码元** 判，与 `packgen.slug_problem` 同一个出处、同一个单位。
+
+        原来这里靠 `max_length=40`（按码点），那边按码元 —— `'𠀀' * 40` 在请求层放行、
+        到建包时被报成"80 个码元，上限 40"，同一件事两本账（第 21 轮复核 P2）。
+        """
+        units = utf16_units(v)
+        if units > INDUSTRY_MAX:
+            raise ValueError(f"行业名称太长（{units} 个字符位，最多 {INDUSTRY_MAX}）")
+        return v
 
 
 # ── 节点产物 ────────────────────────────────────────────────

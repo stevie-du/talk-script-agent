@@ -680,6 +680,37 @@ def test_packgen_unusable_pack_is_not_reported_as_success():
     shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_industry_name_cap_uses_one_unit_on_both_sides():
+    """行业名长度：请求层与建包层必须是**同一个单位**（第 21 轮复核 P2）。
+
+    `'𠀀' * 40` 是 40 个码点 / 80 个 UTF-16 码元。原来请求层用 `max_length`（按码点）放行，
+    建包层按码元报「有 80 个码元，上限 40」—— 一个 40 字的名字收到两条互相矛盾的账，
+    而且上一笔我刚把"上限只有一个出处"写进注释：数字统一了、单位没统一，那句话仍是谎。
+    """
+    from app import packgen
+    from app.schemas import PackCreateRequest, utf16_units      # noqa: F401
+
+    astral = "𠀀" * 40
+    assert len(astral) == 40 and utf16_units(astral) == 80
+    assert packgen._utf16_units(astral) == utf16_units(astral), "两层又各算各的单位"
+    assert packgen.slug_problem(packgen.slugify(astral)), \
+        "建包层没拒：那请求层放行后就会在写盘时才炸"
+    assert not packgen.slug_problem("宠物医院"), "边界内的名字被误伤"
+
+    tmp = _tmp_root_mock()
+    try:
+        c = _client(tmp)
+        r = c.post("/api/packs/create",
+                   json={"industry": astral, "description": "社区推拿，面向上班族"})
+        assert r.status_code == 422, (r.status_code, r.text[:150])
+        assert "太长" in r.text, r.text[:200]
+        ok = c.post("/api/packs/create",
+                    json={"industry": "宠物医院", "description": "社区医院，面向养宠家庭"})
+        assert ok.status_code == 200, ok.text[:150]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_history_route_rejects_a_jid_with_trailing_whitespace():
     """`_JID_RE` 那半边的 fullmatch 迁移也得有用例（第 18 轮复核 P2-2）。
 

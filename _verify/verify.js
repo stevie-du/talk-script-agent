@@ -5948,6 +5948,13 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     out.sweptErr = (swept.b.error || '').slice(0, 7);
     out.resub = resub.st + ':' + String(resub.b.detail || '').slice(0, 7);
     window.__pgclaimms = undefined;
+    // 还原这一行也得可证：旋钮清掉之后再提交一条建包，它必须还是 packing。
+    // 原来这行是个"没人观察的赋值"—— 删掉它门禁照绿（第 16 轮复核 P3），
+    // 于是"后来的场景会不会被残留的 0 当场判死"完全没被量过。
+    var s4 = await api('/api/packs/create', { industry: '推拿所辛', description: '社区推拿，面向上班族' });
+    var afterRestore = await api('/api/jobs/' + s4.b.job_id);
+    out.knobCleared = typeof window.__pgclaimms !== 'number';
+    out.afterRestoreState = afterRestore.b.state;
     return out;
   })();`);
   check("桩：读包内文件先认包（不存在的包 404，private 才是 403）",
@@ -5981,6 +5988,9 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   check("桩：不注入旋钮时按出厂时限回收（刚提交的作业不被当场判死）",
     pgFileGate.liveState === 'packing' && pgFileGate.liveResub === 409
       && pgFileGate.liveSweptState === 'failed' && pgFileGate.liveAfter === 200
+      // 还原那一行也在这条里被量：清掉旋钮之后再提交一条建包，它不该被当场回收
+      //（原来 `window.__pgclaimms = undefined` 是一行没人观察的赋值，删掉门禁照绿）。
+      && pgFileGate.knobCleared === true && pgFileGate.afterRestoreState === 'packing'
       // 值域那一格是诚实的极限：门禁只有两三分钟，"设成 600000000 = 永不回收"这种改动
       // 在行为上量不到，只能把常量本身钉在一个说得过去的区间里（0 = 当场判死、
       // 超过十分钟 = 与界面「正在创建中」的可等范围脱节）。

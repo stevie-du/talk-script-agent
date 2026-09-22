@@ -134,8 +134,12 @@ cd desktop && npm run dist
 # 产物在 desktop/dist/：TalkScript Setup 0.2.0.exe（NSIS 安装包）+ TalkScript 0.2.0.exe（portable）
 # 打完必须认证一遍（逐项比包内引擎与当前源码，缺一步都算没过）：
 cd desktop && npm run verify:package
-# 它查五样：app/ 逐文件一致、renderer/ 逐文件一致、packs/ 逐文件一致（private/ 按设计不出厂）、
-# 包内不许出现 private 文件、两个 exe 的时间戳不许早于最新源码改动（防"改了没重打"）。
+# 它查七样：app/ 逐文件 md5 一致、renderer/ 逐文件 md5 一致、packs/ 逐文件 md5 一致
+# （private/ 按设计不出厂，只在源码侧出现不算差异）、包内不许出现任何 private 文件、
+# package.json 的 build.files 那几个主进程文件的字节必须真的在 resources/app.asar 里、
+# 两个 exe 必须是有效 PE（Setup 另带 NSIS 签名）且不小于 1 MB、
+# 产物时间戳不许早于会进包里的最新源码（只证"是否曾被重打"，不证明内容）。
+# 它证明不了的：干净机器上的安装 / 升级 / 卸载流程 —— 那需要一台真机或虚拟机。
 ```
 
 打包包含引擎代码、行业包与渲染层。**不含任何配置**（连模板都不带）——用户自己配置：

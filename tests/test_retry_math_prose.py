@@ -59,11 +59,17 @@ def timeout_default() -> int:
 
 
 def _capped_read_src() -> str:
-    """`app/llm.py` 里 `_capped_read` 那一处（连它的 docstring），不是整个文件。"""
+    """`app/llm.py` 里 `_capped_read` **自己那份** docstring，不是整个函数体。
+
+    第 21 轮复核 Q4-a1：原来返回整个函数体源码，于是"在同一个函数体里加一个嵌套函数、
+    把正确数字写进它的 docstring、真句全改错"就能骗过断言（实测 2 passed）。
+    """
     src = (ROOT / "app" / "llm.py").read_text(encoding="utf-8")
     for node in ast.walk(ast.parse(src)):
         if isinstance(node, ast.FunctionDef) and node.name == "_capped_read":
-            return ast.get_source_segment(src, node) or ""
+            doc = ast.get_docstring(node) or ""
+            assert doc, "_capped_read 没有 docstring 了：那段说明搬哪去了？"
+            return doc
     raise AssertionError("app/llm.py 里找不到 _capped_read：那段说明搬哪去了？")
 
 
@@ -83,14 +89,23 @@ def _docstring_containing(rel_path: str, marker: str) -> str:
     """找 `rel_path` 里含 `marker` 那句的那份 docstring（改述会红，不会静默失守）。"""
     src = (ROOT / rel_path).read_text(encoding="utf-8")
     tree = ast.parse(src)
-    nodes = [tree] + [n for n in ast.walk(tree)
-                      if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
-    for node in nodes:
+    hits = []
+    for node in ast.walk(tree):
+        # 模块 docstring 不算（第 21 轮复核 Q4-a2：把 marker 那句抄进模块 docstring
+        # 就能让"真句改错"继续绿），只有函数/类自己那份才算。
+        if node is tree or not isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
         doc = ast.get_docstring(node) or ""
         if marker in doc:
-            return doc
-    raise AssertionError(f"{rel_path} 里再没有哪份 docstring 提到「{marker}」——"
-                         "那段说明被搬走或改述了，把这里的锚点一起更新")
+            hits.append((node.name, doc))
+    if len(hits) != 1:
+        raise AssertionError(
+            f"{rel_path} 里提到「{marker}」的 docstring 命中 {len(hits)} 份"
+            f"（{[n for n, _ in hits]}），不是恰好一份："
+            "0 份＝那段说明被搬走或改述了（去更新**文案**，别改 marker）；"
+            "多份＝锚点不唯一，往任意一份里塞正确数字就能把断言喂饱。")
+    return hits[0][1]
 
 
 def test_jobs_budget_comment_matches_the_retry_layers():

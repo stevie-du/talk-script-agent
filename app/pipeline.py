@@ -481,7 +481,7 @@ class Pipeline:
             # 界面说"已取消"而下一次同名提交回 409「行业包已存在」—— 用户既看不到
             # 那个包也删不掉它。只有**本次真的建出来了**才回收。
             if built:
-                self._discard_created_pack(slug)
+                self._discard_created_pack(job, slug)
             self._settle_cancel(job)
         except Exception as e:  # noqa: BLE001
             self._fail(job, e)
@@ -1173,7 +1173,7 @@ class Pipeline:
         if not job.is_cancelled():
             self._fail(job, JobBudget(_jobs.JOB_BUDGET_SECONDS))
 
-    def _discard_created_pack(self, slug: str) -> None:
+    def _discard_created_pack(self, job: Job, slug: str) -> None:
         """取消掉的建包：把**这一次**刚建出来的 `packs/<slug>/` 回收掉。
 
         只删这一个路径，且必须还落在 `packs/` 里 —— 它不是通用删除工具。
@@ -1196,6 +1196,12 @@ class Pipeline:
         else:
             log.warning("取消收尾：packs/%s 回收失败 —— 包目录会留在盘上，"
                         "下次同名提交会报「行业包已存在」，需要人工删除", slug)
+            # 只写日志等于没写：引擎日志在界面上是折叠的过程步骤，而"下次同名建不了、
+            # 应用里又没地方删包"这件事用户必须当场看到（第 21 轮复核 P2）。
+            self._step(job, "packgen_reclaim_failed",
+                       f"本次目录未能回收：请手动删除 packs/{slug}，"
+                       "否则同名重建会一直报「行业包已存在」（应用里没有删包的入口）",
+                       {"slug": slug})
 
     @staticmethod
     def _abort_gate(job: Job):

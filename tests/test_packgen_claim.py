@@ -296,6 +296,47 @@ def test_cancel_rollback_retries_when_a_file_is_locked(monkeypatch):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_a_failed_reclaim_is_told_to_the_user_not_just_logged(monkeypatch):
+    """回收失败必须出现在作业上：只写日志等于用户看不见（第 21 轮复核 P2）。
+
+    后果是确定的：目录留在 `packs/` 里、作业记 cancelled、下次同名提交永久 409，
+    而应用里没有删包的入口（`/api/history/{jid}` 是唯一那条 DELETE，删不了包）。
+    """
+    import app.pipeline as plmod
+    from app.jobs import Job
+
+    pl, tmp, client = _pipeline()
+    slug = "探针丑"
+
+    def always_locked(path, **kw):
+        # 让真的 rmtree_resilient 自己走完重试并返回 False（它的契约就是"失败返回 False"），
+        # 而不是替换掉它 —— 替换会把 OSError 直接抛进 `_discard_created_pack`，测的是另一件事。
+        raise OSError("文件被占用（模拟杀毒软件一直不放）")
+
+    monkeypatch.setattr(shutil, "rmtree", always_locked)
+    try:
+        job = Job("pg-cancel-3", "packgen",
+                  {"industry": "探针丑", "description": "探针用的行业说明"})
+        pl.add_job(job)
+
+        def fake_create_pack(root, _client, industry, _desc, **_kw):
+            (root / "packs" / slug).mkdir(parents=True)
+            (root / "packs" / slug / "skill.yaml").write_text("name: x\n", encoding="utf-8")
+            job.request_cancel()
+            return {"name": slug, "display_name": industry}
+
+        monkeypatch.setattr(plmod, "create_pack", fake_create_pack)
+        pl._run_packgen(job, client, slug)
+        assert job.state == "cancelled", job.state
+        assert (tmp / "packs" / slug).is_dir(), "前置：删不掉才要测文案"
+        told = " ".join(s["title"] for s in job.steps)
+        assert "未能回收" in told and slug in told, \
+            f"回收失败只进了日志，界面上看不出为什么下次同名建不了：{told!r}"
+    finally:
+        monkeypatch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_second_same_name_is_refused_before_any_token_is_spent():
     pl, tmp, client = _pipeline()
     try:

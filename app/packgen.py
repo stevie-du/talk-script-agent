@@ -195,7 +195,13 @@ def _max_slug_units() -> int:
 
 
 def _utf16_units(s: str) -> int:
-    return sum(2 if ord(c) > 0xFFFF else 1 for c in s)
+    """单位与上限都得只有一个出处：直接委托给 `schemas.utf16_units`。
+
+    第 21 轮复核 P2：`schemas` 那边按码点（`max_length`）、这里按码元，
+    `'𠀀' * 40` 就是"请求层放行、建包时被拒"的两本账。现在两边调同一个函数。
+    """
+    from .schemas import utf16_units
+    return utf16_units(s)
 
 
 def slug_problem(slug: str, typed: str = "") -> str:
