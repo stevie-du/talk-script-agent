@@ -79,7 +79,7 @@ class LLMConfig:
     timeout: float = 180      # 单次请求超时（秒）
     # 单次请求的输出预算。必须显式给足：推理型模型（deepseek 系等）的「思考」
     # token 也计入这个预算，服务端默认值容易被思考吃光，导致 content 返回空串
-    # （HTTP 仍是 200），表现为「模型输出无法解析为 ScriptDraft」。
+    # （HTTP 仍是 200），表现为「模型连续 N 次输出的结构都不符合要求」。
     max_tokens: int = DEFAULT_CONFIG["llm"]["max_tokens"]
 
 

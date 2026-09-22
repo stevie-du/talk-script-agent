@@ -105,10 +105,21 @@ class JobBudget(RuntimeError):
     """
 
     def __init__(self, seconds: float):
+        s = max(0.0, float(seconds))
+        # 界面计时器报的是秒（progress.js「已用 N 秒」），这里原来只报分钟：
+        # 「已用 1205 秒」配「超过 20 分钟仍未完成」，用户对不上这是同一本账，
+        # 也就看不出"我到底等了多久被停的"。分钟数不整就带一位小数（90 秒说
+        # 1.5 分钟，不说"超过 2 分钟" —— 那是虚报）。
+        if s >= 60:
+            m = f"{s / 60:.1f}"
+            m = m[:-2] if m.endswith(".0") else m
+            span = f"{m} 分钟（{s:g} 秒）"
+        else:
+            span = f"{s:g} 秒"
         super().__init__(
-            f"本次任务超过 {seconds / 60:.0f} 分钟仍未完成，已停止（模型响应过慢或接口反复重试）。"
-            f"可在设置里降低 llm.retries、或降低行业包 skill.yaml 的 limits.recheck_rounds，"
-            f"推理型模型频繁空内容时建议换非推理档。")
+            f"本次任务超过 {span} 仍未完成，已停止（模型响应过慢或接口反复重试）。"
+            "可在设置里降低 llm.retries、或降低行业包 skill.yaml 的 limits.recheck_rounds，"
+            "推理型模型频繁空内容时建议换非推理档。")
         self.seconds = seconds
 
 
@@ -136,6 +147,13 @@ class Job:
         self.stream_reasoning_len = 0
         self.stream_content_len = 0       # 正文连尾部都不需要，界面只显示字数
         self.started_at = datetime.now().timestamp()
+        # 最近一次"确实有进展"的时刻（走到检查点 / 记一步 / 收到流式增量都会刷新）。
+        # 回收网只看这个，不看 `started_at`：一条活着但在赶进度慢的作业，
+        # `started_at` 早就超过 2× 预算，而它的产物马上就要出来了。
+        self.last_progress = self.started_at
+        # 被第二道网"挂起来"：不再占用并发额度，但**条目、状态、产物一律不动**。
+        # 见 `_reap_stranded`：删条目会让还在跑它的前端 404，改状态会废掉它的状态机。
+        self.stranded = False
 
     # ── 状态迁移（唯一的写入口）──────────────────────────────
     def transition(self, to_state: str, *, force: bool = False, **fields) -> bool:
@@ -204,6 +222,14 @@ class Job:
         """
         self.started_at = time.time()
 
+    def touch(self) -> None:
+        """记一次「这条作业还在往前走」。浮点写，不需要锁。"""
+        self.last_progress = time.time()
+
+    def mark_stranded(self) -> None:
+        """回收网专用：只挂额度，不碰状态。"""
+        self.stranded = True
+
     def request_cancel(self) -> None:
         """置取消标志并立即落到 cancelled 终态。
 
@@ -237,6 +263,7 @@ class Job:
         直接截断文本会让字数停在 1500 字，那是**显示错误信息**，比占内存更糟。
         """
         with self._lock:
+            self.touch()        # 收到增量就是进展：慢但活着，不该被回收网当成卡死
             if kind == "reasoning":
                 self.stream_reasoning_len += len(text)
                 self.stream_reasoning = (self.stream_reasoning + text)[-STREAM_TAIL:]
@@ -327,7 +354,8 @@ class JobRegistry:
         """
         self._reap_stranded()      # 第二道网：先还额度再判（见 prune 的说明）
         with self._lock:
-            if sum(1 for j in self._jobs.values() if j.state in BUSY_STATES) >= limit:
+            if sum(1 for j in self._jobs.values()
+                   if j.state in BUSY_STATES and not j.stranded) >= limit:
                 return False
             self._jobs[job.id] = job
             return True
@@ -346,7 +374,7 @@ class JobRegistry:
         self._reap_stranded()      # 与 add_if_room 同一道第二网（取锁之前）
         with self._lock:
             busy = sum(1 for j in self._jobs.values()
-                       if j.state in BUSY_STATES and j.id != job.id)
+                       if j.state in BUSY_STATES and not j.stranded and j.id != job.id)
             if busy >= limit:
                 return False
             job.transition_or_raise(new_state, error=None)
@@ -383,9 +411,13 @@ class JobRegistry:
         ⚠ 仅供展示（`/api/meta` 的 `max_concurrent` 说明、测试）。
         **不要**用它做「够不够再开一个」的判断再另行 `add()` ——
         那是一次 TOCTOU，用 `add_if_room()`。
+
+        口径与 `add_if_room` 严格一致（含"被第二道网摘掉额度的不算"），
+        否则界面显示"3 个在跑"、后端却继续放行新作业 —— 又是一处两本账。
         """
         with self._lock:
-            return sum(1 for j in self._jobs.values() if j.state in BUSY_STATES)
+            return sum(1 for j in self._jobs.values()
+                       if j.state in BUSY_STATES and not j.stranded)
 
     def prune(self, keep: int = 200) -> None:
         """回收终态作业，只保留最近 `keep` 个，防止长跑进程内存无界增长。
@@ -396,34 +428,46 @@ class JobRegistry:
 
         ⚠ 第二道网（第 9 轮复核：`_guarded` 的兜底如果自己也在 `transition` 上抛，
         作业就永远停在忙态，而这里只回收终态 —— 症状照旧是"一个都没在跑，
-        生成却一直报已达上限"，只能重启）。远超预算的忙态作业**不可能还在正当工作**：
-        每一个检查点（阶段前的 `_stop_check`、流式逐行 abort、被夹到剩余预算的
-        读超时与退避）都在预算内就会触发。所以到 2× 预算仍挂着的，一律就地收口；
-        连收口都失败的最直接移出注册表（把额度还回来），并在日志里说清。
+        生成却一直报已达上限"，只能重启）。这里在回收终态之前先 `stranded` 掉
+        那些远超预算还挂在忙态的作业，把额度让出来；见 `_reap_stranded`。
         """
         self._reap_stranded()
         with self._lock:
             self._trim(lambda j: j.state in TERMINAL_STATES, keep)
 
     def _reap_stranded(self) -> None:
+        """把「远超预算却还挂在忙态」的作业从并发额度里摘出去 —— 只摘额度。
+
+        两道网的取舍（第 10 轮复核把前一版判为 P1）：
+        - 前一版 `force("failed")`：看着像收口，实际把这条作业的状态机废了。
+          `failed -> done` 不在迁移表里（实测），线程后面每一次
+          `transition_or_raise` 都抛 StateConflict，产物还会被「取消/失败 → 撤掉」
+          那一支删走 —— 回收网自己杀掉了本来会成功的作业。
+        - 再前一版本 `_jobs.pop`：额度确实还了，但 `/api/jobs/{id}` 从此 404
+          （`get` 抛 KeyError），正在看进度的界面变成"作业不存在"；
+          而这条作业明明还在跑、马上就要出产物。
+
+        所以现在只置 `stranded`：条目、状态、产物、轮询全都不动，
+        只有额度计数（`add_if_room` / `transition_if_room` / `running_count`）不再算它。
+        作业自己那套预算闸门照旧生效：每个检查点都会以「预算用尽」收工，
+        那条路走的是它自己的状态机，迁移合法、说明也写得清楚。
+
+        单向门（`touch` 不会撤销 stranded）是刻意的：额度已经还给下一条作业了，
+        再收回去就是同一份算力卖两次。
+        """
         limit = JOB_BUDGET_SECONDS * STALE_JOB_MULTIPLIER
+        now = time.time()
         with self._lock:
             stale = [j for j in self._jobs.values()
-                     if j.state not in TERMINAL_STATES
-                     and time.time() - j.started_at > limit]
+                     if j.state in BUSY_STATES
+                     and not j.stranded
+                     and now - j.last_progress > limit]
+            for j in stale:
+                j.mark_stranded()
         for j in stale:
-            age = int(time.time() - j.started_at)
-            try:
-                j.transition("failed", force=True,
-                             error=f"作业超过整作业预算 {limit:.0f} 秒仍未收口（已运行 {age} 秒），"
-                                   f"由引擎回收额度")
-                log.warning("作业 %s 停在 %s 已 %s 秒，强制收口以回收并发额度", j.id, j.state, age)
-            except BaseException:  # noqa: BLE001
-                # 收口这条路本身也坏了（MemoryError 一类）：那就只把额度还回来，
-                # 作业对象仍在线程手里，它的产物照常落盘、只是不再占注册表位置。
-                log.exception("作业 %s 收口失败，直接从注册表移除以归还额度", j.id)
-                with self._lock:
-                    self._jobs.pop(j.id, None)
+            log.warning("作业 %s 已 %s 秒无任何进展，不再占用并发额度"
+                        "（作业线程仍在跑，条目与产物保留；如长期无进展请检查上游接口）",
+                        j.id, int(now - j.last_progress))
 
     def _trim(self, pred, keep: int) -> None:
         """丢掉匹配 pred 的、最旧的超出部分（调用方须持锁）。"""

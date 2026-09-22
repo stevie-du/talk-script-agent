@@ -243,9 +243,13 @@ def test_stub_slug_agrees_with_the_engine_over_a_unicode_sweep(tmp_path):
         stub_out = got[inputs.index(ch)]
         assert stub_out == ch or ch in single, (
             f"白名单里的 U+{ord(ch):04X} 两边已经一致（Node 升级了？）——把这条从清单删掉")
-    # 多字符的输入里，只有含分裂码点的那条才允许分歧
+    # 多字符输入的分歧必须由**某个字符自己的分歧**解释（第 10 轮复核 P3）：
+    # 原来只判"串里含白名单码点"，那等于谁都能免 —— 在任意字符串里塞一个 U+088F，
+    # 两边真正的不一致就被这条豁免吞掉了。而串里每个字符两边都一致时，
+    # 两套实现看到的是同一份"单词/非单词"划分，整串结果不可能分歧 ——
+    # 所以「找不到一个自带分歧的字符」的多字符不一致，一定是判据本身出了问题。
     multi = [(s, a, b) for s, a, b in bad if len(s) > 1
-             and not any(ch in known_version_split for ch in s)]
+             and not any(ch in single for ch in s)]
     assert not multi, ("含碰撞语义的多字符输入不一致（前 6 条）：\n"
                        + "\n".join(f"  {s!r}: 引擎={a!r} 桩={b!r}" for s, a, b in multi[:6]))
     # 真实用例的语义还得对得上：两种写法同一个目录名、纯符号起不出名字

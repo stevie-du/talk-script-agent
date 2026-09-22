@@ -218,8 +218,20 @@ def _humanize_validation(errors: list) -> str:
             parts.append(f"{label}只能是这几个值之一：{allowed}" if allowed
                          else f"{label}的值不在允许的范围内")
         elif kind in ("json_invalid", "json_load_failed"):
-            parts.append(f"{label}不是合法的 JSON" +
-                         (f"（{e.get('msg')}）" if e.get("msg") else ""))
+            # pydantic 给 JSON 解析错的 loc **不是字段名**，而是位置：实测
+            # `{"body": 1 个数}` 形态 `["body", 14]`（第 14 个字符），
+            # 两个数的形态是 `["body", 行, 列]`。之前取末段当"哪个框"，
+            # 于是界面上一句「14 不是合法的 JSON（JSON decode error）」——
+            # 一个不存在的框 + 一句英文，等于没说。
+            nums = [x for x in loc if str(x).isdigit()]
+            if len(nums) >= 2:
+                where = f"（第 {nums[0]} 行第 {nums[1]} 列附近）"
+            elif nums:
+                where = f"（第 {nums[0]} 个字符附近）"
+            else:
+                where = ""
+            parts.append(("请求内容不是合法的 JSON" if len(nums) else
+                          f"{label}不是合法的 JSON") + where)
         elif kind.endswith("_parsing"):
             parts.append(f"{label}要填数字")
         elif kind == "string_type":

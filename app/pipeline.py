@@ -994,6 +994,8 @@ class Pipeline:
         if not job.transition("done", result=result):
             # 落盘期间用户按了停止：产物刚写进去，但作业已取消 —— 撤掉，
             # 否则历史里会留下一条「已停止却带着完整产物」的幽灵记录。
+            # ⚠ 回收网**不参与**这里（第 10 轮复核）：它只把额度让出来、从不把活作业
+            #   改成终态。所以这条 transition 失败只可能是用户真点了停止。
             self.store.delete(job.id)
             return
         self.registry.prune()
@@ -1182,6 +1184,7 @@ class Pipeline:
         return cb
 
     def _step(self, job: Job, key: str, title: str, data: dict):
+        job.touch()          # 记一步 = 有进展（回收网看的是这个，不是 started_at）
         job.steps.append({"key": key, "title": title, "data": data,
                           "ts": datetime.now().isoformat(timespec="seconds")})
 
@@ -1194,6 +1197,9 @@ class Pipeline:
         超预算是失败（要落成 failed 并说清原因）。合并成一种的话，上游卡死会被
         报成「用户点了停止」—— 那是同一类假信号。
         """
+        # 走到检查点本身就是"还在往前走"的证据；放在两条抛错之前，
+        # 这样"被预算判停"的作业最后一次进展时刻仍是真的最后一次。
+        job.touch()
         if job.is_cancelled():
             raise JobCancelled()
         if job.overdue():

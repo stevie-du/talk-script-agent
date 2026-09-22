@@ -21,12 +21,14 @@
   - **流式分支的空内容诊断**：原来 `if on_delta: return self._stream_once(...)`
     直接返回，绕过了后面那段「模型返回空内容 → 请调大 max_tokens」的诊断，
     而 pipeline 全程都传 on_delta —— 于是这条最有用的排障提示在真实使用中
-    永远不会出现，用户只会看到误导性的「模型输出无法解析为 ScriptDraft」。
+    永远不会出现，用户只会看到误导性的「模型连续 N 次输出的结构都不符合要求」
+    （那是"它没写完"被说成"它写坏了"）。
 """
 from __future__ import annotations
 
 import email.utils
 import json
+import logging
 import random
 import re
 import threading
@@ -39,9 +41,10 @@ from pydantic import BaseModel, ValidationError
 from .config import LLMConfig
 from . import mock_fixtures
 
+log = logging.getLogger(__name__)
+
 # 这些状态码视为瞬时故障，值得重试；401/403/400 等重试无意义
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
-
 # 429（限流）的等待口径。主流 SDK（openai / anthropic / liteLLM）对限流
 # 的共识：优先按上游 Retry-After 等，没有就给**比普通故障更长的**指数退避
 # —— 限流要等窗口过去，短退避试了也白试。
@@ -94,8 +97,38 @@ PARSE_ERROR_CHARS = 200
 
 
 def _validation_detail(e: Exception) -> str:
-    """解析错误的回显：压成单行 + 截断。pydantic 的英文原文只取前 200 字符。"""
+    """解析错误的回显：压成单行 + 截断。pydantic 的英文原文只取前 200 字符。
+
+    ⚠ 这一份是**给模型看的**（chat_json 的 re-prompt）与写日志用的；界面上那句
+    用户话术走 `_structural_summary` —— 原文里有 `2 validation errors for ScriptDraft`
+    这种内部类名，贴到中文错误框里等于没说话（第 10 轮复核 P3）。
+    """
     return re.sub(r"\s+", " ", str(e or ""))[:PARSE_ERROR_CHARS]
+
+
+def _structural_summary(e: Exception) -> str:
+    """把"模型这次又没按结构输出"收成一句中文：哪个字段缺了、哪个字段类型不对。
+
+    只保留**字段路径**（那是用户能对着行业包 schema 查的东西），丢掉英文句子。
+    没有结构化 errors 的（`json.loads` 直接失败）退回压扁的原文 —— 那种情况
+    不含类名，且"JSON 解析失败"本身就是能看的线索。
+    """
+    errs = []
+    if isinstance(e, ValidationError):
+        try:
+            errs = e.errors() or []
+        except Exception:                      # noqa: BLE001 —— 归因不许挡住收口
+            errs = []
+    parts = []
+    for er in errs[:6]:
+        loc = ".".join(str(p) for p in (er.get("loc") or ()))
+        kind = str(er.get("type") or "")
+        what = "缺了这个字段" if kind.endswith("missing") else "这个字段结构不对"
+        parts.append(f"{loc or '整体'}{what}")
+    if not parts:
+        return _validation_detail(e)
+    more = f"（另有 {len(errs) - 6} 处，详情看引擎日志）" if len(errs) > 6 else ""
+    return "；".join(parts) + more
 
 _client_lock = threading.Lock()
 _client: httpx.Client | None = None
@@ -290,8 +323,17 @@ class LLMClient:
         # 调用方（pipeline 的错误展示 / 测试）要能区分。
         if isinstance(last_err, EmptyContentError):
             raise last_err
-        raise LLMError(f"模型输出无法解析为 {model_cls.__name__}："
-                       f"模型输出结构不符 —— {_validation_detail(last_err)}")
+        # ⚠ 这句是**给用户看**的，不是给模型看的（给模型的那份在上面的 re-prompt 里，
+        #   那里才该贴 pydantic 原文）。修复前它写成「模型输出无法解析为 ScriptDraft」：
+        #   `ScriptDraft` 是代码内部的类名，界面上没有任何一个地方叫这个名字；
+        #   后面缀的又是整段英文 validation error —— 中文错误框里三处没有一句能照着做。
+        #   原文改成本地日志：排查要看的字段级细节一条不少，界面那句只留能照着做的。
+        log.warning("模型输出结构不符（%s 次尝试后用尽）：%s",
+                    max_retries + 1, _validation_detail(last_err))
+        raise LLMError(f"模型连续 {max_retries + 1} 次输出的结构都不符合要求"
+                       f"（{_structural_summary(last_err)}），本次任务已停止。"
+                       f"可以再试一次；反复出现时换一档不那么爱加解释文字的模型，"
+                       f"或在设置里调大输出预算。")
 
     def ping(self) -> tuple[bool, str]:
         """最小连通性测试：不约束输出格式，返回 (是否连通, 说明)。
@@ -606,7 +648,11 @@ class LLMClient:
         实际睡了 0.2 秒 —— 与这组函数存在的理由（通知与实睡同源）正好相反。
         """
         w = max(0.0, float(seconds))
-        return f"{w:.1f}" if 0 < w < 1 else f"{w:.0f}"
+        # 一位小数向下取整到"看不出来"也不行：2.5s 用 `:.0f` 会印成「2」（Python 用
+        # 银行家舍入，3.5 反而印 4）—— 通知与实睡同源是这组函数存在的理由，
+        # 差 0.5 秒也是差。所以整数才去掉小数点，带小数的一律原样说。
+        s = f"{w:.1f}"
+        return s[:-2] if s.endswith(".0") else s
 
     @staticmethod
     def _interruptible_sleep(seconds: float, should_abort=None,

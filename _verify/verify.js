@@ -292,7 +292,15 @@ window.__addCount = 0;
   // 归还时必须还得是本次占住的那个键。原来两处归还都写死 pgSlug('全屋定制/装修')：
   // 只要有用例提交别的行业名（口腔诊所、猫咖…），它的键就**永远留在集合里**，
   // 之后同一个名字再提交就被桩判成"正在创建中" —— 桩又比后端严了另一个方向。
-  var PG_HELD = null;
+  // ⚠ 一个键也不够（第 10 轮复核 P2）：两次提交不同行业名时，第二次会把归还用的
+  //   键覆盖掉，第一次那个名字就永久卡在"正在创建中" —— 桩凭空造出一个真引擎不会
+  //   给的、而且**再也退不掉的** 409。所以占位键跟着作业走：每个建包作业一条记录。
+  var PG_JOBS = {};      // job_id -> { slug: 本次占住的目录名, polls: 已轮询次数 }
+  var PG_SEQ = 0;
+  function pgJobId(u) {
+    var tail = String(u || '').split('/api/jobs/')[1] || '';
+    return tail.split(/[/?#]/)[0];
+  }
   // ⚠ 引擎按 slugify 之后的目录名占位，不是按用户输入的那串字：
   //   「全屋定制/装修」与「全屋定制 装修」都会落成 packs/全屋定制-装修/，
   //   真引擎第二次直接 409。桩原来按原文比，等于桩比后端宽容 ——
@@ -328,6 +336,9 @@ window.__addCount = 0;
     {rel:'rules/duration.md',size:1024},
     {rel:'private/pricing.md',size:896},
   ];
+  // 桩认为"盘上真有的包"：出厂的 elevator + 建包流程做出来的 fitment。
+  // 详情分支的显示名与 /file 的包名闸都从这一本来 —— 两处各写一份就是两本账。
+  var KNOWN_PACKS = { elevator: '电梯行业包', fitment: '全屋定制/装修' };
   function bornAt(id, backMs) {
     if (!born[id]) born[id] = new Date(Date.now() - backMs).toISOString();
     return born[id];
@@ -658,6 +669,12 @@ window.__addCount = 0;
       return mk({ ok:true, name:undName, draft: isDraft(undName) });
     }
     if (s.indexOf('/api/packs/') >= 0 && s.indexOf('/file') >= 0) {
+      // ⚠ 包名也要问一本账（第 10 轮复核 P3）：这段原来**完全忽略包名**，
+      //   任何包名都回 DET_FILES 里的内容 —— 而真引擎先构造 Pack(root, name)，
+      //   不存在的包直接 404（app/server.py 的 pack_file，在 private/ 判定**之前**）。
+      //   桩替实现把这一格演成成功，「界面点了个不存在的包还能读到正文」就量不出来。
+      var filePack = decodeURIComponent((s.split('/api/packs/')[1] || '').split(/[/?#]/)[0] || '');
+      if (!KNOWN_PACKS[filePack]) return err(404, '行业包不存在：' + filePack);
       // 真实后端对 private/ 一律 403（安装包与导出都排除它，界面也不该能读全文），
       // 且**与包名无关**。桩原来只认 elevator：前面有用例建出第二个包之后，
       // 请求落到通用的 /api/packs/ 清单分支、拿回一份没有 size/text 的东西，
@@ -747,31 +764,53 @@ window.__addCount = 0;
         return err(409, '行业包正在创建中：' + indKey);
       }
       PG_CLAIMED.push(indKey);
-      PG_HELD = indKey;          // 归还时必须还得是**这一个**键（见 PG_CLAIMED 处的说明）
+      PG_SEQ++;
+      var pgId = 'jobpg' + PG_SEQ;          // 每次提交一个独立作业：真引擎就是按 job.id 记占位的
+      PG_JOBS[pgId] = { slug: indKey, polls: 0, state: 'packing' };
       calls.pg = 0;
-      return mk({ job_id: 'jobpg' });
+      return mk({ job_id: pgId });
     }
-    if (s.indexOf('/api/jobs/jobpg/cancel') >= 0) {
+    if (s.indexOf('/api/jobs/jobpg') >= 0 && s.indexOf('/cancel') >= 0) {
+      var cid = pgJobId(s);
       if (PGCANCELFAIL) {
         calls.failpgcancel = (calls.failpgcancel || 0) + 1;
         return err(500, '引擎没有接受这次取消：作业正在写文件');
       }
       calls.cancel++;
-      PG_CLAIMED = PG_CLAIMED.filter(function(x){ return x !== PG_HELD; }); PG_HELD = null;
-      return mk({ id: 'jobpg', state: 'cancelled', kind: 'packgen', params: {} });
+      // 只归还**这条作业**占住的键（第 10 轮 P2：写死一个键会把别人的占位删掉，
+      // 或把自己的留在集合里永久 409）。作业条目本身留着 —— 真引擎的终态作业还在
+      // 注册表里（prune 只保留最近 200 条），轮询它照样有答案，不是 404。
+      if (PG_JOBS[cid]) {
+        PG_CLAIMED = PG_CLAIMED.filter(function(x){ return x !== PG_JOBS[cid].slug; });
+        PG_JOBS[cid] = { slug: '', polls: PG_JOBS[cid].polls, state: 'cancelled' };
+      }
+      return mk({ id: cid, state: 'cancelled', kind: 'packgen', params: {} });
     }
     if (s.indexOf('/api/jobs/jobpg') >= 0) {
-      calls.pg++;
-      if (calls.pg <= 2) {
-        return mk({ id: 'jobpg', kind: 'packgen', state: 'packing',
+      var pid = pgJobId(s);
+      var pj = PG_JOBS[pid];
+      if (!pj) {
+        // 不认识这个作业 id：真引擎此时是 404，不是"随便回一份别人的结果"。
+        return err(404, '作业不存在');
+      }
+      if (pj.state && pj.state !== 'packing') {
+        // 已收工：继续回同一份终态快照（幂等轮询，不因为归还过就变 404）
+        return pj.state === 'done'
+          ? mk({ id: pid, kind: 'packgen', state: 'done', result: PG_RESULT })
+          : mk({ id: pid, kind: 'packgen', state: pj.state, params: {} });
+      }
+      pj.polls++;
+      if (pj.polls <= 2) {
+        return mk({ id: pid, kind: 'packgen', state: 'packing',
           params: { industry: '全屋定制/装修' },
           steps: [{ key: 'retry', title: '接口自动重试·第 1/2 次',
                     ts: '2026-09-20T10:00:05', data: { note: '模型返回空内容' } }],
           stream: { phase: '行业包生成', reasoning_tail: '先想这个行业的细分领域……',
                     reasoning_len: 512, content_len: 0 } });
       }
-      PG_CLAIMED = PG_CLAIMED.filter(function(x){ return x !== PG_HELD; }); PG_HELD = null;  // finally 归还
-      return mk({ id: 'jobpg', kind: 'packgen', state: 'done', result: PG_RESULT });
+      PG_CLAIMED = PG_CLAIMED.filter(function(x){ return x !== pj.slug; });
+      PG_JOBS[pid] = { slug: '', polls: pj.polls, state: 'done' };   // finally 归还
+      return mk({ id: pid, kind: 'packgen', state: 'done', result: PG_RESULT });
     }
     if (s.indexOf('/api/packs/') >= 0) {
       // 详情必须**按请求的包名**回：原来无论问哪个包都回「电梯行业包」，
@@ -779,8 +818,7 @@ window.__addCount = 0;
       // （批次 10 复核抓到 settings.js 的 undraft 正是读错了对象）。
       var segDet = (s.split('/api/packs/')[1] || '');
       var detName = decodeURIComponent(segDet.split(/[/?#]/)[0] || 'elevator');
-      var DET_DISPLAY = { elevator: '电梯行业包', fitment: '全屋定制/装修' };
-      var detDn = DET_DISPLAY[detName] || detName;   // 没登记的包名就**原样回显**，不再一律冒充 fitment
+      var detDn = KNOWN_PACKS[detName] || detName;   // 没登记的包名就**原样回显**，不再一律冒充 fitment
       // 校对清单：真实后端按**盘上有没有 校对清单.md** 回（app/server.py 读那个文件，
       // 只有 packgen 建包时写过；「转正」也不删它）。原来这里恒回一句
       // '1. 核对参数 / 2. 核对禁用词' —— 既不是 markdown 形状（P3-50 的渲染器在桩上
@@ -5643,6 +5681,52 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   await evalIn(`if (window.__ts.settingsOpen) document.getElementById('btn-close-settings').click();
     window.__ts.newChat(); return true;`);
   await sleep(300);
+
+  // ── 12p) 桩自己的建包占位必须按作业归还（第 10 轮复核 P2）───────────
+  // 桩原来用**一个全局变量**记"这次提交占住了哪个目录名"：两次不同行业的提交会互相
+  // 覆盖归还用的键，第一次那个名字就永久卡在"正在创建中" —— 桩凭空造出一个真引擎
+  // 不会给、而且再也退不掉的 409。这条断言直接量桩（不绕界面），要的是界面走不到的
+  // "并发两次"形态：A 收工**不能**把 B 还在排的队放掉，B 也**不能**被 A 的收工误放。
+  const pgTwoJobs = await evalIn(`return (async () => {
+    var api = function (u, body) {
+      return window.fetch(u, { method: body ? 'POST' : 'GET',
+        headers: { 'Content-Type': 'application/json' },
+        body: body ? JSON.stringify(body) : undefined })
+        .then(function (r) { return r.json().then(function (b) { return { st: r.status, b: b }; }); });
+    };
+    var newPack = function (ind) {
+      return api('/api/packs/create', { industry: ind, description: ind + '，面向周边居民获客' });
+    };
+    var pollTo = function (id) {
+      var last = null;
+      var one = function (i) {
+        if (i > 8 || (last && last.b.state === 'done')) return Promise.resolve(last);
+        return api('/api/jobs/' + id).then(function (r) { if (r.b.state) last = r; return one(i + 1); });
+      };
+      return one(0).then(function () { return last; });
+    };
+    var a = await newPack('猫咖甲');
+    var b = await newPack('口腔诊所乙');
+    var ida = a.b.job_id, idb = b.b.job_id;
+    var ra = await pollTo(ida);                    // A 先收工
+    var dupA = await newPack('猫咖甲');            // 自己的键该还得还
+    var dupB = await newPack('口腔诊所乙');        // B 还在跑：这个名字必须仍然 409
+    var midB = await api('/api/jobs/' + idb);      // B 的作业不能被 A 的收工改动
+    var rb = await pollTo(idb);
+    var dupB2 = await newPack('口腔诊所乙');       // B 收工后它的键才释放
+    var stillThere = await api('/api/jobs/' + ida);  // 收工过的作业还在注册表里（真引擎 prune 才删）
+    return { sa: a.st, sb: b.st, distinct: ida !== idb && !!ida, ra: ra && ra.b.state,
+             dupA: dupA.st, dupB: dupB.st, midB: midB.b.state, rb: rb && rb.b.state,
+             dupB2: dupB2.st, still: stillThere.st + ':' + (stillThere.b.state || ''),
+             idA2: dupA.b.job_id, idB2: dupB2.b.job_id };
+  })();`);
+  check("桩：并发两次建包各自归还自己的占位（A 收工不放 B 的队，也不误伤 B 的作业）",
+    pgTwoJobs.sa === 200 && pgTwoJobs.sb === 200 && pgTwoJobs.distinct === true
+      && pgTwoJobs.ra === 'done'
+      && pgTwoJobs.dupA === 200 && pgTwoJobs.dupB === 409
+      && pgTwoJobs.midB === 'packing' && pgTwoJobs.rb === 'done'
+      && pgTwoJobs.dupB2 === 200 && pgTwoJobs.still === '200:done',
+    JSON.stringify(pgTwoJobs));
 
   // ── 13) 布局 ─────────────────────────────────────────────
   const layout = await evalIn(`return {

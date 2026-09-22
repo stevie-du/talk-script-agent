@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import re
 import shutil
 import sys
@@ -27,7 +28,7 @@ sys.path.insert(0, str(ROOT))
 
 from app.config import LLMConfig, load_config                       # noqa: E402
 from app.jobs import (JOB_BUDGET_SECONDS, Job, JobBudget, JobCancelled,  # noqa: E402
-                       TERMINAL_STATES)
+                      JobRegistry, TERMINAL_STATES)
 from app.llm import RETRY_UPGRADE_CAP, LLMClient, LLMError, _brief    # noqa: E402
 from app.packgen import claim_slug, preview_slug, release_slug       # noqa: E402
 from app.pipeline import (MAX_CONCURRENT_JOBS, Pipeline, ScriptDraft,  # noqa: E402
@@ -1107,45 +1108,181 @@ def test_read_error_survives_a_cause_that_raises_base_exception():
         _safe_str(_NoStr())
 
 
-# ── 第 9 轮 N7：忙态漏槽的第二道网 ──────────────────────────────
-def test_stranded_busy_jobs_are_reaped_but_fresh_ones_are_not():
-    """远超预算仍挂在忙态的作业要被收口；正常在跑的一条不许被碰。
+# ── 第 9/10 轮：忙态漏槽的第二道网（只归还额度，绝不动作业）──
+def _stranded(reg, jid, **kw):
+    j = Job(jid, "generate", kw)
+    assert reg.add_if_room(j, MAX_CONCURRENT_JOBS)
+    j.transition_or_raise("selecting")
+    j.last_progress = time.time() - JOB_BUDGET_SECONDS * 3
+    return j
 
-    `prune()` 原来只回收终态，于是"停在忙态"等于永久占一个并发额度
-    （本轮已经修过多条把作业留在忙态的路径，但兜底自己坏掉时仍然没有后手）。
+
+def test_a_stuck_job_frees_its_slot_without_being_mutated():
+    """回收网的唯一职责是把并发额度还回来 —— 作业自己的状态它不许碰。
+
+    第 10 轮复核把上一版判成 P1：把还在往前走的作业 force 成 failed，看着像收口，
+    实际是废掉它的状态机（`failed → done` 不在迁移表里），后面每一次
+    `transition_or_raise` 都抛 StateConflict，作业半路死掉，已写进去的产物还会被
+    "取消 → 撤掉"那一支删走。实测两条作业（收与不收）都以 failed + 零产物收场。
     """
-    from app import jobs as J
-    reg = J.JobRegistry()
-    fresh = J.Job("stale-fresh", "generate", {})
-    stranded = J.Job("stale-old", "generate", {})
-    assert reg.add_if_room(fresh, 4) and reg.add_if_room(stranded, 4)
-    stranded.transition_or_raise("selecting")
-    stranded.started_at = time.time() - J.JOB_BUDGET_SECONDS * 3
+    reg = JobRegistry()
+    fresh = Job("fresh-1", "generate", {})
+    assert reg.add_if_room(fresh, MAX_CONCURRENT_JOBS)
+    stuck = _stranded(reg, "stuck-1")
     reg.prune()
-    assert stranded.state == "failed", stranded.state
-    assert "回收额度" in (stranded.error or ""), stranded.error
-    assert fresh.state == "queued", "在预算内的作业被误伤"
+    assert reg.running_count() == 1, "额度没还回来"
+    assert stuck.state == "selecting", f"回收网改了作业状态：{stuck.state}"
+    assert fresh.state == "queued" and reg.get("fresh-1") is fresh
+
+
+def test_a_full_house_of_stuck_jobs_still_admits_a_new_one():
+    """症状本身：四条卡死的作业曾把后来所有生成都挡在 409 之外，只能重启。
+
+    `running_count`（界面看到的"在跑几条"）与 `add_if_room`（真的放不放行）
+    必须同一个口径，否则又是一处两本账：显示"0 个在跑"却继续拒绝新作业。
+    """
+    reg = JobRegistry()
+    stuck = [_stranded(reg, f"stuck-{i}") for i in range(MAX_CONCURRENT_JOBS)]
+    reg.prune()
+    assert reg.running_count() == 0, "第二道网没把额度算回去"
+    nxt = Job("next-1", "generate", {})
+    assert reg.add_if_room(nxt, MAX_CONCURRENT_JOBS), "还是被卡死的作业挡住了"
+    # 三个额度口径都要一致 —— 重写走的是另一条路（`transition_if_room`），
+    # 只补 `add_if_room` 的话，症状会在「重写本段」上原样复现。
+    done = Job("done-1", "generate", {})
+    assert reg.add_if_room(done, MAX_CONCURRENT_JOBS)
+    done.transition_or_raise("writing")
+    done.transition_or_raise("done")
+    assert reg.transition_if_room(done, "rewriting", MAX_CONCURRENT_JOBS), \
+        "卡死的作业还在堵住单段重写"
+    # 被摘额度的作业仍然可查：条目没被删，界面不会变成"作业不存在"
+    snaps = {s["id"] for s in reg.snapshots()}
+    assert {j.id for j in stuck} <= snaps
+    assert all(j.stranded and not j.is_cancelled() for j in stuck)
+
+
+def test_a_busy_but_progressing_job_is_never_reaped():
+    """一直在往前走的作业，哪怕跑了远超预算，也不该被回收网碰。"""
+    reg = JobRegistry()
+    j = Job("alive-1", "generate", {})
+    assert reg.add_if_room(j, MAX_CONCURRENT_JOBS)
+    j.transition_or_raise("selecting")
+    j.started_at = time.time() - JOB_BUDGET_SECONDS * 3      # 按开始时间早该"超时"
+    j.last_progress = time.time() - 1.0                      # 一秒前还在推进
+    reg.prune()
+    assert j.state == "selecting" and reg.get("alive-1") is j
     assert reg.running_count() == 1
 
 
-def test_the_net_frees_the_slot_even_when_transition_raises():
-    """收口这条路自己也坏了（MemoryError 一类）时，额度照样要还回来。
+def test_checkpoints_are_what_count_as_progress():
+    """「有进展」的三个来源都要真的刷新时间戳，否则第二道网要么误伤要么失效。"""
+    j = Job("touch-1", "generate", {})
+    j.last_progress = 0.0
+    Pipeline._stop_check(j)
+    t1 = j.last_progress
+    assert t1 > 0, "检查点不算进展"
+    j.last_progress = 0.0
+    Pipeline._delta_handler(j, "文案撰写")("content", "字")
+    assert j.last_progress > 0, "流式增量不算进展"
+    j.last_progress = 0.0
+    j.push_delta("reasoning", "再想一点")
+    assert j.last_progress > 0, "push_delta 不算进展"
 
-    这正是第 9 轮复核点出的残留：`_guarded` 的兜底若在自己那次 `job.transition`
-    上抛，作业就停在忙态、没有任何东西能救。第二道网因此不能依赖同一次调用。
+
+def test_a_reaped_job_that_still_finishes_keeps_its_artifact(tmp_path, monkeypatch):
+    """被第二道网摘掉额度的作业如果真跑完了，产物、历史与轮询都必须照旧。
+
+    这是回收网唯一可能被误伤的路径（判据是"40 分钟毫无进展"，正常作业每个
+    检查点都会刷新，所以基本进不来；但一旦进来，代价不能是用户的数据）。
+    上一版把作业从注册表里 `pop` 掉，这条测试直接 `KeyError` —— 也就是界面上
+    的"作业不存在"，而它其实还在跑。
     """
-    from app import jobs as J
-    reg = J.JobRegistry()
-    jobs_ = [J.Job(f"leak-{i}", "generate", {}) for i in range(4)]
-    for j in jobs_:
-        assert reg.add_if_room(j, 4)
-    stuck = jobs_[0]
-    stuck.transition_or_raise("selecting")
-    stuck.started_at = time.time() - J.JOB_BUDGET_SECONDS * 3
+    pl = _pipeline(tmp_path)
+    orig = Pipeline._step
+    fired = {"done": False, "job": None, "stranded": None}
 
-    def boom(*a, **k):
-        raise MemoryError("连迁移都失败")
-    stuck.transition = boom                       # 收口失败的最坏形态
-    newcomer = J.Job("newcomer", "generate", {})
-    assert reg.add_if_room(newcomer, 4) is True, "四槽全被漏掉的忙态占死，第二道网没生效"
-    assert reg.running_count() <= 4
+    def step(self, job, key, title, data):
+        out = orig(self, job, key, title, data)
+        if key.startswith("write") and not fired["done"]:
+            fired["done"] = True
+            fired["job"] = job
+            job.last_progress = 0.0        # 伪装成"很久没进展"，但线程继续往前走
+            self.registry.prune()
+            fired["stranded"] = job.stranded
+        return out
+
+    monkeypatch.setattr(Pipeline, "_step", step)
+    jid = pl.start_generate(_req())
+    snap = wait_job(pl, jid, timeout=120)
+    assert fired["done"], "前置没成立：改写步骤的那一步根本没跑到"
+    assert fired["stranded"] is True, "第二道网没触发 —— 这条测试什么都没测到"
+    assert snap["state"] == "done", f"被回收的作业没能正常收尾：{snap}"
+    assert pl.store.read_result(jid), "产物没了 —— 回收网把用户等出来的东西弄丢了"
+    assert any(h.get("id") == jid for h in pl.store.history()), "历史里没有这条"
+    # 轮询口径不能被弄坏：作业还在的时候 `/api/jobs/{id}` 认得它，跑完也认得
+    assert pl.registry.get(jid) is fired["job"]
+
+
+# ── 第 10 轮 P3：三处"说给用户听的话"必须与真的那本账同源 ─────────
+def test_the_wait_shown_is_the_wait_slept_even_above_one_second():
+    """`:.0f` 把 2.5 秒印成「2」也是说谎 —— 通知与实睡同源不分数量级。
+
+    Python 用银行家舍入，3.5 又印成 4：同一个函数两种错法，所以整数以外一律带小数。
+    """
+    assert LLMClient._fmt_wait(2.5) == "2.5"
+    assert LLMClient._fmt_wait(3.5) == "3.5"
+    assert LLMClient._fmt_wait(0.2) == "0.2"
+    assert LLMClient._fmt_wait(30.0) == "30"
+    assert LLMClient._fmt_wait(0.0) == "0"
+
+
+def test_the_budget_message_names_the_same_unit_the_timer_uses():
+    """界面计时是秒（progress.js「已用 N 秒」），文案只报分钟就对不上是同一件事。
+
+    分钟数不整时报 1.5 而不是"超过 2 分钟" —— 虚报的等待时长比不说还糟。
+    """
+    big = str(JobBudget(JOB_BUDGET_SECONDS))
+    assert "20 分钟" in big and "1200 秒" in big, big
+    odd = str(JobBudget(90.0))
+    assert "1.5 分钟" in odd and "超过 2 分钟" not in odd, odd
+    small = str(JobBudget(45.0))
+    assert "45 秒" in small and "分钟" not in small, small
+
+
+def test_a_structurally_bad_model_output_never_quotes_internal_class_names(monkeypatch,
+                                                                           caplog):
+    """模型连续输出坏结构时，界面上那句不许是「无法解析为 ScriptDraft」+ 整段英文。
+
+    `ScriptDraft` 是代码内部的类名（连 pydantic 自己印出来的原文里都有它），界面上
+    没有任何一个地方叫这个。给用户的话要带"下一步做什么"与**字段路径**；原文转日志，
+    给模型的 re-prompt 里照旧留原文 —— 那才是看得懂英文的那一方。
+    """
+    import httpx
+
+    def handler(_req):
+        return httpx.Response(200, json={"choices": [{
+            "message": {"content": '{"sections": [{"oops": 1}]}'}, "finish_reason": "stop"}]})
+
+    client = _client()
+    seen = []
+
+    def spy(req):
+        seen.append(json.loads(req.content.decode("utf-8")))
+        return handler(req)
+
+    real = httpx.Client
+    monkeypatch.setattr("app.llm.get_client",
+                        lambda *a, **k: real(transport=httpx.MockTransport(spy)))
+    caplog.set_level(logging.WARNING)
+    with pytest.raises(LLMError) as ei:
+        client.chat_json("write", "s", "u", ScriptDraft, max_retries=1)
+    msg = str(ei.value)
+    assert "ScriptDraft" not in msg, f"把类名贴给了用户：{msg}"
+    assert "validation errors" not in msg, f"整段英文原话进了错误框：{msg}"
+    assert msg.startswith("模型") and "结构" in msg, msg
+    assert "sections" in msg, f"字段路径被一并抹掉了：{msg}"
+    assert "调大输出预算" in msg, f"没给下一步：{msg}"
+    # 原文没丢：一次在日志里（排查），一次在给模型的那条 re-prompt 里
+    assert "validation errors for ScriptDraft" in caplog.text
+    reprompt = [m for m in seen[-1]["messages"] if m["role"] == "user"][-1]["content"]
+    assert "不是合法的目标 JSON" in reprompt and "validation errors" in reprompt

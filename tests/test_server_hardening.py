@@ -119,6 +119,17 @@ def test_validation_errors_are_said_in_chinese():
                     json={"industry": "？？？", "description": "纯符号名字探针"})
         assert r3.status_code == 400, r3.text
         assert "可用作目录名" in r3.json()["detail"], r3.json()
+        # 请求体整体不是合法 JSON：pydantic 把位置写在 loc 里（实测
+        # ["body", 14] —— 第 14 个**字符**），它不是字段名。之前取末段当"哪个框"，
+        # 于是界面显示「14 不是合法的 JSON（JSON decode error）」：
+        # 一个不存在的框 + 一句英文，等于没说（第 10 轮复核 P2）。
+        r4 = c.post("/api/generate", content=b'{"topic": "\xe6\xa2\xaf",,}',
+                    headers={"content-type": "application/json"})
+        assert r4.status_code == 422, r4.text
+        d4 = r4.json()["detail"]
+        assert "不是合法的 JSON" in d4, d4
+        assert "JSON decode error" not in d4, f"又把英文原话贴给了用户：{d4}"
+        assert not re.match(r"^\d+", d4), f"拿字符偏移量当了字段名：{d4}"
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1398,5 +1409,32 @@ def test_every_reachable_validation_error_reads_in_chinese():
             for seg in detail.split("；"):
                 assert not re.match(r"^\s*[A-Za-z]", seg), f"{name}: 这一段是英文原句 → {seg}"
             assert "Input should be" not in detail, f"{name}: 仍然直出 pydantic 英文 → {detail}"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_packgen_stub_sends_exactly_what_the_engine_says():
+    """UI 桩里那两句 422/400 文案必须与服务端真输出逐字相同。
+
+    桩里抄一份服务端文案，是"第三本账"：改文案的人只会改一处，
+    于是界面上的断言开始验证一句**引擎根本不会说的话** —— 门禁绿，量到的却是假的。
+    做法与其它跨文件守卫一致：两边各读一份事实再比，不在测试里第三遍抄写。
+    """
+    tmp = _tmp_root_mock()
+    try:
+        c = _client(tmp)
+        # 真输出（同一入口，与服务端唯一权威同源）
+        real_422 = c.post("/api/packs/create",
+                          json={"industry": "猫咖", "description": "小店"}).json()["detail"]
+        real_400 = c.post("/api/packs/create",
+                          json={"industry": "？？？", "description": "纯符号名字探针"}).json()["detail"]
+        assert "太短" in real_422 and "目录名" in real_400, (real_422, real_400)
+
+        stub = (ROOT / "_verify" / "verify.js").read_text(encoding="utf-8")
+        assert f"'{real_422}'" in stub, \
+            f"UI 桩的 422 文案与服务端不一致，界面在验证一句引擎不会说的话：{real_422}"
+        # 400 那句在桩里是两段字符串拼起来的（模板串里一行太长），逐段比对
+        assert real_400.split("，")[0] in stub and real_400.split("，", 1)[1].rstrip("。") in stub, \
+            f"UI 桩的 400 文案与服务端不一致：{real_400}"
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
