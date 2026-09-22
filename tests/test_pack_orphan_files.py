@@ -103,6 +103,22 @@ def _orphans(pack_dir: Path) -> list:
     return found
 
 
+def _bodies_with(src: str, name: str, slice_name: str) -> list:
+    """`src` 里**同时**含 `name` 与 `slice_name` 的那些函数体（返回函数名列表）。
+
+    只认函数体：类体或模块体里两个名字各自漂浮，说明不了"这一件由这一条路径注入"。
+    """
+    import ast
+    out = []
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            seg = ast.get_source_segment(src, node) or ""
+            if name in seg and slice_name in seg:
+                out.append(node.name)
+    return out
+
+
 def test_every_pack_knowledge_file_is_wired_or_declared_human_only():
     packs = [d for d in sorted((ROOT / "packs").glob("*")) if (d / "skill.yaml").exists()]
     assert packs, "一个包都没扫到 —— 这条守卫会在空集合上空转，先让它红"
@@ -119,14 +135,21 @@ def test_every_pack_knowledge_file_is_wired_or_declared_human_only():
                    if all(rel not in o for o in orphans.values()))
     assert not wired, (f"这些登记对应的文件已经**不再是孤儿**了 —— 在该包里被接进提示词，"
                        f"或者那份文件/那个包已经不在了；两种情况都该删掉这条登记：{wired}")
-    # ENGINE_WIRED 不是免检通道：文件名与切片名必须真的出现在引擎代码里。
-    # 引擎哪天不再加载它（改名、删分支），这份登记就红，而不是继续假装在注入。
-    app_src = "\n".join(p.read_text(encoding="utf-8") for p in sorted((ROOT / "app").glob("*.py")))
+    # ENGINE_WIRED 不是免检通道：文件名与切片/占位符名必须出现在**同一个函数体**里。
+    # 旧判据是"两者各自在 app/ 的某个角落出现过"—— 把两对调（`topics.md` 配 `hooks_slice`）
+    # 也不会红（第 16 轮复核 P3-11），而这条登记存在的理由恰恰是"这一件确实由这一条注入路径
+    # 加载"。类体与模块体不算一处接线 —— 那正是两个名字能各自漂浮的地方。
+    srcs = {p.name: p.read_text(encoding="utf-8")
+            for p in sorted((ROOT / "app").glob("*.py"))}
     for rel, slice_name in ENGINE_WIRED.items():
-        assert Path(rel).name in app_src, \
-            f"{rel} 已经不出现在 app/ 里了：它到底还进不进提示词？把登记或文件处理掉"
-        assert slice_name in app_src, \
-            f"占位符 {slice_name} 在 app/ 里找不到了：{rel} 的接线已断，别留在登记表里"
+        name = Path(rel).name
+        hits = [f"{f}:{fn}" for f, s in srcs.items()
+                for fn in _bodies_with(s, name, slice_name)]
+        assert hits, (
+            f"{rel} 与 {slice_name} 从没出现在同一个函数体里 —— 这条登记的接线大概已断。"
+            f"现状：文件名在 {sorted(f for f, s in srcs.items() if name in s)}，"
+            f"占位符在 {sorted(f for f, s in srcs.items() if slice_name in s)}。"
+            f"要么把接线补回同一处，要么把 {rel} 从 ENGINE_WIRED 摘掉并说明它现在怎么进提示词。")
 
 
 def test_the_guard_really_catches_a_new_unwired_file(tmp_path):
@@ -139,3 +162,17 @@ def test_the_guard_really_catches_a_new_unwired_file(tmp_path):
         f"前置：elevator 的孤儿都应已按 包/路径 登记，未登记的是 {sorted(found)}"
     (dst / "knowledge" / "新加而没接线.md").write_text("# 标题\n\n正文\n", encoding="utf-8")
     assert "knowledge/新加而没接线.md" in _orphans(dst), "加了没接线的文件却抓不到，守卫空转"
+
+
+def test_the_engine_wiring_check_needs_both_names_in_one_function():
+    """自证：对调两对 `文件 ↔ 切片` 必须红（第 16 轮复核 P3-11 的洞就在这）。"""
+    apart = ("def load():\n    return file_text('knowledge/topics.md')\n\n"
+             "def render():\n    return hooks_slice\n")
+    assert _bodies_with(apart, "topics.md", "hooks_slice") == [], \
+        "两个名字分处两函数也算接线 —— 那对调两对就不会红，正是被证伪的那条判据"
+    together = "def load():\n    return slice_of(file_text('knowledge/topics.md')), hooks_slice\n"
+    assert _bodies_with(together, "topics.md", "hooks_slice") == ["load"], "同函数体要算"
+    in_class = ("class Pack:\n"
+                "    def a(self):\n        return 'knowledge/topics.md'\n"
+                "    def b(self):\n        return hooks_slice\n")
+    assert _bodies_with(in_class, "topics.md", "hooks_slice") == [], "类体不算一处接线"
