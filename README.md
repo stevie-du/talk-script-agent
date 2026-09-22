@@ -147,12 +147,19 @@ cd desktop && npm run dist
 # 产物在 desktop/dist/：TalkScript Setup 0.2.0.exe（NSIS 安装包）+ TalkScript 0.2.0.exe（portable）
 # 打完必须认证一遍（逐项比包内引擎与当前源码，缺一步都算没过）：
 cd desktop && npm run verify:package
-# 它查七样：app/ 逐文件 md5 一致、renderer/ 逐文件 md5 一致、packs/ 逐文件 md5 一致
+# 它查 8 样（数目由 `desktop/scripts/verify-package.mjs` 头部那份 A./B./… 清单自己核对，
+# 见 tests/test_batch9_audit_findings.py::test_readme_lists_as_many_certification_checks_as_the_script_makes）：
+#   app/ 逐文件 md5 一致、renderer/ 逐文件 md5 一致、packs/ 逐文件 md5 一致
 # （private/ 按设计不出厂，只在源码侧出现不算差异）、包内不许出现任何 private 文件、
-# package.json 的 build.files 那几个主进程文件的字节必须真的在 resources/app.asar 里、
+# package.json 的 build.files 那几个主进程文件：解析 app.asar 的**头**，按
+#   路径 + 偏移 + 大小取出字节与磁盘源文件比 md5（不是"在归档里搜子串"），
+#   清单里列了而磁盘/归档里缺任一侧都算差异；
 # 两个 exe 必须是有效 PE（Setup 另带 NSIS 签名）且不小于 1 MB、
-# 产物时间戳不许早于会进包里的最新源码（只证"是否曾被重打"，不证明内容）。
-# 它证明不了的：干净机器上的安装 / 升级 / 卸载流程 —— 那需要一台真机或虚拟机。
+# 产物时间戳不许早于会进包里的最新源码（只证"是否曾被重打"，不证明内容）、
+# Setup.exe 的**载荷**（用 7z 列 NSIS 里的文件清单与大小）必须与 win-unpacked 同一本账
+#   —— 本机没有能读 NSIS 的 7z 时这一样会明写"跳过"并跟在结论行一起打印，不混进"认证通过"。
+# 它证明不了的：Setup 里每个文件的**字节**（要解 96 MB 载荷）、干净机器上的安装 / 升级 / 卸载
+# —— 后者需要一台真机或虚拟机。
 ```
 
 打包包含引擎代码、行业包与渲染层。**不含任何配置**（连模板都不带）——用户自己配置：

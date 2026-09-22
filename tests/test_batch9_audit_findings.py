@@ -298,3 +298,24 @@ def test_readme_worst_case_request_count_is_the_real_one():
             f"retries={retries} 时最坏应是 {computed} 次请求，README 还写着 {expected}"
         assert f"**{expected}**" in readme, \
             f"README 里 retries={retries} 的那句没标 {expected}，或数字还没同步"
+
+
+def test_readme_lists_as_many_certification_checks_as_the_script_makes():
+    """README 说 `npm run verify:package` 「查 N 样」，那个 N 由脚本自己报（第 22 轮）。
+
+    加一条判据（本轮就加了 H 条：Setup 载荷 ↔ win-unpacked）而 README 不改，
+    下一个人会以为脚本少查一步；反过来 README 加了而脚本没加，就是照着一份
+    不存在的清单验收。所以数目不许靠人记得同步 —— 与上面那条 README 报价同源。
+    """
+    import re
+
+    script = (ROOT / "desktop" / "scripts" / "verify-package.mjs").read_text(encoding="utf-8")
+    letters = re.findall(r"^//   ([A-Z])\.", script, re.M)
+    assert letters and letters == sorted(set(letters)), \
+        f"脚本头部的判据清单读不出来（要的是 `//   A.` 这种行、且字母不重复）：{letters}"
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    claimed = [int(n) for n in re.findall(r"它查 (\d+) 样", readme)]
+    assert claimed, "README 里那句「它查 N 样」被改述了：锚点与数目都要跟着改"
+    assert claimed == [len(letters)], \
+        f"README 报「{'、'.join(str(c) for c in claimed)} 样」，脚本实际列了 {len(letters)} 条" \
+        f"（{''.join(letters)}）—— 改脚本就一起改 README，别把这一格放宽"
