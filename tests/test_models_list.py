@@ -200,6 +200,38 @@ def test_fresh_install_can_add_then_delete_back_to_empty(tmp_path):
     assert raw == [] and active == ""
 
 
+def test_setup_refusals_still_match_the_renderer_regex():
+    """服务端那三句"没法生成"必须仍然落进 `api.js` 的 `MODEL_SETUP_REPLY`。
+
+    `jobs.js:148` 的兜底是 `modelSetupGap(meta) || MODEL_SETUP_REPLY.test(e.message)`：
+    meta 看起来正常而服务端仍拒绝（配置文件被手改坏、加载后又被删干净）时，
+    界面靠这条正则把用户带回「设置 → 模型接口」。改文案的人不会想到有个正则在
+    读它 —— 这条守卫就是让那次改动当场报红。判据从两边各读一份事实，不抄文案。
+    ⚠ 「缺少或无效的访问令牌」那句必须**不**匹配：它要的是换地址重开，不是去配模型。
+    """
+    import ast
+    import re
+
+    srv = (ROOT / "app" / "server.py").read_text(encoding="utf-8")
+    fn = next(n for n in ast.walk(ast.parse(srv))
+              if isinstance(n, ast.FunctionDef) and n.name == "_require_model")
+    refusals = []
+    for node in ast.walk(fn):
+        if (isinstance(node, ast.Call) and getattr(node.func, "id", "") == "HTTPException"
+                and len(node.args) >= 2 and isinstance(node.args[1], ast.Constant)):
+            refusals.append(str(node.args[1].value))
+    assert len(refusals) >= 3, f"三种缺法该各自说清，只读到 {len(refusals)} 句：{refusals}"
+
+    js = (ROOT / "desktop" / "renderer" / "js" / "api.js").read_text(encoding="utf-8")
+    m = re.search(r"MODEL_SETUP_REPLY\s*=\s*/(.+?)/;", js)
+    assert m, "api.js 里找不到 MODEL_SETUP_REPLY，这条守卫该改写法了"
+    pattern = re.compile(m.group(1))
+    for msg in refusals:
+        assert pattern.search(msg), f"这句界面认不出来、不会把用户带去设置：{msg}"
+    token_msg = "缺少或无效的访问令牌。请通过应用入口打开界面，或使用启动时打印的带 token 的地址。"
+    assert not pattern.search(token_msg), "令牌问题不该被当成没配模型"
+
+
 def test_generate_without_any_model_is_refused_with_a_clear_reason(tmp_path):
     """一条模型都没有时生成 → 400 且说清「还没配置模型」。
 

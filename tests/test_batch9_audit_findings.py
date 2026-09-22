@@ -132,7 +132,10 @@ def test_each_limits_anomaly_leaves_a_trace(value, expect):
     try:
         keys = _steps_of(tmp)
         assert expect in keys, f"recheck_rounds={value!r} 没有留痕：{keys}"
-        assert not any(k.startswith("limits_") for k in keys if k != expect) or True
+        # 原来这行末尾挂着 `or True`，整条断言永远为真（等于没写）。真判据是
+        # "只留这一条 limits_* 痕"：同一种异常被两处各记一次，界面就会出现两条
+        # 说的同一件事的步骤，而这正是这里要挡的。
+        assert [k for k in keys if k.startswith("limits_")] == [expect], keys
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

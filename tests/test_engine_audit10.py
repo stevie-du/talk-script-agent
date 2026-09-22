@@ -405,10 +405,10 @@ def test_empty_section_for_a_valid_option_is_said_during_the_job(tmp_path):
     text = topics.read_text(encoding="utf-8")
     # 把选中的那一节正文清空（保留标题）——"这一节存在"但"没有知识"是同一种缺
     lines = text.split("\n")
-    out, hit = [], False
+    out, hit, found = [], False, False
     for ln in lines:
         if ln.startswith("## ") and seg in ln:
-            hit = True
+            hit = found = True
             out.append(ln)
             out.append("")
             continue
@@ -417,7 +417,11 @@ def test_empty_section_for_a_valid_option_is_said_during_the_job(tmp_path):
         if hit:
             continue
         out.append(ln)
-    assert hit or True
+    # 前置条件本身要成立：没找到那节就什么都没清空，后面的"该留痕"会以
+    # 一个不相干的原因失败（原来这行写着 `assert hit or True` —— 永远为真，
+    # 等于没断言；⚠ 也不能直接 `assert hit`：hit 是"当前在不在目标节内"的状态位，
+    # 扫到下一个标题就被清掉，循环结束时必然为 False，那是断言自己写错）。
+    assert found, f"没在 topics.md 里找到「{seg}」那一节，前面的改写等于没做任何事"
     topics.write_text("\n".join(out), encoding="utf-8")
 
     jid = pl.start_generate(_req(segment=seg, format="voice"))
