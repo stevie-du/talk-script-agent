@@ -886,3 +886,77 @@ def test_start_packgen_releases_the_claim_even_before_the_job_exists(tmp_path, m
         pl.start_packgen("宠物医院", "社区小店")
     assert claim_slug(slug) is True, "占位没还：这个名字从此永远建不出包"
     release_slug(slug)
+
+
+# ── 第 7 轮复核（打 §15.13 那批新代码的 lane）查出的四条，各自钉一条 ──
+class _Boom(Exception):
+    """`str()` 自己会抛的异常：归因代码不许假设异常一定说得出话。"""
+
+    def __str__(self):
+        return 1 / 0        # noqa: B018  ← 故意的
+
+
+def test_read_error_survives_a_cause_whose_str_raises():
+    """归因里一次 `str()` 抛错，绝不能把"作业收口"整条路带走。
+
+    实测过的形态（lane 探针 G6）：`RuntimeError("产物落盘失败") from _Boom()`，
+    而 `_Boom.__str__` 自己抛 `ZeroDivisionError` → 原来 `_readable_error` 直接
+    把 Secondary 异常抛给 `_guarded`，`job.transition` 那一行根本没跑到，
+    作业停在 `writing`、`running_count()` 永远是 1 —— 又是一次"忙态=永久漏额度"。
+    """
+    outer = RuntimeError("产物落盘失败")
+    outer.__cause__ = _Boom()
+    msg = _readable_error(outer)          # 不许抛
+    assert "产物落盘失败" in msg, msg
+
+
+def test_guarded_settles_the_job_even_when_fail_itself_blows_up(tmp_path, monkeypatch):
+    """连 `_fail` 都抛的时候，兜底那条路必须仍然把作业落到终态。
+
+    归因、落盘、渲染文案任何一步出问题都不该换成"作业永远在跑"：
+    症状是引擎在一个都没跑的情况下持续回「已达上限」，只能重启。
+    """
+    pl = _pipeline(tmp_path)
+    job = Job("be-2", "generate", {})
+    pl.registry.add_if_room(job, MAX_CONCURRENT_JOBS)
+    job.transition_or_raise("selecting")
+
+    def boom(*a, **k):
+        raise RuntimeError("记失败这一步自己也炸了")
+
+    monkeypatch.setattr(pl, "_fail", boom)
+    t = threading.Thread(target=pl._guarded(job, lambda: (_ for _ in ()).throw(_Boom())))
+    t.start()
+    t.join(5)
+    assert job.state == "failed", job.state
+    assert pl.registry.running_count() == 0
+
+
+def test_read_error_keeps_a_root_cause_the_prose_only_mentions_by_class_name():
+    """外层顺嘴提了一句异常类型名，不等于根因已经说过 —— 旧判据会把它整条丢掉。
+
+    原来去重条件是 `type(c).__name__ in msg`（对整句话做子串匹配）：
+    外层写「这类 ValueError 需要检查包配置」时，真正的 ValueError("quota_table …")
+    就被当成"已经说过了"。空消息的环节本来就 continue 掉了，这条宽判是多余的。
+    """
+    cause = ValueError("quota_table 第 3 行缺少 count 键")
+    outer = RuntimeError("包配置里的 ValueError 需要检查 pack.yaml")
+    outer.__cause__ = cause
+    msg = _readable_error(outer)
+    assert "quota_table 第 3 行缺少 count 键" in msg, f"根因被类型名子串误伤：{msg}"
+
+
+def test_clamped_wait_never_turns_retries_into_a_hammer():
+    """预算到点后的等待：有闸门可问才是 0，没闸门可问时要有下限。
+
+    `_clamped_wait` 夹到剩余预算是 P2-49 的修法，但"到点"夹出来是 0 ——
+    有作业闸门时下一次尝试前会收工，没有闸门的调用点就变成 0 秒连打 N 次
+    （实测 4 个请求 0 秒内全发完）。两个调用点现在都按有无闸门给 floor。
+    """
+    past = time.time() - 1.0
+    assert LLMClient._clamped_wait(60.0, past, floor=0.0) == 0.0
+    floored = LLMClient._clamped_wait(60.0, past, floor=0.2)
+    assert floored >= 0.2, floored
+    # 未到点时仍然以"剩余预算"为上界，不能被下限顶回去
+    soon = time.time() + 0.05
+    assert LLMClient._clamped_wait(60.0, soon, floor=0.0) <= 0.05

@@ -291,13 +291,29 @@ window.__addCount = 0;
   //   「界面对重名提交做了什么」又变成量不出来的东西。
   //   ⚠ 本函数整体是模板字符串：这里不许出现反引号，也不许写带反斜杠的正则，
   //     所以逐字符判（反斜杠在这里会被吃掉一层，正则里的 w 类不能用）。
+  // ⚠ 判据必须与 Python 的"单词字符"类（Unicode 字母数字 + 下划线）同域，不能只认 ASCII + 汉字：
+  //   第 7 轮复核对 26 个输入量出 5 处差异（café 机电 / ３D打印 / ひらがな诊所 / 한국어 /
+  //   Ürün 名称）—— 桩按窄集折，会把引擎认为合法的字符当成"要折成 - 的符号"，
+  //   极端情况下连占位键都算成空串，于是桩自己造出一个引擎不会给的 409。
   function pgSlug(t) {
     var s = String(t || ''), out = '';
     for (var i = 0; i < s.length; i++) {
       var c = s.charAt(i), code = s.charCodeAt(i);
       var keep = (code >= 48 && code <= 57) || (code >= 65 && code <= 90)
-                 || (code >= 97 && code <= 122) || (code >= 0x4e00 && code <= 0x9fff)
-                 || c === '_';
+                 || (code >= 97 && code <= 122) || c === '_'
+                 || (code >= 0xC0 && code <= 0x24F)
+                 || (code >= 0x370 && code <= 0x3FF)
+                 || (code >= 0x400 && code <= 0x4FF)
+                 || (code >= 0x590 && code <= 0x6FF)
+                 || (code >= 0xE00 && code <= 0xE7F)
+                 || (code >= 0x1E00 && code <= 0x1EFF)
+                 || (code >= 0x3041 && code <= 0x30FF)
+                 || (code >= 0x3400 && code <= 0x4DBF)
+                 || (code >= 0x4E00 && code <= 0x9FFF)
+                 || (code >= 0xAC00 && code <= 0xD7A3)
+                 || (code >= 0xF900 && code <= 0xFAFF)
+                 || (code >= 0xFF10 && code <= 0xFF19)
+                 || (code >= 0xFF21 && code <= 0xFF5A);
       out += keep ? c : '-';
     }
     return out.replace(/-+/g, '-').replace(/^-+|-+$/g, '');
@@ -646,6 +662,11 @@ window.__addCount = 0;
       // 「读到的内容」标成别的文件名这类错就量不出来。
       var req2 = (s.split('rel=')[1] || '').split('&')[0];
       var relQ = req2 ? decodeURIComponent(req2) : 'knowledge/topics.md';
+      // 真实路由回的是**规范化之后**的 rel（app/server.py 用 relative_to(base)），
+      // 直接回显原始请求等于替界面保守住了"标签取自请求而不是响应"这类错。
+      // ⚠ 这段在模板字符串里：不写反斜杠（正则里的反斜杠会被吃掉一层 —— 本项目踩过四次），
+      //   所以折叠重复斜杠用 split/join 而不是 replace 正则。
+      relQ = relQ.split('//').join('/');
       return mk({ rel: relQ, size: 1024,
                   text: relQ + ' 的内容（桩）— 家用电梯怎么挑？' });
     }
@@ -677,6 +698,11 @@ window.__addCount = 0;
       try { pgBody = JSON.parse((o && o.body) || '{}'); } catch (_) {}
       var ind = String(pgBody.industry || '');
       var indKey = pgSlug(ind);
+      // 纯符号名字：引擎在**花钱之前**就拒（pipeline.start_packgen → 400），
+      // 压根不占位。桩原来会算出一个空串键并把 409 的理由写成「行业包正在创建中：」——
+      // 那是桩自己造的一种"假忙碌"，还会让第二个纯符号名字看起来在排队（第 7 轮复核抓到）。
+      if (!indKey) return err(400, '行业名称里没有任何可用作目录名的字符（纯符号起不了名），'
+                                   + '请换成含中文、字母或数字的名称');
       if (PG_CLAIMED.indexOf(indKey) >= 0) {
         calls.pgdup = (calls.pgdup || 0) + 1;
         return err(409, '行业包正在创建中：' + indKey);

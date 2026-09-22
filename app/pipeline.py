@@ -1221,8 +1221,18 @@ class Pipeline:
                 fn()
             except BaseException as e:  # noqa: BLE001
                 if job.state not in TERMINAL_STATES:
-                    self._fail(job, e if isinstance(e, Exception)
-                               else RuntimeError(f"作业线程被 {type(e).__name__} 打断"))
+                    try:
+                        self._fail(job, e if isinstance(e, Exception)
+                                   else RuntimeError(f"作业线程被 {type(e).__name__} 打断"))
+                    except BaseException:  # noqa: BLE001
+                        # 连"记失败"都失败（第 7 轮复核：归因里一次 `str()` 抛错就够）时，
+                        # 绝不能把作业留在忙态 —— `prune()` 只回收终态，那个并发额度
+                        # 就永久没了，症状还是那句"一个都没在跑，但生成一直报已达上限"。
+                        # 这里只走 `transition`（不落盘、不渲染文案），它自己不再抛。
+                        job.transition("failed", force=True,
+                                       error=f"作业失败（{type(e).__name__}）·状态收口时"
+                                             f"二次出错，详情看引擎日志")
+                        log.exception("作业 %s 收口失败，已强制落 failed", job.id)
                 raise
         return run
 
@@ -1255,6 +1265,20 @@ def _readable(text: str) -> str:
     return re.sub(r"[\s、，。：:；;！!？?\-—·.。,]+", "", t)
 
 
+def _safe_str(obj) -> str:
+    """取异常的可读文本，取不到就当没有。
+
+    第 7 轮复核实测：`str()` 本身可以抛（自定义异常的 `__str__` 里再出错），
+    而 `_readable_error` 是在**收尾失败的收尾代码**里被调用的 —— 它一抛，
+    `_guarded` 就没机会把作业落到终态，于是忙态永久占着一个并发额度
+    （`prune()` 只回收终态）。归因是"锦上添花"，绝不能反过来把收口挡住。
+    """
+    try:
+        return str(obj).strip()
+    except BaseException:  # noqa: BLE001
+        return ""
+
+
 def _readable_error(e: Exception) -> str:
     """把异常转成用户能看懂的一句话。
 
@@ -1265,7 +1289,7 @@ def _readable_error(e: Exception) -> str:
       `could not convert string to float: '六十'`（参数写成中文数字）
       `cannot use 'dict' as a set element`（词表条目写成映射）
     """
-    msg = str(e).strip() or type(e).__name__
+    msg = _safe_str(e) or type(e).__name__
     # 归因不能只留最后一层：预算闸门在「请求已经出错」之后抛出时，
     # 界面上就只剩"超过 20 分钟…"，而真正的起因（一个坏 URL、一次连接失败）
     # 没有任何地方说（批次 10 复核实测）。异常链里带着它，就把它一起说出去。
@@ -1283,7 +1307,7 @@ def _readable_error(e: Exception) -> str:
             break
         chain.append(node)
     for c in chain:
-        cs = str(c).strip()
+        cs = _safe_str(c)
         if not cs:
             continue
         head = cs[:120]
@@ -1292,7 +1316,10 @@ def _readable_error(e: Exception) -> str:
         # ⚠ 比的是**截断后的那一段**而不是完整 `cs`：外层带进来的本来就是被
         #   `_brief` 砍过的原文，用完整 `cs not in msg` 判"没说过"，实测会把
         #   同一段话印两遍（160 + 120 字重复）。取 120 字与要打印的长度同源。
-        if head in msg or type(c).__name__ in msg:
+        # ⚠ 不再用"类型名在不在 msg 里"当去重条件（第 7 轮复核抓到）：那是对
+        #   整句话做子串匹配，外层只要顺嘴提了一句 `ValueError`，真根因就被丢掉。
+        #   空消息的环节上面已经 `continue` 掉了，这一条本来就是多余的宽判。
+        if head in msg:
             break
         msg = f"{msg}（上一步：{head}）"
         break

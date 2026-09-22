@@ -377,7 +377,7 @@ class LLMClient:
                     wait = self._backoff(attempt, rate_limited=(e.code == 429),
                                          retry_after=e.retry_after)
                     # 通知与真正要睡的秒数同源（夹到剩余预算）
-                    wait = self._clamped_wait(wait, deadline)
+                    wait = self._clamped_wait(wait, deadline, floor=0.0 if should_abort else 0.2)
                     note = (f"上游限流(429)，{wait:.0f}s 后重试" if e.code == 429
                             else f"接口返回 {e.code}")
                     self._notify(on_retry, note, attempt + 1, attempts)
@@ -405,7 +405,7 @@ class LLMClient:
                 wait = self._backoff(attempt, rate_limited=rate_limited,
                                      retry_after=(_retry_after_seconds(resp.headers)
                                                   if rate_limited else None))
-                wait = self._clamped_wait(wait, deadline)   # 与界面同一口径（P2-49 后半）
+                wait = self._clamped_wait(wait, deadline, floor=0.0 if should_abort else 0.2)   # 与界面同一口径（P2-49 后半）
                 note = (f"上游限流(429)，{wait:.0f}s 后重试" if rate_limited
                         else f"接口返回 {resp.status_code}")
                 self._notify(on_retry, note, attempt + 1, attempts)
@@ -570,20 +570,26 @@ class LLMClient:
         return httpx.Timeout(float(read), connect=CONNECT_TIMEOUT)
 
     @staticmethod
-    def _clamped_wait(seconds: float, deadline: float | None = None) -> float:
+    def _clamped_wait(seconds: float, deadline: float | None = None,
+                      floor: float = 0.0) -> float:
         """把一次等待夹到"剩余作业预算"里 —— 只此一处，别在调用点各算各的。
 
         界面上那句「60s 后重试」与线程真正睡的秒数必须是同一个数：批次 10 把
         退避夹进预算之后，通知仍按**未夹**的 `wait` 生成（第 6 轮复核抓到），
         于是用户看到"60s 后重试"而实际 2 秒就继续了。
+
+        `floor` 管另一半：预算已到点时夹出来是 0 —— 有作业闸门可问时这正是对的
+        （下一次尝试前的闸门会以「预算用尽」收工）；但**没有闸门可问**的调用点，
+        0 退避等于把重试打成"立刻连打 N 次"的 hammer（第 7 轮实测：4 个请求 0 秒
+        内全发完）。那种调用点给个下限，慢一点但不出环。
         """
         wait = max(0.0, float(seconds))
         if not deadline:
             return wait
         left_budget = float(deadline) - time.time()
         if left_budget <= 0:
-            return 0.0                      # 预算已到点：交给闸门去说
-        return min(wait, left_budget)
+            return max(0.0, float(floor))   # 到点：有闸门交给闸门，没闸门也别空转
+        return max(min(wait, left_budget), float(floor))
 
     @staticmethod
     def _interruptible_sleep(seconds: float, should_abort=None,
