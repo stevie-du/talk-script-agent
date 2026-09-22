@@ -702,15 +702,29 @@ window.__addCount = 0;
       if (calls.job <= 2) return mk({ id:'job1', state:'rewriting',
         created_at: bornAt('job1', 8000),
         params:{ topic:'家用电梯怎么挑？', pack:'elevator', duration:60 },
-        steps:[{ key:'select', title:'选题策划', ts:'2026-09-13T10:00:01', data:{} },
-               { key:'write_r1', title:'文案撰写', ts:'2026-09-13T10:00:05', data:{} }],
+        steps:[{ key:'select', title:'选题策划', ts:'2026-09-13T10:00:01',
+                 data:{ usage:{ prompt_tokens:5200, completion_tokens:610,
+                                completion_tokens_details:{ reasoning_tokens:380 } } } },
+               // usage（P3-15）：真实引擎把上游回的 token 量记在**模型调用那几步**上，
+               // 而 check_r1 是纯代码校验、不调模型 —— 留成空 data 就是界面对
+               // 「没有 usage 的步骤什么都不许印」的负样本。
+               { key:'write_r1', title:'文案撰写', ts:'2026-09-13T10:00:05',
+                 data:{ usage:{ prompt_tokens:9800, completion_tokens:2400,
+                                completion_tokens_details:{ reasoning_tokens:1500 } } } },
+               { key:'check_r1', title:'校验·第 1 轮', ts:'2026-09-13T10:00:08', data:{} }],
         stream:{ phase:'回炉改写', reasoning_tail:'正在斟酌开场钩子……',
                  reasoning_len:136, content_len:12 } });
       return mk({ id:'job1', state:'done',
         created_at: bornAt('job1', 8000),
         params:{ topic:'家用电梯怎么挑？', pack:'elevator', duration:60 },
-        steps:[{ key:'select', title:'选题策划', ts:'2026-09-13T10:00:01', data:{} },
-               { key:'write_r1', title:'文案撰写', ts:'2026-09-13T10:00:05', data:{} },
+        // ⚠ usage 必须**与上面那条在跑的快照一致**：完成后界面仍会拿这份快照
+        // 重画一次步骤条，这里漏掉 usage 就等于"跑的时候有 token 账、跑完没了"。
+        steps:[{ key:'select', title:'选题策划', ts:'2026-09-13T10:00:01',
+                 data:{ usage:{ prompt_tokens:5200, completion_tokens:610,
+                                completion_tokens_details:{ reasoning_tokens:380 } } } },
+               { key:'write_r1', title:'文案撰写', ts:'2026-09-13T10:00:05',
+                 data:{ usage:{ prompt_tokens:9800, completion_tokens:2400,
+                                completion_tokens_details:{ reasoning_tokens:1500 } } } },
                { key:'check_r1', title:'校验·第 1 轮', ts:'2026-09-13T10:00:09', data:{} }],
         result: RESULT });
     }
@@ -1341,6 +1355,13 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     busy: window.__ts.busy, jobId: window.__ts.jobId,
     userMsg: !!document.querySelector('.msg.msg-user .bubble.user'),
     steps: document.querySelectorAll('.msg-assistant .steps .step').length,
+    // 每一步的「标题 | 徽章文本」——P3-15 的 token 账要能在步骤行上看到
+    usageBadges: Array.prototype.slice.call(
+      document.querySelectorAll('.msg-assistant .steps .step'))
+      .map(function (li) {
+        var t = li.querySelector('.step-t'), n = li.querySelector('.step-note');
+        return (t ? t.textContent : '') + '|' + (n ? n.textContent : '');
+      }),
     thinkShown: !document.querySelector('#think-stream')?.classList.contains('hidden'),
     sess: (function () {
       var ids = Array.prototype.slice.call(
@@ -1448,6 +1469,17 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("生成中：左栏会话列表没有重复 id",
     running.sess.dup.length === 0, JSON.stringify(running.sess));
   check("步骤时间线渲染出已完成步骤", running.steps >= 2, `steps=${running.steps}`);
+  // P3-15：usage 记进作业步骤已经几轮了，界面始终没有消费方 —— 于是"这次思考
+  // 吃掉了多少预算"仍然只能靠抓包看（主报告 R1 就是这件事看不见换来的）。
+  // 两条一起钉：① 数字是 completion 减 reasoning 得来的（把 2400 当正文就是错账）；
+  // ② 纯代码校验那一步什么都不显示 —— 少了这条，"永远输出 思考 0 token"也能全绿。
+  check("生成中：模型步骤显示「思考 N token · 正文 M token」",
+    running.usageBadges.some(s => s === "文案撰写|思考 1500 token · 正文 900 token") &&
+    running.usageBadges.some(s => s === "选题策划|思考 380 token · 正文 230 token"),
+    JSON.stringify(running.usageBadges));
+  check("生成中：不调模型的步骤不显示 token 徽章",
+    running.usageBadges.some(s => s === "校验·第 1 轮|"),
+    JSON.stringify(running.usageBadges));
   check("生成中展示流式思考过程", running.thinkShown, "");
 
   // ── 3·b) 生成中状态行：位置与转圈（取法见上面 running.genStatus）

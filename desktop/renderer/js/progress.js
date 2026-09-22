@@ -48,6 +48,23 @@ function fmtDur(ms) {
   return `${Math.floor(s / 60)}m${Math.round(s % 60)}s`;
 }
 
+/** 一次模型调用的 token 账（P3-15）。
+ *
+ *  OpenAI 口径里 `completion_tokens` **含**思考，正文是减出来的差值；
+ *  上游没回 `reasoning_tokens` 时只报正文 —— 不猜思考占了多少。
+ *  这里报的是 token 而不是「字」：usage 里没有字符数，而界面正文字数已有权威源
+ *  （`check.segments[].chars`），再造一份就是两本账。 */
+function fmtUsage(u) {
+  if (!u) return "";
+  const comp = Number(u.completion_tokens) || 0;
+  const think = Number((u.completion_tokens_details || {}).reasoning_tokens) || 0;
+  const body = Math.max(comp - think, 0);
+  const parts = [];
+  if (think) parts.push(`思考 ${think} token`);
+  if (body) parts.push(`正文 ${body} token`);
+  return parts.join(" · ");
+}
+
 /** 生成中的占位骨架（助手气泡的初始内容）。
  *
  *  顺序就是时间顺序：做完的（步骤）→ 正在想的（思考流）→ 此刻在干什么（状态行）。
@@ -90,10 +107,14 @@ export function renderProgress(body, snap) {
     const dur = (t0 !== null && t1 !== null && t1 >= t0) ? t1 - t0 : null;
     const note = cur.data?.note || "";
     const badge = note ? `<span class="step-note">${esc(note)}</span>` : "";
+    const usage = fmtUsage(cur.data?.usage);
+    // 复用 `.step-note` 的版式：`styles.css` 现在归用户改（见 README 那条披露），
+    // 这里不新增只服务于测试的选择器。
+    const usageBadge = usage ? `<span class="step-note">${esc(usage)}</span>` : "";
     const durHtml = dur !== null ? `<span class="step-dur">${fmtDur(dur)}</span>` : "";
     parts.push(`<li class="step done">
         <span class="step-dot"></span>
-        <span class="step-t">${esc(cur.title)}</span>${badge}${durHtml}
+        <span class="step-t">${esc(cur.title)}</span>${badge}${usageBadge}${durHtml}
       </li>`);
   }
 
