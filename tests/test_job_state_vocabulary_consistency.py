@@ -236,3 +236,27 @@ def test_quota_messages_still_carry_the_bucketing_marker():
         assert mark in msg, f"pipeline.py:{ln} 这句说的是额度，却不再带分桶标记 {mark!r}：{msg}"
     for ln, msg in other:
         assert mark not in msg, f"jobs.py/pipeline.py:{ln} 这句不是额度问题却带着标记，会被念成「已达上限」：{msg}"
+
+
+def test_error_codes_the_renderer_compares_against_exist_on_the_server():
+    """渲染层按 `e.code === "…"` 分流，那些字符串必须仍然是服务端给的码值。
+
+    `jobs.js` 用码分辨「额度满了（等一拍再发）」与「行业包坏了（把引擎原话送到屏幕）」，
+    两边各写一份字符串：Python 侧是 `ERR_*` 常量，JS 侧是字面量。
+    现有测试只钉住"服务端确实发出 pack_broken"这一半 —— 把常量的**值**改掉
+    （改名会有测试提醒，改值不会），渲染层就静默不再分流：坏包被念成普通失败，
+    而用户唯一能拿去修的行列号信息被替换掉（P1-1 修过的同一个错）。
+
+    与 BUSY_STATES 那条同源的做法：读两个文件、比对，不靠"记得改两处"。
+    """
+    root = Path(__file__).resolve().parent.parent
+    srv = (root / "app" / "server.py").read_text(encoding="utf-8")
+    server_codes = set(re.findall(r'^ERR_[A-Z_]+\s*=\s*["\']([^"\']+)["\']', srv, re.M))
+    assert len(server_codes) >= 4, f"服务端错误码没读到，守卫该改写法了：{server_codes}"
+
+    js = (root / "desktop" / "renderer" / "js" / "jobs.js").read_text(encoding="utf-8")
+    used = set(re.findall(r"\.code\s*===\s*[\"']([^\"']+)[\"']", js))
+    assert used, "jobs.js 里不再按 code 分流 —— 这条守卫要跟着改写法，别直接删"
+    dangling = sorted(used - server_codes)
+    assert not dangling, \
+        f"渲染层在比对这些码，但服务端已经不发它们：{dangling}（服务端现有：{sorted(server_codes)}）"
