@@ -188,3 +188,51 @@ def test_frontend_no_longer_copies_a_terminal_list():
     assert "!BUSY_STATES.has(" in src, "settled 必须取 BUSY_STATES 的补集"
     # 非空守卫：注释全被吃掉时上面两条会失去意义，先确认代码还在
     assert "function updateRow" in src, "源码被剥空了 —— 断言会空转，先修 _strip_comments"
+
+
+def test_quota_messages_still_carry_the_bucketing_marker():
+    """409 分桶靠子串匹配，抛出方的文案必须仍然带着那个标记。
+
+    `app/server.py` 给 StateConflict 分两个码：
+    `ERR_QUOTA if _QUOTA_MARK in msg else ERR_STATE_CONFLICT`；渲染层
+    `isQuotaConflict` 优先读机器码、只在没码时回退文案匹配。于是流水线把
+    「同时进行的任务已达上限」改成「任务太多，稍后再试」= 那个 409 悄悄不再带
+    quota 码：界面既不提示"等一拍再发"，也不再说清是额度 —— 而这一步
+    现有测试一条都不会红（它只测"给了码的那些"）。
+
+    与 `test_setup_refusals_still_match_the_renderer_regex` 同一类：判据从两边各读
+    一份事实（AST 取抛出文案 + 源码取常量），不抄整句、不靠"记得改两处"。
+    """
+    import ast
+    import re
+
+    root = Path(__file__).resolve().parent.parent
+    srv = (root / "app" / "server.py").read_text(encoding="utf-8")
+    m = re.search(r'^_QUOTA_MARK\s*=\s*["“](.+?)["”]', srv, re.M)
+    assert m, "app/server.py 里找不到 _QUOTA_MARK，这条守卫该改写法了"
+    mark = m.group(1)
+
+    def literals(fname):
+        tree = ast.parse((root / "app" / fname).read_text(encoding="utf-8"))
+        out = []
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call)
+                    and getattr(node.func, "id", "") == "StateConflict" and node.args):
+                continue
+            a = node.args[0]
+            if isinstance(a, ast.Constant):
+                out.append((node.lineno, str(a.value)))
+            elif isinstance(a, ast.JoinedStr):              # f-string：拼上常量段
+                parts = [v.value for v in a.values if isinstance(v, ast.Constant)]
+                out.append((node.lineno, "".join(str(p) for p in parts)))
+        return out
+
+    sites = literals("pipeline.py") + literals("jobs.py")
+    assert sites, "一个 StateConflict 抛出点都没读到，守卫空转"
+    quota = [(ln, msg) for ln, msg in sites if re.search(r"上限|额度|并发", msg)]
+    other = [(ln, msg) for ln, msg in sites if (ln, msg) not in quota]
+    assert len(quota) >= 2, f"额度类抛出点少于两条，说明分类判据散了：{sites}"
+    for ln, msg in quota:
+        assert mark in msg, f"pipeline.py:{ln} 这句说的是额度，却不再带分桶标记 {mark!r}：{msg}"
+    for ln, msg in other:
+        assert mark not in msg, f"jobs.py/pipeline.py:{ln} 这句不是额度问题却带着标记，会被念成「已达上限」：{msg}"
