@@ -384,7 +384,12 @@ packs/elevator/
   ⚠ 计划提示的两条返回路径都填了：主路径给报告、`duration` 非正数那条给 `null`（「没测」与
   「测了很好」必须是两种形状）。落点：`result.json` 的 `check.ai_tells` + 回炉反馈里的非阻塞建议；
   report 键集一致性测试仍缺（A3 一起做）
-- [ ] **A3** `tests/test_aitells_alignment.py`：yaml ↔ `patterns/anti-ai-smell.md` ↔ 函数名三方对账。
+- [x] **A3** `tests/test_aitells_alignment.py`：三方对账 —— **但第三方依据不是 anti-ai-smell.md**。
+  ⚠ 实测撞两条门禁：那份 md 是**整份注入提示词**的（撰写一轮预算 < 7600 字，当时只剩 28 字余量），
+  且渲染出来的提示词里不许出现 `*.md` 路径。改用**不进提示词**的规格文档 §2.1 作依据
+  （`docs/需求方案-去AI味与热点情报.md`，按小节切片解析 —— 全文扫会被文档后面别的表污染）。
+  另加四条词表不变量（键名 / 非空 / 非结构类 / ≥2 字且互不为子串）。
+  【原计划，保留备查】yaml ↔ `patterns/anti-ai-smell.md` ↔ 函数名三方对账。
   ⚠ **不能照抄** `test_banwords_alignment.py`：它靠 ad-law.md 固定前缀词族行解析（`:23-39`），
   而 anti-ai-smell.md 是自由清单、词在句内括号里、无函数名可锚
   （`anti-ai-smell.md:14`）。需给 md 加可解析词表节 + 断言 severity 一致
@@ -392,7 +397,9 @@ packs/elevator/
   ⚠ 86/87 历史产物是 mock 夹具且含清单体（`mock_fixtures.py:39,47`）→ **按 `result.mock` 分流**统计，
   否则 ai_smell 一进门槛冒烟必挂；词表与 `skill.yaml:78` / `anti-ai-smell.md:14` 已禁的书面连接词**显式对齐**，
   否则 169/175 假命中复现
-- [ ] **A5** 结果页 chips 加人味分 + `.banner.why` 折叠明细；`store.render_script_md` 同步一行
+- [x] **A5** 结果页加了「**人味分**」tab（分数 + 逐条命中明细 + 占位密度，明说"不进合格判定"）
+  + 正文里的 `.tell-mark` 下划线（点了跳该面板）+ `store.render_script_md` 同步一行。
+  ⚠ `.banner.why` 折叠明细**没做** —— 明细已经在人味分 tab 里了，再加一份就是同一信息两份表示。
 - [ ] **A6** 真人语料：`yt-dlp + faster-whisper` 出稿 → **`data_dir/intel/samples/<style>/*.md`**
   （**不放 packs/**：pack 是可分发单元、包内文件会被 `/api/packs/{name}` 全量列出供下载
   `server.py:371-394`，语料是运营数据不是行业知识）→ `write_ctx` 经 data_dir 读取注入 `$samples`。
@@ -406,29 +413,40 @@ packs/elevator/
 （10 个种子扩散出 102 条真实问句、噪声 0，且比政策文件滞后出现——那才是"正在办、正卡壳"）。
 **参考货币**：MoneyPrinterTurbo（125k star）无选题/质检/去AI味，可借鉴的是接入形态（WebUI/API/CLI/批量/任务历史）。
 
-- [ ] **B1** 抓取器：纯 HTTP、**零新增依赖**（`httpx` 已在 `requirements-runtime.txt`）。
+- [x] **B1** 抓取器：`app/intel.py` 的源注册表（`ADAPTERS`），纯 HTTP、**零新增依赖**。
   五档各按自己节奏，不搞统一"每日"：政策库季度 / 通报月 / 需求词日 / 热榜日 / B站按需。
   已验证端点与坑见 `intel/policy/pull_policy.py`（政策库 `t=zhengcelibrary_all` 返回空，必须 gw+bm 分开查；
   `searchfield=content` 跨行业污染，只有 title 级命中可用）。
   ⚠ 脚本目前硬编码绝对路径（`pull_policy.py:7`）→ 改 argv 传 data_dir
-- [ ] **B2** **intel 落点改到 `data_dir`**：现在在仓库根，开发态能跑是因为 `data_dir` 默认等于 root，
+- [x] **B2** **intel 落点已在 `data_dir/intel/<pack>/`**（`intel.intel_dir`）。
+  【原记录，保留备查】现在在仓库根，开发态能跑是因为 `data_dir` 默认等于 root，
   打包后安装目录不可写、会找不到（同 `store.py:53` 里 `generated/` 那条约定；
   先例还有 `config.py:121`）。引擎侧新建读取模块挂 `data_dir/"intel"`
-- [ ] **B3** `GET /api/intel/today`：只读本地文件，**空或坏返回 `[]` 不抛**（返 plain dict 即可，
+- [x] **B3** `GET /api/intel/today`：只读本地文件，**空或坏返回空结构不抛**。
+  ⚠ 另有 `POST /api/intel/refresh`（走 Job）与 `POST /api/intel/ignore`（只影响今天）。
+  【原记录，保留备查】返 plain dict 即可，
   schemas.py 无响应模型先例；token 鉴权自动覆盖，仅 `/api/health` 白名单 `server.py:271`）。
   ⚠ 与 `private_facts()` 的失败语义**相反**（`knowledge.py` 的 `Pack.private_facts()` 读不到要中止生成）；
   这条差异要写进注释，否则将来一定有人"顺手统一"
-- [ ] **B4** 懒触发：打开选题页时按"上次抓取距今"决定是否后台补抓，**走 Job 管道**。
+- [x] **B4** 懒触发：`/api/intel/today` 回 `stale`，**渲染层**补一发 POST（GET 不带副作用），
+  走 Job 管道 + **独立并发额度**（`INTEL_BUSY_STATES` / `MAX_CONCURRENT_INTEL`）。
+  【原记录，保留备查】打开选题页时按"上次抓取距今"决定是否后台补抓，**走 Job 管道**。
   ⚠ **先例是 `start_generate` / `start_packgen`**（P1-43 已修，packgen 早走 Job：路由
   `app/server.py` 的 `packs_create`，入口 `app/pipeline.py` 的 `start_packgen`），
   "别学 packgen 同步 POST"这句话已过时，别引错路。成本：新增状态要动
   `TRANSITIONS`+`BUSY_STATES`+progress.js 标签+`test_job_state_vocabulary_consistency.py`（都在 `app/jobs.py` 顶部）；
   且 `add_if_room` 与生成共享 `MAX_CONCURRENT_JOBS=4`（`app/pipeline.py`）→ **纯 HTTP 抓取用独立并发额度**，
   别跟 LLM 作业抢名额
-- [ ] **B5** LLM 归并成选题卡：批量一次调用处理 20–30 条，走现成 `chat_json`。
+- [x] **B5** 归并成选题卡 —— **但不是 LLM 归并**：`需求方案 §2.9 B-2` 把 LLM 从"相关性判定"里
+  彻底拿掉（不可复现、且会改选题缓存指纹），改成确定性的词族 + `topics_map` 匹配。
+  于是 `app/intel.py` 里**一次模型调用都没有** —— "没配 Key"对今日选题零影响。
+  降级路径仍在（没数据时界面显示原始条目列表，不是空白）。
+  【原计划，保留备查】批量一次调用处理 20–30 条，走现成 `chat_json`。
   **必须有降级**：没配 Key 或离线时退化成"原始条目列表"（标题+出处+日期+来源标签），
   否则首装用户打开是一页空白
-- [ ] **B6** 选题视图 UI：**左栏常驻入口 + 右栏切视图，不跳页、不整窗覆盖**（原型定稿见
+- [x] **B6** 选题视图 UI：左栏常驻入口 + 右栏切视图，不跳页、不整窗覆盖（`js/topics.js`）。
+  分区 / chip / 计数 / 未接入 N **四处都由 `pack.yaml` 的 `intel_sources` 渲染**。
+  【原记录，保留备查】原型定稿见
   `_verify/_proto-topics-src.html`）。筛选轴 = 来源，一根轴不混别的维度；
   两种"没有"要长得不一样：`计数0`=已接入今天没货（留在行内、压淡）、`未接入`=不进筛选行只在来源面板说明。
   ⚠ 新增 nav-item 必须复用 `.nav-item` / `.stg-nav-item` 现成类 —— 这两个是同一控件的两处实例，
@@ -437,6 +455,11 @@ packs/elevator/
   `skill.yaml` 的 select 模板加一节【政策与行业动态：引用须带文号，不得照搬】。
   ⚠ 注入会改 `_plan_key` 指纹（`pipeline.py:459-461` 哈希渲染后 system+user）→ **需明确 intel 进不进指纹**，
   否则情报刷新会让同参数重选题、选题缓存打不中
+  - **2026-09-23 状态：仍未做**（`需求方案` 待确认 #8 把它列在二期）。它是**唯一**还没接上的一环 ——
+    情报现在只到「看得到、能点去生成（填主题）」，**内容不进提示词**。
+    做的时候按 `需求方案 §2.9 B-3` 的口径：`$intel_block` 放 prompt **末尾**
+    （与 `$feedback_block` 同一条规矩），且**指纹里只带本次选中话题的 id + 出处文号**、
+    不带整块 intel —— 这样情报刷新不会让所有历史版本失效。
 
 ### 已定不做
 
