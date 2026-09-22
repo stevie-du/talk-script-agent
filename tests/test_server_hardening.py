@@ -1501,6 +1501,13 @@ def test_packgen_stub_sends_exactly_what_the_engine_says():
         rj = c.get("/api/jobs/没有这个作业").json()
         rc = c.post("/api/jobs/没有这个作业/cancel").json()
         assert rp.get("code") == "pack_missing", rp
+        # 桩"按路由发各自的原文"这件事只有在这两句**本来就不同**时才有意义：
+        # 第 16 轮复核量出，今天整条对账比的是"桩里有没有这句话"（成员关系），
+        # 所以把 cancel 那支改成发 GET 的原文，两边各发一份正确的原文、对账照样绿。
+        # 这里补两刀：(1) 引擎这两句必须不同；(2) 桩里那两个常量必须各有使用点
+        # （定义之外 ≥1 次）—— 共用一句 / 把其中一支改到另一支上，会立刻只剩定义行。
+        assert rj["detail"] != rc["detail"], \
+            f"GET 与 cancel 发了同一句 404（{rj['detail']}）：分路由的原文已经名存实亡"
         # ⚠ 必须按**带引号的字面量**比，不能裸比子串：「作业不存在」是
         #   「作业不存在或已随重启释放」的前缀，裸比会让 cancel 那支改错了也照样绿。
         rbad = c.get("/api/packs/%2e%2e/file?rel=pack.yaml")
@@ -1509,6 +1516,13 @@ def test_packgen_stub_sends_exactly_what_the_engine_says():
                      f"'{rj['detail']}'", f"'{rc['detail']}'",
                      f"'{rbad.json()['detail']}'"):
             assert frag in stub, f"UI 桩的 404/400 文案与服务端不一致：{frag}"
+        # 桩侧：两个 404 常量除了定义行还必须各有**使用点**（出现 ≥2 次）。
+        # 把 cancel 那支改成发 GET 的原文（第 16 轮复核列的变异形状）时，
+        # 「桩按路由发各自的原文」这件事就只剩一个悬空的常量 —— 这里会红，
+        # 而原来那圈成员关系比对不会（两句都还在桩里）。
+        for const in ("ERR_JOB_GONE_GET", "ERR_JOB_GONE_CANCEL"):
+            assert stub.count(const) >= 2, \
+                f"桩里 {const} 只出现 {stub.count(const)} 次（只有定义？）—— 那条路由没在发它"
         # 建包的两类冲突是两句不同的话（app/packgen.py 的两条 raise）：桩原来只有
         # 「正在创建中」一句，于是"占位到底还不还"在桩上量不出来（两种情况都 409）。
         # 走源码对账而不是走 HTTP：这条路径要花钱/要有模型配置，文案对账不该依赖它。
