@@ -174,7 +174,7 @@ window.__addCount = 0;
   //   第 3 张卡正文：一个真占位 → span class="over jumpable"
   // 「点击定位首处」原来找的是 .script-card .over，抓到的是字数胶囊（P3-9）。
   // 占位符本身按引擎的约定写成带「待补：」前缀的形式（app/knowledge.py 与
-  // export_skill.py 的提示词就是要模型这么写），于是屏幕上会不会多印一层
+  // 包模板就是要模型这么写），于是屏幕上会不会多印一层
   // 「待补：」也正好是这条夹具能量的东西（P3-8）。
   var PH_RESULT = JSON.parse(JSON.stringify(RESULT));
   PH_RESULT.sections[2].text = '第三，载重按{{待补：主力机型载重}}来定，别听口头报数。';
@@ -739,10 +739,6 @@ window.__addCount = 0;
       warnings: WARN_HTTP });
     // 必须在 /api/config 的通用匹配之前：indexOf('/api/config') 也会命中 reset
     if (s.indexOf('/api/config/reset') >= 0) return mk({ ok:true, fields:['base_url'] });
-    // 知识库只读查看器：包文件清单 + 文件内容
-    if (s.indexOf('/api/packs/elevator/export-skill') >= 0) return mk(
-      { path:'C:/tmp/agent-skills/elevator', name:'elevator', files:12,
-        include_private:false, hints:['已按安全默认排除 private/ 目录（商业信息不外带）。'] });
     // 匹配任意包名的转正：实际请求可能是 fitment（测试里切过包）。
     // ⚠ 名字要**回显请求里那一个**，并且只在真的是 elevator 时才动 ELEVATOR_DRAFT：
     //   原来恒回 name:'elevator'，等于桩替界面把"改错了包"这件事掩盖掉（批次 10 复核指出）。
@@ -2195,7 +2191,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       && piLoaded.size.length > 0,
     JSON.stringify(piLoaded));
 
-  // private/ 文件卡：后端现在对它回 **403**（安装包与导出都排除 private/，
+  // private/ 文件卡：后端现在对它回 **403**（安装包排除 private/，
   // 界面这个口子也必须关）。这里验两件事：整条路走得通（不崩、有内容），
   // 并且说的是「不经界面浏览」而不是「读取失败」—— 后者会把人引去查没坏的东西。
   const privFile = await evalIn(`return (function(){

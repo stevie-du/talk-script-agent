@@ -116,9 +116,8 @@ export const api = {
   // 建包 = 后台作业（P1-43）：返回 {job_id}，进度与结果用 job(id) 轮询取。
   createPack: (industry, description) =>
     request("/api/packs/create", { method: "POST", body: { industry, description } }),
-  // 注：「导出为 Agent 技能」的 UI 入口已删（2026-09-17），后端
-  // /api/packs/<n>/export-skill 端点仍由 pytest 覆盖 —— 想恢复 UI 时
-  // 把 exportSkill 加回来 + 复刻按钮 + 在 README 写明用途。
+  // 注：「导出为 Agent 技能」已整个移除（UI 入口 2026-09-17 撤，后端端点与
+  // app/export_skill.py 2026-09-22 删）。git 历史里有完整实现，想恢复从那里捞。
   undraft: (name) => request(`/api/packs/${encodeURIComponent(name)}/undraft`, { method: "POST", body: {} }),
 
   config: () => request("/api/config"),

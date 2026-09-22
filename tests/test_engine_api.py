@@ -10,7 +10,6 @@
   F 禁用词不重叠计数（「包过检」原来报 2 处）
   G 历史索引：失败作业重启后仍在列表里；删除能清干净
   H 取消：状态冻结、不落产物（「result.json 存在 ⟺ done」）
-  I export-skill 的 name 白名单
   J 并发上限
 
 跑法：python tests/test_engine_api.py    或    pytest tests/test_engine_api.py
@@ -197,10 +196,6 @@ def test_error_mapping_and_bounds(tmp_path):
                                         "voice": "bogus"}).status_code == 422
     assert c.post("/api/generate", json={"pack": "elevator", "topic": "ok",
                                         "format": "bogus"}).status_code == 422
-
-    # export-skill 的 name 白名单（修复前这条路由没有校验）
-    r = c.post("/api/packs/%2e%2e/export-skill")
-    assert r.status_code == 400, (r.status_code, r.text)
 
     # 记录 id 白名单
     assert c.get("/api/history/not-a-jid").status_code == 400

@@ -26,7 +26,6 @@ sys.path.insert(0, str(ROOT))
 import yaml  # noqa: E402
 
 from app.config import load_config                             # noqa: E402
-from app.export_skill import export_agent_skill                # noqa: E402
 from app.packgen import create_pack                            # noqa: E402
 from app.pipeline import Pipeline, wait_job                    # noqa: E402
 from app.schemas import (GenerateRequest,                # noqa: E402
@@ -59,7 +58,6 @@ def test_end_to_end_mock():
         _case_rewrite_segment(pl, tmp, jid_direct)
         _case_pack_without_storyboard_stage(pl, tmp)
         _case_packgen(pl, tmp)
-        _case_export_skill(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -221,38 +219,6 @@ def _case_packgen(pl: Pipeline, tmp: Path):
         pass
     assert not (tmp / "packs" / preview_slug("假行业取消测试")).exists(), \
         "取消后留下了半成品目录"
-
-
-# ── 5. 导出 Agent 技能 ──────────────────────────────────────
-def _case_export_skill(tmp: Path):
-    exp = export_agent_skill(tmp, "elevator")
-    exp_dir = Path(exp["path"])
-    skill_md = (exp_dir / "SKILL.md").read_text(encoding="utf-8")
-    assert skill_md.startswith("---\nname:") and "description:" in skill_md.split("---")[1]
-    assert (exp_dir / "tools" / "check.py").exists()
-    assert (exp_dir / "knowledge" / "topics.md").exists()
-    assert (exp_dir / "skill.yaml").exists()
-    assert "只输出一个 JSON" not in skill_md, "导出的技能不应含引擎专属 JSON 指令"
-    assert not (exp_dir / "private").exists(), "默认不应导出 private/"
-
-    # 导出的校验器要能在技能目录内独立运行
-    demo = exp_dir / "_demo.txt"
-    demo.write_text((ROOT / "examples" / "demo-60s.txt").read_text(encoding="utf-8"),
-                    encoding="utf-8")
-    # 子进程的输出**两边都要钉死为 utf-8**：`text=True` 用的是**本机 locale**
-    # 解码（中文 Windows = cp936），而校验器打印的是中文。外层一旦设了
-    # PYTHONIOENCODING=utf-8（在 Windows 上看中文输出的常规做法），子进程按
-    # utf-8 写、父进程按 gbk 读 → `_readerthread` 抛 UnicodeDecodeError、
-    # `run.stdout` 变成 None，本用例于是以
-    # `TypeError: argument of type 'NoneType' is not a container` 收场 ——
-    # 一个和真实缺陷毫无关系的错。第 6 轮复核实测：带该变量必红、不带必绿。
-    run = subprocess.run([sys.executable, str(exp_dir / "tools" / "check.py"),
-                          str(demo), "--duration", "60", "--rate", "4.5"],
-                         capture_output=True, text=True, encoding="utf-8",
-                         env={**os.environ, "PYTHONIOENCODING": "utf-8"})
-    assert run.returncode == 0, run.stdout + run.stderr
-    assert "244" in run.stdout, run.stdout
-    demo.unlink(missing_ok=True)
 
 
 def main() -> int:

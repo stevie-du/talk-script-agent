@@ -804,39 +804,6 @@ class _FakeLLM:
         return self._out
 
 
-# ── 6 导出默认不带 private ──────────────────────────────────
-def test_export_excludes_private_by_default(tmp_path=None):
-    tmp = _tmp_root()
-    from app.export_skill import export_agent_skill
-
-    # 先确保模板包里有 private 目录且有内容
-    priv = tmp / "packs" / "elevator" / "private"
-    assert priv.exists() and any(priv.glob("*.yaml"))
-
-    out = export_agent_skill(tmp, "elevator")
-    assert not (Path(out["path"]) / "private").exists(), "默认导出不该带 private/"
-    assert out["include_private"] is False
-    assert (Path(out["path"]) / "SKILL.md").exists()
-    assert (Path(out["path"]) / "tools" / "check.py").exists()
-
-    out2 = export_agent_skill(tmp, "elevator",
-                              out_dir=tmp / "with-priv", include_private=True)
-    assert (Path(out2["path"]) / "private").exists(), "显式开启时才应带 private/"
-    shutil.rmtree(tmp, ignore_errors=True)
-
-
-def test_export_rejects_path_traversal(tmp_path=None):
-    tmp = _tmp_root()
-    from app.export_skill import export_agent_skill
-    from app.knowledge import PackError
-    try:
-        export_agent_skill(tmp, "../..")
-        raise AssertionError("穿越路径应当被拒绝")
-    except PackError:
-        pass
-    shutil.rmtree(tmp, ignore_errors=True)
-
-
 def test_reset_restores_defaults(tmp_path=None):
     """base_url / model 填错之后要能回到默认 —— 留空保存是无效操作。
 

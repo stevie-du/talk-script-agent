@@ -1,7 +1,6 @@
 # 输出模板
 
-> **本文件面向「成品排版」与「导出的 Agent 技能」**：`export_skill.py` 生成的
-> SKILL.md 会要求 agent 按下面的 ①~⑤ 输出，人工交付也照这个版式。
+> **本文件面向「成品排版」与人工交付**：成稿与人工交付都照下面的 ①~⑤ 版式。
 >
 > **模型输出的结构契约不在这里** —— 撰写阶段返回什么由 `skill.yaml` 的
 > `stages.write` / `stages.storyboard` 模板规定，落盘字段由 `app/schemas.py`

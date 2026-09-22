@@ -307,11 +307,9 @@ packs/elevator/
 ```
 
 新建行业包 = 在界面上让模型生成初稿（见上面「日常使用」第 6 步），或照这个结构手工建一份。
-`private/` 两处都不外带：导出为 Agent 技能时**默认不导出**（需要时显式开启），
-打安装包时也**不进 extraResources**（`desktop/packaging.test.js` 用真匹配器钉住这条规则，
-构建前的 `beforePack` 还会再拦一次）。
-「导出为 Agent 技能」的**界面入口 2026-09-17 已撤**，端点 `/api/packs/<name>/export-skill` 仍在
-（手工调用可用，见 `docs/知识库与技能配置指南.md` 的说明）。
+`private/` 不外带：打安装包时**不进 extraResources**（`desktop/packaging.test.js` 用真匹配器钉住
+这条规则，构建前的 `beforePack` 还会再拦一次）。「导出为 Agent 技能」已整个移除
+（界面入口 2026-09-17 撤，端点与 `app/export_skill.py` 2026-09-22 删）。
 
 ### 禁用词表的三个约定
 

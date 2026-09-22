@@ -40,7 +40,7 @@ HUMAN_ONLY = {
     "elevator/compliance/ad-law.md": "tests/test_banwords_alignment.py 的词族事实源",
     "elevator/compliance/platform.md": "平台侧人工核实清单（含 AI 标识要求）",
     "elevator/rules/duration.md": "时长换算说理，真值在 pack.yaml/limits 与 checker",
-    "elevator/rules/output-template.md": "交付物版式说明，导出侧消费",
+    "elevator/rules/output-template.md": "交付物版式说明，人工交付消费",
     "_template/compliance/ad-law.md": "随模板复制到新包，给人看；词族事实源那份在"
                                       " elevator（test_banwords_alignment 只读它）",
     "_template/compliance/platform.md": "随模板复制到新包；平台侧人工核实清单",

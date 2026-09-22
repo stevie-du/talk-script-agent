@@ -259,8 +259,7 @@ def _is_private_rel(rel: str) -> bool:
     判据用**路径段**而不是 `rel.startswith("private/")`：
       · Windows 文件系统不区分大小写，`Private/products.yaml` 是同一个文件；
       · 反斜杠形态（`private\\products.yaml`）也要挡住，否则等于没拦。
-    与 `app/export_skill.py` 的 `PRIVATE_DIR`、pack.yaml 的 `files.private`
-    是同一个约定（那些文件都在 `private/` 段下）。
+    与 pack.yaml 的 `files.private` 是同一个约定（那些文件都在 `private/` 段下）。
     """
     parts = re.split(r"[/\\]+", rel or "")
     return any(p.lower() == PRIVATE_DIR_NAME for p in parts)
@@ -730,7 +729,7 @@ def create_app(root: Path, token: str | None = None,
     # ── 行业包 ──────────────────────────────────────────────
     @app.get("/api/packs/{name}")
     def get_pack(name: str):
-        # 必须与 pack_file / export-skill / undraft 走同一套白名单。
+        # 必须与 pack_file / undraft 走同一套白名单。
         # 这里曾经漏了 —— 后果不是「读不到包」，而是 `%2e%2e` 解码成 `..` 后
         # `Pack(root, "..")` 成功命中 `root/pack.yaml`，接口回 200 并附带
         # `base.rglob("*")` 的**整棵目录树清单**（含 config.yaml 与各包 private/ 的
@@ -768,8 +767,8 @@ def create_app(root: Path, token: str | None = None,
         为什么单独挡 `private/`（缺陷 4）
         --------------------------------
         安装包刻意**不携带** `packs/*/private/**`（`desktop/package.json` 的
-        extraResources 排除规则，`tests/test_runtime_requirements.py` 钉着），
-        导出技能也默认不带（`/api/packs/{name}/export-skill`）。这个端点原先却是
+        extraResources 排除规则，`tests/test_runtime_requirements.py` 钉着）。
+        这个端点原先却是
         200 明文返回 `private/products.yaml` —— 一条数据「不许出厂」却又「随时可
         经 HTTP 读走」，两者只能留一个。选择关这个口子而不是放宽打包规则，理由：
           · 界面**从来不需要**它的内容才能工作：包详情把文件列出来（只有名字与
@@ -831,26 +830,6 @@ def create_app(root: Path, token: str | None = None,
         # StateConflict（额度满）由全局处理器映射成 409，与 /api/generate 同口径。
         # LLMError 不再出现在这里：它发生在作业线程里，界面在作业失败横幅上看到它。
 
-    @app.post("/api/packs/{name}/export-skill")
-    def packs_export(name: str, include_private: bool = False):
-        from .export_skill import export_agent_skill
-        # 这是唯一需要 name 拼路径的写操作：必须走同一套白名单校验，
-        # 否则 `%2e%2e` 这类编码会一路走到 Pack(root, "..")。
-        _safe_name(name)
-        try:
-            # root_for_packs：包**在它里面**，而导出目标也按 `root/agent-skills` 拼。
-            # 传 root 的话，打包版就是往安装目录里写（Program Files 不可写 → 500），
-            # 现在落到数据目录，与 generated/ 同一处。
-            return export_agent_skill(root_for_packs, name,
-                                      include_private=include_private)
-        except PackBrokenError as e:
-            # 必须先于 PackError 捕获（它是子类），否则「包坏了」会被报成 404。
-            raise HTTPException(409, str(e))
-        except PackError as e:
-            raise HTTPException(404, str(e))
-        except Exception as e:  # noqa: BLE001
-            raise HTTPException(500, f"导出失败：{e}")
-
     @app.post("/api/packs/{name}/undraft")
     def packs_undraft(name: str):
         """人工校对完成后把 `draft` 改为 false —— **就地改那一行**。
@@ -892,8 +871,8 @@ def create_app(root: Path, token: str | None = None,
     def generate(req: GenerateRequest):
         # 入参校验排在「有没有配模型」之前：非法包名跟环境状态无关，
         # 放在后面会让同一个错误请求因为用户配没配 Key 而返回不同内容。
-        # 包名过 `_safe_name`：其余四个按名字取包的端点（pack_detail / pack_file /
-        # undraft / export-skill）都调了，只有这个走请求体的入口漏了 ——
+        # 包名过 `_safe_name`：其余按名字取包的端点（pack_detail / pack_file /
+        # undraft）都调了，只有这个走请求体的入口漏了 ——
         # 于是 `{"pack":"../../.."}` 能把 packs 之外的目录当包加载。
         # knowledge.Pack 里还有一层不变式，这层负责给出 400 而不是 404。
         _safe_name(req.pack)
