@@ -1388,21 +1388,64 @@ def test_packgen_admission_failure_after_the_slot_is_taken_settles_the_job(tmp_p
     release_slug("猫咖丁")
 
 
+def _whole_second_regex_offenders(sources):
+    """挑出"读「N 秒后重试」却只认整数"的正则 —— 走 AST，不看文本行。
+
+    第 12 轮量出按行扫的两个毛病：注释/文档串里引用这句历史的话会被当成真代码（假红），
+    而没有 r 前缀、跨行隐式拼接、`([0-9]+)` 这类写法反而放过（假绿）。只看真正传给
+    re.findall/search/match/fullmatch/finditer 的**字符串常量**，两种毛病一起没了。
+    """
+    import ast
+    import warnings
+    bs = chr(92)
+    bad_int_only = ["(" + bs + "d+)", "([0-9]+)"]
+    out = []
+    for name, src in sources:
+        # 样例里有故意写坏的正则（`"\d"` 没加 r 前缀），那份 SyntaxWarning 是**样例**的
+        # 而不是本测试的 —— 抑制掉，别污染门禁输出。
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(src, filename=name)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr not in ("findall", "search", "match", "fullmatch", "finditer"):
+                continue
+            if not (isinstance(node.func.value, ast.Name) and node.func.value.id == "re"):
+                continue
+            if not node.args or not isinstance(node.args[0], ast.Constant):
+                continue
+            pat = node.args[0].value
+            if not isinstance(pat, str) or "后重试" not in pat:
+                continue
+            if "[" + bs + "d.]" in pat or "[0-9.]" in pat:      # 认小数的写法放行
+                continue
+            if any(t in pat for t in bad_int_only):
+                out.append(f"{name}:{node.lineno}: {pat}")
+    return out
+
+
 def test_no_test_reads_the_retry_note_with_a_whole_second_regex():
     r"""`_fmt_wait` 会印小数，任何"只认整数"的正则读这句通知都会把对的读成错的。
 
-    第 11 轮复核量到：一次 2.4s 的等待被整数正则读成 4，于是断言在通知正确时报红。
-    同一族正则散在两处就是两本账 —— 这里扫全库（只看真的在调用 re 的那些行）。
+    第 11 轮量到：一次 2.4s 的等待被整数正则读成 4，于是断言在通知正确时报红。
     """
-    offenders = []
-    whole = "(\\d+)" + "s 后重试"
-    for p in (ROOT / "tests").glob("*.py"):
-        for no, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
-            if "re." not in line or whole not in line:
-                continue
-            if "[\\d.]" not in line:
-                offenders.append(f"{p.name}:{no}: {line.strip()}")
-    assert not offenders, f"读「N 秒后重试」的正则不认小数：{offenders}"
+    files = [(p.name, p.read_text(encoding="utf-8"))
+             for p in sorted((ROOT / "tests").glob("*.py"))]
+    offenders = _whole_second_regex_offenders(files)
+    assert not offenders, f"这些正则读「N 秒后重试」却不认小数：{offenders}"
+    # 守卫自证（本项目对"只能变绿的守卫"过敏）：坏例必须被抓、好例必须放过，
+    # 三种坏写法（带 r 前缀、不带前缀、[0-9]+）少抓一种都说明扫描器在空转。
+    bs = chr(92)
+    demo = ("import re\n"
+            + 're.findall(r"(' + bs + 'd+)s 后重试", t)\n'
+            + 're.search("(' + bs + 'd+)s 后重试", t)\n'
+            + 're.match(r"([0-9]+)s 后重试", t)\n'
+            + 're.findall(r"([' + bs + 'd.]+)s 后重试", t)\n'
+            + '# 注释里再写一遍 (' + bs + 'd+)s 后重试 不算代码\n')
+    caught = _whole_second_regex_offenders([("demo.py", demo)])
+    assert len(caught) == 3, f"守卫没抓全（应 3 条，抓到 {caught}）"
+    assert _whole_second_regex_offenders([("c.py", "import re\nx = re\n")]) == []
 
 
 # ── 第 12 轮：额度账的"单向门"不再漏计 / 同名建包不重复花钱 ──────────
