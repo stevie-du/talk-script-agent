@@ -127,6 +127,14 @@ node _verify/e2e-live.js              # 真实端到端（真引擎 + 真页面 
 四条都是零第三方依赖（除 pytest），可分别单独运行。
 `_verify/legacy/` 里是重构前写的脚本，依赖已不存在的 DOM 与全局变量，**不要运行**。
 
+## 一条关于门禁的披露（别把这 6 条红当噪声）
+
+`node _verify/verify.js` 在**提交态 HEAD** 上是 **328/334**，不是全绿：红的 6 条都在量 UI 几何与层级
+（页签条 `position: sticky`、`.page-head-titles h2` 字号、左栏 12/16 竖向节奏 ×3、`--f-display`）。
+它们是配着 `desktop/renderer/styles.css` 那份**尚未提交**的 v6 改动写的 ——
+断言与 CSS 是一对，必须一起提交；单独落任何一半都会把红留给下一个人。
+不要把这几条改弱来"让门变绿"。（在工作树里带着那份 CSS 时，门是 334/334。）
+
 ## 打包 Windows 安装包
 
 ```bash
