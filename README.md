@@ -48,8 +48,10 @@
 20 分钟（`app/jobs.py` 的 `JOB_BUDGET_SECONDS`）：到点落 `failed` 并说明"上游太慢或反复重试"，
 不再无限等下去（《审查报告-20260920》P1-5 的两半现在都收口了）。
 ⚠ 这句在**正常路径**上是绝对的；如果连"收口"这一步自己都在抛（内存耗尽一类），还有一道
-按 `STALE_JOB_MULTIPLIER`（2× 预算）扫忙的回收网会把并发额度还回来 —— 代价是那条作业的
-错误信息只剩「由引擎回收额度」一句，具体原因要去引擎日志里找。
+按 `STALE_JOB_MULTIPLIER`（2× 预算）扫忙的回收网 —— 它**只把这条作业从并发额度里摘出去**
+（`Job.stranded`），不改状态、不删条目、不动产物：那条作业该怎么走完还怎么走完，
+界面照常轮询得到结果，引擎日志里留一条"已 N 秒无任何进展，不再占用并发额度"。
+第 10 轮复核就是因为前两个版本分别犯了"force failed"和"移出注册表"这两个错才改成这样的。
 其余全是确定性代码。
 
 各阶段的**输出预算不是一刀切**：选题与分镜固定 4000、单段重写固定 3000，
@@ -383,10 +385,11 @@ packs/elevator/
   ⚠ 与 `private_facts()` 的失败语义**相反**（`knowledge.py` 的 `Pack.private_facts()` 读不到要中止生成）；
   这条差异要写进注释，否则将来一定有人"顺手统一"
 - [ ] **B4** 懒触发：打开选题页时按"上次抓取距今"决定是否后台补抓，**走 Job 管道**。
-  ⚠ **先例是 `start_generate` / `start_packgen`**（P1-43 已修，packgen 早走 Job `server.py:426-446`），
+  ⚠ **先例是 `start_generate` / `start_packgen`**（P1-43 已修，packgen 早走 Job：路由
+  `app/server.py` 的 `packs_create`，入口 `app/pipeline.py` 的 `start_packgen`），
   "别学 packgen 同步 POST"这句话已过时，别引错路。成本：新增状态要动
-  `TRANSITIONS`+`BUSY_STATES`+progress.js 标签+`test_job_state_vocabulary_consistency.py`（`jobs.py:39-62`）；
-  且 `add_if_room` 与生成共享 `MAX_CONCURRENT_JOBS=4`（`pipeline.py:95,213`）→ **纯 HTTP 抓取用独立并发额度**，
+  `TRANSITIONS`+`BUSY_STATES`+progress.js 标签+`test_job_state_vocabulary_consistency.py`（都在 `app/jobs.py` 顶部）；
+  且 `add_if_room` 与生成共享 `MAX_CONCURRENT_JOBS=4`（`app/pipeline.py`）→ **纯 HTTP 抓取用独立并发额度**，
   别跟 LLM 作业抢名额
 - [ ] **B5** LLM 归并成选题卡：批量一次调用处理 20–30 条，走现成 `chat_json`。
   **必须有降级**：没配 Key 或离线时退化成"原始条目列表"（标题+出处+日期+来源标签），

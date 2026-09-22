@@ -110,8 +110,10 @@ def _structural_summary(e: Exception) -> str:
     """把"模型这次又没按结构输出"收成一句中文：哪个字段缺了、哪个字段类型不对。
 
     只保留**字段路径**（那是用户能对着行业包 schema 查的东西），丢掉英文句子。
-    没有结构化 errors 的（`json.loads` 直接失败）退回压扁的原文 —— 那种情况
-    不含类名，且"JSON 解析失败"本身就是能看的线索。
+    `json.loads` 直接失败那一支没有结构化 errors，这里**也不回退原文**：
+    原文是 `Expecting value: line 1 column 1 (char 0)` 这类英文（第 11 轮复核 P3 抓到
+    第一版正是从这里把英文又漏进了界面），而它含不含类名都不该给用户看 ——
+    完整原文由 `chat_json` 收尾那句 `log.warning` 落到引擎日志。
     """
     errs = []
     if isinstance(e, ValidationError):
@@ -126,9 +128,10 @@ def _structural_summary(e: Exception) -> str:
         what = "缺了这个字段" if kind.endswith("missing") else "这个字段结构不对"
         parts.append(f"{loc or '整体'}{what}")
     if not parts:
-        return _validation_detail(e)
+        return "输出不是可解析的 JSON"
     more = f"（另有 {len(errs) - 6} 处，详情看引擎日志）" if len(errs) > 6 else ""
     return "；".join(parts) + more
+
 
 _client_lock = threading.Lock()
 _client: httpx.Client | None = None
@@ -652,7 +655,12 @@ class LLMClient:
         # 银行家舍入，3.5 反而印 4）—— 通知与实睡同源是这组函数存在的理由，
         # 差 0.5 秒也是差。所以整数才去掉小数点，带小数的一律原样说。
         s = f"{w:.1f}"
-        return s[:-2] if s.endswith(".0") else s
+        if s == "0.0" and w > 0:
+            # 0.03 秒印成「0」正是这个函数存在的理由（通知与实睡同源）；
+            # 向上取整成 0.1 又是另一种谎。多留一位小数、并以 0.01 兜底，
+            # 让"任何非零等待"都不显示成 0。
+            s = f"{max(w, 0.01):.2f}"
+        return s.removesuffix(".0")
 
     @staticmethod
     def _interruptible_sleep(seconds: float, should_abort=None,

@@ -1436,5 +1436,26 @@ def test_packgen_stub_sends_exactly_what_the_engine_says():
         # 400 那句在桩里是两段字符串拼起来的（模板串里一行太长），逐段比对
         assert real_400.split("，")[0] in stub and real_400.split("，", 1)[1].rstrip("。") in stub, \
             f"UI 桩的 400 文案与服务端不一致：{real_400}"
+        # 第 10 轮桩新加的三条 404（未知包的 /file、未知作业的 GET 与 cancel）同样必须同源于服务端，
+        # 连 `code` 一起比 —— 界面按 code 判的那条路径不能只在桩上存在。
+        rp = c.get("/api/packs/没有这个包/file?rel=pack.yaml").json()
+        rj = c.get("/api/jobs/没有这个作业").json()
+        rc = c.post("/api/jobs/没有这个作业/cancel").json()
+        assert rp.get("code") == "pack_missing", rp
+        # ⚠ 必须按**带引号的字面量**比，不能裸比子串：「作业不存在」是
+        #   「作业不存在或已随重启释放」的前缀，裸比会让 cancel 那支改错了也照样绿。
+        rbad = c.get("/api/packs/%2e%2e/file?rel=pack.yaml")
+        assert rbad.status_code == 400, rbad.text
+        for frag in (f"'{rp['detail'].split('：', 1)[0]}：'", f"'{rp['code']}'",
+                     f"'{rj['detail']}'", f"'{rc['detail']}'",
+                     f"'{rbad.json()['detail']}'"):
+            assert frag in stub, f"UI 桩的 404/400 文案与服务端不一致：{frag}"
+        # 建包的两类冲突是两句不同的话（app/packgen.py 的两条 raise）：桩原来只有
+        # 「正在创建中」一句，于是"占位到底还不还"在桩上量不出来（两种情况都 409）。
+        # 走源码对账而不是走 HTTP：这条路径要花钱/要有模型配置，文案对账不该依赖它。
+        pgsrc = (ROOT / "app" / "packgen.py").read_text(encoding="utf-8")
+        for why in ("行业包正在创建中", "行业包已存在"):
+            assert f"{why}：" in pgsrc, f"服务端不再有「{why}：」这句，桩里的措辞该跟着改"
+            assert f"'{why}：'" in stub, f"桩里没有「{why}：」这一句（与服务端不同源）"
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

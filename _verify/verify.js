@@ -295,11 +295,49 @@ window.__addCount = 0;
   // ⚠ 一个键也不够（第 10 轮复核 P2）：两次提交不同行业名时，第二次会把归还用的
   //   键覆盖掉，第一次那个名字就永久卡在"正在创建中" —— 桩凭空造出一个真引擎不会
   //   给的、而且**再也退不掉的** 409。所以占位键跟着作业走：每个建包作业一条记录。
-  var PG_JOBS = {};      // job_id -> { slug: 本次占住的目录名, polls: 已轮询次数 }
+  var PG_JOBS = {};      // job_id -> { slug, industry, polls, state, born }
   var PG_SEQ = 0;
+  // 已经建成的包目录（引擎侧是 packs/<slug>/ 真的在那儿）：桩必须分得清
+  // 「还在创建中」与「已经存在」两句不同的 409（app/packgen.py 的两条 raise）。
+  var PG_CREATED = {};
+  // 占位的上限时长：引擎在建包 worker 的 finally 里归还，与"有没有人轮询"无关；
+  // 桩的作业只在被轮询时才推进，于是一条再没人问的作业会把名字**永久**占着
+  // （第 11 轮复核 P2：12p 之外又留下两条永久 409）。桩没有线程可杀，就给占位一个
+  // 到点该归还的占位（数值见常量，注释里不抄数字——这条由 test_runtime_requirements 盯着）：
+  // 超时的作业按"预算用尽"落 failed 并归还 —— 与引擎那条路径同形
+  // （失败 + 额度还回来），至少不会永久 409。窗口远大于任何一条断言的轮询间隔。
+  var PG_CLAIM_MS = 60000;
   function pgJobId(u) {
     var tail = String(u || '').split('/api/jobs/')[1] || '';
     return tail.split(/[/?#]/)[0];
+  }
+  function pgSweepStale() {
+    var nowT = Date.now();
+    Object.keys(PG_JOBS).forEach(function (k) {
+      var j = PG_JOBS[k];
+      if (j.state === 'packing' && j.slug && nowT - j.born > PG_CLAIM_MS) {
+        PG_CLAIMED = PG_CLAIMED.filter(function (x) { return x !== j.slug; });
+        PG_JOBS[k] = { slug: '', industry: j.industry, polls: j.polls,
+                       state: 'failed', born: j.born };
+      }
+    });
+  }
+  // 快照只有一本账：轮询、取消、幂等重放都走这里（三处各写一份就是第 10 轮那种漂移）
+  function pgSnap(pid) {
+    var j = PG_JOBS[pid];
+    // 字段集对齐 Job.snapshot()：真引擎的终态快照仍带 created_at / steps / error，
+    // 少给一个字段，界面里"读不到就当没有"的那一支就永远不跑（第 11 轮复核 P3）。
+    return mk({ id: pid, kind: 'packgen', state: j.state, created_at: bornAt(pid, 2000),
+                error: j.state === 'failed' ? '作业超时未收工（桩的占位回收，对应引擎的整作业预算）' : null, steps: [],
+                params: { industry: j.industry },
+                result: j.state === 'done' ? PG_RESULT : undefined });
+  }
+  // 包名的合法性判定与 app/server.py 的 _safe_name 同方向（不合法 → 400，排在"包存在吗"
+  // 之前，与引擎一致：_safe_name 在前、Pack(root,name) 在后）。判据直接复用 pgSlug：
+  // 一个名字原样穿过 slugify 才算干净名字 —— 不另抄一份字符类（那是第 8 轮手写区段表
+  // 错 62 个码点的老路）。
+  function packNameOk(n) {
+    return !!n && n.indexOf('..') < 0 && pgSlug(n) === n;
   }
   // ⚠ 引擎按 slugify 之后的目录名占位，不是按用户输入的那串字：
   //   「全屋定制/装修」与「全屋定制 装修」都会落成 packs/全屋定制-装修/，
@@ -336,16 +374,23 @@ window.__addCount = 0;
     {rel:'rules/duration.md',size:1024},
     {rel:'private/pricing.md',size:896},
   ];
-  // 桩认为"盘上真有的包"：出厂的 elevator + 建包流程做出来的 fitment。
-  // 详情分支的显示名与 /file 的包名闸都从这一本来 —— 两处各写一份就是两本账。
-  var KNOWN_PACKS = { elevator: '电梯行业包', fitment: '全屋定制/装修' };
+  // 桩认为"盘上真有的包"，**显示名与包名都从 META 现算**（第 10 轮复核 P3）：
+  // 这段原来抄了一份手写表，抄错的那一列让同一个包在下拉里叫「全屋定制包」、
+  // 在右栏详情里叫「全屋定制/装修」—— 而 /file 干脆完全忽略包名，任何包名都回
+  // DET_FILES 的内容。真引擎先构造 Pack(root, name)，不存在的包直接 404
+  // （app/server.py 的 pack_file，在 private/ 判定**之前**），所以两处都必须问同一本账。
+  var KNOWN_PACKS = {};
+  META.packs.forEach(function (p) { KNOWN_PACKS[p.name] = p.display_name; });
   function bornAt(id, backMs) {
     if (!born[id]) born[id] = new Date(Date.now() - backMs).toISOString();
     return born[id];
   }
   // 建包作业（P1-43）的桩：POST /api/packs/create 只回 job_id，
-  // 结果挂在 GET /api/jobs/jobpg 上。第一拍必须是 packing ——
+  // 结果挂在 GET /api/jobs/jobpgN 上。第一拍必须是 packing ——
   // 若桩一上来就 done，界面里那段轮询/进度代码永远不会被执行（空转）。
+  // ⚠ 这是一份**共享**的结果体：name/dir 恒为 fitment，不随提交的行业名变
+  //   （快照里的 params.industry 才是本次真提交的那个）。要量"界面把哪个包加进了
+  //   下拉"这类按对象判定的行为，得先把它改成按作业生成，别在这份常量上加字段。
   var PG_RESULT = {
     name: 'fitment', display_name: '全屋定制/装修', dir: 'C:/packs/fitment', draft: true,
     // 与 app/packgen._checklist 同形状：H1 + 说明 + 一批 "- [ ]" 条目 + 一个 "## " 小节。
@@ -674,7 +719,14 @@ window.__addCount = 0;
       //   不存在的包直接 404（app/server.py 的 pack_file，在 private/ 判定**之前**）。
       //   桩替实现把这一格演成成功，「界面点了个不存在的包还能读到正文」就量不出来。
       var filePack = decodeURIComponent((s.split('/api/packs/')[1] || '').split(/[/?#]/)[0] || '');
-      if (!KNOWN_PACKS[filePack]) return err(404, '行业包不存在：' + filePack);
+      // 顺序与引擎一致：先 _safe_name（不合法 400），再 Pack() 存在性（未知包 404），
+      // 最后才是 private/ 的 403 —— 反过来会把"读不存在的包"演成"私有资料被拒"。
+      if (!packNameOk(filePack)) return err(400, '行业包名称不合法');
+      if (!KNOWN_PACKS[filePack]) {
+        // 文案与 code 都与 app/server.py 同源（真引擎这里回 detail + code=pack_missing），
+        // 逐字一致性由 tests/test_server_hardening.py 的桩/服务端对账用例钉住。
+        return errc(404, '行业包不存在：' + filePack, 'pack_missing');
+      }
       // 真实后端对 private/ 一律 403（安装包与导出都排除它，界面也不该能读全文），
       // 且**与包名无关**。桩原来只认 elevator：前面有用例建出第二个包之后，
       // 请求落到通用的 /api/packs/ 清单分支、拿回一份没有 size/text 的东西，
@@ -759,6 +811,10 @@ window.__addCount = 0;
       // 那是桩自己造的一种"假忙碌"，还会让第二个纯符号名字看起来在排队（第 7 轮复核抓到）。
       if (!indKey) return err(400, '行业名称里没有任何可用作目录名的字符（纯符号起不了名），'
                                    + '请换成含中文、字母或数字的名称');
+      pgSweepStale();                 // 先看有没有到点该归还的占位
+      // 两句 409 是两件事（app/packgen.py 两条 raise 的原文）：目录已经在 = 已存在，
+      // 只有还在创建中的那条才算"排队"。桩原来只有后一句。
+      if (PG_CREATED[indKey]) return err(409, '行业包已存在：' + indKey);
       if (PG_CLAIMED.indexOf(indKey) >= 0) {
         calls.pgdup = (calls.pgdup || 0) + 1;
         return err(409, '行业包正在创建中：' + indKey);
@@ -766,59 +822,75 @@ window.__addCount = 0;
       PG_CLAIMED.push(indKey);
       PG_SEQ++;
       var pgId = 'jobpg' + PG_SEQ;          // 每次提交一个独立作业：真引擎就是按 job.id 记占位的
-      PG_JOBS[pgId] = { slug: indKey, polls: 0, state: 'packing' };
-      calls.pg = 0;
+      PG_JOBS[pgId] = { slug: indKey, industry: ind, polls: 0, state: 'packing',
+                        born: Date.now() };
       return mk({ job_id: pgId });
     }
     if (s.indexOf('/api/jobs/jobpg') >= 0 && s.indexOf('/cancel') >= 0) {
       var cid = pgJobId(s);
+      if (!PG_JOBS[cid]) return err(404, '作业不存在');   // app/server.py 的 job_cancel 同文案
       if (PGCANCELFAIL) {
         calls.failpgcancel = (calls.failpgcancel || 0) + 1;
         return err(500, '引擎没有接受这次取消：作业正在写文件');
       }
+      pgSweepStale();
       calls.cancel++;
+      if (PG_JOBS[cid].state !== 'packing') return pgSnap(cid);   // 已结束：幂等，不改状态
       // 只归还**这条作业**占住的键（第 10 轮 P2：写死一个键会把别人的占位删掉，
       // 或把自己的留在集合里永久 409）。作业条目本身留着 —— 真引擎的终态作业还在
       // 注册表里（prune 只保留最近 200 条），轮询它照样有答案，不是 404。
-      if (PG_JOBS[cid]) {
-        PG_CLAIMED = PG_CLAIMED.filter(function(x){ return x !== PG_JOBS[cid].slug; });
-        PG_JOBS[cid] = { slug: '', polls: PG_JOBS[cid].polls, state: 'cancelled' };
-      }
-      return mk({ id: cid, state: 'cancelled', kind: 'packgen', params: {} });
+      PG_CLAIMED = PG_CLAIMED.filter(function(x){ return x !== PG_JOBS[cid].slug; });
+      PG_JOBS[cid] = { slug: '', industry: PG_JOBS[cid].industry,
+                       polls: PG_JOBS[cid].polls, state: 'cancelled',
+                       born: PG_JOBS[cid].born };
+      return pgSnap(cid);
     }
     if (s.indexOf('/api/jobs/jobpg') >= 0) {
       var pid = pgJobId(s);
+      pgSweepStale();
       var pj = PG_JOBS[pid];
       if (!pj) {
-        // 不认识这个作业 id：真引擎此时是 404，不是"随便回一份别人的结果"。
-        return err(404, '作业不存在');
+        // 不认识这个作业 id：真引擎此时是 404「作业不存在或已随重启释放」，
+        // 不是"随便回一份别人的结果"。
+        return err(404, '作业不存在或已随重启释放');
       }
-      if (pj.state && pj.state !== 'packing') {
-        // 已收工：继续回同一份终态快照（幂等轮询，不因为归还过就变 404）
-        return pj.state === 'done'
-          ? mk({ id: pid, kind: 'packgen', state: 'done', result: PG_RESULT })
-          : mk({ id: pid, kind: 'packgen', state: pj.state, params: {} });
-      }
+      if (pj.state !== 'packing') return pgSnap(pid);   // 已收工：同一份终态快照，幂等可轮询
+      calls.pg++;             // 全局"建包被轮询了几次"的观测值（断言用它判"少传参数时不许开轮询"）
       pj.polls++;
       if (pj.polls <= 2) {
         return mk({ id: pid, kind: 'packgen', state: 'packing',
-          params: { industry: '全屋定制/装修' },
+          params: { industry: pj.industry },
           steps: [{ key: 'retry', title: '接口自动重试·第 1/2 次',
                     ts: '2026-09-20T10:00:05', data: { note: '模型返回空内容' } }],
           stream: { phase: '行业包生成', reasoning_tail: '先想这个行业的细分领域……',
                     reasoning_len: 512, content_len: 0 } });
       }
       PG_CLAIMED = PG_CLAIMED.filter(function(x){ return x !== pj.slug; });
-      PG_JOBS[pid] = { slug: '', polls: pj.polls, state: 'done' };   // finally 归还
-      return mk({ id: pid, kind: 'packgen', state: 'done', result: PG_RESULT });
+      PG_CREATED[pj.slug] = 1;                       // 目录从此在那儿了：下一句 409 换措辞
+      PG_JOBS[pid] = { slug: '', industry: pj.industry, polls: pj.polls, state: 'done',
+                       born: pj.born };             // finally 归还
+      return pgSnap(pid);
     }
+    // 认不出来的作业 id 就是认不出来：真引擎 GET /api/jobs/{id} 回 404
+    // 「作业不存在或已随重启释放」，cancel 未知 id 回 404「作业不存在」。
+    // 原来这一路落到最后的兜底分支拿到 200 + 空对象，界面轮询因为 state 永远
+    // undefined 而**死转**（真引擎会立刻收工报错）—— 桩比后端宽容，还顺手把
+    // "作业消失之后界面做什么"这条路从门禁里抹掉了（第 11 轮复核 P2）。
+    // ⚠ 位置有讲究：必须在**所有**具名作业分支（jobrun/jobkeep/jobph/job1/jobfail/
+    //   jobpgN）之后，否则它会把真存在的作业一并 404 掉 —— 放错一次，八条断言同时红。
+    if (s.indexOf('/api/jobs/') >= 0) return err(404, '作业不存在或已随重启释放');
     if (s.indexOf('/api/packs/') >= 0) {
       // 详情必须**按请求的包名**回：原来无论问哪个包都回「电梯行业包」，
       // 于是「看着 A 包点了按钮、实际改的是 B 包」这类错误在桩上量不出来
       // （批次 10 复核抓到 settings.js 的 undraft 正是读错了对象）。
       var segDet = (s.split('/api/packs/')[1] || '');
       var detName = decodeURIComponent(segDet.split(/[/?#]/)[0] || 'elevator');
-      var detDn = KNOWN_PACKS[detName] || detName;   // 没登记的包名就**原样回显**，不再一律冒充 fitment
+      // 详情与 /file 问同一本账（第 11 轮复核 P2：只有 /file 一侧把未知包判 404，
+      // 详情照样 200 回一份十个文件的清单 —— 那本账又分成两页）。判据顺序照引擎：
+      // _safe_name → Pack() 存在性。
+      if (!packNameOk(detName)) return err(400, '行业包名称不合法');
+      if (!KNOWN_PACKS[detName]) return errc(404, '行业包不存在：' + detName, 'pack_missing');
+      var detDn = KNOWN_PACKS[detName];
       // 校对清单：真实后端按**盘上有没有 校对清单.md** 回（app/server.py 读那个文件，
       // 只有 packgen 建包时写过；「转正」也不删它）。原来这里恒回一句
       // '1. 核对参数 / 2. 核对禁用词' —— 既不是 markdown 形状（P3-50 的渲染器在桩上
@@ -5709,24 +5781,59 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     var b = await newPack('口腔诊所乙');
     var ida = a.b.job_id, idb = b.b.job_id;
     var ra = await pollTo(ida);                    // A 先收工
-    var dupA = await newPack('猫咖甲');            // 自己的键该还得还
-    var dupB = await newPack('口腔诊所乙');        // B 还在跑：这个名字必须仍然 409
+    var dupA = await newPack('猫咖甲');            // A 的占位必须已经还掉：还留着就报"正在创建中"
+    var dupB = await newPack('口腔诊所乙');        // B 还在跑：这个名字必须仍然报"正在创建中"
     var midB = await api('/api/jobs/' + idb);      // B 的作业不能被 A 的收工改动
     var rb = await pollTo(idb);
-    var dupB2 = await newPack('口腔诊所乙');       // B 收工后它的键才释放
+    var dupB2 = await newPack('口腔诊所乙');       // B 收工后占位才归还
     var stillThere = await api('/api/jobs/' + ida);  // 收工过的作业还在注册表里（真引擎 prune 才删）
+    var cancelDone = await api('/api/jobs/' + ida + '/cancel', {});  // 幂等：不许把 done 改成 cancelled
+    var detailGone = await api('/api/packs/' + '猫咖甲');            // 桩没真建目录：未知包必须 404
     return { sa: a.st, sb: b.st, distinct: ida !== idb && !!ida, ra: ra && ra.b.state,
-             dupA: dupA.st, dupB: dupB.st, midB: midB.b.state, rb: rb && rb.b.state,
-             dupB2: dupB2.st, still: stillThere.st + ':' + (stillThere.b.state || ''),
+             dupA: dupA.st, dupAwhy: String(dupA.b.detail || '').slice(0, 7),
+             dupB: dupB.st, dupBwhy: String(dupB.b.detail || '').slice(0, 7),
+             midB: midB.b.state, rb: rb && rb.b.state,
+             dupB2: dupB2.st, dupB2why: String(dupB2.b.detail || '').slice(0, 7),
+             still: stillThere.st + ':' + (stillThere.b.state || ''),
+             cancelState: cancelDone.st + ':' + (cancelDone.b.state || ''),
+             detail: detailGone.st + ':' + (detailGone.b.code || ''),
+             indA: (ra.b.params || {}).industry, indB: (rb.b.params || {}).industry,
              idA2: dupA.b.job_id, idB2: dupB2.b.job_id };
   })();`);
+  // 引擎在包目录已存在时报的是「行业包已存在」，只有仍在创建中才报「正在创建中」
+  // （app/packgen.py 两条 raise）。桩原来只有一句，于是"占位到底还不还"这件事量不出来：
+  // 还不还都是 409。现在两句都在，判据按**措辞**分，不按状态码分。
   check("桩：并发两次建包各自归还自己的占位（A 收工不放 B 的队，也不误伤 B 的作业）",
     pgTwoJobs.sa === 200 && pgTwoJobs.sb === 200 && pgTwoJobs.distinct === true
       && pgTwoJobs.ra === 'done'
-      && pgTwoJobs.dupA === 200 && pgTwoJobs.dupB === 409
+      && pgTwoJobs.dupA === 409 && pgTwoJobs.dupAwhy === '行业包已存在：'
+      && pgTwoJobs.dupB === 409 && pgTwoJobs.dupBwhy === '行业包正在创建'
       && pgTwoJobs.midB === 'packing' && pgTwoJobs.rb === 'done'
-      && pgTwoJobs.dupB2 === 200 && pgTwoJobs.still === '200:done',
+      && pgTwoJobs.dupB2 === 409 && pgTwoJobs.dupB2why === '行业包已存在：'
+      && pgTwoJobs.still === '200:done'
+      && pgTwoJobs.cancelState === '200:done'
+      && pgTwoJobs.detail === '404:pack_missing'
+      && pgTwoJobs.indA === '猫咖甲' && pgTwoJobs.indB === '口腔诊所乙',
     JSON.stringify(pgTwoJobs));
+
+  // 包名这一格也要有断言，否则"桩回不回 404"随时可以静默退回宽容（第 10 轮 P3）：
+  // 真引擎对不存在的包是 404，且**先判包、再判 private**。
+  const pgFileGate = await evalIn(`return (async () => {
+    var st = function (u) { return window.fetch(u).then(function (r) { return r.status; }); };
+    return {
+      realYaml: await st('/api/packs/elevator/file?rel=pack.yaml'),
+      noPack: await st('/api/packs/从没建过的包/file?rel=pack.yaml'),
+      noPackPriv: await st('/api/packs/从没建过的包/file?rel=private/x.md'),
+      priv: await st('/api/packs/elevator/file?rel=private/pricing.md'),
+      noRel: await st('/api/packs/elevator/file'),
+      listed: Object.keys(window.__tsMeta.packs.reduce(function (m, p) { m[p.name] = 1; return m; }, {})).length
+    };
+  })();`);
+  check("桩：读包内文件先认包（不存在的包 404，private 才是 403）",
+    pgFileGate.realYaml === 200 && pgFileGate.noPack === 404
+      && pgFileGate.noPackPriv === 404 && pgFileGate.priv === 403
+      && pgFileGate.noRel === 404 && pgFileGate.listed === 2,
+    JSON.stringify(pgFileGate));
 
   // ── 13) 布局 ─────────────────────────────────────────────
   const layout = await evalIn(`return {

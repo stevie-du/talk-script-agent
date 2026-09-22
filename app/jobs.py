@@ -111,8 +111,7 @@ class JobBudget(RuntimeError):
         # 也就看不出"我到底等了多久被停的"。分钟数不整就带一位小数（90 秒说
         # 1.5 分钟，不说"超过 2 分钟" —— 那是虚报）。
         if s >= 60:
-            m = f"{s / 60:.1f}"
-            m = m[:-2] if m.endswith(".0") else m
+            m = f"{s / 60:.1f}".removesuffix(".0")
             span = f"{m} 分钟（{s:g} 秒）"
         else:
             span = f"{s:g} 秒"
@@ -221,6 +220,10 @@ class Job:
         「重写本段」会立刻被判超预算，把一次正常的重写报成失败。
         """
         self.started_at = time.time()
+        # 回收网的钟也要一起重开：只 reset `started_at` 的话，一条 41 分钟前的老记录
+        # 点「重写本段」会在刚被放行的瞬间被 `last_progress` 判成卡死并永久摘掉额度
+        # （`stranded` 是单向门），整条重写全程零额度记账（第 11 轮复核 P1）。
+        self.touch()
 
     def touch(self) -> None:
         """记一次「这条作业还在往前走」。浮点写，不需要锁。"""
@@ -378,6 +381,9 @@ class JobRegistry:
             if busy >= limit:
                 return False
             job.transition_or_raise(new_state, error=None)
+            # 放行与"重新计时"必须在同一个临界区：不然刚被放行的老作业会在
+            # 下一次回收扫描里被摘掉额度（第 11 轮复核 P1，实测 stranded=True 跑完整条重写）。
+            job.touch()
             return True
 
     def get(self, jid: str) -> Job:
@@ -408,12 +414,15 @@ class JobRegistry:
         **不是**「非终态作业数」：待确认的作业不该算并发 ——
         否则 4 张没人理的确认卡就能把后续所有生成永久挡在 409 之外。
 
-        ⚠ 仅供展示（`/api/meta` 的 `max_concurrent` 说明、测试）。
-        **不要**用它做「够不够再开一个」的判断再另行 `add()` ——
-        那是一次 TOCTOU，用 `add_if_room()`。
+        ⚠ **不是**「非终态作业数」：待确认的作业不该算并发 ——
+        否则 4 张没人理的确认卡就能把后续所有生成永久挡在 409 之外。
 
-        口径与 `add_if_room` 严格一致（含"被第二道网摘掉额度的不算"），
-        否则界面显示"3 个在跑"、后端却继续放行新作业 —— 又是一处两本账。
+        ⚠ 更正这份文档原来的一句话（第 11 轮复核）：它自称"供 `/api/meta` 展示"，
+        而 grep 全库确认 **生产端没有任何调用者** —— `/api/meta` 只回常量 max_concurrent。
+        界面上"几条在跑"是渲染层按历史记录自己数的（`main.js` / `sessions.js`），
+        那是另一本账：被回收网摘掉额度的作业这里不算它，界面却照样数它一条。
+        所以它的用途只有两个：诊断日志与测试断言。**不要**拿它去做准入判断 ——
+        那是 TOCTOU，准入用 `add_if_room()` / `transition_if_room()`。
         """
         with self._lock:
             return sum(1 for j in self._jobs.values()
@@ -430,6 +439,13 @@ class JobRegistry:
         作业就永远停在忙态，而这里只回收终态 —— 症状照旧是"一个都没在跑，
         生成却一直报已达上限"，只能重启）。这里在回收终态之前先 `stranded` 掉
         那些远超预算还挂在忙态的作业，把额度让出来；见 `_reap_stranded`。
+
+        ⚠ 于是 `keep` 只是**终态**作业的上界：被摘掉额度的作业还没进终态，
+        `_trim` 不收它，注册表可能超出 keep（第 11 轮复核 P2）。这是刻意的取舍 ——
+        每一条这样的记录都对应一次"引擎自己没把作业收口"的缺陷，且各带一条
+        WARNING 日志；宁可留着几条记录占几 KB，也不要再犯"为了回收内存而改动
+        活作业状态"那个 P1。真正该修的是产生它的那条路径（见 `_spawn` / `_guarded` /
+        `start_packgen` 的三处兜底）。
         """
         self._reap_stranded()
         with self._lock:

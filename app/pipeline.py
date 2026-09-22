@@ -268,6 +268,7 @@ class Pipeline:
         # 只能重启引擎。归还做成幂等的：`release_slug` 用 discard。
         # ⚠ 归还点**只能有这一个**：内层再 release 一次，若这期间别人抢到了同名
         #   占位，第二次 discard 会偷走别人的锁。
+        job_added = False
         try:
             jid = new_job_id()
             job = Job(jid, "packgen", {"industry": industry,
@@ -277,12 +278,18 @@ class Pipeline:
             if not self.registry.add_if_room(job, MAX_CONCURRENT_JOBS):
                 raise StateConflict(
                     f"同时进行的任务已达上限（{MAX_CONCURRENT_JOBS} 个），请等其中一个完成后再试")
+            job_added = True
             # `self.llm` 是惰性构建的（会读 data_dir 下的配置文件），所以它**也可能抛**：
             # 放在 try 外面等于给「配置坏了」留一条漏占位的路径。
             client = self.llm               # P1-6：作业级抓一次，中途不换配置
             self._spawn(job, lambda: self._run_packgen(job, client, slug))
-        except BaseException:
+        except BaseException as e:
             release_slug(slug)
+            # P1-46 的第四条路（第 11 轮复核 P2）：`self.llm` 在 `add_if_room` **之后**抛
+            # （配置读不出来）时，原来只归还 slug，作业却永远停在 queued —— 那条并发额度
+            # 要等 2× 预算才被回收网摘掉，实测连点十次就是"一个都没在跑但一直已达上限"。
+            if job_added and job.state not in TERMINAL_STATES:
+                self._fail(job, e)
             raise
         return jid
 

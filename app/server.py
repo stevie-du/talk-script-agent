@@ -214,24 +214,21 @@ def _humanize_validation(errors: list) -> str:
         elif kind == "literal_error":
             # 枚举值写错：pydantic 给的是 "Input should be 'strong', 'standard' or 'off'"，
             # 中文界面里露这句等于没说话（第 9 轮实测：voice / format 两个下拉都走这里）。
-            allowed = str((ctx.get("expected") or "")).replace("'", "").strip()
+            allowed = str(ctx.get("expected") or "").replace("'", "").strip()
             parts.append(f"{label}只能是这几个值之一：{allowed}" if allowed
                          else f"{label}的值不在允许的范围内")
         elif kind in ("json_invalid", "json_load_failed"):
-            # pydantic 给 JSON 解析错的 loc **不是字段名**，而是位置：实测
-            # `{"body": 1 个数}` 形态 `["body", 14]`（第 14 个字符），
-            # 两个数的形态是 `["body", 行, 列]`。之前取末段当"哪个框"，
-            # 于是界面上一句「14 不是合法的 JSON（JSON decode error）」——
-            # 一个不存在的框 + 一句英文，等于没说。
+            # pydantic 给 JSON 解析错的 loc **不是字段名**，而是位置。实测 2.13.5 +
+            # FastAPI 0.141 下七种畸形 body 全是 `["body", <字符偏移>]` 一个数
+            # （第 14 个字符 / 第 213 个字符…），msg 恒为 "JSON decode error"。
+            # 之前取末段当"哪个框"，于是界面上一句「14 不是合法的 JSON（JSON decode error）」
+            # —— 一个不存在的框 + 一句英文，等于没说（第 10 轮复核 P2）。
+            # ⚠ 不写"两个数 = 行/列"那一支：第 11 轮复核量过，它在这套版本上永不达，
+            #   留着就是装饰码 + 一句站不住的注释。
             nums = [x for x in loc if str(x).isdigit()]
-            if len(nums) >= 2:
-                where = f"（第 {nums[0]} 行第 {nums[1]} 列附近）"
-            elif nums:
-                where = f"（第 {nums[0]} 个字符附近）"
-            else:
-                where = ""
-            parts.append(("请求内容不是合法的 JSON" if len(nums) else
-                          f"{label}不是合法的 JSON") + where)
+            parts.append(("请求内容不是合法的 JSON" if nums else
+                          f"{label}不是合法的 JSON")
+                         + (f"（第 {nums[0]} 个字符附近）" if nums else ""))
         elif kind.endswith("_parsing"):
             parts.append(f"{label}要填数字")
         elif kind == "string_type":

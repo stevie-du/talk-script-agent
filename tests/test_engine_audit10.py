@@ -842,7 +842,10 @@ def test_retry_note_quotes_the_wait_it_will_actually_sleep(monkeypatch):
                      deadline=started + 3.0,
                      on_retry=lambda note, i, n: notes.append(note))
     waited = _t.time() - started
-    quoted = [int(m) for n in notes for m in re.findall(r"(\d+)s 后重试", n)]
+    # ⚠ 这一族正则需要**整份一致**：`_fmt_wait` 现在会印小数（2.5s），这里若还写
+    #   (\d+) 就会把 2.4 读成 4 —— 通知是对的、判据把它读错了（第 11 轮复核 P2；
+    #   同文件 :1022 那处已经是 [\d.]+，两处各写一份就是两本账）。
+    quoted = [float(m) for n in notes for m in re.findall(r"([\d.]+)s 后重试", n)]
     assert quoted, notes
     assert max(quoted) <= 3, f"通知说等 {quoted} 秒，而预算只剩 3 秒：{notes}"
     assert waited < 8, f"实际睡了 {waited:.1f}s，通知与预算都对不上"
@@ -1138,15 +1141,21 @@ def test_a_stuck_job_frees_its_slot_without_being_mutated():
 def test_a_full_house_of_stuck_jobs_still_admits_a_new_one():
     """症状本身：四条卡死的作业曾把后来所有生成都挡在 409 之外，只能重启。
 
+    ⚠ 这里**不许**先调 `prune()`（第 11 轮复核 P1 抓的就是上一版这么写的）：
+    "四槽全漏死"的现场恰恰是没有任何作业会完成，于是 prune 永远不会被触发 ——
+    测试先 prune 等于替实现补上那道网要做的事，把唯一要证明的前提证没了。
+    真正要测的是两道额度闸**在取锁之前**各自扫一遍。
+
     `running_count`（界面看到的"在跑几条"）与 `add_if_room`（真的放不放行）
     必须同一个口径，否则又是一处两本账：显示"0 个在跑"却继续拒绝新作业。
     """
     reg = JobRegistry()
     stuck = [_stranded(reg, f"stuck-{i}") for i in range(MAX_CONCURRENT_JOBS)]
-    reg.prune()
-    assert reg.running_count() == 0, "第二道网没把额度算回去"
+    # 最后加进去的那条此刻还不算"过期"（它是 add 之后才被伪造成 40 分钟没动的），
+    # 所以这里不能用 prune 补一刀 —— 要看的就是"下一次准入自己把它扫掉"。
     nxt = Job("next-1", "generate", {})
     assert reg.add_if_room(nxt, MAX_CONCURRENT_JOBS), "还是被卡死的作业挡住了"
+    assert reg.running_count() == 1, "准入时那一次扫描没把额度算回去（只剩 nxt 自己）"
     # 三个额度口径都要一致 —— 重写走的是另一条路（`transition_if_room`），
     # 只补 `add_if_room` 的话，症状会在「重写本段」上原样复现。
     done = Job("done-1", "generate", {})
@@ -1175,12 +1184,20 @@ def test_a_busy_but_progressing_job_is_never_reaped():
 
 
 def test_checkpoints_are_what_count_as_progress():
-    """「有进展」的三个来源都要真的刷新时间戳，否则第二道网要么误伤要么失效。"""
+    """「有进展」的**四个**来源都要真的刷新时间戳，否则第二道网要么误伤要么失效。
+
+    上一版这份用例标题写"三个"、实际只测了两个（第 11 轮复核 P1：`_step` 那一行
+    删掉也全绿）；`_delta_handler` 走的仍是下面这两个，不单独算一个来源。
+    """
     j = Job("touch-1", "generate", {})
     j.last_progress = 0.0
     Pipeline._stop_check(j)
     t1 = j.last_progress
     assert t1 > 0, "检查点不算进展"
+    j.last_progress = 0.0
+    Pipeline._step(object.__new__(Pipeline), j, "write", "文案撰写", {})
+    assert j.last_progress > 0, "记一步进度不算进展"
+    assert len(j.steps) == 1, "顺手把记步本身改坏了"
     j.last_progress = 0.0
     Pipeline._delta_handler(j, "文案撰写")("content", "字")
     assert j.last_progress > 0, "流式增量不算进展"
@@ -1286,3 +1303,103 @@ def test_a_structurally_bad_model_output_never_quotes_internal_class_names(monke
     assert "validation errors for ScriptDraft" in caplog.text
     reprompt = [m for m in seen[-1]["messages"] if m["role"] == "user"][-1]["content"]
     assert "不是合法的目标 JSON" in reprompt and "validation errors" in reprompt
+
+
+def test_the_wait_note_never_prints_zero_for_a_nonzero_wait():
+    """0.03 秒印成「0s 后重试」是 `_fmt_wait` 存在的理由反过来的样子（第 11 轮复核 P2）。
+
+    向上取整成 0.1 也是一种谎，所以这里只要求两件事：非零进 → 非零出，且能原样读回。
+    """
+    for w in (0.03, 0.001, 0.2, 1.5, 30.0, 60.0):
+        s = LLMClient._fmt_wait(w)
+        assert float(s) > 0, f"等了 {w}s 却通知「{s} 后重试」"
+        assert s != "0", f"非零等待印成了 0：{w}"
+    assert LLMClient._fmt_wait(0.0) == "0"
+
+
+def test_a_model_that_returns_no_json_at_all_still_speaks_chinese(monkeypatch):
+    """模型一个字都不按 JSON 给（`json.loads` 直接抛）时，界面那句不许漏英文。
+
+    第 11 轮复核抓到：这条恰恰是**最常见**的那次失败，而第一版的
+    `_structural_summary` 在没有结构化 errors 时回退了 pydantic/json 原文
+    （`Expecting value: line 1 column 1 (char 0)`）。原文只进引擎日志。
+    """
+    import httpx
+
+    def handler(_req):
+        return httpx.Response(200, json={"choices": [{
+            "message": {"content": "好的，下面是我写的口播稿……"}, "finish_reason": "stop"}]})
+
+    client = _client()
+    real = httpx.Client
+    monkeypatch.setattr("app.llm.get_client",
+                        lambda *a, **k: real(transport=httpx.MockTransport(handler)))
+    with pytest.raises(LLMError) as ei:
+        client.chat_json("write", "s", "u", ScriptDraft, max_retries=1)
+    msg = str(ei.value)
+    assert "Expecting" not in msg and "char" not in msg, f"英文原文又漏进界面：{msg}"
+    assert "输出不是可解析的 JSON" in msg, msg
+
+
+def test_rewrite_of_an_old_record_is_not_stranded_the_moment_it_starts():
+    """昨天那条记录点「重写本段」，不许在刚被放行的瞬间就被回收网摘掉额度。
+
+    `transition_if_room` 放行与 `reset_budget` 都要重开回收网的钟：少任何一处，
+    整条重写就全程不进额度账（`stranded` 是单向门），实测同时在飞的忙态作业能超上限。
+    """
+    reg = JobRegistry()
+    j = Job("old-1", "generate", {})
+    assert reg.add_if_room(j, MAX_CONCURRENT_JOBS)
+    j.transition_or_raise("writing")
+    j.transition_or_raise("done")
+    j.last_progress = time.time() - JOB_BUDGET_SECONDS * 2 - 5      # 40 分钟没动过的老记录
+    assert reg.transition_if_room(j, "rewriting", MAX_CONCURRENT_JOBS)
+    # ⚠ 光"放行后立刻断言没被摘"是什么也测不到的（第 11 轮复核：那样写时把
+    #   `transition_if_room` 里的 touch 删掉照样绿）—— 摘额度发生在**下一次扫描**，
+    #   真机上就是并发的另一条生成。这里补上那一次扫描，才是被测到的那个时序。
+    other = Job("peer-1", "generate", {})
+    assert reg.add_if_room(other, MAX_CONCURRENT_JOBS)
+    assert not j.stranded, "刚放行的重写在下一次扫描里被摘掉额度 —— 这一条重写在额度账上不存在"
+    assert reg.running_count() == 2, f"重写不在账上：{[s['state'] for s in reg.snapshots()]}"
+    j.reset_budget()
+    assert j.last_progress > time.time() - 2, "reset_budget 只重开了 started_at，没重开回收网的钟"
+
+
+def test_packgen_admission_failure_after_the_slot_is_taken_settles_the_job(tmp_path,
+                                                                          monkeypatch):
+    """`self.llm` 在建包作业**占上额度之后**抛（配置读不出来）：作业必须落终态。
+
+    P1-46 的第四条路 —— 原来这里只归还 slug，作业停在 queued，那条并发额度
+    要等 2× 预算才被回收网摘掉（实测连点十次 = 引擎说"一个都没在跑但已达上限"）。
+    """
+    pl = _pipeline(tmp_path)
+    pl._llm = None                              # 让 `self.llm` 走惰性构建那一条路
+
+    def boom(self):
+        raise RuntimeError("配置文件读不出来")
+    monkeypatch.setattr(Pipeline, "_build_llm", boom)
+    with pytest.raises(RuntimeError):
+        pl.start_packgen("猫咖丁", "社区猫咖，面向养猫人群获客")
+    states = [s["state"] for s in pl.registry.snapshots()]
+    assert "failed" in states, f"作业没落终态：{states}"
+    assert pl.registry.running_count() == 0, "那条并发额度还挂在 queued 上"
+    from app.packgen import claim_slug, release_slug
+    assert claim_slug("猫咖丁"), "归还点漏了：这个名字从此永远建不出包"
+    release_slug("猫咖丁")
+
+
+def test_no_test_reads_the_retry_note_with_a_whole_second_regex():
+    r"""`_fmt_wait` 会印小数，任何"只认整数"的正则读这句通知都会把对的读成错的。
+
+    第 11 轮复核量到：一次 2.4s 的等待被整数正则读成 4，于是断言在通知正确时报红。
+    同一族正则散在两处就是两本账 —— 这里扫全库（只看真的在调用 re 的那些行）。
+    """
+    offenders = []
+    whole = "(\\d+)" + "s 后重试"
+    for p in (ROOT / "tests").glob("*.py"):
+        for no, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
+            if "re." not in line or whole not in line:
+                continue
+            if "[\\d.]" not in line:
+                offenders.append(f"{p.name}:{no}: {line.strip()}")
+    assert not offenders, f"读「N 秒后重试」的正则不认小数：{offenders}"

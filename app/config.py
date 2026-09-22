@@ -78,8 +78,8 @@ class LLMConfig:
     retries: int = 2          # 请求失败（网络/超时/429/5xx）自动重试次数
     timeout: float = 180      # 单次请求超时（秒）
     # 单次请求的输出预算。必须显式给足：推理型模型（deepseek 系等）的「思考」
-    # token 也计入这个预算，服务端默认值容易被思考吃光，导致 content 返回空串
-    # （HTTP 仍是 200），表现为「模型连续 N 次输出的结构都不符合要求」。
+    # token 也计入这个预算，服务端默认值容易被思考吃光 —— 表现为 llm._ensure_content
+    # 那句「模型返回了空内容」（HTTP 仍是 200），而不是"结构不符"那一类。
     max_tokens: int = DEFAULT_CONFIG["llm"]["max_tokens"]
 
 
