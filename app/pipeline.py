@@ -259,8 +259,17 @@ class Pipeline:
         # 让两条同名请求都跑到模型那一步再一败一成，等于白烧一份 token
         # 并且让用户等一两分钟才知道自己重名（修复前 `_creating` 的占用
         # 发生在模型调用之后，正是这个形态）。
+        # ⚠ 顺序：先抢锁、再看目录在不在（第 12 轮复核 P2）。原来"存在检查"在
+        #   抢锁之前，两条同名请求可以同时越过它 → 各起一个作业、各花一份 token，
+        #   后写的那一份还覆盖前一份；`packgen` 里那句"占位在模型调用之前，
+        #   所以并发同名不会重复花钱"的说明因此与实际不符。
         if not claim_slug(slug):
+            if (self.root / "packs" / slug).exists():
+                raise FileExistsError(f"行业包已存在：{slug}")
             raise FileExistsError(f"行业包正在创建中：{slug}")
+        if (self.root / "packs" / slug).exists():
+            release_slug(slug)                # 抢到锁了但目录已在：把锁还回去再报错
+            raise FileExistsError(f"行业包已存在：{slug}")
         # 占位从这一行起就要有人还。原来 `try` 从 `self.llm` 才开始，于是
         # `new_job_id()` / `Job(...)` / `add_if_room()` 任何一处抛（第 6 轮复核
         # 实测：强行让 `new_job_id` 抛）都会留下一个**永不归还**的 slug ——
@@ -1187,6 +1196,11 @@ class Pipeline:
         显示的永远是**当前这一版**的量。
         """
         def cb(_note: str = "", _attempt: int = 0, _total: int = 0) -> None:
+            # 每一次真正的 HTTP 尝试都是一次进展证据：不这么记的话，"两次检查点之间
+            # 最长能隔多久"的上界是 3×timeout×流式倍率（默认最坏 ~5400s），
+            # 会超过回收网 2× 预算(2400s)的门限 —— 一条只是在慢上游前面等着的活作业
+            # 会被误判卡死（第 12 轮复核 P3 的根因）。有了这一行，静默上界就是单次尝试。
+            job.touch()
             job.begin_stream(phase)
         return cb
 

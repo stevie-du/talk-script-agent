@@ -354,10 +354,22 @@ window.__addCount = 0;
   //   p{L} p{N} + 下划线（与 CPython 的定义同源），带 u 标志后按码点走。
   //   跨语言一致性由 tests/test_packgen_claim.py 逐码点对账钉住。
   var BS = String.fromCharCode(92);
+  // ⚠ V8 与 CPython 的 Unicode 数据版本不是一份：下面这些码点 V8 的 p{L} 认成字母、
+  //   Python 的单词字符类不认（引擎把它们折成分隔符）。原来只在测试里"豁免"它们，
+  //   第 12 轮实测证明豁免是错的：猫咖+U+088F+甲 引擎给 猫咖-甲、桩给 猫咖᠏甲 ——
+  //   桩会占住一个引擎根本不会用的目录名，于是造出引擎不会给的 409/400。
+  //   所以这张表必须在**桩这一侧**生效：先按引擎的口径把这些码点折成 "-"，再走属性类。
+  //   这份表由 tests/test_packgen_claim.py 与 Python 侧逐码点对账（两边各写一份就是两本账）。
+  var PG_SPLIT_CP = [0x88F, 0xC5C, 0xCDC, 0xA7CE, 0xA7CF, 0xA7D2, 0xA7D4, 0xA7F1];
+  var PG_SPLIT = PG_SPLIT_CP.map(function (c) { return String.fromCharCode(c); });
   var NON_WORD = new RegExp("[^" + BS + "p{L}" + BS + "p{N}_]+", "gu");
   var EDGE_DASH = new RegExp("^-+|-+$", "g");
   function pgSlug(t) {
-    return String(t || "").replace(NON_WORD, "-").replace(EDGE_DASH, "");
+    var s = String(t || "");
+    for (var si = 0; si < PG_SPLIT.length; si++) {
+      s = s.split(PG_SPLIT[si]).join("-");     // 先按引擎口径把分裂码点当分隔符
+    }
+    return s.replace(NON_WORD, "-").replace(EDGE_DASH, "");
   }
   // 详情里那份文件清单（/api/packs/<name> 的 files）提到外面来：读文件的分支要按
   // **同一份表**回 size —— 两处各写一份就是第二本账（第 8 轮量到：详情说

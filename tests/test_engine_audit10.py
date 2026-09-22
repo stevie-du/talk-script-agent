@@ -1403,3 +1403,68 @@ def test_no_test_reads_the_retry_note_with_a_whole_second_regex():
             if "[\\d.]" not in line:
                 offenders.append(f"{p.name}:{no}: {line.strip()}")
     assert not offenders, f"读「N 秒后重试」的正则不认小数：{offenders}"
+
+
+# ── 第 12 轮：额度账的"单向门"不再漏计 / 同名建包不重复花钱 ──────────
+def _stranded_busy(reg, n):
+    """造 n 条"挂在忙态但已被回收网摘掉额度"的作业（第 12 轮实测的形状）。"""
+    out = []
+    for i in range(n):
+        j = Job(f"s-{i}", "generate", {})
+        assert reg.add_if_room(j, MAX_CONCURRENT_JOBS)
+        j.transition_or_raise("writing")
+        j.last_progress = 0.0                      # 下一次扫描就会把它摘掉
+        reg.prune()
+        assert j.stranded, f"回收网没把 {j.id} 摘掉：这条测试什么都没测到"
+        out.append(j)
+    return out
+
+
+def test_stranded_records_cannot_pile_up_unaccounted_rewrites():
+    """被误摘额度的老记录各自点「重写本段」，并发数不许突破上限。
+
+    第 12 轮实测：准入这条与 `all_busy_counted` 对 stranded 的规则相反
+    —— 准入允许它、计数排除它，7 条同时在飞而 `running_count()` 报 3。
+    """
+    reg = JobRegistry()
+    stuck = _stranded_busy(reg, MAX_CONCURRENT_JOBS)
+    admitted = 0
+    for j in stuck:
+        j.last_progress = time.time()               # 用户此刻点了按钮
+        if reg.transition_if_room(j, "rewriting", MAX_CONCURRENT_JOBS):
+            admitted += 1
+            assert not j.stranded, "放行后必须回到账上，否则这条重写不占名额"
+    counted = sum(1 for s in reg.snapshots()
+                  if s["state"] in ("rewriting", "writing", "queued"))
+    assert admitted <= MAX_CONCURRENT_JOBS, f"放行了 {admitted} 条 > 上限 {MAX_CONCURRENT_JOBS}"
+    assert counted == admitted, f"界面/额度两本账：在飞 {counted}，准入 {admitted}"
+
+
+def test_prune_bounds_stranded_entries():
+    """`keep` 必须也管住"被摘额度但还没进终态"的记录（第 12 轮：它们永久驻留）。"""
+    reg = JobRegistry()
+    _stranded_busy(reg, MAX_CONCURRENT_JOBS)
+    assert reg.prune(keep=1) is None
+    left = [s for s in reg.snapshots() if s["state"] == "writing"]
+    assert len(left) <= 1, f"keep=1 却留下 {len(left)} 条被摘额度的记录（内存无界增长）"
+
+
+def test_the_wait_note_never_understates_the_sleep():
+    """上报的等待时长必须 ≥ 实睡（429 的 Retry-After 语义是"至少这么久"）。"""
+    for w in (90.06, 0.2, 2.5, 3.5, 30.0, 0.03, 0.001, 59.99):
+        s = LLMClient._fmt_wait(w)
+        assert float(s) + 1e-9 >= w, f"通知说 {s}s，实睡 {w}s —— 少说了"
+    assert LLMClient._fmt_wait(0.0) == "0"
+
+
+def test_an_http_attempt_counts_as_progress(tmp_path):
+    """每次真正的 HTTP 尝试都要给回收网喂一次"还活着"的证据。
+
+    否则"两次检查点之间最长能隔多久"的下界是 3×timeout×流式倍率（默认 ~5400s），
+    比 2× 预算(2400s) 还长 —— 一条只是在慢上游前面等着的活作业会被误判卡死。
+    """
+    pl = _pipeline(tmp_path)
+    j = Job("att-1", "generate", {})
+    j.last_progress = 0.0
+    pl._stream_reset(j, "文案撰写")()
+    assert j.last_progress > 0, "尝试开始不算进展（第二道网会误伤慢上游）"

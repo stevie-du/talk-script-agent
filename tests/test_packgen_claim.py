@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import re
 import shutil
 import sys
 import tempfile
@@ -205,12 +206,33 @@ def test_stub_slug_agrees_with_the_engine_over_a_unicode_sweep(tmp_path):
     node = shutil.which("node")
     if not node:
         pytest.skip("没有 node，跨语言对账跑不了")
+    # ⚠ 第 12 轮把"清单只作减法 + 每条自证"这套判据证伪了两次：
+    #   (a) 豁免支实际是空跑 —— 全 BMP 扫下来没有任何多字符输入含分裂码点，所以
+    #       "含分裂码点的整串也必须一致"这件事从没量过；实测 `猫咖+U+088F+甲`
+    #       引擎给 猫咖-甲、桩给 猫咖᠏甲（桩占住一个引擎根本不会用的目录名）。
+    #   (b) 判据是 `not any(ch in single)`，而 single 恰好等于整张清单，于是"每个
+    #       单字符各红一次"被结构性地排除 —— 清单里的字符从不出现在 real-world 串里。
+    #   修法：这张表**归桩所有**（下面的 PG_SPLIT_CP），测试从桩里读它，并且双向对账：
+    #   "Python 认为非单词而 V8 认为单词"的码点集合必须恰好等于这张表。两边各自
+    #   升级 Unicode 数据都会红，加条目、删条目、清单烂掉都不再是静默的。
+    stub_body = _stub_slug()
+    m = re.search(r"PG_SPLIT_CP\s*=\s*\[([^\]]*)\]", stub_body)
+    assert m, "桩里没有 PG_SPLIT_CP 这张表了 —— 跨语言对账失去共同事实源"
+    split_chars = {chr(int(tok.strip(), 16)) for tok in m.group(1).split(",") if tok.strip()}
+    assert split_chars, "桩里的折叠表是空集：那 V8/CPython 的分歧必须由整串对账兜住"
     cps = [cp for cp in range(0x21, 0xFFFF) if not 0xD800 <= cp <= 0xDFFF] \
         + list(range(0x1D400, 0x1D560, 5)) + [0x10000, 0x20000, 0x1F600, 0x2C2F]
     inputs = [chr(cp) for cp in cps]
     # 几条真实的"同目录不同写法"，碰撞语义要靠多字符才量得到
     inputs += ["全屋定制/装修", "全屋定制 装修", "宠物医院", "？？？", "!!!",
                "café 机电", "３D打印", "ひらがな诊所", "한국어", "𝕬宠物"]
+    # 整串对账：分裂码点拼进真词、以及首尾/连续分隔符这些折叠语义，全部喂进同一轮
+    combos = [f"猫咖{ch}甲" for ch in sorted(split_chars)] \
+        + [f"{ch}宠物" for ch in sorted(split_chars)] \
+        + [f"宠物{ch}" for ch in sorted(split_chars)] \
+        + ["宠物医院-", "-宠物医院", "宠物--医院", "宠物 医院", "宠物-医院",
+           "ª宠物", "宠物ª", "ß维保", "２３D打印"]
+    inputs += [s for s in combos if s not in inputs]
     (tmp_path / "in.json").write_text(json.dumps(inputs, ensure_ascii=False), encoding="utf-8")
     (tmp_path / "slug.js").write_text(_stub_slug() + "\nmodule.exports = pgSlug;\n",
                                       encoding="utf-8")
@@ -218,48 +240,42 @@ def test_stub_slug_agrees_with_the_engine_over_a_unicode_sweep(tmp_path):
         "const fs = require('fs');\n"
         + "const pgSlug = require(process.argv[2]);\n"
         + "const ins = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));\n"
-        + "process.stdout.write(JSON.stringify(ins.map(s => pgSlug(s))));\n", encoding="utf-8")
+        + "const BS = String.fromCharCode(92);\n"
+        + "const WRE = new RegExp('[' + BS + 'p{L}' + BS + 'p{N}_]$', 'u');\n"
+        + "process.stdout.write(JSON.stringify({ slugs: ins.map(s => pgSlug(s)),\n"
+        + "  word: ins.map(s => WRE.test(s)) }));\n", encoding="utf-8")
     r = subprocess.run([node, str(tmp_path / "run.js"), str(tmp_path / "slug.js"),
                         str(tmp_path / "in.json")],
                        capture_output=True, text=True, encoding="utf-8")
     assert r.returncode == 0, r.stderr[:300]
-    got = json.loads(r.stdout)
+    out = json.loads(r.stdout)
+    got, node_word = out["slugs"], out["word"]
     bad = [(s, preview_slug(s), g) for s, g in zip(inputs, got) if preview_slug(s) != g]
-    # 例外清单里的每个码点都必须**自带理由**：Python 认为它不是单词字符（目录名被折空），
-    # V8 的 \p{L} 却认它是字母。这是两个运行时各自带的 Unicode 数据版本差，不是判据写错。
-    # 第 9 轮复核定下的两点：清单原来只作减法（加条目永远不会红）且扫描范围有洞
-    # （U+088F、U+A7C0 段整段没扫），所以现在是全 BMP 逐码点 + 每条都要自证。
-    known_version_split = {"\u088f", "\u0c5c", "\u0cdc", "\ua7ce",
-                           "\ua7cf", "\ua7d2", "\ua7d4", "\ua7f1"}
-    single = {s: (a, b) for s, a, b in bad if len(s) == 1}
-    new_ones = sorted(set(single) - known_version_split)
-    assert not new_ones, (
-        "建包桩与引擎出现了新的目录名分歧（前 8 条）：\n"
-        + "\n".join(f"  {s!r} U+{ord(s):04X}: 引擎={single[s][0]!r} 桩={single[s][1]!r}"
-                    for s in new_ones[:8]))
-    for ch in sorted(known_version_split):
+    # ⚠ 整串必须一致，**没有豁免支**（第 12 轮把原来那条"有证人就免"的判据证伪了：
+    #   single 恰好等于整张清单，所以含清单码点的串必然被免掉，逐字符那层又全绿 ——
+    #   于是 猫咖+U+088F+甲 这种真分歧穿着"有证人"的外衣过去了）。
+    assert not bad, ("建包桩与引擎的目录名出现分歧（前 8 条）：\n"
+                     + "\n".join(f"  {s!r}: 引擎={a!r} 桩={b!r}" for s, a, b in bad[:8]))
+
+    def _cp(ch):
+        return " ".join(f"U+{ord(c):04X}" for c in ch)
+
+    # 双向对账这张折叠表：Python 的 \w 不认、V8 的 p{L}/p{N}/_ 认 —— 这些码点必须
+    # **恰好**是桩里折掉的那些。表多一条（把两边本来一致的字符折成 '-'）与少一条
+    # （放任一个真分歧）都红；Node/CPython 谁升级了 Unicode 数据也会红。
+    divergent = {inputs[i] for i in range(len(inputs))
+                 if len(inputs[i]) == 1
+                 and re.fullmatch(r"\w", inputs[i]) is None
+                 and node_word[i]}
+    only_table = sorted(split_chars - divergent)
+    only_real = sorted(divergent - split_chars)
+    assert not only_real, ("这些码点两侧行为不同，桩却没折它们（前 8 个）："
+                           + ", ".join(_cp(c) for c in only_real[:8]))
+    assert not only_table, ("桩的折叠表里有码点两侧其实已经一致 —— 白拿一次差异，"
+                            "删掉它（前 8 个）：" + ", ".join(_cp(c) for c in only_table[:8]))
+    for ch in sorted(split_chars):
         assert preview_slug(ch) == "", \
-            f"白名单里的 U+{ord(ch):04X} 在引擎侧并不是「折成空」，这条理由已站不住：删掉它"
-        stub_out = got[inputs.index(ch)]
-        assert stub_out == ch or ch in single, (
-            f"白名单里的 U+{ord(ch):04X} 两边已经一致（Node 升级了？）——把这条从清单删掉")
-    # 多字符输入的分歧必须由**某个字符自己的分歧**解释（第 10 轮复核 P3）：
-    # 原来只判"串里含白名单码点"，那等于谁都能免 —— 任意串塞一个 U+088F 就能把
-    # 真正的不一致藏过去。
-    # ⚠ 这条收紧在今天这份数据上是**空跑**（第 11 轮复核实测 bad=8 / single=8 /
-    #   多字符分歧 0：单字符那一层的新分歧由上面的 new_ones 先红）。它买的是一份保险，
-    #   不是当下抓到的东西。而且它不是全权的：slugify 会把连续的非单词字符合成一个
-    #   "-"、再削首尾，所以"每个字符两边都一致"并不严格蕴含"整串一致"（全权版本要
-    #   把剔除证人字符后的串再跑一遍 Node 对账）。因此这里再钉两条前提，让保险真的
-    #   在保：这些多字符输入里**一个白名单码点都不许有** —— 一旦有用例这么写，
-    #   豁免支就从"空跑"变成"可达"，必须先补上全权对账再说。
-    multi = [(s, a, b) for s, a, b in bad if len(s) > 1
-             and not any(ch in single for ch in s)]
-    assert not multi, ("含碰撞语义的多字符输入不一致（前 6 条）：\n"
-                       + "\n".join(f"  {s!r}: 引擎={a!r} 桩={b!r}" for s, a, b in multi[:6]))
-    for s in [x for x in inputs if len(x) > 1]:
-        assert not any(ch in known_version_split for ch in s), \
-            f"{s!r} 含白名单码点：豁免支从此可达，先补全权的整串对账再放开这条"
+            f"表里的 U+{ord(ch):04X} 在引擎侧并不是「折成空」，这条理由站不住：删掉它"
     # 真实用例的语义还得对得上：两种写法同一个目录名、纯符号起不出名字
     key = {s: g for s, g in zip(inputs, got)}
     assert key["全屋定制/装修"] == key["全屋定制 装修"] == "全屋定制-装修"

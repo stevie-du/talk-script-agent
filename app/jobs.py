@@ -116,7 +116,7 @@ class JobBudget(RuntimeError):
         else:
             span = f"{s:g} 秒"
         super().__init__(
-            f"本次任务超过 {span} 仍未完成，已停止（模型响应过慢或接口反复重试）。"
+            f"本次任务的单次时间预算 {span} 已用完，已停止（模型响应过慢或接口反复重试）。"
             "可在设置里降低 llm.retries、或降低行业包 skill.yaml 的 limits.recheck_rounds，"
             "推理型模型频繁空内容时建议换非推理档。")
         self.seconds = seconds
@@ -383,6 +383,11 @@ class JobRegistry:
             job.transition_or_raise(new_state, error=None)
             # 放行与"重新计时"必须在同一个临界区：不然刚被放行的老作业会在
             # 下一次回收扫描里被摘掉额度（第 11 轮复核 P1，实测 stranded=True 跑完整条重写）。
+            # 被摘过额度的作业在这里**回到账上**（第 12 轮复核 P1）：`all_busy_counted`
+            # 对 stranded 的两条规则是"排除它"，而准入这条又允许它，于是 N 条被误摘的
+            # 老记录可以同时重写，实测 7 条在飞 > 上限 4 而计数报 3。
+            # 单向门在这里打开是安全的：这一次准入真的占了一个名额，就必须被数到。
+            job.stranded = False
             job.touch()
             return True
 
@@ -450,6 +455,11 @@ class JobRegistry:
         self._reap_stranded()
         with self._lock:
             self._trim(lambda j: j.state in TERMINAL_STATES, keep)
+            # 被摘掉额度的作业不会进终态，`keep` 对它们形同虚设（第 12 轮复核 P2：
+            # 实测 20 条永久驻留，`prune(keep=0)` 也收不掉）。它们已经没有名额、
+            # 也再不会被准入逻辑算到，留着只为了轮询 —— 超过 keep 就该按最旧的丢掉，
+            # 否则这条"只摘额度不动作业"的网自己变成了无界内存增长点。
+            self._trim(lambda j: j.stranded and j.state in BUSY_STATES, keep)
 
     def _reap_stranded(self) -> None:
         """把「远超预算却还挂在忙态」的作业从并发额度里摘出去 —— 只摘额度。

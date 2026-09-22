@@ -29,6 +29,7 @@ from __future__ import annotations
 import email.utils
 import json
 import logging
+import math
 import random
 import re
 import threading
@@ -654,12 +655,12 @@ class LLMClient:
         # 一位小数向下取整到"看不出来"也不行：2.5s 用 `:.0f` 会印成「2」（Python 用
         # 银行家舍入，3.5 反而印 4）—— 通知与实睡同源是这组函数存在的理由，
         # 差 0.5 秒也是差。所以整数才去掉小数点，带小数的一律原样说。
-        s = f"{w:.1f}"
-        if s == "0.0" and w > 0:
-            # 0.03 秒印成「0」正是这个函数存在的理由（通知与实睡同源）；
-            # 向上取整成 0.1 又是另一种谎。多留一位小数、并以 0.01 兜底，
-            # 让"任何非零等待"都不显示成 0。
-            s = f"{max(w, 0.01):.2f}"
+        # 只能**向上**取整（第 12 轮实测）：`round(90.06,1)` 给 90.0，而等待随后还会被
+        # `_clamped_wait` 抬到下限 0.2 → 通知说 90s、实睡 90.2s。少说一次等待时长正是
+        # 这组函数存在的理由的反面；429 的 Retry-After 语义是"至少等这么久"。
+        s = f"{math.ceil(w * 10) / 10:.1f}"
+        # ceil 之后任何 0<w<0.05 都会得到 "0.1"（宁可多说，也绝不说 0），
+        # 所以这里不再需要补小数位；只有 w==0 才印 "0"。
         return s.removesuffix(".0")
 
     @staticmethod
