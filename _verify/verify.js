@@ -5920,9 +5920,9 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     out.termKeys = Object.keys(term.b || {}).sort().join(',');
     out.termResult = 'result' in (term.b || {}) ? String(term.b.result) : 'ABSENT';
     out.termStream = term.b && term.b.stream ? term.b.stream.phase : '';
-    // 出厂值那一档也得走一遍：不注入旋钮时（默认 PG_CLAIM_MS = 60s）刚提交的作业**不该**
-    // 被回收、名字该还占着；把旋钮注入成 0 之后同一条才落 failed 并归还。
-    // 原来只有 lim=0 那一支被量过，于是"把 PG_CLAIM_MS 改成 600000000"（当场判死）
+    // 出厂值那一档也得走一遍：不注入旋钮时（走的是 PG_CLAIM_MS 那个时限）刚提交的作业
+    // **不该**被回收、名字该还占着；把旋钮注入成 0 之后同一条才落 failed 并归还。
+    // 原来只有 lim=0 那一支被量过，于是"把 PG_CLAIM_MS 改成极大值（当场判死 / 永不回收）"
     // 这类改动手感上是红的、实际上门禁照绿（第 16 轮复核 P2-7）。
     var sLive = await api('/api/packs/create', { industry: '推拿所己', description: '社区推拿，面向上班族' });
     var live = await api('/api/jobs/' + sLive.b.job_id);
@@ -5971,7 +5971,7 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     pgFileGate.sweptState === 'failed' && pgFileGate.sweptErr === '作业超时未收工'
       && /^409:行业包正在创建/.test(pgFileGate.resub) === false && /^200:/.test(pgFileGate.resub),
     JSON.stringify(pgFileGate));
-  // 出厂值那一档也得有人量：默认 60s 之内不许回收（否则"回收时限"其实是"当场判死"），
+  // 出厂值那一档也得有人量：出厂时限之内不许回收（否则"回收时限"其实是"当场判死"），
   // 而注入成 0 之后同一条作业要能落 failed 并把名字还回来（第 16 轮复核 P2-7）。
   check("桩：不注入旋钮时按出厂时限回收（刚提交的作业不被当场判死）",
     pgFileGate.liveState === 'packing' && pgFileGate.liveResub === 409
