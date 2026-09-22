@@ -743,10 +743,14 @@ def test_every_llm_step_of_a_real_job_carries_usage(tmp_path):
     assert snap["state"] == "done", snap.get("error")
     steps = {s["key"]: (s.get("data") or {}) for s in snap["steps"]}
     called = {t for t, _ in seen}
-    assert {"select", "write", "storyboard"} <= called, called
-    # 步骤名带轮次（`write_r1` / `write_r2`），且校验步是纯代码、不该假装有 token
+    # elevator 是合并包（方案 10，stages.draft）：首调用 draft、回炉走 write、
+    # storyboarding 照旧 —— select 不该再出现（合并包没有单独的选题调用）。
+    # 老包（无 stages.draft）走的才是 select+write 两段。
+    assert {"draft", "storyboard"} <= called, called
+    assert "write" in called and "select" not in called, called
+    # 步骤名带轮次（`write_r2`…；r1 被 draft 顶掉），且校验步是纯代码、不该假装有 token
     llm_steps = [k for k in steps
-                 if k == "select" or k == "storyboard" or k.startswith("write_")]
+                 if k in ("select", "draft", "storyboard") or k.startswith("write_")]
     assert len(llm_steps) >= 3, sorted(steps)
     for key in llm_steps:
         assert steps[key].get("usage"), f"步骤 {key} 没有 usage：这一步的钱没记账"

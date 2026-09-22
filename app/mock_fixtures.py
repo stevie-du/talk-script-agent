@@ -70,6 +70,23 @@ def response_for(task: str, user: str) -> dict:
     if task == "select":
         return dict(_PLAN_ADDITION if "加装" in user else _PLAN_TRAP)
 
+    if task == "draft":
+        # 方案 10 合并阶段：plan 与 sections 同回。选题的分流逻辑与 select 相同
+        # （用户提"加装"就用加装角度）；正文沿用 write 的首轮脏夹具 ——
+        # 合并首调用没有"回炉"字样 → 脏版 → 第二轮回炉走 task="write" 拿干净版，
+        # 回炉闭环照样被走到。
+        plan = dict(_PLAN_ADDITION if "加装" in user else _PLAN_TRAP)
+        n_points = 3
+        m = re.search(r"(\d+)\s*个要点", user)
+        if m:
+            n_points = max(1, min(4, int(m.group(1))))
+        sections = [dict(s) for s in _SECTIONS_DIRTY]
+        points = [s for s in sections if s["type"] == "point"]
+        while len(points) > n_points:
+            drop = points.pop(len(points) // 2)
+            sections.remove(drop)
+        return {"plan": plan, "sections": sections}
+
     if task == "write":
         n_points = 3
         m = re.search(r"(\d+)\s*个要点", user)

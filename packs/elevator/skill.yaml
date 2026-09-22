@@ -80,6 +80,83 @@ stages:
       # 只注「## 选题库」一节（2293 字），公式/禁忌那几节是给人读的。
       ideas: knowledge/ideas.md#选题库
 
+  # 合并阶段（方案 10）：选题与正文一次调用 —— 省掉 select 单独一轮的思考与
+  # 往返（实测 select 占总耗时 17%~33%）。引擎看到 stages.draft 就走这条路径；
+  # 没有它的老包走 select+write 两段，两种形态都被支持。
+  # 回炉轮仍走下面的 write 阶段（plan 由 $plan_json 注入），所以 write 保留不删。
+  draft:
+    system: |
+      你是$industry行业资深的短视频内容策划。你懂行业，也懂短视频（前 3 秒定生死、完播率、转化引导）。你写的不是说明书，是能让人一口气听完并行动的口语。
+      你先定选题（plan 部分），再按定下的选题写正文（sections 部分）。
+      口语化硬规则：
+      1. 单句 ≤ 25 字，长句拆开
+      2. 不用书面语连接词（因此/由此可见/综上所述/值得注意的是）
+      3. 每段只讲一件事，必须有停顿节奏感（用 ／ 标注）
+      4. 需要重读的词用 **加粗**
+      5. 事实缺失处用 {{待补：xxx}} 占位，绝不估算填充
+      6. 不出现绝对化承诺（绝对安全/零事故/政府补贴类权威背书等）
+      7. 口语化 ≠ 俚语化：按人设/受众切档——专业受众与品牌场景"自然但克制"，不用俚语网梗、不情绪化攻击；只有幽默玩梗风格才放开
+      $anti_ai_rule
+      只输出一个 JSON 对象，不要任何多余文字。
+    # 注入 = select 与 write 两边 files 的并集（redlines 只声明一次，模板里两处
+    # 引用都会被填上）；hooks 仍由引擎按风格切片注入，不在这里声明。
+    # 人味档位沿用 write.anti_ai —— 回炉轮与首调用必须是同一份口径。
+    user_template: |
+      【任务】先定选题角度与结构，再按它写出口播脚本正文 —— 两部分在**同一次输出**里交齐。
+
+      【主题】$topic
+      【细分领域】$segment　【受众】$audience
+      【平台】$platform　【风格】$style　【人设】$persona
+      【目标时长】$duration 秒，正文恰好 $points 个要点
+
+      【行业知识·当前细分】
+      $topics_slice
+
+      【受众痛点与话术】
+      $audience_slice
+
+      【已验证选题库（angle/hook_type 优先从中挑同类角度，别自造钩子类型）】
+      $ideas
+
+      【钩子库（hook_type 必须从中选）】
+      $hooks
+
+      【行业红线（定角度与写正文都不得触碰；救援、术语、敏感话题按此口径）】
+      $redlines
+
+      【第一部分 · 选题要求】
+      1. angle：一句话角度，不站队、不说教
+      2. hook_type：从钩子库 10 类中选，hook_line 是可直接念的开场句
+      3. points：恰好 $points 条，每条一句可展开的核心观点
+      4. cta：结尾引导，动作唯一，**用户指定的动作是「$cta」**，不得自换别的动作
+      5. 不出现绝对化承诺、权威背书、无法核实的资历数字、行业红线表述
+
+      【第二部分 · 按定下的选题写正文】
+      【结尾引导动作】$cta（cta 段就按这个动作写，不自换）
+      【字数配额（硬性）】总计≈$quota_total 字：开场钩子≈$quota_hook 字；正文 $points 个要点、每个≈$quota_body_per 字；结尾引导≈$quota_cta 字
+      $facts_block
+      $growth
+      $voice_block
+      【术语 → 口语解释（要用到这个术语时按右列说，别自己编类比）】
+      $terms
+      sections 恰好 1 个 hook + $points 个 point + 1 个 cta，顺序固定；每段 text 用 ／ 标注停顿，**重读词**加粗（口语化硬规则见系统提示）；subtitle 每屏 ≤ 12 字，不是口播原文照搬；私有知识库已填的数字优先使用，没有的事实用 {{待补：xxx}} 占位；$platform 平台合规，不出现该平台违禁词。
+      （分镜不在这里写 —— 有单独的「分镜」阶段，正文定稿后才生成。）
+
+      【输出结构】一个 JSON 对象，两个键，plan 在前：
+      {
+        "plan": {"angle": "一句话角度，不站队", "hook_type": "钩子库10类之一", "hook_line": "可直接念的开场句", "points": ["每条一句核心观点"], "cta": "结尾引导动作"},
+        "sections": [
+          {"type": "hook", "text": "开场钩子文案", "subtitle": "字幕关键词"},
+          {"type": "point", "text": "要点文案", "subtitle": "字幕关键词"},
+          {"type": "cta", "text": "结尾引导文案", "subtitle": "字幕关键词"}
+        ]
+      }
+    files:
+      ideas: knowledge/ideas.md#选题库
+      growth: patterns/growth.md
+      redlines: compliance/industry.md#红线速查
+      terms: knowledge/standards.md#核心术语
+
   write:
     system: |
       你是$industry行业资深的短视频内容策划。你懂行业，也懂短视频（前 3 秒定生死、完播率、转化引导）。你写的不是说明书，是能让人一口气听完并行动的口语。

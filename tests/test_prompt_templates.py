@@ -108,6 +108,8 @@ def test_stage_files_keys_are_injected():
         timings = [{"start": 0.0, "end": 5.0}, {"start": 5.0, "end": 14.0}]
         ctxs = {
             "select": pr.select_ctx(p),
+            # draft：方案 10 合并阶段（select ∪ write 的注入合到一个阶段名下）
+            "draft": pr.draft_ctx(p),
             "write": pr.write_ctx(p, _PLAN, ""),
             "rewrite_segment": pr.rewrite_ctx(sections, 1, 50, "更口语"),
             "storyboard": pr.storyboard_ctx(sections, timings),

@@ -36,8 +36,10 @@ PIPELINE = ROOT / "app" / "pipeline.py"
 LLM = ROOT / "app" / "llm.py"
 PROGRESS_JS = ROOT / "desktop" / "renderer" / "js" / "progress.js"
 
-# 调模型的四个阶段（纯代码校验那一步没有 usage，界面也就不该给它印徽章）。
-MODEL_STAGES = {"select", "write_r{rnd}", "storyboard", "rewrite_segment"}
+# 调模型的阶段（纯代码校验那一步没有 usage，界面也就不该给它印徽章）。
+# draft：方案 10 合并阶段（select+write 一次调用的包）；select/write_r{rnd}：
+# 老包（无 stages.draft）仍走的两段路径。两条路径都必须记 usage。
+MODEL_STAGES = {"select", "write_r{rnd}", "draft", "storyboard", "rewrite_segment"}
 
 _STEP_HEAD = re.compile(r"self\._step\(\s*job,\s*f?[\"'](?P<key>[^\"']+)[\"']")
 

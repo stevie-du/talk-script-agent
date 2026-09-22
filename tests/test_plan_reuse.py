@@ -59,8 +59,22 @@ def _gen(pl: Pipeline, **kw) -> dict:
 
 
 def _tmp() -> Path:
+    """老包夹具：剥掉 stages.draft 的 elevator。
+
+    方案 10 之后仓库里的包默认走合并路径（选题与正文一次调用）—— 那条路径
+    **没有单独的 select 调用**，本文件测的"复用"对它无从谈起（合并路径上
+    没有可以省掉的那一通调用，见 `pipeline._draft_once` 的 docstring）。
+    选题复用是老包（select+write 两段）的机制，所以这里把包退回老形态，
+    这批测试顺带成为「老包路径在合并包落地后仍然工作」的回归守护。
+    """
+    import yaml
     tmp = Path(tempfile.mkdtemp(prefix="talkscript-reuse-"))
     shutil.copytree(ROOT / "packs", tmp / "packs")
+    sk = tmp / "packs" / "elevator" / "skill.yaml"
+    data = yaml.safe_load(sk.read_text(encoding="utf-8"))
+    data["stages"].pop("draft", None)
+    sk.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+                  encoding="utf-8")
     return tmp
 
 

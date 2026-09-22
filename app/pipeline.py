@@ -59,6 +59,18 @@ class ScriptDraft(BaseModel):
     sections: list[ScriptSection]
 
 
+class DraftBundle(BaseModel):
+    """模型在「合并」阶段（stages.draft）要返回的结构：选题与正文同回。
+
+    方案 10（主报告 §六-10）：select+write 合并为一次调用，一个思考阶段代替
+    原来两轮（实测 select 占总耗时 17%~33%）。plan 在前 —— 模型先把角度/钩子/
+    要点定下来，再按它写正文。sections 的结构与旧 write 契约完全一致；
+    回炉轮仍走 stages.write（plan 由 $plan_json 注入），所以 write 阶段保留。
+    """
+    plan: TopicPlan
+    sections: list[ScriptSection]
+
+
 class StoryboardDraft(BaseModel):
     """模型在「分镜」阶段要返回的结构：与 sections 一一对应的分镜列表。"""
     storyboard: list[StoryboardShot]
@@ -406,21 +418,34 @@ class Pipeline:
             p["model"] = client.cfg.model
             p["max_tokens"] = client.cfg.max_tokens
             p["temperature"] = client.cfg.temperature
-            job.transition_or_raise("selecting", params=p)
-            plan = self._select(job, pack, skill, p, client)
-            self._stop_check(job)
-            self._continue_write(job, pack, skill, plan, client)
+            if "draft" in (skill.get("stages") or {}):
+                # 方案 10：合并包（skill.yaml 声明 stages.draft）选题与正文一次调用，
+                # 不进 selecting —— 省掉 select 单独一轮的思考与往返。
+                # 状态机本就允许 queued → writing，无需新边。
+                job.transition_or_raise("writing", params=p)
+                plan, draft0, usage0 = self._draft_once(job, pack, skill, p, client)
+                self._stop_check(job)
+                self._continue_write(job, pack, skill, plan, client,
+                                     prebuilt=(draft0, usage0))
+            else:
+                # 老包（stages 里没有 draft，本改造之前建的）：select+write 两段照旧。
+                job.transition_or_raise("selecting", params=p)
+                plan = self._select(job, pack, skill, p, client)
+                self._stop_check(job)
+                self._continue_write(job, pack, skill, plan, client)
         except JobCancelled:
             self._settle_cancel(job)
         except Exception as e:  # noqa: BLE001
             self._fail(job, e)
 
     def _continue_write(self, job: Job, pack: Pack, skill: dict, plan: TopicPlan,
-                        client: LLMClient):
+                        client: LLMClient, *,
+                        prebuilt: tuple[dict, dict] | None = None):
         try:
             self._stop_check(job)
             p = job.params
-            draft, revisions = self._write_with_recheck(job, pack, skill, p, plan, client)
+            draft, revisions = self._write_with_recheck(job, pack, skill, p, plan,
+                                                        client, prebuilt=prebuilt)
             # P1-30：正文定稿 + 校验通过后，分镜单独生成（voice 模式整个跳过）。
             # ⚠ "校验通过之后"只在**回炉还在跑**的意义上成立：最后一轮不过校验时
             #   `_write_with_recheck` 照样 return（见该方法的 `or rnd == rounds`），
@@ -707,9 +732,46 @@ class Pipeline:
                 # dict 保序 → 先进先出。上不封顶会让长跑的引擎攒住整段会话的选题。
                 self._plan_cache.pop(next(iter(self._plan_cache)))
 
+    def _draft_once(self, job: Job, pack: Pack, skill: dict, p: dict,
+                    client: LLMClient) -> tuple[TopicPlan, dict, dict]:
+        """合并包（stages.draft）的首调用：选题与正文一次拿回（方案 10）。
+
+        与两段路径的三处不同，都是**有意**的：
+          - 不走 plan 缓存（P1-8 的"复用上次选题"省的是 select 那一通调用；
+            合并路径本来就没有单独的 select 可省，缓存只会留下第二本账）；
+          - 不设 4000 的 select 预算 —— 一个思考阶段要同时装下选题与正文，
+            用 write 的全额预算（cfg.max_tokens）；
+          - 「换一版」照旧提温 0.25，但作用在这唯一一次调用上。
+        返回 `(plan, draft_dict, usage)`；draft_dict 与 write 路径的
+        `ScriptDraft(...).model_dump()` 同形，回炉循环不用区分来源。
+        """
+        pr = PromptRenderer(pack)
+        ctx = pr.draft_ctx(p)
+        system, user = self._render_stage(job, pr, "draft", ctx)
+        temp = (min(1.0, float(client.cfg.temperature) + 0.25)
+                if p.get("reroll") else None)
+        usage: dict = {}
+        bundle = client.chat_json(
+            "draft", system, user, DraftBundle,
+            on_retry=self._retry_logger(job),
+            on_delta=self._delta_handler(job, "选题与撰写"),
+            on_attempt=self._stream_reset(job, "选题与撰写"),
+            should_abort=self._abort_gate(job),
+            deadline=job.deadline(),
+            usage=usage, temperature=temp)
+        plan = bundle.plan
+        draft = ScriptDraft(sections=bundle.sections).model_dump()
+        # 与 write 路径同一条规矩：阶段完成后再记步骤（界面把 steps 一律画成已完成）。
+        self._step(job, "draft", "选题与撰写（一次调用）",
+                   {"plan": plan.model_dump(),
+                    **({"usage": usage} if usage else {})})
+        return plan, draft, usage
+
     def _write_with_recheck(self, job: Job, pack: Pack, skill: dict,
                             p: dict, plan: TopicPlan,
-                            client: LLMClient) -> tuple[dict, list[dict]]:
+                            client: LLMClient, *,
+                            prebuilt: tuple[dict, dict] | None = None
+                            ) -> tuple[dict, list[dict]]:
         ban = Banwords(pack.banwords_data())
         quota = Quota.from_pack(pack.data)
         tells = _load_tells(pack)
@@ -758,32 +820,38 @@ class Pipeline:
         draft: dict = {}
         for rnd in range(1, rounds + 1):
             self._stop_check(job)     # 回炉每一轮前先看有没有让停
-            job.transition("writing" if rnd == 1 else "rewriting")
+            if prebuilt is not None and rnd == 1:
+                # 合并路径（方案 10）：选题与正文已在 stages.draft 那一次调用里
+                # 完成并记过步骤，这里直接拿它的产物进校验 —— 不再 transition、
+                # 不再渲染、不再重复记一步"文案撰写"。回炉轮照旧走 stages.write。
+                draft, _ = prebuilt
+            else:
+                job.transition("writing" if rnd == 1 else "rewriting")
 
-            ctx = pr.write_ctx(p, plan.model_dump(), feedback)
-            system, user = self._render_stage(job, pr, "write", ctx)
-            # 「换一版」：同主题同参数重掷，小幅提温换取不同表达（仍受校验约束）
-            temp = None
-            if p.get("reroll"):
-                temp = min(1.0, float(client.cfg.temperature) + 0.25)
-            draft_usage: dict = {}
-            draft = client.chat_json(
-                "write", system, user, ScriptDraft,
-                on_retry=self._retry_logger(job), temperature=temp,
-                on_delta=self._delta_handler(
-                    job, "回炉改写" if rnd > 1 else "文案撰写"),
-                on_attempt=self._stream_reset(
-                    job, "回炉改写" if rnd > 1 else "文案撰写"),
-                should_abort=self._abort_gate(job),
-                                deadline=job.deadline(),
-                usage=draft_usage).model_dump()
-            # 步骤必须在阶段「完成后」再记：界面把 steps 一律渲染为已完成，
-            # 若在开始前就记录，会出现「已完成的文案撰写」与「文案撰写中」并存。
-            # usage（P3-15）：上游回的 token 量原先被 `if not choices: continue`
-            # 连同末尾 chunk 一起丢掉 —— 思考吃多少、前缀缓存命中多少全靠抓包才知道。
-            self._step(job, f"write_r{rnd}", "文案撰写" if rnd == 1 else f"回炉改写·第 {rnd - 1} 轮",
-                       ({"feedback": feedback} if feedback else {})
-                       | ({"usage": draft_usage} if draft_usage else {}))
+                ctx = pr.write_ctx(p, plan.model_dump(), feedback)
+                system, user = self._render_stage(job, pr, "write", ctx)
+                # 「换一版」：同主题同参数重掷，小幅提温换取不同表达（仍受校验约束）
+                temp = None
+                if p.get("reroll"):
+                    temp = min(1.0, float(client.cfg.temperature) + 0.25)
+                draft_usage: dict = {}
+                draft = client.chat_json(
+                    "write", system, user, ScriptDraft,
+                    on_retry=self._retry_logger(job), temperature=temp,
+                    on_delta=self._delta_handler(
+                        job, "回炉改写" if rnd > 1 else "文案撰写"),
+                    on_attempt=self._stream_reset(
+                        job, "回炉改写" if rnd > 1 else "文案撰写"),
+                    should_abort=self._abort_gate(job),
+                                    deadline=job.deadline(),
+                    usage=draft_usage).model_dump()
+                # 步骤必须在阶段「完成后」再记：界面把 steps 一律渲染为已完成，
+                # 若在开始前就记录，会出现「已完成的文案撰写」与「文案撰写中」并存。
+                # usage（P3-15）：上游回的 token 量原先被 `if not choices: continue`
+                # 连同末尾 chunk 一起丢掉 —— 思考吃多少、前缀缓存命中多少全靠抓包才知道。
+                self._step(job, f"write_r{rnd}", "文案撰写" if rnd == 1 else f"回炉改写·第 {rnd - 1} 轮",
+                           ({"feedback": feedback} if feedback else {})
+                           | ({"usage": draft_usage} if draft_usage else {}))
 
             job.transition("checking")
             report = check_script(draft["sections"], p["duration"], p["rate"], ban,

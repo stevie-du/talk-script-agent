@@ -151,6 +151,35 @@ class PromptRenderer:
         self._note("select", "hooks", ctx["hooks"])
         return ctx
 
+    def draft_ctx(self, p: dict) -> dict:
+        """合并阶段（stages.draft，方案 10）的上下文 = select 的选题注入 ∪ write 的撰写注入。
+
+        与 select_ctx/write_ctx 各自为政不同，这里把两边的注入合到 **draft 一个
+        阶段名**下（`stage_files("draft")`、`_note("draft", …)`），让 `unfilled()`
+        与空占位符清理都按 draft 一本账。人味档位仍读 `stages.write.anti_ai`：
+        回炉轮走 write，首调用与回炉的人味口径必须是同一份配置（不是缺省回退）。
+        """
+        ctx = self.base_ctx(p)
+        self.stage_files("draft", ctx)
+        ctx["topics_slice"] = self.pack.topics_slice(p["segment"])
+        self._note("draft", "topics_slice", ctx["topics_slice"])
+        ctx["audience_slice"] = self.pack.audience_slice(p["audience"])
+        self._note("draft", "audience_slice", ctx["audience_slice"])
+        # 钩子库按风格切片（与 select_ctx 同一条规矩：files 里不该再声明 hooks）。
+        ctx["hooks"] = self.pack.hooks_slice(p["style"])
+        self._note("draft", "hooks", ctx["hooks"])
+        rule, voice_block = self.voice_parts(p.get("voice", "strong"))
+        ctx["anti_ai_rule"] = rule
+        ctx["voice_block"] = voice_block
+        facts_block = ""
+        if p.get("facts"):
+            facts_block += f"\n【用户提供的资料】\n{p['facts']}\n"
+        private = self.pack.private_facts()
+        if private:
+            facts_block += f"\n【私有知识库（优先作为事实来源）】\n{private}\n"
+        ctx["facts_block"] = facts_block
+        return ctx
+
     def write_ctx(self, p: dict, plan_dump: dict, feedback: str) -> dict:
         ctx = self.base_ctx(p)
         self.stage_files("write", ctx)
