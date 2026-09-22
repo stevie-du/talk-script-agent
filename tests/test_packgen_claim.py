@@ -105,6 +105,38 @@ def test_a_thread_that_cannot_start_releases_the_claim_exactly_once():
     packgen.release_slug("探针丙")
 
 
+def test_cancel_after_the_pack_is_written_leaves_no_orphan_dir(monkeypatch):
+    """取消落在写盘之后：刚建出来的包必须被回收，否则"已取消"与"下次同名 409"同时成立。
+
+    第 15 轮复核把这条形态钉死：包在盘上、作业记 cancelled、历史又不收 packgen ——
+    用户既看不到那个包，也再不能用同一个名字建。回收只准动本次这一个目录。
+    """
+    import app.pipeline as plmod
+    from app.jobs import Job
+
+    pl, tmp, client = _pipeline()
+    slug = "探针戊"
+    try:
+        job = Job("pg-cancel-1", "packgen",
+                  {"industry": "探针戊", "description": "探针用的行业说明"})
+        pl.add_job(job)
+
+        def fake_create_pack(root, _client, industry, _desc, **_kw):
+            (root / "packs" / slug).mkdir(parents=True)
+            (root / "packs" / slug / "skill.yaml").write_text("name: x\n", encoding="utf-8")
+            job.request_cancel()          # 用户在建完之后、收尾之前点了停止
+            return {"name": slug, "display_name": industry}
+
+        monkeypatch.setattr(plmod, "create_pack", fake_create_pack)
+        pl._run_packgen(job, client, slug)
+        assert job.state == "cancelled", job.state
+        assert not (tmp / "packs" / slug).exists(), \
+            "取消掉的包留在盘上：下一次同名提交会报「行业包已存在」，而它不在任何列表里"
+        assert (tmp / "packs" / "elevator").is_dir(), "回收越界，删到别人的包了"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_second_same_name_is_refused_before_any_token_is_spent():
     pl, tmp, client = _pipeline()
     try:

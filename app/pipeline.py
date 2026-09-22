@@ -27,6 +27,7 @@ import hashlib
 import json
 import logging
 import re
+import shutil
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -436,6 +437,7 @@ class Pipeline:
 
     def _run_packgen(self, job: Job, client: LLMClient, slug: str = "") -> None:
         """建包作业的主体（进度 / 取消 / 错误都走作业这一套）。"""
+        built = False
         try:
             self._stop_check(job)
             job.transition_or_raise("packing")
@@ -453,11 +455,18 @@ class Pipeline:
                                slug_preclaimed=bool(slug))
             # 回调里已经查过一次（就在写盘之前）；这里再查一次是防它写完之后才被子线程
             # 取消 —— 目录已经建好就不该假装失败，但状态必须是 cancelled，不能报 done。
+            built = True
             self._stop_check(job)
             if not job.transition("done", result=info):
                 return
             self.registry.prune()
         except JobCancelled:
+            # 取消的语义是"什么都没发生"（与生成路径「取消 → 撤掉产物」同一本账）。
+            # 第 15 轮复核定到的形态：取消落在写盘之后时包已在盘上、作业却记 cancelled，
+            # 界面说"已取消"而下一次同名提交回 409「行业包已存在」—— 用户既看不到
+            # 那个包也删不掉它。只有**本次真的建出来了**才回收。
+            if built:
+                self._discard_created_pack(slug)
             self._settle_cancel(job)
         except Exception as e:  # noqa: BLE001
             self._fail(job, e)
@@ -1146,6 +1155,27 @@ class Pipeline:
         """
         if not job.is_cancelled():
             self._fail(job, JobBudget(_jobs.JOB_BUDGET_SECONDS))
+
+    def _discard_created_pack(self, slug: str) -> None:
+        """取消掉的建包：把**这一次**刚建出来的 `packs/<slug>/` 回收掉。
+
+        只删这一个路径，且必须还落在 `packs/` 里 —— 它不是通用删除工具。
+        删失败（文件被占用等）只留日志：取消本身已经生效，不该因为回收没干净
+        再把作业改成 failed（那会是另一种假失败）。
+        """
+        base = (self.root / "packs").resolve()
+        target = (base / slug).resolve() if slug else None
+        if not target or target == base or not target.is_relative_to(base):
+            log.warning("取消收尾：本次目录路径不像建包产物，跳过删除：%s", target)
+            return
+        if not target.is_dir():
+            return                      # 取消得早，压根没建出来
+        try:
+            shutil.rmtree(target)
+            log.info("取消已生效：本次创建的 packs/%s 已回收", slug)
+        except OSError as e:
+            log.warning("取消收尾：packs/%s 回收失败（%s）—— 包目录会留在盘上，"
+                        "下次同名提交会报「行业包已存在」，需要人工删除", slug, e)
 
     @staticmethod
     def _abort_gate(job: Job):
