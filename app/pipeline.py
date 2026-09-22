@@ -27,7 +27,6 @@ import hashlib
 import json
 import logging
 import re
-import shutil
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -37,6 +36,7 @@ from pydantic import BaseModel
 from .ai_tells import AITells
 from .checker import Banwords, Quota, check_script, count_chars
 from .config import AppConfig, load_config
+from .fileio import rmtree_resilient
 from . import jobs as _jobs                              # noqa: F401
 from .jobs import (JOB_BUDGET_SECONDS, TERMINAL_STATES, Job,  # noqa: F401
                    JobBudget, JobCancelled, JobRegistry, StateConflict,
@@ -1170,12 +1170,15 @@ class Pipeline:
             return
         if not target.is_dir():
             return                      # 取消得早，压根没建出来
-        try:
-            shutil.rmtree(target)
+        # rmtree_resilient 而不是裸 shutil.rmtree：Windows 上杀软正扫着刚写好的
+        # 那批文件时，单次删除会抛"文件被占用"，而这里的后果和建包失败时一模一样
+        # —— 目录留在盘上、下次同名提交被 409 挡住。同一件事只准有一本账
+        # （app/packgen.py 的失败清理早就用这个）。
+        if rmtree_resilient(target):
             log.info("取消已生效：本次创建的 packs/%s 已回收", slug)
-        except OSError as e:
-            log.warning("取消收尾：packs/%s 回收失败（%s）—— 包目录会留在盘上，"
-                        "下次同名提交会报「行业包已存在」，需要人工删除", slug, e)
+        else:
+            log.warning("取消收尾：packs/%s 回收失败 —— 包目录会留在盘上，"
+                        "下次同名提交会报「行业包已存在」，需要人工删除", slug)
 
     @staticmethod
     def _abort_gate(job: Job):

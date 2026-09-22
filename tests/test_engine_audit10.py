@@ -1394,16 +1394,25 @@ def test_packgen_admission_failure_after_the_slot_is_taken_settles_the_job(tmp_p
 
 
 def _whole_second_regex_offenders(sources):
-    """挑出"读「N 秒后重试」却只认整数"的正则 —— 走 AST，不看文本行。
+    r"""挑出"读「N 秒后重试」却只认整数"的正则 —— 扫**所有字符串常量**，不看调用形状。
 
     第 12 轮量出按行扫的两个毛病：注释/文档串里引用这句历史的话会被当成真代码（假红），
-    而没有 r 前缀、跨行隐式拼接、`([0-9]+)` 这类写法反而放过（假绿）。只看真正传给
-    re.findall/search/match/fullmatch/finditer 的**字符串常量**，两种毛病一起没了。
+    而没有 r 前缀、跨行隐式拼接、`([0-9]+)` 这类写法反而放过（假绿）。
+    第 16 轮量出"只看 `re.findall(常量)` 这种形状"同样是假绿：把模式先赋给变量、
+    `re.compile` 存起来再调、`pattern=` 关键字、`import re as r2` 这几种写法一个都不抓
+    —— 而它们都是本仓库真会写出来的形状。
+
+    所以这一版换成**行为判据**，与调用形状彻底解耦：
+    1. 候选 = 任意字符串常量（文档串除外），且同时含「后重试」与数字类（`\d` 或 `[0-9]`）；
+    2. 拿它去搜真实通知原文「上游限流(429)，4.7s 后重试」，取第一个捕获组（没有组就用整段）；
+    3. 读出来的值必须含 `4.7`。只认整数的写法在这里必然读到 `7` —— 不管它写成
+       `(\d+)`、`([0-9]+)`、`(\d{1,2})`、`[0-9][0-9]*` 还是 `\d+`。
+    编译不过的（不是正则）跳过；压根搜不中的（不是读这句通知的）跳过。
     """
     import ast
+    import re as _re
     import warnings
-    bs = chr(92)
-    bad_int_only = ["(" + bs + "d+)", "([0-9]+)"]
+    sample = "上游限流(429)，4.7s 后重试"
     out = []
     for name, src in sources:
         # 样例里有故意写坏的正则（`"\d"` 没加 r 前缀），那份 SyntaxWarning 是**样例**的
@@ -1411,22 +1420,32 @@ def _whole_second_regex_offenders(sources):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", SyntaxWarning)
             tree = ast.parse(src, filename=name)
+        docs = set()
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            body = getattr(node, "body", None)
+            if isinstance(body, list) and body \
+                    and isinstance(body[0], ast.Expr) \
+                    and isinstance(body[0].value, ast.Constant) \
+                    and isinstance(body[0].value.value, str):
+                docs.add(id(body[0].value))               # 文档串是散文，不是代码
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
                 continue
-            if node.func.attr not in ("findall", "search", "match", "fullmatch", "finditer"):
+            if id(node) in docs:
                 continue
-            if not (isinstance(node.func.value, ast.Name) and node.func.value.id == "re"):
+            pat = node.value
+            if "后重试" not in pat or ("\\d" not in pat and "[0-9]" not in pat):
                 continue
-            if not node.args or not isinstance(node.args[0], ast.Constant):
+            try:
+                rx = _re.compile(pat)
+            except _re.error:
+                continue                                   # 不是正则，管不着
+            m = rx.search(sample)
+            if not m:
                 continue
-            pat = node.args[0].value
-            if not isinstance(pat, str) or "后重试" not in pat:
-                continue
-            if "[" + bs + "d.]" in pat or "[0-9.]" in pat:      # 认小数的写法放行
-                continue
-            if any(t in pat for t in bad_int_only):
-                out.append(f"{name}:{node.lineno}: {pat}")
+            got = m.group(1) if m.groups() else m.group(0)
+            if "4.7" not in (got or ""):
+                out.append(f"{name}:{node.lineno}: {pat!r} 读到 {got!r}（应为 '4.7'）")
     return out
 
 
@@ -1440,16 +1459,23 @@ def test_no_test_reads_the_retry_note_with_a_whole_second_regex():
     offenders = _whole_second_regex_offenders(files)
     assert not offenders, f"这些正则读「N 秒后重试」却不认小数：{offenders}"
     # 守卫自证（本项目对"只能变绿的守卫"过敏）：坏例必须被抓、好例必须放过，
-    # 三种坏写法（带 r 前缀、不带前缀、[0-9]+）少抓一种都说明扫描器在空转。
+    # 而且**换成 indirect 写法照样抓**（第 16 轮的靶子就是这里只认一种调用形状）。
     bs = chr(92)
-    demo = ("import re\n"
-            + 're.findall(r"(' + bs + 'd+)s 后重试", t)\n'
-            + 're.search("(' + bs + 'd+)s 后重试", t)\n'
-            + 're.match(r"([0-9]+)s 后重试", t)\n'
+    bad = "(" + bs + "d+)s 后重试"
+    demo = ('"""文档串里写 (' + bs + 'd+)s 后重试 不算代码"""\n'
+            + "import re\n"
+            + 're.findall(r"' + bad + '", t)\n'
+            + 'pat = r"' + bad + '"\n'
+            + 're.search(pat, t)\n'
+            + 'R = re.compile(r"' + bad + '")\n'
+            + 'R.fullmatch(t)\n'
+            + 're.match(pattern=r"' + bad + '", string=t)\n'
+            + 're.finditer(r"([0-9][0-9]*)s 后重试", t)\n'
             + 're.findall(r"([' + bs + 'd.]+)s 后重试", t)\n'
-            + '# 注释里再写一遍 (' + bs + 'd+)s 后重试 不算代码\n')
+            + 'note = "60s 后重试"\n')
     caught = _whole_second_regex_offenders([("demo.py", demo)])
-    assert len(caught) == 3, f"守卫没抓全（应 3 条，抓到 {caught}）"
+    assert len(caught) == 5, (
+        f"应抓到 5 条（4 种 indirect 形状 + 一条 [0-9][0-9]*），实抓 {caught}")
     assert _whole_second_regex_offenders([("c.py", "import re\nx = re\n")]) == []
 
 

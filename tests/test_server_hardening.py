@@ -513,6 +513,65 @@ def test_packgen_failure_cleans_up(tmp_path=None):
     shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_packgen_late_failure_cleans_up(tmp_path=None):
+    """失败发生在 `_materialize` **之后**（最后写 `校对清单.md`）也要收走目录。
+
+    上面那条用例把故障注入在 `pack.yaml`，落点其实在 try/except 里；`校对清单.md`
+    是那份 try 之外的最后一次写盘，炸掉后盘上是一个「23 个文件、Pack 能加载、
+    会出现在包列表里」的包，而作业记的是失败，重试同名永远 409。
+    """
+    tmp = _tmp_root()
+    from app import packgen
+
+    real_write = packgen.write_atomic
+    hits = {"n": 0}
+
+    def boom(path, text, *a, **kw):
+        if str(path).endswith("校对清单.md"):
+            hits["n"] += 1
+            raise OSError("磁盘满了（落盘的最后一步）")
+        return real_write(path, text, *a, **kw)
+
+    slug = packgen.slugify("半成品行业")
+    with patch.object(packgen, "write_atomic", side_effect=boom):
+        try:
+            packgen.create_pack(tmp, _FakeLLM(Partial), "半成品行业", "测试描述文本")
+            raise AssertionError("应当抛错")
+        except OSError:
+            pass
+
+    # 注入点必须真的到了：否则这条会在"根本没走到最后一步"时假绿。
+    assert hits["n"] == 1, f"校对清单那一步没被执行（hits={hits}），故障注入没落点"
+    assert not (tmp / "packs" / slug).exists(), "失败后残留了半成品目录，重试会被 409 挡死"
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_packgen_rollback_never_touches_a_preexisting_pack(tmp_path=None):
+    """回收网只准收走**本次**建的目录：重名时必须把别人的包原样留在盘上。
+
+    这条钉的是上面那段 try 的形状 —— `if d.exists(): raise` 必须落在保护圈**之外**。
+    把它挪进去（看着只是少一层缩进）就会让"同名包已存在"这一次失败顺手
+    `rmtree` 掉那个已存在、里面有用户手写内容的包。
+    """
+    tmp = _tmp_root()
+    from app import packgen
+
+    slug = packgen.slugify("半成品行业")
+    d = tmp / "packs" / slug
+    d.mkdir(parents=True)
+    (d / "用户手写的东西.md").write_text("别删我\n", encoding="utf-8")
+
+    try:
+        packgen.create_pack(tmp, _FakeLLM(Partial), "半成品行业", "测试描述文本")
+        raise AssertionError("同名应当抛 FileExistsError")
+    except FileExistsError:
+        pass
+
+    assert (d / "用户手写的东西.md").read_text(encoding="utf-8") == "别删我\n", \
+        "同名建包失败时回收网删掉了已存在的包 —— 这是数据丢失，不是清理"
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_packgen_cleanup_retries_when_locked(tmp_path=None):
     """清理半成品时若文件被瞬时占用，要重试，而不是静默留下目录。
 

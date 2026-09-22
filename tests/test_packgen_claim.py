@@ -137,6 +137,51 @@ def test_cancel_after_the_pack_is_written_leaves_no_orphan_dir(monkeypatch):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_cancel_rollback_retries_when_a_file_is_locked(monkeypatch):
+    """取消收尾的回收要和建包自己的清理同一次数：文件被瞬时占用时要重试。
+
+    第 16 轮自查量到的不一致：`packgen.create_pack` 失败时走 `rmtree_resilient`
+    （注释写明"单次 rmtree 在 Windows 上会被杀软挡掉"），而 `_run_packgen` 的取消
+    回收用的是裸 `shutil.rmtree` —— 同一个平台、同一类目录、同一个"下次同名 409"
+    后果，却有两本账。这里不新建判据，只把 packgen 那份既有判据接上。
+    """
+    import app.pipeline as plmod
+    from app.jobs import Job
+
+    pl, tmp, client = _pipeline()
+    slug = "探针己"
+    calls = {"n": 0}
+    real_rmtree = shutil.rmtree
+
+    def flaky(path, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("文件被占用（模拟杀毒软件扫描）")
+        return real_rmtree(path, **kw)
+
+    monkeypatch.setattr(shutil, "rmtree", flaky)
+    try:
+        job = Job("pg-cancel-2", "packgen",
+                  {"industry": "探针己", "description": "探针用的行业说明"})
+        pl.add_job(job)
+
+        def fake_create_pack(root, _client, industry, _desc, **_kw):
+            (root / "packs" / slug).mkdir(parents=True)
+            (root / "packs" / slug / "skill.yaml").write_text("name: x\n", encoding="utf-8")
+            job.request_cancel()
+            return {"name": slug, "display_name": industry}
+
+        monkeypatch.setattr(plmod, "create_pack", fake_create_pack)
+        pl._run_packgen(job, client, slug)
+        assert job.state == "cancelled", job.state
+        assert calls["n"] >= 2, f"没走重试（rmtree 只被调用 {calls['n']} 次）"
+        assert not (tmp / "packs" / slug).exists(), \
+            "第一次被占用就放弃：包留在盘上，下次同名提交报「行业包已存在」"
+    finally:
+        monkeypatch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_second_same_name_is_refused_before_any_token_is_spent():
     pl, tmp, client = _pipeline()
     try:

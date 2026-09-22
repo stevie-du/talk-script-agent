@@ -291,9 +291,26 @@ def create_pack(root: Path, llm: LLMClient, industry: str, description: str, *,
         try:
             match_notes = _materialize(d, base, out, slug, industry, description,
                                        segments, audiences, personas)
+            checklist = _checklist(out, slug)
+            # P1-44：生成完必须体检 —— 模型输出的包能不能用，不能等用户第一次
+            # 生成才发现（生成时已付过费）。加载 Pack(slug)（结构坏 → 抛）+
+            # param_audit 全量（切片/配额/词表降级逐项列出），体检结果并进校对清单。
+            # 再加两份**只有建包期知道**的事实（P1-2 / P3-13）：
+            #   match_notes  哪个选项没配上章节、被哪些同名/近名标题挤掉
+            #   dupes        模型把同一个选项写了两遍（合并后的那一份才有内容）
+            audit_notes = _pack_audit(root, slug) + match_notes + dupes
+            if audit_notes:
+                checklist += ("\n\n## 引擎体检发现（生成时自动检测，逐项核实后重跑或用前确认）\n"
+                              + "\n".join(f"- [ ] {t}" for t in audit_notes))
+            write_atomic(d / "校对清单.md", checklist)
         except Exception:
-            # 中途失败就把半成品收走：否则重试会被上面的 FileExistsError 挡成 409，
-            # 用户只能自己去文件管理器里删目录。
+            # 从"我们决定要建这个目录"到"最后一次写盘"整段都在这里的保护圈内
+            # （第 16 轮复核：修复前 try 只裹住 `_materialize`，而 `校对清单.md`
+            #  是它**外面**的最后一次写盘 —— 那一步炸掉（磁盘满 / Windows 杀软
+            #  正扫着刚建的 23 个文件）会留下一个 `Pack` 能加载、会出现在包列表里
+            #  的包，作业却记为失败；重试同名永远 409，而应用里没有删包的入口）。
+            # 上面 `if d.exists(): raise` 特意留在这个 try 之外：那是"别人的目录"，
+            # 回收网不许碰它。
             #
             # 用 rmtree_resilient 而不是 `ignore_errors=True`：后者会把「没删掉」
             # 当成成功，于是半成品目录留在那儿，下次建包照样被 409 挡住，
@@ -302,19 +319,6 @@ def create_pack(root: Path, llm: LLMClient, industry: str, description: str, *,
             if not rmtree_resilient(d):
                 log.warning("半成品目录未能清除，下次建包同名行业会被挡：%s", d)
             raise
-
-        checklist = _checklist(out, slug)
-        # P1-44：生成完必须体检 —— 模型输出的包能不能用，不能等用户第一次
-        # 生成才发现（生成时已付过费）。加载 Pack(slug)（结构坏 → 抛）+
-        # param_audit 全量（切片/配额/词表降级逐项列出），体检结果并进校对清单。
-        # 再加两份**只有建包期知道**的事实（P1-2 / P3-13）：
-        #   match_notes  哪个选项没配上章节、被哪些同名/近名标题挤掉
-        #   dupes        模型把同一个选项写了两遍（合并后的那一份才有内容）
-        audit_notes = _pack_audit(root, slug) + match_notes + dupes
-        if audit_notes:
-            checklist += ("\n\n## 引擎体检发现（生成时自动检测，逐项核实后重跑或用前确认）\n"
-                          + "\n".join(f"- [ ] {t}" for t in audit_notes))
-        write_atomic(d / "校对清单.md", checklist)
 
         # 产物摘要随返回下发：结果页据此渲染「生成了什么」（细分/受众/人设/选题），
         # 而不是只给一份待核实的校对清单 —— 用户此前「不知道生成了啥」。
