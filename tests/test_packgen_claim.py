@@ -571,6 +571,70 @@ def test_the_slug_length_cap_has_one_authority_and_the_message_shows_what_the_us
     assert "保留设备名" in msg, msg
 
 
+def _stub_result_keys():
+    """从 `_verify/verify.js` 里抠出 `PG_RESULT` 的顶层键（不抄第二份清单）。
+
+    ⚠ 不能按"行首缩进 + 键名"匹配：`name/display_name/dir/draft` 四个键写在同一行，
+    行首匹配只抠到 `name` —— 第一版就是这么把一条好守卫写成假红的（提取器 bug 会被
+    误读成"桩与服务端不一致"，那种误判比漏判更费下一轮的时间）。
+    """
+    src = (ROOT / "_verify" / "verify.js").read_text(encoding="utf-8")
+    i = src.index("var PG_RESULT = {")
+    block = src[i:src.index("\n  };", i)]
+    return set(re.findall(r"\b([a-z][a-z_]{1,})\s*:", block))
+
+
+def _renderer_packgen_result_reads():
+    """抠出渲染层**读建包产物**时用的字段名（`out.xxx`），不是全文件的 `out.`。
+
+    ⚠ 必须按消费点裁剪：`settings.js` 里另有一个 `out = await api.saveModel(...)`，
+    它读的 `out.id` / `out.warnings` 属于模型保存接口 —— 全文件扫会把那两个也拉进
+    建包的对账里，报一条假红（第一版就这样）。
+    ⚠ 每个锚点只准出现一次：改名/搬函数会让这里直接 ValueError，而不是安静地
+    去比另一处同名代码。
+    """
+    js = (ROOT / "desktop" / "renderer" / "js" / "settings.js").read_text(encoding="utf-8")
+    read = set()
+    for anchor in ("const out = snap.result || {};", "function renderPackgenSummary(out) {"):
+        assert js.count(anchor) == 1, f"锚点「{anchor}」出现 {js.count(anchor)} 次，判据不能再定位消费点"
+        i = js.index(anchor)
+        read |= set(re.findall(r"\bout\.([a-z_]+)", js[i:js.index("\n}", i)]))
+    return read
+
+
+def test_packgen_result_keys_agree_across_engine_stub_and_renderer():
+    """建包产物的字段名：引擎、UI 桩、渲染层三方必须同一本账（第 22 轮自查）。
+
+    快照的**键集**已有 §15.32/§15.33 两条守着，但 `result` 里面那层没有：
+    引擎把 `banwords_extra_hard` 改成 `banwords_hard`，桩照旧发旧名、门照样绿，
+    而真界面上摘要那几节直接空掉 —— 界面上"看起来成功、内容不见了"是最难查的一种。
+    渲染层读到的键也一并量：它读了引擎不发的键，就等于在读 `undefined`。
+    """
+    pl, tmp, client = _pipeline()
+    try:
+        jid = pl.start_packgen(INDUSTRY, DESC)
+        deadline = time.time() + 20
+        while time.time() < deadline and pl.get_job(jid).state not in TERMINAL_STATES:
+            time.sleep(0.05)
+        job = pl.get_job(jid)
+        assert job.state == "done", job.error
+        engine_keys = set(job.result or {})
+        assert engine_keys, "引擎没返回任何产物字段，这条对账会假绿"
+
+        stub_keys = _stub_result_keys()
+        assert stub_keys, "桩里抠不出 PG_RESULT 的键：判据本身要先改"
+        assert stub_keys == engine_keys, (
+            f"桩的建包产物字段与服务端不一致 只在桩={sorted(stub_keys - engine_keys)} "
+            f"只在引擎={sorted(engine_keys - stub_keys)}")
+
+        read = _renderer_packgen_result_reads()
+        assert read, "渲染层一处 `out.` 都没抠到：锚点或提取器先失效了，这条会假绿"
+        unknown = read - engine_keys
+        assert not unknown, f"渲染层在读引擎不发的字段（拿到的是 undefined）：{sorted(unknown)}"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def _stub_slug():
     """把 `_verify/verify.js` 里的 pgSlug 抠出来（不抄第二份实现）。"""
     src = (ROOT / "_verify" / "verify.js").read_text(encoding="utf-8")
