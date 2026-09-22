@@ -191,6 +191,81 @@ def _stub_slug():
     return body
 
 
+def _stub_name_ok():
+    """抠出桩里的包名校验（NAME_OK + packNameOk），不抄第二份实现。"""
+    src = (ROOT / "_verify" / "verify.js").read_text(encoding="utf-8")
+    i = src.index("var NAME_OK = new RegExp(")
+    j = src.index("function packNameOk(n) {", i)
+    k = src.index("\n  }", j) + len("\n  }")
+    body = src[i:k]
+    assert "String.fromCharCode(92)" in body, "桩的包名判据没走属性类（手写区段表的老路）"
+    return body
+
+
+def test_stub_pack_name_check_agrees_with_the_engine():
+    """桩的"包名合法吗"必须与 `app/server.py` 的 `_safe_name` 同一判据。
+
+    第 12 轮复核定性：原来它复用 `pgSlug(n) === n` 当校验，那**两个方向都错** ——
+    `-a`、`a--b`、`ab-` 在引擎里合法（单词字符类加连字符），被 slugify 削首尾后
+    不再相等 → 桩替引擎 400；反过来 Cn 类码点引擎 400、桩放行。
+    这里逐码点 + 逐形状对账，唯一允许的差异是两个运行时各自的 Unicode 数据版本差
+    （同一个测试里现算，不是抄来的清单）；除此之外任何一条不一致都红。
+    """
+    import json
+    import re
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("没有 node，跨语言对账跑不了")
+    from app.server import _NAME_RE
+
+    cps = [cp for cp in range(0x21, 0x2000) if not 0xD800 <= cp <= 0xDFFF] \
+        + list(range(0x4E00, 0x4E20)) + [0x1D400, 0x1F600, 0x2C2F, 0x10000]
+    names = [chr(cp) for cp in cps] \
+        + ["-a", "a-", "a--b", "ab-", "-", "--", "a.b", "a/b", "..", "x", "电梯_a-1",
+           "全屋定制-装修", "２３D打印"]
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        (tmp / "in.json").write_text(json.dumps(names, ensure_ascii=False), encoding="utf-8")
+        (tmp / "name.js").write_text(_stub_name_ok() + "\nmodule.exports = packNameOk;\n",
+                                     encoding="utf-8")
+        (tmp / "run.js").write_text(
+            "const fs = require('fs');\n"
+            + "const ok = require(process.argv[2]);\n"
+            + "const ins = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));\n"
+            + "const BS = String.fromCharCode(92);\n"
+            + "const W = new RegExp('[' + BS + 'p{L}' + BS + 'p{N}_]$', 'u');\n"
+            + "process.stdout.write(JSON.stringify({ ok: ins.map(function (s) { return ok(s); }),\n"
+            + "  word: ins.map(function (s) { return W.test(s); }) }));\n",
+            encoding="utf-8")
+        r = subprocess.run([node, str(tmp / "run.js"), str(tmp / "name.js"), str(tmp / "in.json")],
+                           capture_output=True, text=True, encoding="utf-8")
+        assert r.returncode == 0, r.stderr[:300]
+        out = json.loads(r.stdout)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    def engine_ok(n):
+        return bool(_NAME_RE.match(n or "")) and ".." not in (n or "")
+
+    diff = [(n, engine_ok(n), bool(o), bool(w)) for n, o, w in zip(names, out["ok"], out["word"])
+            if engine_ok(n) != bool(o)]
+    # 唯一可解释的差异：这个**单字符**在 Python 的 \w 与 V8 的 p{L}/p{N}/_ 之间不一致
+    # （即两个运行时的 Unicode 数据版本差），且方向必须是"桩比引擎宽"。
+    # 反过来（引擎合法、桩拒）永远不可接受 —— 那是桩自己造的一次拒绝，界面上
+    # "点了一个真引擎会接受的包"这条路就再也量不到了。
+    unjustified = [(n, e, s) for n, e, s, w in diff
+                   if not (len(n) == 1 and not re.fullmatch(r"\w", n) and w)
+                   or not (e is False and s is True)]
+    assert not unjustified, ("桩的包名判定与服务端不一致（前 8 条 名字/引擎/桩）：\n"
+                             + "\n".join(f"  {n!r}: 引擎={e} 桩={s}" for n, e, s in unjustified[:8]))
+    strict = [(n, e, s) for n, e, s, w in diff if e and not s]
+    assert not strict, ("桩比引擎严（引擎合法的包名被桩拒了）—— 这类差异会让界面永远"
+                        "量不到「点了一个引擎真会接受的包」：\n"
+                        + "\n".join(f"  {n!r}: 引擎={e} 桩={s}" for n, e, s in strict[:8]))
+
+
 def test_stub_slug_agrees_with_the_engine_over_a_unicode_sweep(tmp_path):
     """建包桩算出的目录名，必须与 `preview_slug` 逐字符一致。
 

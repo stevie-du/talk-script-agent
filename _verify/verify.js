@@ -313,31 +313,49 @@ window.__addCount = 0;
   }
   function pgSweepStale() {
     var nowT = Date.now();
+    // 时限可以注入（window.__pgclaimms）：否则这条回收线在门禁里从不自发触发，
+    // 它造的那句 failed 文案与"占位被归还"这两件事就永远没有断言覆盖
+    // （第 12 轮复核：把 PG_CLAIM_MS 改成 600000000，331/331 照绿）。
+    var lim = (typeof window.__pgclaimms === 'number') ? window.__pgclaimms : PG_CLAIM_MS;
     Object.keys(PG_JOBS).forEach(function (k) {
       var j = PG_JOBS[k];
-      if (j.state === 'packing' && j.slug && nowT - j.born > PG_CLAIM_MS) {
+      if (j.state === 'packing' && j.slug && nowT - j.born >= lim) {
         PG_CLAIMED = PG_CLAIMED.filter(function (x) { return x !== j.slug; });
-        PG_JOBS[k] = { slug: '', industry: j.industry, polls: j.polls,
-                       state: 'failed', born: j.born };
+        PG_JOBS[k] = { slug: '', industry: j.industry, polls: j.polls, state: 'failed',
+                       born: j.born, error: '作业超时未收工（桩的占位回收，对应引擎的整作业预算）' };
       }
     });
   }
+  // 建包作业的流式块只有一份：真引擎只要设过 stream_phase 就带 stream 键
+  // （app/jobs.py 的 snapshot）—— 原来 done/cancelled 的快照干脆没有它，
+  // 界面里"读不到就当没有"的那一支于是永远不跑（第 12 轮复核 P1）。
+  var PG_STREAM = { phase: '行业包生成', reasoning_tail: '先想这个行业的细分领域……',
+                    reasoning_len: 512, content_len: 0 };
+  // 两句 404 属于两条不同路由（app/server.py 的 job_status 与 job_cancel），
+  // 各起一个名字：桩/服务端对账才能按路由比，而不是"文件里出现过这句就算过"。
+  var ERR_JOB_GONE_GET = '作业不存在或已随重启释放';
+  var ERR_JOB_GONE_CANCEL = '作业不存在';
   // 快照只有一本账：轮询、取消、幂等重放都走这里（三处各写一份就是第 10 轮那种漂移）
   function pgSnap(pid) {
     var j = PG_JOBS[pid];
-    // 字段集对齐 Job.snapshot()：真引擎的终态快照仍带 created_at / steps / error，
-    // 少给一个字段，界面里"读不到就当没有"的那一支就永远不跑（第 11 轮复核 P3）。
+    // 字段集对齐 Job.snapshot()：id/kind/state/params/steps/error/created_at，
+    // 外加 include_result 时的 result 与设过 stream_phase 时的 stream。
+    // ⚠ result 在"终态但非 done"时是 **null 而不是缺键** —— 引擎就是这么给的。
     return mk({ id: pid, kind: 'packgen', state: j.state, created_at: bornAt(pid, 2000),
-                error: j.state === 'failed' ? '作业超时未收工（桩的占位回收，对应引擎的整作业预算）' : null, steps: [],
+                error: j.error || null, stream: PG_STREAM, steps: [],
                 params: { industry: j.industry },
-                result: j.state === 'done' ? PG_RESULT : undefined });
+                result: j.state === 'done' ? PG_RESULT : null });
   }
   // 包名的合法性判定与 app/server.py 的 _safe_name 同方向（不合法 → 400，排在"包存在吗"
-  // 之前，与引擎一致：_safe_name 在前、Pack(root,name) 在后）。判据直接复用 pgSlug：
-  // 一个名字原样穿过 slugify 才算干净名字 —— 不另抄一份字符类（那是第 8 轮手写区段表
-  // 错 62 个码点的老路）。
+  // 之前，与引擎一致：_safe_name 在前、Pack(root,name) 在后）。
+  // ⚠ 第 12 轮量出"复用 pgSlug 当名称校验"是**第三种编码**且两个方向都错：
+  //   -a、a--b、ab- 在引擎里合法（单词字符类 + 连字符），被 pgSlug 削首尾后不再相等 → 桩拒；
+  //   而 Cn 类码点引擎 400、桩放行。改成直接写属性类字符集（连字符放末尾为字面量），
+  //   与引擎同域；反斜杠还是只能靠 String.fromCharCode(92)（模板字符串会吃掉一层）。
+  var NAME_OK = new RegExp("^[" + String.fromCharCode(92) + "p{L}"
+                           + String.fromCharCode(92) + "p{N}_-]+$", "u");
   function packNameOk(n) {
-    return !!n && n.indexOf('..') < 0 && pgSlug(n) === n;
+    return !!n && n.indexOf('..') < 0 && NAME_OK.test(n);
   }
   // ⚠ 引擎按 slugify 之后的目录名占位，不是按用户输入的那串字：
   //   「全屋定制/装修」与「全屋定制 装修」都会落成 packs/全屋定制-装修/，
@@ -840,7 +858,7 @@ window.__addCount = 0;
     }
     if (s.indexOf('/api/jobs/jobpg') >= 0 && s.indexOf('/cancel') >= 0) {
       var cid = pgJobId(s);
-      if (!PG_JOBS[cid]) return err(404, '作业不存在');   // app/server.py 的 job_cancel 同文案
+      if (!PG_JOBS[cid]) return err(404, ERR_JOB_GONE_CANCEL);
       if (PGCANCELFAIL) {
         calls.failpgcancel = (calls.failpgcancel || 0) + 1;
         return err(500, '引擎没有接受这次取消：作业正在写文件');
@@ -862,9 +880,9 @@ window.__addCount = 0;
       pgSweepStale();
       var pj = PG_JOBS[pid];
       if (!pj) {
-        // 不认识这个作业 id：真引擎此时是 404「作业不存在或已随重启释放」，
-        // 不是"随便回一份别人的结果"。
-        return err(404, '作业不存在或已随重启释放');
+        // 不认识这个作业 id：GET 与 cancel 两条路由的原文不同（server.py 的
+        // job_status / job_cancel），按路由发对应的那句。
+        return err(404, ERR_JOB_GONE_GET);
       }
       if (pj.state !== 'packing') return pgSnap(pid);   // 已收工：同一份终态快照，幂等可轮询
       calls.pg++;             // 全局"建包被轮询了几次"的观测值（断言用它判"少传参数时不许开轮询"）
@@ -890,7 +908,10 @@ window.__addCount = 0;
     // "作业消失之后界面做什么"这条路从门禁里抹掉了（第 11 轮复核 P2）。
     // ⚠ 位置有讲究：必须在**所有**具名作业分支（jobrun/jobkeep/jobph/job1/jobfail/
     //   jobpgN）之后，否则它会把真存在的作业一并 404 掉 —— 放错一次，八条断言同时红。
-    if (s.indexOf('/api/jobs/') >= 0) return err(404, '作业不存在或已随重启释放');
+    if (s.indexOf('/api/jobs/') >= 0) {
+      return s.indexOf('/cancel') >= 0 ? err(404, ERR_JOB_GONE_CANCEL)
+                                       : err(404, ERR_JOB_GONE_GET);
+    }
     if (s.indexOf('/api/packs/') >= 0) {
       // 详情必须**按请求的包名**回：原来无论问哪个包都回「电梯行业包」，
       // 于是「看着 A 包点了按钮、实际改的是 B 包」这类错误在桩上量不出来
@@ -5831,20 +5852,63 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   // 包名这一格也要有断言，否则"桩回不回 404"随时可以静默退回宽容（第 10 轮 P3）：
   // 真引擎对不存在的包是 404，且**先判包、再判 private**。
   const pgFileGate = await evalIn(`return (async () => {
-    var st = function (u) { return window.fetch(u).then(function (r) { return r.status; }); };
-    return {
+    var api = function (u, body) {
+      return window.fetch(u, { method: body ? 'POST' : 'GET',
+        headers: { 'Content-Type': 'application/json' },
+        body: body ? JSON.stringify(body) : undefined })
+        .then(function (r) { return r.json().then(function (b) { return { st: r.status, b: b }; }); });
+    };
+    var st = function (u) { return api(u).then(function (r) { return r.st; }); };
+    var out = {
       realYaml: await st('/api/packs/elevator/file?rel=pack.yaml'),
       noPack: await st('/api/packs/从没建过的包/file?rel=pack.yaml'),
       noPackPriv: await st('/api/packs/从没建过的包/file?rel=private/x.md'),
       priv: await st('/api/packs/elevator/file?rel=private/pricing.md'),
       noRel: await st('/api/packs/elevator/file'),
+      badName: await st('/api/packs/%2e%2e/file?rel=pack.yaml'),
       listed: Object.keys(window.__tsMeta.packs.reduce(function (m, p) { m[p.name] = 1; return m; }, {})).length
     };
+    // 未知 id 的两句 404 分属两条路由，文案不同（server.py 的 job_status / job_cancel）：
+    // 按**路由**比，不是"文件里出现过这句就算过"。
+    var g404 = await api('/api/jobs/20260101-000000-abcdef');
+    var c404 = await api('/api/jobs/20260101-000000-abcdef/cancel', {});
+    out.getCode = g404.st + ':' + g404.b.detail;
+    out.cancelCode = c404.st + ':' + c404.b.detail;
+    // 终态快照的字段集必须与引擎一致（缺一个键，界面那条"读不到就算了"的分支永不跑）
+    var sub = await api('/api/packs/create', { industry: '推拿所戊', description: '社区推拿，面向上班族' });
+    var sid = sub.b.job_id;
+    await api('/api/jobs/' + sid);
+    await api('/api/jobs/' + sid + '/cancel', {});
+    var term = await api('/api/jobs/' + sid);
+    out.termKeys = Object.keys(term.b || {}).sort().join(',');
+    out.termResult = 'result' in (term.b || {}) ? String(term.b.result) : 'ABSENT';
+    out.termStream = term.b && term.b.stream ? term.b.stream.phase : '';
+    // 占位回收线：把时限注入成 0，让它当场触发 —— 否则这句永远没有断言覆盖
+    window.__pgclaimms = 0;
+    var s2 = await api('/api/packs/create', { industry: '宠物医院庚', description: '社区医院，面向养宠家庭' });
+    var swept = await api('/api/jobs/' + s2.b.job_id);
+    var resub = await api('/api/packs/create', { industry: '宠物医院庚', description: '社区医院，面向养宠家庭' });
+    out.sweptState = swept.b.state;
+    out.sweptErr = (swept.b.error || '').slice(0, 7);
+    out.resub = resub.st + ':' + String(resub.b.detail || '').slice(0, 7);
+    window.__pgclaimms = undefined;
+    return out;
   })();`);
   check("桩：读包内文件先认包（不存在的包 404，private 才是 403）",
     pgFileGate.realYaml === 200 && pgFileGate.noPack === 404
       && pgFileGate.noPackPriv === 404 && pgFileGate.priv === 403
-      && pgFileGate.noRel === 404 && pgFileGate.listed === 2,
+      && pgFileGate.noRel === 404 && pgFileGate.badName === 400
+      && pgFileGate.listed === 2,
+    JSON.stringify(pgFileGate));
+  check("桩：未知作业按路由发各自的 404 原文，终态快照带齐引擎那 9 个键",
+    pgFileGate.getCode === '404:作业不存在或已随重启释放'
+      && pgFileGate.cancelCode === '404:作业不存在'
+      && pgFileGate.termKeys === 'created_at,error,id,kind,params,result,state,steps,stream'
+      && pgFileGate.termResult === 'null' && pgFileGate.termStream === '行业包生成',
+    JSON.stringify(pgFileGate));
+  check("桩：占位回收时限可注入，到点落 failed 并归还名字（不会永久 409）",
+    pgFileGate.sweptState === 'failed' && pgFileGate.sweptErr === '作业超时未收工'
+      && /^409:行业包正在创建/.test(pgFileGate.resub) === false && /^200:/.test(pgFileGate.resub),
     JSON.stringify(pgFileGate));
 
   // ── 13) 布局 ─────────────────────────────────────────────
