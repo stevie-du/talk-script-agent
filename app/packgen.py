@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 import threading
@@ -236,14 +237,21 @@ def claim_slug(slug: str) -> str | None:
 
 
 def _table_key(slug: str) -> str:
-    """占位表的键：**大小写折叠过的** slug。
+    """占位表的键：**操作系统对目录名的归一化形式**（Windows 不分大小写，POSIX 分）。
 
-    第 18 轮复核实测：原来表按原样作键，而 NTFS/APFS 的目录名不区分大小写 ——
+    第 18 轮复核实测：原来表按原样作键，而 NTFS 的目录名不区分大小写 ——
     `Probe Case` 与 `probe case` 各拿到一份凭证（c1/c2）、两条作业双双起、双双进模型，
     盘上却只有一个目录（实测：写盘 2 次、目录 1 个、两条作业都报 done）。
-    P2-46 那句"花钱之前就把同名挡住"对大小写变体完全失效。折叠后与文件系统同域。
+
+    为什么不是 `casefold()`（我第一版修法）：`casefold` 比文件系统**更宽**，
+    实测 10 组难缠的名字里有 7 组不一致 —— `İ`/`i̇`、`ß`/`ẞ`、`σ`/`ς`、`µ`/`μ`、
+    `ǅ`/`ǆ`、`ﬁ` 类连字、`ẛ`/`ṡ` 在 NTFS 上是**不同**的目录，却会被 fold 成同一个键，
+    于是第二个合法的行业名被误报「行业包正在创建中」。
+    同一组对照里 `os.path.normcase` 与文件系统 **0 处不一致**（Windows 折大小写、
+    POSIX 保持区分），而且它本来就是"按本机文件系统归一名字"这件事的正解 ——
+    表的职责是"别人能不能建出同一个目录"，那正是文件系统说了算的那件事。
     """
-    return slug.casefold()
+    return os.path.normcase(slug)
 
 
 def release_slug(slug: str, owner: str) -> bool:

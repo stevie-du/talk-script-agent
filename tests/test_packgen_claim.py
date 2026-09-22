@@ -184,7 +184,7 @@ def test_the_worker_side_release_is_also_token_scoped(monkeypatch):
     try:
         pl._run_packgen(job, client, slug)
         assert job.state == "failed", job.state
-        assert packgen._creating.get(slug.casefold()) == tb, \
+        assert packgen._creating.get(packgen._table_key(slug)) == tb, \
             "worker 的 finally 把别人活着的占位摘走了（等于回到硬摘）"
         assert packgen.claim_slug(slug) is None, \
             "第三条请求此刻能与 B 并行建同一个目录"
@@ -397,6 +397,20 @@ def slug_of(client) -> str:
     return preview_slug(INDUSTRY)
 
 
+def _fs_same_dir(a: str, b: str) -> bool:
+    """问**文件系统本身**：这两个名字在本机是不是同一个目录（不是问我们的表）。"""
+    root = Path(tempfile.mkdtemp(prefix="fssame-"))
+    try:
+        (root / a).mkdir()
+        try:
+            (root / b).mkdir()
+            return False
+        except FileExistsError:
+            return True
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_claim_and_release_are_pairwise():
     s = "某个临时占位"
     ta = packgen.claim_slug(s)
@@ -417,17 +431,29 @@ def test_claim_and_release_are_pairwise():
     assert packgen.claim_slug("") == packgen.NO_CLAIM
     assert "" not in packgen._creating, "NO_CLAIM 进表了：那个键谁也删不掉（含兜底清理）"
 
-    # 表必须与文件系统同域：NTFS/APFS 的目录名不分大小写，`Probe-Case` 与 `probe-case`
-    # 是**同一个目录**（第 18 轮复核 P1-2 实测：两条大小写变体各拿到一份凭证、双双起作业、
-    # 双双进模型，盘上只有一个目录，而两条都报 done）。
-    tc = packgen.claim_slug("Probe-Case")
-    assert tc
-    assert packgen.claim_slug("probe-case") is None, "大小写变体绕过了占位互斥"
-    assert packgen.claim_slug("PROBE-CASE") is None, "同上：折叠要覆盖所有大小写形式"
-    assert packgen.release_slug("probe-case", tc) is True, "归还也得认折叠后的键"
-    td = packgen.claim_slug("PROBE-CASE")
-    assert td and packgen.release_slug("PROBE-CASE", td) is True
-    assert packgen._creating == {}, "兜底归还之后表没清干净"
+    # 表的键必须与"本机文件系统是否把这两个名字当成同一个目录"同域。
+    # 判据问的是文件系统（`_fs_same_dir` 真去 mkdir 一次），不是问我们的表 —— 否则自证。
+    # Windows 不分大小写；POSIX 分；而 `casefold()` 比文件系统**宽**：
+    # ß/ẞ、σ/ς、ﬁ/fi 在 NTFS 上是三个不同的目录，用 fold 会把这三个合法行业名
+    # 误报成「行业包正在创建中」（实测 10 组难缠名字里 7 组与文件系统不一致）。
+    for a, b in (("Probe-Case", "probe-case"), ("ß包", "ẞ包"), ("σα", "ςα"), ("ﬁn", "fin")):
+        same = _fs_same_dir(a, b)
+        ta2 = packgen.claim_slug(a)
+        assert ta2, a
+        tb2 = packgen.claim_slug(b)
+        assert (tb2 is None) == same, (
+            f"{a} / {b}：文件系统说两者是同一个目录吗 = {same}，"
+            f"占位表却说互斥 = {tb2 is None} —— 表键要用 os.path.normcase，不是 casefold")
+        packgen.release_slug(a, ta2)
+        if tb2:
+            packgen.release_slug(b, tb2)
+    # 归还时换一种大小写写法也要认得（同一份凭证、同一个归一化键）
+    tz = packgen.claim_slug("Probe-Case")
+    assert tz
+    same_case = packgen._table_key("Probe-Case") == packgen._table_key("PROBE-CASE")
+    assert packgen.release_slug("PROBE-CASE", tz) is same_case, "归还的键归一化不一致"
+    if same_case:
+        assert packgen._creating == {}, "兜底归还之后表没清干净"
     # 凭证不能"匹配上表里根本没有的项"：`_creating.get(k)` 对缺项返回 None，
     # 于是 owner=None 会走进删除分支、紧接着 del 抛 KeyError
     #（第 18 轮复核复量 P1-2 时当场撞出来的一格）。
