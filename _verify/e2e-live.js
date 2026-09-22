@@ -32,6 +32,14 @@ const results = [];
 const check = (n, ok, d) => results.push([n, !!ok, d || ""]);
 
 (async function main() {
+  // 前置检查：`.venv` 不在版本库里，所以在别的克隆里跑这道门时最容易撞上 ——
+  // 原来它是 spawn 抛一坨 ENOENT 栈（读栈的人得先猜"这算门红还是环境缺"）。
+  // 现在报人话 + 退出码 2，与"门真的红了"区分开。
+  if (!fs.existsSync(PY)) {
+    console.error("缺引擎虚拟环境：" + PY +
+      "\n  先按 README「启动（开发模式）」建 venv、装 requirements，再跑这道门。");
+    process.exit(2);
+  }
   const port = await freePort(8977);
   const cdpPort = await freePort(9377);
   const token = "e2e-token-" + Date.now();

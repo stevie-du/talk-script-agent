@@ -124,7 +124,12 @@ node _verify/verify.js                # 界面回归（桩 fetch，百秒量级�
 node _verify/e2e-live.js              # 真实端到端（真引擎 + 真页面 + 真落盘）
 ```
 
-四条都是零第三方依赖（除 pytest），可分别单独运行。
+四条门各自的前置（实测过，别说"零依赖"）：
+`pytest` 与 `e2e-live` 要仓库根的 `.venv`（引擎虚拟环境）；`node --test desktop/` 要
+`cd desktop && npm install`（它跑纯逻辑，但用例 import 了 `electron` 与 `minimatch` ——
+干净克隆里没装就是 21 pass / 2 fail，报的是 `Cannot find module`，不是产品缺陷）；
+`verify.js` 用桩 fetch，不需要引擎在跑；`e2e-live` 会自己起引擎，缺 `.venv` 时现在直接
+报人话并以退出码 2 结束（与"门真的红了"区分开）。
 `_verify/legacy/` 里是重构前写的脚本，依赖已不存在的 DOM 与全局变量，**不要运行**。
 
 ## 一条关于门禁的披露（别把这 6 条红当噪声）
