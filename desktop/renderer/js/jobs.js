@@ -59,6 +59,10 @@ export function collectParams() {
     duration: getParam("duration") ? Number(getParam("duration")) : null,
     style: getParam("style"), platform: getParam("platform"),
     persona: getParam("persona"), cta: getParam("cta"),
+    // A-2：改写范围。**这一行不能少** —— 请求体是显式白名单，漏掉一个键就是
+    // 「设置页里选了 in-place、发出去的请求里没有它、后端静默落回 bounded」，
+    // 与 quota_degraded 当年被白名单滤掉是同一类静默降级。
+    rewrite_scope: getParam("rewrite_scope"),
     facts: $("facts").value.trim() || null,
     voice: $("voice") ? $("voice").value : "strong",
     format: $("format") ? $("format").value : "both",

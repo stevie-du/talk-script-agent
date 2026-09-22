@@ -11,6 +11,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 AI = ROOT / "app/ai_tells.py"
+KN_F = ROOT / "app/knowledge.py"
+PIPE_F = ROOT / "app/pipeline.py"
 PACK = ROOT / "packs/elevator"
 YAML_F = PACK / "ai_tells.yaml"
 
@@ -135,6 +137,78 @@ MUTATIONS = [
                         "通篇无一个具体数字/时间/数量" + (f"（{ph} 处占位，超过段数）" if ph else ""))]""",
         "        return []",
         "tests/test_aitells_false_positive.py -k borderline",
+    ),
+    # ── A-2 改写范围三档 ───────────────────────────────────────
+    (
+        "A-2 in-place 档不再禁止删句（只剩「句内清理」这句好话）",
+        PIPE_F,
+        '"**不许删句、加句、并句，也不许调整段落顺序**；"\n',
+        '""\n',
+        "tests/test_rewrite_scope.py -k three_scopes",
+    ),
+    (
+        "A-2 三档文案只剩一份（_violation_feedback 无视 scope）",
+        PIPE_F,
+        'lines.append(f"- 上一版全文（{SCOPE_INSTRUCTION[scope]}）：\\n" + body)',
+        'lines.append(f"- 上一版全文（{SCOPE_INSTRUCTION[DEFAULT_REWRITE_SCOPE]}）：\\n" + body)',
+        "tests/test_rewrite_scope.py -k three_scopes",
+    ),
+    (
+        "A-2 默认档从 bounded 换成 structural",
+        KN_F,
+        'DEFAULT_REWRITE_SCOPE = "bounded"',
+        'DEFAULT_REWRITE_SCOPE = "structural"',
+        "tests/test_rewrite_scope.py -k default",
+    ),
+    (
+        "A-2 _normalize 无视请求与包配置（永远落默认档）",
+        PIPE_F,
+        'scope = str(scope) if scope not in (None, "") else (pack.rewrite_scope() or DEFAULT_REWRITE_SCOPE)',
+        "scope = DEFAULT_REWRITE_SCOPE",
+        "tests/test_rewrite_scope.py -k precedence",
+    ),
+    (
+        "A-2 请求里的非法档位静默回落（不抛错）",
+        PIPE_F,
+        """        bad_scope = rewrite_scope_error(scope)
+        if bad_scope:
+            raise ValueError(bad_scope)""",
+        "        scope = None if rewrite_scope_error(scope) else scope",
+        "tests/test_rewrite_scope.py -k precedence",
+    ),
+    (
+        "A-2 取值检查放行任意值（rewrite_scope_error 恒为空）",
+        KN_F,
+        """    if value not in REWRITE_SCOPES:
+        return (f"pack.yaml 的 rewrite_scope={value!r} 不是合法档位\"""",
+        """    if False:
+        return (f"pack.yaml 的 rewrite_scope={value!r} 不是合法档位\"""",
+        "tests/test_rewrite_scope.py -k bad_scope",
+    ),
+    (
+        "A-2 pack_info 不再校验 rewrite_scope（坏值静默退回默认）",
+        KN_F,
+        """        serr = rewrite_scope_error(data.get("rewrite_scope"))
+        if serr:
+            err = serr""",
+        "        pass",
+        "tests/test_rewrite_scope.py -k pack_error",
+    ),
+    (
+        "A-2 rewrite_scope 不进落盘白名单（算了但无声丢掉）",
+        PIPE_F,
+        '    "rewrite_scope",\n',
+        "",
+        "tests/test_rewrite_scope.py -k persisted",
+    ),
+    (
+        "A-2 SCOPE_INSTRUCTION 漏一档（回炉那一刻 KeyError）",
+        PIPE_F,
+        """    "structural":
+        "**可以重排**""",
+        """    "unused_placeholder":
+        "**可以重排**""",
+        "tests/test_rewrite_scope.py -k every_scope",
     ),
 ]
 

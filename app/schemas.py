@@ -44,6 +44,11 @@ class GenerateRequest(BaseModel):
     platform: str | None = Field(default=None, max_length=32)
     persona: str | None = Field(default=None, max_length=64)
     cta: str | None = Field(default=None, max_length=32)
+    # A-2：回炉改写的范围三档（见 `knowledge.REWRITE_SCOPES`）。不传 = 用本包
+    # `pack.yaml` 配的档，包也没配就落 `bounded`。**必须在这里显式声明** ——
+    # Pydantic 默认忽略未声明的键，少这一行会让界面上选的档位在请求层无声消失，
+    # 与 `quota_degraded` 当年被白名单滤掉是同一类静默降级。
+    rewrite_scope: Literal["in-place", "bounded", "structural"] | None = None
     facts: str | None = Field(default=None, max_length=FACTS_MAX)  # 产品手册/数据/案例
     rate: float | None = Field(default=None, gt=0, le=20)          # 覆盖语速
     voice: Literal["strong", "standard", "off"] = "strong"         # 人味档位

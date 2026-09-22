@@ -24,6 +24,7 @@ const TOOLBAR_KEYS = ["segment", "audience", "duration", "platform"];
 const KEY_FALLBACK_LABEL = {
   segment: "细分领域", audience: "受众", duration: "时长（秒）",
   style: "风格", platform: "平台", persona: "人设", cta: "结尾引导",
+  rewrite_scope: "改写范围",
 };
 
 const SAMPLES = [

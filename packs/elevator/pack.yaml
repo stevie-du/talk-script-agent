@@ -39,6 +39,16 @@ params:
     label: 结尾引导
     options: [关注, 私信, 留资, 到店, 评论关键词]
     default: 关注
+  # A-2：回炉改写的范围三档（见 app/knowledge.py 的 REWRITE_SCOPES 与
+  # pipeline.SCOPE_INSTRUCTION）。**不是"生成方式"，是"改稿时允许动多大"**：
+  #   in-place   只句内换词，不删句/不加句/不换段落顺序（事实与占位一个字符不动）
+  #   bounded    默认档：按点名的几条逐处改，不另起一炉、不动未点名的段落
+  #   structural 允许合并/拆分/重排段落（改得动，但最容易矫枉过正）
+  # 没配这一项 = 走 bounded。写错档位名会在包列表上直接标成不可用（不静默退回默认）。
+  rewrite_scope:
+    label: 改写范围
+    options: [in-place, bounded, structural]
+    default: bounded
 
 # 语速（字/秒）按风格自动选
 rate_by_style:

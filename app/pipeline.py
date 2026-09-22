@@ -41,7 +41,8 @@ from . import jobs as _jobs                              # noqa: F401
 from .jobs import (JOB_BUDGET_SECONDS, TERMINAL_STATES, Job,  # noqa: F401
                    JobBudget, JobCancelled, JobRegistry, StateConflict,
                    new_job_id)
-from .knowledge import Pack, PackError, param_audit  # noqa: F401
+from .knowledge import (DEFAULT_REWRITE_SCOPE, Pack, PackError,  # noqa: F401
+                        param_audit, rewrite_scope_error)
 from .llm import EmptyContentError, LLMClient
 from .packgen import claim_slug, create_pack, preview_slug, release_slug, slug_problem
 from .prompts import PromptRenderer
@@ -132,6 +133,10 @@ REVISION_ACTION_FULL_RECHECK = "全文回炉"
 PERSISTED_PARAMS: tuple[str, ...] = (
     "topic", "segment", "audience", "duration", "style",
     "platform", "persona", "cta", "rate", "voice", "format",
+    # A-2：本次回炉用的改写范围。**必须落盘** —— 事后解释"这条为什么被重写了"
+    # 靠的就是它；不落盘的话，同一个主题两次生成给出长短不同的稿子，
+    # 而 `result.json` 里看不出当时用的是 in-place 还是 structural。
+    "rewrite_scope",
     # P3-14：当时用的模型与预算 —— 事后要解释「这条为什么慢 / 为什么这样」
     # 只能靠这些落盘值，不能靠「现在的 config.yaml」（它今天就被改过两次）。
     "model", "max_tokens", "temperature",
@@ -152,6 +157,31 @@ PARAMS_DROPPED: dict[str, str] = {
 #    `_normalize` 是纯参数归一，不读 self.llm（测试直接调它时会没有客户端）。
 #    它们最终仍落进 result.json 的 params（PERSISTED_PARAMS 已含）。
 RUNTIME_PARAMS: tuple[str, ...] = ("model", "max_tokens", "temperature")
+
+#: 回炉改写范围三档各自给模型的那句话（A-2，对标 shuorenhua 的三档）。
+#: 三档都建立在**同一件事**上：把上一版全文附给模型、让它逐处改而不是重掷骰子
+#: （P2-41）。差别只在**允许动多大**：
+#:
+#:   in-place   —— 只句内清理。事实（文号/数字/引文）、`{{待补}}` 占位、cta 的动作
+#:                 一个字符都不许动，也不许删句/加句/并句/换段落顺序。
+#:                 用在"稿子已经很好，只有几处文风/合规词要换"的时候。
+#:   bounded    —— 默认档。可以按点名的几条逐处改，不另起一炉、不动未点名的段落。
+#:   structural —— 允许合并/拆分/调整段落顺序。改得动，但最容易矫枉过正。
+#:
+#: ⚠ 三档都**不许动 `{{待补}}`**：占位是"这里缺事实"的标记（见 ai_tells 的 A-1），
+#: 被改写顺手填上一个编的数字，比留着空坏得多。
+SCOPE_INSTRUCTION: dict[str, str] = {
+    "in-place":
+        "**只做句内清理**：可以换词、改标点、调整同一句内的语序；"
+        "**不许删句、加句、并句，也不许调整段落顺序**；"
+        "文号、数字、引文、{{待补}} 占位、cta 的动作一个字符都不许动",
+    "bounded":
+        "**在它基础上按上面几条逐处修改**，不要另起一炉重写、不要改动了未点名的段落；"
+        "文号、数字、引文与 {{待补}} 占位不许动",
+    "structural":
+        "**可以重排**：允许合并、拆分、调整段落顺序，但上面点名的每条问题都必须解决；"
+        "文号、数字、引文与 {{待补}} 占位照旧不许动",
+}
 
 
 class Pipeline:
@@ -564,6 +594,15 @@ class Pipeline:
         duration = float(pick("duration", 60))
         style = str(pick("style", ""))
         rate = params.get("rate") or pack.rate_for_style(style)
+        # A-2：改写范围。优先级 = 请求 > 本包 pack.yaml > 引擎默认（bounded）。
+        # 请求里给了非法值**抛错而不是回落** —— 静默回落等于把用户/调用方
+        # 明确表达的意图换成另一个档位去改写稿子（`GenerateRequest` 的 Literal
+        # 已在请求层挡住 422，这里兜的是绕过请求模型直接调 `_normalize` 的路径）。
+        scope = params.get("rewrite_scope")
+        bad_scope = rewrite_scope_error(scope)
+        if bad_scope:
+            raise ValueError(bad_scope)
+        scope = str(scope) if scope not in (None, "") else (pack.rewrite_scope() or DEFAULT_REWRITE_SCOPE)
         quota = Quota.from_pack(pack.data)
         points = pack.points_limit(duration)
         target = quota.target(duration, float(rate)) if quota.available else {}
@@ -585,6 +624,7 @@ class Pipeline:
             "rate": float(rate),
             "voice": params.get("voice") if params.get("voice") in ("strong", "standard", "off") else "strong",
             "format": params.get("format") if params.get("format") in ("both", "voice") else "both",
+            "rewrite_scope": scope,
             "reroll": bool(params.get("reroll")),
             "points": points,
             "quota": target,
@@ -861,7 +901,8 @@ class Pipeline:
             if report["passed"] or rnd == rounds:
                 draft["check"] = report
                 return draft, revisions
-            feedback = self._violation_feedback(report, draft.get("sections") or [])
+            feedback = self._violation_feedback(report, draft.get("sections") or [],
+                                                p.get("rewrite_scope", DEFAULT_REWRITE_SCOPE))
             # `action` 是给人看的，`action_code` 才是给界面分流用的。修复前只有
             # `action`，而 result.js 拿中文字面量去筛"哪些版本是全文回炉" ——
             # 改一句中文文案（不改任何行为）就会让那条横幅静默消失，而 UI 桩是
@@ -872,7 +913,8 @@ class Pipeline:
         return draft, revisions
 
     @staticmethod
-    def _violation_feedback(report: dict, prev_sections: list[dict] | None = None) -> str:
+    def _violation_feedback(report: dict, prev_sections: list[dict] | None = None,
+                            scope: str = DEFAULT_REWRITE_SCOPE) -> str:
         """回炉反馈（Self-Refine 的 critique）：**可执行的修改清单 + 上一版正文**。
 
         修复前这里只给统计数字（「命中硬禁用词「绝对安全」×1」）且**不带上一版**，
@@ -925,8 +967,7 @@ class Pipeline:
         if prev_sections:
             body = "\n".join(f"  第 {i} 段（{s.get('type', '')}）：{s.get('text', '')}"
                              for i, s in enumerate(prev_sections, 1))
-            lines.append("- 上一版全文（**在它基础上按上面几条逐处修改**，"
-                         "不要另起一炉重写、不要改动了未点名的段落）：\n" + body)
+            lines.append(f"- 上一版全文（{SCOPE_INSTRUCTION[scope]}）：\n" + body)
         return "\n".join(lines)
 
     def _storyboard(self, job: Job, pack: Pack, draft: dict, p: dict,

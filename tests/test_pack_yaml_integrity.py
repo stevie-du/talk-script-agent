@@ -347,7 +347,15 @@ def test_pack_info_is_clean_when_everything_is_fine(tmp_path):
         (root / "packs" / "elevator" / "pack.yaml").read_text(encoding="utf-8"))
     assert info.display_name == declared["display_name"]
     assert info.display_name != "elevator"
-    assert len(info.params) == len(declared["params"]) == 7
+    # 参数键集是**规格副本**：改 pack.yaml 的 params 就得一起改这里。
+    # 原来写的是裸数字 `== 7`，报错只说「7 != 8」，看不出是哪个键多了/少了 ——
+    # A-2 加 rewrite_scope 时就撞上过这一次，所以改成列出键集。
+    assert set(info.params) == {
+        "segment", "audience", "duration", "style", "platform", "persona",
+        "cta", "rewrite_scope",
+    }, f"电梯包的参数键集变了：{sorted(info.params)}"
+    assert len(info.params) == len(declared["params"]), \
+        "info.params 与 pack.yaml 声明的不是同一份"
 
 
 def test_broken_banwords_is_visible_from_the_list_too(tmp_path):

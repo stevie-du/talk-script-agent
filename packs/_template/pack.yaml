@@ -47,6 +47,12 @@ params:
     label: 结尾引导
     options: [关注, 私信, 留资, 到店, 评论关键词]
     default: 关注
+  # 回炉改写范围三档（见 app/knowledge.py 的 REWRITE_SCOPES）。与行业无关，
+  # 新包直接沿用；真要覆盖，改 options/default 即可（写错档位名会被判成坏包）。
+  rewrite_scope:
+    label: 改写范围
+    options: [in-place, bounded, structural]
+    default: bounded
 
 # 语速与配额是「口播」这件事的物理量，与行业无关，直接沿用（新包会复制这些表）。
 rate_by_style:

@@ -199,6 +199,12 @@ def pack_info(pack_dir: Path) -> PackInfo:
         terr = tolerance_error(data.get("duration_tolerance_pct"))
         if terr:
             err = terr
+    if not err:
+        # A-2：改写范围写错 = 静默退回默认档（包作者以为配了 in-place，拿到的是 bounded）。
+        # 与容差同一处收口 —— 都是「pack.yaml 里一个枚举值写错，行为变了但没人知道」。
+        serr = rewrite_scope_error(data.get("rewrite_scope"))
+        if serr:
+            err = serr
     try:
         return PackInfo(
             name=str(data.get("name", dir_name)),
@@ -486,6 +492,41 @@ def _heading_exists(pack_dir: Path, rel: str, keyword: str, level: int = 2) -> b
     text = read_text_cached(pack_dir / rel)
     return any(re.match(rf"^#{{{level}}}(?!#)\s", ln) and keyword in ln
                for ln in text.split("\n"))
+
+
+# ── 改写范围三档（A-2）────────────────────────────────────────
+#
+# 来源：`需求方案-去AI味与热点情报.md` §2.9 A-2 —— 对标 MrGeDiao/shuorenhua 的
+# structural / bounded / in-place 三档。**语义本来就已经在代码里**：
+# `pipeline._violation_feedback` 的尾巴一直写着「不要另起一炉重写、不要改动了
+# 未点名的段落」，那正是 `bounded` 档。A-2 做的事是把它**升格成显式参数**，
+# 让三档各自有名字、能被配置、能被断言 —— 而不是把一句话藏在提示词尾巴里。
+#
+# 为什么默认 `bounded`：`in-place` 更保守但可能改不动（事实错的稿子必须删句），
+# `structural` 放开了重排、改起来最有效但最容易"矫枉过正"（把好句子一起重写）。
+# `bounded` 是文档 §2.9 A-2 与第三部分待确认 #6 定的默认档。
+REWRITE_SCOPES: tuple[str, ...] = ("in-place", "bounded", "structural")
+DEFAULT_REWRITE_SCOPE = "bounded"
+
+
+def rewrite_scope_error(value) -> str:
+    """`rewrite_scope` 的取值检查：返回人话错误，空串 = 合法或没配。
+
+    与 `checker.tolerance_error` 同一套处理（都在 `pack_info` 里加载期判死）：
+    `pack.yaml` 里把枚举值写错（`inplace` / `in_place` / `InPlace`）的后果是
+    **静默走回默认档** —— 包作者以为配了"只换词不删句"，实际拿到的是 bounded，
+    回炉照样敢删句。配置写错改变了行为却看不出来，正是本项目最忌讳的那一类。
+    """
+    if value is None or value == "":
+        return ""
+    if not isinstance(value, str):
+        return (f"pack.yaml 的 rewrite_scope 必须是字符串（{'/'.join(REWRITE_SCOPES)}），"
+                f"实际是 {type(value).__name__}：{value!r}")
+    if value not in REWRITE_SCOPES:
+        return (f"pack.yaml 的 rewrite_scope={value!r} 不是合法档位"
+                f"（只能是 {'/'.join(REWRITE_SCOPES)}）—— 写错会静默退回默认档 "
+                f"{DEFAULT_REWRITE_SCOPE}，回炉行为与你配的不是一回事")
+    return ""
 
 
 def param_audit(pack_dir: Path, data: dict) -> dict[str, dict[str, str]]:
@@ -950,6 +991,21 @@ class Pack:
         if tolerance_error(v):
             return None
         return float(v) if v not in (None, "") else None
+
+    def rewrite_scope(self) -> str | None:
+        """本包配的回炉改写范围（`pack.yaml` 的 `rewrite_scope`），没配返回 None。
+
+        None 的含义是"本包不覆盖"，由 `pipeline._normalize` 落到
+        `DEFAULT_REWRITE_SCOPE`。取值合法性由 `pack_info` 在**加载时**判死
+        （`rewrite_scope_error`），这里再判一次只是为了兜"绕过列表直接来取"的路径：
+        坏值一律退回 None（走默认档），而不是带着一个不认识的档位去拼提示词 ——
+        拼进去的结果是 `_SCOPE_INSTRUCTION[...]` KeyError，作业失败在回炉那一步，
+        而用户看到的是一句与包配置无关的异常。
+        """
+        v = self.data.get("rewrite_scope")
+        if rewrite_scope_error(v):
+            return None
+        return str(v) if v not in (None, "") else None
 
     def ai_tells_data(self) -> dict | None:
         """文风 tell 词表（`pack.yaml` 的 `ai_tells` 键指定文件名）；结构坏了返回 None。
