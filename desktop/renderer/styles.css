@@ -2091,6 +2091,14 @@ th { color: var(--text-2); font-size: var(--f-xs); font-weight: 500; }
 tr:last-child td { border-bottom: none; }
 td.ok { color: var(--ok); font-weight: 500; }
 td.bad { color: var(--bad); font-weight: 500; }
+/* 第三档（2026-09-23）：`td.ok` / `td.bad` 只有两档，而情报源表的「接入」列
+   天然有三态 —— 已接入 / 声明了但引擎没有适配器 / 主动关掉。
+   后两态都用 `td.bad` 会把「我们决定不做」（小红书不做 x-s 逆向）与
+   「配错了」（id 拼错）说成同一件事，而它们的处理完全不同。
+   ⚠ 用 `--warn` 当**文字色**（不是底色）：这是 `.m-chip` 那一族之外的用法，
+   §2.6 记着状态药丸族在白卡上低于 4.5:1 的欠账，所以这里只用在**表格单元格**
+   的短文本上，且与 `td.bad` 同族（同一档字号/字重），不新开一族。 */
+td.warn { color: var(--warn); font-weight: 500; }
 /* 列宽与等宽单元格：以前这几处写成内联 style="width:86px"。
    CSP 收紧到 style-src 'self'（不带 'unsafe-inline'）之后，内联属性会被
    **静默忽略** —— 列宽失效、界面不会报错，正是本项目最忌讳的那种失效。
@@ -2360,6 +2368,9 @@ pre#pg-checklist {
 @media (max-width: 1120px) {
   #chat-stream { padding: var(--s4) var(--s4) var(--s3); }
   #composer { padding: var(--s2) var(--s4) var(--s3); }
+  /* 选题视图必须跟着降：§2.8 量到「窄窗再差 8px」的根因就是新视图没跟这条
+     媒体查询一起降内边距 —— 1440 窗下两列对齐、1000 窗下差 8px，越窄差越多。 */
+  .topics-inner, .topics-src-inner { padding: var(--s4) var(--s4) var(--s3); }
   .nav-item kbd { display: none; }
 }
 @media (max-width: 860px) {
@@ -2594,3 +2605,107 @@ input:not([type]) {
    居中（与「模型接口」空态同一套画法）。 */
 #pane-packgen { max-width: var(--w-stg-3col); }
 #pane-packgen > .page-card { max-width: 560px; margin-inline: auto; }
+
+/* ══════════════ 今日选题 / 情报源（B 线，2026-09-23）══════════════
+   分区、chip、计数、「未接入 N」**全部由 pack.yaml 的 intel_sources 渲染**，
+   这里一个平台名都不写死（§2.2「一处声明、四处一致」）。
+
+   列宽口径照 §2.8：阅读面（选题列表）与正文/输入卡同档 `--w-stream` 780 居中；
+   **唯一例外是情报源那张表格**，它跟设置页三列同档 `--w-stg-3col` 1160 ——
+   那是应用里已有的第三种面，不是新发明的档。 */
+/* 头部那两颗情报动作只在选题视图里出现。用属性选择器而不是给按钮加 hidden：
+   切视图的路径有好几条，逐条开关按钮迟早漏一条（见 ui.js 的 gotoView）。 */
+.rh-intel { display: none; }
+#right[data-view="topics"] .rh-intel { display: inline-flex; }
+#view-topics { overflow: hidden; }        /* 滚动交给两个内层容器，各自独立 */
+.topics, .topics-src {
+  flex: 1; min-height: 0; overflow-y: auto;
+  scrollbar-gutter: stable;               /* 与 #chat-stream 同口径（§2.8 那 6px 的来处） */
+}
+.topics-inner {
+  max-width: var(--w-stream); width: 100%; margin-inline: auto;
+  padding: var(--s4) var(--s4) var(--s6);
+  display: flex; flex-direction: column; gap: var(--s4);
+}
+.topics-src-inner {
+  max-width: var(--w-stg-3col); width: 100%; margin-inline: auto;
+  padding: var(--s4) var(--s4) var(--s6);
+  display: flex; flex-direction: column; gap: var(--s4);
+}
+.topics-head { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; }
+.topics-grow { flex: 1 1 auto; }
+/* 卡头用 `.res-top`（会换行）而不是 `.kb-group-t`（nowrap，长标题会被压成一字一行） */
+.topics-inner .res-top .card-title { flex: 1 1 auto; min-width: 0; }
+/* 分组直接落在页面底色上，不再套一层白卡 —— 卡中卡会吃掉层级（规范 §3） */
+.topics-inner .kb-group > .res-metric-list { margin-top: 0; }
+/* 选题卡：与正文同列后改单列堆叠（780 放两列会把 D/S/E 的数值列挤掉） */
+.topic-grid { display: grid; gap: var(--s4); grid-template-columns: 1fr; }
+
+/* D / S / E 三根信号条。`--w` 由 JS 走 CSSOM 写（`el.style.setProperty`）——
+   内联 style 属性会被 CSP 静默忽略（style-src 'self' 无 'unsafe-inline'）。 */
+.sig-grid { display: grid; grid-template-columns: 56px 1fr auto; gap: var(--s1) var(--s2);
+  align-items: center; font-size: var(--f-2xs); color: var(--text-2); }
+.sig-track { height: var(--s1); border-radius: var(--r-pill); background: var(--fill);
+  overflow: hidden; }
+.sig-track > i { display: block; height: 100%; width: calc(var(--w, 0) * 1%);
+  background: var(--ink); }
+.sig-track.dim > i { background: var(--line-strong); }
+.sig-grid b { color: var(--text-1); font-weight: 600; }
+.topic-quote { font-size: var(--f-sm); color: var(--text-2); line-height: 1.6;
+  border-left: 2px solid var(--line-strong); padding-left: var(--s3); }
+.topic-from { font-size: var(--f-2xs); color: var(--text-2); font-family: var(--mono);
+  margin-top: var(--s1); display: flex; align-items: center; gap: var(--s1); }
+.topic-from svg { width: 14px; height: 14px; flex: 0 0 auto; color: var(--warn); }
+.topic-foot { margin-top: auto; display: flex; gap: var(--s2); align-items: center; }
+.topics-empty { font-size: var(--f-sm); color: var(--text-2); line-height: 1.7; }
+
+/* 情报源表：`接入` 与 `上次抓取` 是**两根正交列**（GitHub Actions 的
+   status/conclusion、Airbyte 的"从没同步过"与"同步了但 0 条"同理）——
+   合成一列就同时丢两种信息：未打通 和 今天没货 只能都写成灰色。 */
+.src-tbl td:first-child { font-family: var(--mono); font-size: var(--f-xs); }
+.src-tbl th.num, .src-tbl td.num { text-align: right; font-variant-numeric: tabular-nums; }
+/* 分数三带图例（抄 Lighthouse 的 lh-scorescale）：没有图例的分数等于没分数。 */
+.score-legend { display: flex; gap: var(--s3); font-size: var(--f-2xs); color: var(--text-2); }
+.score-legend span { display: inline-flex; align-items: center; gap: var(--s1); }
+.score-legend i { width: 8px; height: 8px; border-radius: var(--r-pill);
+  background: var(--fill-strong); display: inline-block; }
+.score-legend i.hi { background: var(--ok); }
+.score-legend i.mid { background: var(--warn); }
+
+/* ══════════════ 结果页：节奏条 / 每段语速 / 人味标记（§2.7，2026-09-23）══════════
+   三样都是"数据早就有、界面上没露"的那类，所以这里只补展示，不新增数据通路。 */
+.script-pane { display: flex; flex-direction: column; gap: var(--s4); }
+.script-pane > .script-list { margin-top: 0; }
+
+/* ① 节奏条：按段着色，宽度 = 该段时长占比。`--w` 由 JS 走 CSSOM 写
+   （内联 style 属性会被 CSP 静默忽略 —— style-src 'self' 且无 'unsafe-inline'）。 */
+.tempo { display: flex; height: var(--s1); border-radius: var(--r-pill);
+  overflow: hidden; background: var(--fill); gap: 0; }
+.tempo > i { display: block; height: 100%; width: calc(var(--w, 0) * 1%);
+  background: var(--line-strong); }
+/* 钩子与结尾各给自己一档深浅：一眼能分出"开头/正文/结尾"三段结构，
+   而不是一根灰条上量刻度。 */
+.tempo > i.hook { background: var(--ink); }
+.tempo > i.cta { background: var(--ink); opacity: .55; }
+/* 超配额的段用 --bad 标出来 —— 它同时是 `.quota.over` 的那一档红，
+   两处说同一件事就该用同一个色，别开第二档。 */
+.tempo > i.over { background: var(--bad); opacity: 1; }
+.tempo-legend { display: flex; gap: var(--s3); flex-wrap: wrap;
+  font-size: var(--f-2xs); color: var(--text-2); }
+
+/* ② 每段语速：与 `.quota` 同族（同字号、同 flex），超目标走同一档 `.over` 红。 */
+.rate { font-size: var(--f-xs); font-weight: 400; color: var(--text-3); flex: 0 0 auto; }
+.rate.over { color: var(--bad); font-weight: 500; }
+
+/* ③ 人味标记：正文里**只加下划线、不改文字色**（§2.7 ③ 明写）——
+   拿 --warn 当正文色就撞上 §2.6 那笔「状态药丸族对比度不达标」的欠账，
+   而正文比药丸更该守住 4.5:1。下划线用点线，与「重读加粗」不打架。 */
+.tell-mark { text-decoration: underline dotted var(--line-strong);
+  text-underline-offset: 3px; cursor: pointer; }
+.tell-mark:hover { text-decoration-color: var(--text-2); }
+/* 卡脚那枚"N 处人味标记 · 看明细"：与 `.rw` 同档（--h-sm / 13px / 次级色），
+   默认淡显、悬停提亮（与 `.card-foot .rw` 同一套路，一排里不许两种控件高）。 */
+.card-foot .tell-jump { height: var(--h-sm); font-size: var(--f-sm); padding: 0 var(--s2);
+  flex: 0 0 auto; display: inline-flex; align-items: center; cursor: pointer;
+  color: var(--text-2); border-radius: var(--r-ctl); opacity: .72; }
+.card-foot .tell-jump:hover { opacity: 1; background: var(--fill); color: var(--ink); }

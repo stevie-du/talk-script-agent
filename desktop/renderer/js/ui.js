@@ -663,6 +663,16 @@ export function setLeftFolded(folded) {
 export function gotoView(name) {
   $$("#right > .view").forEach(v => v.classList.add("hidden"));
   $("view-" + name)?.classList.remove("hidden");
+  // `data-view` 是给**头部那两颗情报动作**用的：它们只在选题视图里有意义
+  // （重抓 / 情报源），挂在 `.rh-actions` 上由 CSS 按这个属性显隐。
+  // 用属性而不是给按钮加 `hidden` 类：切视图的路径有好几条（导航、去生成、
+  // 新建对话、打开历史），逐条去开关按钮迟早漏一条。
+  const right = $("right");
+  if (right) right.dataset.view = name;
+  // 左栏那颗「今日选题」的高亮也在这里同步：切视图的路径有好几条
+  // （导航、去生成、新建对话、打开历史），集中在唯一的切屏函数里才不会漏。
+  // ⚠ 不 import topics.js —— 那边已经 import 本模块，反向会绕成循环。
+  $$(".nav-item").forEach(b => b.classList.toggle("on", name === "topics" && b.id === "btn-topics"));
 }
 
 // `bindOnce`：全局监听只注册一次（修复前「新建行业包完成」会二次 boot()，

@@ -131,4 +131,13 @@ export const api = {
   packFile: (name, rel) =>
     request(`/api/packs/${encodeURIComponent(name)}/file?rel=${encodeURIComponent(rel)}`),
   testConfig: (body) => request("/api/config/test", { method: "POST", body }),
+
+  // 情报（今日选题 / 情报源）。三个端点分工：
+  //   today   只读本地文件，空或坏返回空结构（**不抛**）—— 抓取失败不该让页面报错
+  //   refresh 立即重抓，走后台作业（独立并发额度，不占生成的名额）
+  //   ignore  忽略一条，**只影响今天**（明天同题还会回来）
+  intelToday: (pack) => request(`/api/intel/today?pack=${encodeURIComponent(pack)}`),
+  intelRefresh: (pack) => request("/api/intel/refresh", { method: "POST", body: { pack } }),
+  intelIgnore: (pack, key) =>
+    request("/api/intel/ignore", { method: "POST", body: { pack, key } }),
 };

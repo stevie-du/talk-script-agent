@@ -4,6 +4,8 @@
 判据不是"跑过了"，而是"改回去必须红"。任何一条全绿 = 那条断言是空的。
 每条变异跑完立刻还原（finally），文件不会被留在变异态。
 """
+import json
+import re
 import shlex
 import subprocess
 import sys
@@ -18,6 +20,10 @@ JOBS_F = ROOT / "app/jobs.py"
 SRV_F = ROOT / "app/server.py"
 PACK = ROOT / "packs/elevator"
 YAML_F = PACK / "ai_tells.yaml"
+TOPICS_F = ROOT / "desktop/renderer/js/topics.js"
+UI_F = ROOT / "desktop/renderer/js/ui.js"
+UI_F = ROOT / "desktop/renderer/js/ui.js"
+NODE = ("C:/Users/78470/.workbuddy-ai/binaries/node/versions/22.22.2-2/node.exe")
 
 MUTATIONS = [
     (
@@ -338,20 +344,136 @@ MUTATIONS = [
         if False:""",
         "tests/test_intel.py -k orphan_sources",
     ),
+    # ── 今日选题 UI（断言在 verify.js 里，所以选择器用 verify:）────────
+    (
+        "UI 分组桶按 x.label 找（而桶里存的是 x.g）→ 每张卡各成一组",
+        TOPICS_F,
+        "    let bucket = groups.find(x => x.g.label === g.label);",
+        "    let bucket = groups.find(x => x.label === g.label);",
+        "verify:topics",
+    ),
+    (
+        "UI 切视图不写 #right[data-view]（头部情报动作永远不显示）",
+        UI_F,
+        '  const right = $("right");\n  if (right) right.dataset.view = name;',
+        "  const right = null;",
+        "verify:topics",
+    ),
+    (
+        "UI「换一批」改成重新抓（把零成本的翻页换成真金白银）",
+        TOPICS_F,
+        '  $("btn-more").onclick = () => { page += 1; render(); };',
+        '  $("btn-more").onclick = () => { page += 1; render(); api.intelRefresh(packName()); };',
+        "verify:topics",
+    ),
+    (
+        "UI「忽略」不本地摘掉（要等一整轮才消失）",
+        TOPICS_F,
+        "    for (const g of data.groups || []) g.items = (g.items || []).filter(it => itemKey(it) !== key);",
+        "",
+        "verify:topics",
+    ),
+    (
+        "UI「未接入 N」不渲染（未接入的平台变成界面上不存在）",
+        TOPICS_F,
+        '    chips.push(`<span class="m-chip" title="${esc(why.join("；"))}">未接入 ${off.length}</span>`);',
+        "",
+        "verify:topics",
+    ),
+    (
+        "UI「去生成」自动发送（不给改参数的机会）",
+        TOPICS_F,
+        '  refreshGate();\n  gotoView("chat");',
+        '  refreshGate();\n  gotoView("chat"); import("./jobs.js").then(m => m.send());',
+        "verify:topics",
+    ),
+    (
+        "UI 情报源表把「接入」与「上次抓取」合成一列",
+        TOPICS_F,
+        '      <td>${last}</td>\n      <td class="num">${g.count}</td>',
+        '      <td class="num">${g.count}</td>',
+        "verify:topics",
+    ),
 ]
 
-bad = 0
+# 子集运行：`python _verify/mutate.py -k UI` 只跑名字里含 UI 的那几条。
+# 全量一轮 40+ 条要二十多分钟（每条都要起一次 pytest 或整个界面回归网），
+# 改一处 UI 时没必要把 A/B 线那几十条也重跑一遍。
+_only = ""
+if len(sys.argv) >= 3 and sys.argv[1] == "-k":
+    _only = sys.argv[2]
+
+# ── 崩溃恢复日志 ──────────────────────────────────────────────
+# 变异期间被杀（SIGTERM / 断电 / Ctrl-C 没走到 finally）会在工作区留下一份
+# **变异态**的代码，而且它长得跟正常代码一模一样 —— 下一次运行会把这份残留
+# 当成"原始内容"备份起来，于是残留被永久保留。
+# 实测就发生过：topics.js 里被追加了三份 `import('./jobs.js').then(m => m.send())`，
+# 而每条变异都报"报红 OK"（因为断言确实红了，红的是残留）。
+#
+# 所以每次改文件之前先把原内容写进日志，还原成功后删掉它；
+# 启动时若发现日志还在，说明上次没跑完 —— 先按日志还原，再开始。
+JOURNAL = ROOT / "_verify" / ".mutate-journal.json"
+
+
+def _recover() -> None:
+    if not JOURNAL.exists():
+        return
+    try:
+        saved = json.loads(JOURNAL.read_text(encoding="utf-8"))
+    except Exception as e:                          # noqa: BLE001
+        print(f"🔴 崩溃恢复日志读不出来（{e}）：请手动核对工作区，然后删掉 {JOURNAL}")
+        sys.exit(2)
+    for rel, text in saved.items():
+        p = ROOT / rel
+        p.write_text(text, encoding="utf-8")
+        print(f"⚠ 上次变异没跑完，已按日志还原：{rel}")
+    JOURNAL.unlink()
+    print("（恢复完成 —— 建议 git status 再确认一遍）")
+
+
+_recover()
+
+bad = skipped = 0
 for name, path, old, new, selector in MUTATIONS:
+    if _only and _only not in name:
+        skipped += 1
+        continue
     orig = path.read_text(encoding="utf-8")
     if old not in orig:
-        print(f"[SKIP] {name} —— 旧串没找到，断言会空转")
+        print(f"[SKIP] {name} —— 旧串没找到（变异没生效，不是断言报红）")
         bad += 1
         continue
+    # 先把原内容落进崩溃恢复日志，再改文件 —— 顺序反了的话，改完到写日志之间
+    # 被杀就是"残留 + 无日志"，正是这次踩到的那个坑。
+    JOURNAL.write_text(json.dumps({str(path.relative_to(ROOT)): orig}, ensure_ascii=False),
+                       encoding="utf-8")
     path.write_text(orig.replace(old, new, 1), encoding="utf-8")
+    # 选择器两种写法：
+    #   "verify:…" → 跑界面回归网（node _verify/verify.js），非零退出即报红。
+    #                它的 check() 不抛异常，只在最后 exit(1)，所以判据只能是退出码。
+    #                界面侧的断言同样要能证伪，否则"新加了一堆 check"只是看着热闹。
+    #   其余       → 当成 pytest 的 -k 选择器。
+    if selector.startswith("verify:"):
+        cmd = [str(NODE), str(ROOT / "_verify/verify.js")]
+    else:
+        cmd = [str(ROOT / ".venv/Scripts/python.exe"), "-m", "pytest", "-q",
+               *shlex.split(selector)]
     try:
-        r = subprocess.run([str(ROOT / ".venv/Scripts/python.exe"), "-m", "pytest", "-q", *shlex.split(selector)],
-                           capture_output=True, text=True, cwd=ROOT)
+        r = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)
         out = (r.stdout or "") + (r.stderr or "")
+        if selector.startswith("verify:"):
+            m = re.search(r"(\d+)/(\d+) 通过", out)
+            if m and m.group(1) == m.group(2):
+                print(f"[全绿 !! 漏检] {name} —— 界面断言全过（{m.group(0)}）")
+                bad += 1
+            elif "FAIL:" in out or "Error" in out:
+                # 整网崩了（SyntaxError / 中途抛）—— 这**不算**报红：
+                # 崩掉的网可能压根没跑到那条断言，拿它当"守住了"是自欺。
+                print(f"[全绿 !! 工具错] {name} —— 回归网中途崩了，不是断言报红：\n{out[-400:]}")
+                bad += 1
+            else:
+                print(f"[报红 OK] {name}（{m.group(0) if m else '退出码非零'}）")
+            continue
         # ⚠ 退出码 5 = "一条用例都没收集到"，用法错误也是非零 —— 直接当"报红"就是把
         #   「选择器写错了」误读成「断言守住了」。必须显式区分：只有真出现 FAILED 才算报红。
         #   （本工具第一版就是 `selector.split()`，把 `-k 'a or b'` 拆成了三个参数，
@@ -367,4 +489,16 @@ for name, path, old, new, selector in MUTATIONS:
             bad += 1
     finally:
         path.write_text(orig, encoding="utf-8")
+        # ⚠ 还原必须**校验**：本工具第一版只写不查，实测丢过一次内容
+        #   （topics.js 里「未接入 N」那一整段被变异删掉后没回来，而后续运行
+        #    只报了一句 [SKIP] 旧串没找到 —— 代码静默少了一段，没人知道）。
+        #   还原失败比变异失败严重得多：它是在改用户的工作区。
+        if path.read_text(encoding="utf-8") != orig:
+            print(f"🔴 还原失败：{path.name} 与变异前不一致！请立刻核对这个文件")
+            bad += 1
+        else:
+            JOURNAL.unlink(missing_ok=True)
+print("\n共 %d 条变异，%d 条不合格%s"
+      % (len(MUTATIONS) - skipped, bad,
+         ("（跳过 %d 条）" % skipped) if skipped else ""))
 sys.exit(1 if bad else 0)

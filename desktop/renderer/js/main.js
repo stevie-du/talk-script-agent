@@ -20,12 +20,14 @@ import {
   renderModelPicker, setLanding,
 } from "./ui.js";
 import { BUSY_STATES } from "./progress.js";
+import { bindTopics } from "./topics.js";
 
 async function boot() {
   bindShell();
   bindSettings();
 
   bindSessionList();
+  bindTopics();
   T.bindScrollPin();
   renderSamples();
   // 问候语按当前时刻落档（HTML 里那句是兜底文案，不参与展示）。

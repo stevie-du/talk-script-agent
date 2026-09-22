@@ -58,7 +58,10 @@ process.on("SIGINT", () => { cleanupAll(); process.exit(130); });
 const RESULT = {
   id: "s1", created_at: "2026-09-13T10:00:00", pack: "elevator", pack_draft: false,
   params: { topic: "家用电梯怎么挑？", pack: "elevator", duration: 60, platform: "抖音",
-            style: "口播科普", persona: "维保老师傅", segment: "家用电梯", audience: "业主乘客" },
+            style: "口播科普", persona: "维保老师傅", segment: "家用电梯", audience: "业主乘客",
+            // 目标语速（`pack.yaml` 的 rate_by_style 经 _normalize 落到 params.rate）。
+            // 桩里给真值，好让"每段语速 vs 目标"那条断言能算得出期望。
+            rate: 4.5 },
   quota: { total: 261, hook: 40, body: 171, cta: 50 },
   plan: { angle: "看维保", hook_type: "反常识", hook_line: "钩子", points: ["要点一"], cta: "关注" },
   sections: [
@@ -80,6 +83,19 @@ const RESULT = {
       { type: "cta", chars: 6, quota: 50 },
     ],
     points: 2,
+    // 人味报告（§2.7 ③）：桩里给两条带 `words` 的命中 —— 正文下划线读的就是它。
+    // ⚠ `words` 必须是段内**原文子串**（后端 TellHit.words 的契约），
+    //   桩里写成别的字样那条下划线就找不到位置、静默不出现。
+    ai_tells: {
+      score: 88, strong: 0, weak: 2, tells_enabled: ["bookish_connective", "no_specific"],
+      config_warnings: [], placeholders: { count: 1, per_100: 2.4, cap: 4 },
+      hits: [
+        { id: "bookish_connective", severity: "weak", count: 2, where: "第2段",
+          detail: "第一×1、第二×1", words: ["第一，看井道尺寸和载重。"] },
+        { id: "list_enumeration", severity: "weak", count: 2, where: "第3段",
+          detail: "清单体连排：第一…第二", words: ["第二，看维保响应时间。"] },
+      ],
+    },
   },
   placeholders: ["{{待补：主力机型载重}}"],
   // 两条回炉记录：新形态带机器码 action_code，第二条**故意只带中文标签**，
@@ -109,11 +125,92 @@ const META = {
       },
       // 后端 param_audit 的桩：桩包里「小红书」没配平台分级词表。
       // 真值由 app/knowledge.py 的 param_audit() 按包配置算出。
-      param_audit: { platform: { "小红书": "平台分级词表未定义该平台：只按通用词表校验，平台差异化红线不生效" } } },
+      param_audit: { platform: { "小红书": "平台分级词表未定义该平台：只按通用词表校验，平台差异化红线不生效" } },
+      // 情报源声明（B 线，§2.2）：选题页的分区 / 筛选行 chip / 计数 /
+      // 情报源表**四处都由它渲染**，所以桩也必须带上 —— 少了它，那四条断言
+      // 会退化成"渲染了空列表"而照样绿（空转）。
+      intel_sources: [
+        { id: "demand_terms", label: "下拉词", platform: "百度", role: "雷达",
+          cadence: "daily", note: "搜索联想词 diff", params: {}, enabled: true, wired: true },
+        { id: "bilibili_search", label: "B站同类", platform: "B站", role: "供给度量",
+          cadence: "on_demand", note: "", params: {}, enabled: true, wired: true },
+        { id: "hot_board", label: "抖音热榜", platform: "抖音", role: "破圈触发器",
+          cadence: "daily", note: "命中 0 是正常结果", params: {}, enabled: true, wired: true },
+        { id: "xhs_board", label: "小红书", platform: "小红书", role: "破圈触发器",
+          cadence: "—", note: "没有公开榜，要 x-s 签名 —— 不做", params: {},
+          enabled: false, wired: false },
+      ] },
     { name: "fitment", display_name: "全屋定制包", draft: true,
       params: { segment: { label: "细分领域", default: "全屋定制", options: ["全屋定制"] } } },
   ],
 };
+
+// 桩：今日选题的一份结果。形状与 app/intel.py 的 `today()` 完全一致
+// （groups 按声明走，items 带 score/flags/ev）。
+const INTEL_TODAY = {
+  pack: "elevator", fetched_at: "2026-09-23T10:12:00+08:00", stale: false,
+  ignored: 2, unwired: 1, errors: {},
+  items: [
+    { guid: "g-new", title: "电梯应急更换程序指引", desc: "本周新出，几乎没人写",
+      source_id: "demand_terms", source_label: "下拉词", platform: "百度",
+      role: "雷达", segment: "维保", published: "", url: "", ev: "本周新出",
+      score: { D: 1.0, S: 0.22, E: 0.7, opportunity: 78, is_new: true,
+               demand_new: 2, supply_n: 1, total_n: 3, fact_density: 0.33 },
+      flags: [["good", "机会分高"], ["good", "本周新出"]] },
+    { guid: "g-old", title: "住宅老旧电梯申报国债补贴工作指引", desc: "存量话题",
+      source_id: "demand_terms", source_label: "下拉词", platform: "百度",
+      role: "雷达", segment: "旧楼加装", published: "", url: "", ev: "存量话题",
+      score: { D: 0.5, S: 0.9, E: null, opportunity: 5, is_new: false,
+               demand_new: 1, supply_n: 9, total_n: 10, fact_density: 0.6 },
+      flags: [["bad", "红海 · 需换角度"]] },
+    { guid: "g-bili", title: "困人的第一原因不是电梯坏了，是人", desc: "同题已有 41 条",
+      source_id: "bilibili_search", source_label: "B站同类", platform: "B站",
+      role: "供给度量", segment: "维保", published: "1758000000", url: "https://b/1",
+      ev: "存量话题",
+      score: { D: 1.0, S: 1.0, E: 0.12, opportunity: null, is_new: false,
+               demand_new: 2, supply_n: 9, total_n: 3, fact_density: 0.33 },
+      flags: [["warn", "数据不足 · 算不出机会分"]] },
+    { guid: "g-hot", title: "被关 30 分钟，能索赔吗", desc: "榜上 6 小时",
+      source_id: "hot_board", source_label: "抖音热榜", platform: "抖音",
+      role: "破圈触发器", segment: "维保", published: "", url: "",
+      ev: "本周新出", warn: "禁「包赔 / 一定赔」，命中 banwords hard",
+      score: { D: 1.0, S: 0.3, E: 0.95, opportunity: 70, is_new: true,
+               demand_new: 2, supply_n: 3, total_n: 3, fact_density: 0.33 },
+      flags: [["good", "机会分高"]] },
+  ],
+  groups: [
+    { id: "demand_terms", label: "下拉词", platform: "百度", role: "雷达",
+      cadence: "daily", note: "搜索联想词 diff", enabled: true, wired: true,
+      state: "ok", count: 4, items: [] },
+    { id: "bilibili_search", label: "B站同类", platform: "B站", role: "供给度量",
+      cadence: "on_demand", note: "", enabled: true, wired: true,
+      state: "ok", count: 3, items: [] },
+    { id: "hot_board", label: "抖音热榜", platform: "抖音", role: "破圈触发器",
+      cadence: "daily", note: "命中 0 是正常结果", enabled: true, wired: true,
+      state: "ok", count: 1, items: [] },
+    { id: "xhs_board", label: "小红书", platform: "小红书", role: "破圈触发器",
+      cadence: "—", note: "没有公开榜，要 x-s 签名 —— 不做", enabled: false,
+      wired: false, state: "off", count: 0, items: [] },
+  ],
+};
+// 再补 4 条：一屏 5 条，**只有 4 条时「换一批」是 disabled**，
+// 那条断言就退化成"点了个不能点的按钮"，`calls===0` 与"没重抓"之间没有因果。
+(function () {
+  const mk2 = (guid, title, label, sid, seg, opp) => ({
+    guid: guid, title: title, desc: "补样本", source_id: sid, source_label: label,
+    platform: "", role: "", segment: seg, published: "", url: "", ev: "存量话题",
+    score: { D: 0.5, S: 0.5, E: 0.4, opportunity: opp, is_new: false,
+             demand_new: 1, supply_n: 1, total_n: 2, fact_density: 0.5 },
+    flags: [] });
+  INTEL_TODAY.items.push(
+    mk2("g-n2", "电梯维保记录该谁存", "下拉词", "demand_terms", "维保", 40),
+    mk2("g-n3", "加装电梯资金怎么摊", "下拉词", "demand_terms", "旧楼加装", 30),
+    mk2("g-b2", "维保记录为什么查不到", "B站同类", "bilibili_search", "维保", 20),
+    mk2("g-b3", "电梯年检到底查什么", "B站同类", "bilibili_search", "检验检测", 10));
+})();
+INTEL_TODAY.groups[0].items = INTEL_TODAY.items.filter(i => i.source_label === "下拉词");
+INTEL_TODAY.groups[1].items = INTEL_TODAY.items.filter(i => i.source_label === "B站同类");
+INTEL_TODAY.groups[2].items = INTEL_TODAY.items.filter(i => i.source_label === "抖音热榜");
 
 function stubScript() {
   // ⚠ 返回的是**纯 JS**，不带 <script> 包装 —— 它现在由 serve() 作为同源外部
@@ -151,6 +248,10 @@ window.__addCount = 0;
 })();
 (function(){
   var META = ${JSON.stringify(META)};
+  // 今日选题的桩数据：必须**内联进桩脚本**（照 META 的写法），
+  // 直接在桩里写 INTEL_TODAY 是拿不到的 —— 那是 Node 侧的常量，
+  // 浏览器里没有它，fetch 一抛就被 load() 的 catch 接成空态（症状：全 0 条）。
+  var INTEL = ${JSON.stringify(INTEL_TODAY)};
   // 2026-09-17：把 META 挂到 window 上，让 verify.js 的 evalIn 也能读当前 pack 的
   // params 列表（任务 2 的"全量参数"断言需要比对 expectedKeys 与实际渲染的 keys）。
   // 仅暴露元信息（不暴露 mock 函数 / 接口状态），是只读快照，不污染调用方。
@@ -516,6 +617,24 @@ window.__addCount = 0;
     window.__lastHeaders = hdrs;
     // 记录令牌是否真的带上了（回归「渲染层没带 token」这类问题）
     window.__sawToken = !!(hdrs['X-TalkScript-Token'] || hdrs['x-talkscript-token']);
+    // ── 情报（今日选题 / 情报源）──
+    // 这份桩是**照 pack.yaml 的声明渲染出来的**，不是手写死的一屏 HTML：
+    // 分组、chip、计数、未接入 N 全由它算，所以断言测的是"渲染层真的在读声明"。
+    if (s.indexOf('/api/intel/today') >= 0) { return mk(INTEL); }
+    if (s.indexOf('/api/intel/refresh') >= 0) {
+      window.__refreshCalls = (window.__refreshCalls || 0) + 1;
+      return mk({ job_id: 'inteljob1' });
+    }
+    if (s.indexOf('/api/intel/ignore') >= 0) {
+      var ib = {}; try { ib = JSON.parse(o && o.body || '{}'); } catch (_) {}
+      window.__ignoredKeys = (window.__ignoredKeys || []).concat([ib.key]);
+      return mk({ ok: true, ignored: window.__ignoredKeys.length });
+    }
+    if (s.indexOf('/api/jobs/inteljob1') >= 0) {
+      return mk({ id:'inteljob1', kind:'intel', state:'done', params:{ pack:'elevator' },
+                  steps:[], error:null, created_at:'2026-09-23T10:00:00',
+                  result:{ pack:'elevator', items:4, sources:[], errors:{} } });
+    }
     if (s.indexOf('/api/meta') >= 0) {
       return mk(Object.assign({}, META,
         { has_api_key: hasKey(), mock: false, llm_defaulted: llmDefaulted(),
@@ -591,6 +710,8 @@ window.__addCount = 0;
       return mk({ ok:true, id:mid, models:publicModels() });
     }
     if (s.indexOf('/api/generate') >= 0) {
+      // 「去生成」必须**不自动发送**：这条计数器是那条断言的判据。
+      window.__genCalls = (window.__genCalls || 0) + 1;
       calls.gen++; calls.job = 0;
       // 2026-09-17：两种「不能生成」的原因分开说（与后端 _require_model 一致）——
       // 一条模型都没有 vs 有模型但没填 Key。同一句「未配置 Key」会把前者说成后者。
@@ -4000,7 +4121,10 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     return { 线到按钮: +(btn.t - head.b).toFixed(2),
              按钮到搜索: +(sea.t - btn.b).toFixed(2),
              搜索到列表: +(sc.t - sea.b).toFixed(2),
-             底线到设置: +(r('#btn-open-settings').t - (foot.top + footBorder)).toFixed(2),
+             // ⚠ 量的是**第一个** nav 项，不是写死「设置」：§2.5 把「今日选题」
+             // 放在设置上面之后，写死 #btn-open-settings 测的就变成了
+             // "两个 nav 项之间的距离"，与它要守的"容器上内边距 16"完全是两件事。
+             底线到首项: +(r('.left-foot .nav-sec .nav-item').t - (foot.top + footBorder)).toFixed(2),
              列表底内边距: getComputedStyle(document.querySelector('.left-scroll')).paddingBottom };`);
   check("左栏竖向节奏分组：按钮→搜索 12、其余段 16（含底部设置区）",
     Object.entries(leftRhythm).every(([k, v]) =>
@@ -4185,22 +4309,29 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
         文字左: tl === null ? null : +(tl - x).toFixed(1) };
     };
     const R = s => document.querySelector(s).getBoundingClientRect();
-    const foot = R('.left-foot'), btn = R('#btn-open-settings');
+    const foot = R('.left-foot'), btn = R('.left-foot .nav-sec .nav-item');
+    const lastBtn = R('#btn-open-settings');   // 最末项，用于「末项→窗口底」那一段
     const bt = parseFloat(getComputedStyle(document.querySelector('.left-foot')).borderTopWidth);
     return { 块: [
         B('新建', '#btn-new-chat', 'svg', null),
         B('搜索', '.sess-search', 'svg', 'input'),
         B('分组标签', '#session-list .group-lbl', '.gl-folder', '.gl-t'),
         B('会话行', '#session-list .sess-item', '.dot', '.sess-topic'),
-        B('设置', '#btn-open-settings', 'svg', '.nav-t')],
+        B('设置', '#btn-open-settings', 'svg', '.nav-t'),
+        // 「今日选题」（B 线，§2.5）与其余 nav 块**必须同一套几何** ——
+        // 它是 nav-item 的第四个实例，自己画一套就会在左栏里显得错位。
+        // ⚠ 这段注释在**模板字符串内部**：一律不许出现反引号（连类名也不要
+        // 加反引号），否则模板会被提前截断、后面的字符变成 Node 代码执行 ——
+        // 实测症状是 ReferenceError: item is not defined，而报错行号指向注释本身。
+        B('今日选题', '#btn-topics', 'svg', '.nav-t')],
       竖向: { 头部线到新建: +(R('#btn-new-chat').top - R('.left-head').bottom).toFixed(1),
         新建到搜索: +(R('.sess-search').top - R('#btn-new-chat').bottom).toFixed(1),
         搜索到列表: +(R('.left-scroll').top - R('.sess-search').bottom).toFixed(1),
-        分隔线到设置: +(btn.top - (foot.top + bt)).toFixed(1),
-        设置到窗口底: +(innerHeight - btn.bottom).toFixed(1) } };`);
+        分隔线到首项: +(btn.top - (foot.top + bt)).toFixed(1),
+        末项到窗口底: +(innerHeight - lastBtn.bottom).toFixed(1) } };`);
   const same = (k) => colGeo.块.every(b => b[k] === colGeo.块[0][k]);
-  check("左栏五块（新建/搜索/分组标签/会话行/设置）胶囊几何逐项相等",
-    colGeo.块.length === 5 && colGeo.块.every(b => !b.缺)
+  check("左栏六块（新建/搜索/分组标签/会话行/设置/今日选题）胶囊几何逐项相等",
+    colGeo.块.length === 6 && colGeo.块.every(b => !b.缺)
       && same('h') && same('w') && same('pad') && same('radius')
       && same('图标左') && same('图标宽') && same('文字左'),
     JSON.stringify(colGeo.块));
@@ -4217,10 +4348,10 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   // 「设置→窗口底边」也钉在同一条 16 上：.left-foot 与 .left-top 是同列上下两个
   // 固定区，必须用同一套 padding。下边曾停在 --s2，于是上 16 下 8 —— 用户报
   // 「底部设置区域四周间距不统一」量的正是这个。左右仍是 12（图标列，见五块几何那条）。
-  check("左栏竖向节奏分组：新建→搜索 12，其余段 16（头→新、搜→列、分隔→设、设→底）",
+  check("左栏竖向节奏分组：新建→搜索 12，其余段 16（头→新、搜→列、分隔→首项、末项→底）",
     colGeo.竖向.头部线到新建 === 16 && colGeo.竖向.新建到搜索 === 12
-      && colGeo.竖向.搜索到列表 === 16 && colGeo.竖向.分隔线到设置 === 16
-      && colGeo.竖向.设置到窗口底 === 16,
+      && colGeo.竖向.搜索到列表 === 16 && colGeo.竖向.分隔线到首项 === 16
+      && colGeo.竖向.末项到窗口底 === 16,
     JSON.stringify(colGeo.竖向));
   // ── 左栏的两处「刻度外细节」（用户：左侧只优化细节，不要大改）────────
   // 1) 图标盒：这一列里 14px 字形配的盒子必须都是 16 —— 搜索行的清除按钮
@@ -6300,6 +6431,209 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   await shot("result-tabs-subs.png", `window.__ts.newChat();
     [...document.querySelectorAll('#session-list .sess-item')]
       .find(n => n.textContent.includes('家用电梯')).click(); return true;`);
+
+  // ── 结果页三样（§2.7）：节奏条 / 每段语速 / 人味标记回到正文 ────────
+  // 三样都是"数据早就有、界面上没露"的那类，所以断言盯的是**展示口径**：
+  // 数值算得对不对、下划线落在正文里、超目标的档位用得对不对。
+  const result3 = await evalIn(`return (function(){
+    var pane = document.querySelector('.res-pane[data-tab="script"]');
+    var bars = [...pane.querySelectorAll('.tempo > i')];
+    var rates = [...pane.querySelectorAll('.script-card .rate')];
+    var marks = [...pane.querySelectorAll('.card-text .tell-mark')];
+    var cards = [...pane.querySelectorAll('.script-card')];
+    var legend = [...pane.querySelectorAll('.tempo-legend span')].map(function (x) { return x.textContent.trim(); });
+    var kids = [...pane.querySelector('.script-pane').children].map(function (x) { return x.className; });
+    return {
+      barCount: bars.length,
+      barWidths: bars.map(function (b) { return b.style.getPropertyValue('--w'); }),
+      barCls: bars.map(function (b) { return b.className; }),
+      legend: legend,
+      rateCount: rates.length,
+      rateTexts: rates.map(function (x) { return x.textContent.trim(); }),
+      rateOver: rates.map(function (x) { return x.classList.contains('over'); }),
+      cardCount: cards.length,
+      markCount: marks.length,
+      marksInText: marks.every(function (m) { return !!m.closest('.card-text'); }),
+      markTipCount: pane.querySelectorAll('.card-foot .tell-jump').length,
+      paneKids: kids,
+    }; })()`);
+  check("节奏条按段渲染、宽度走 CSSOM（4 段 + 3 行图例）",
+    result3.barCount === 4 && result3.legend.length === 3
+      && result3.barWidths.join(",") === "23,27,27,12"
+      && result3.barCls[0].indexOf("hook") >= 0 && result3.barCls[3].indexOf("cta") >= 0,
+    JSON.stringify({ n: result3.barCount, w: result3.barWidths,
+                     cls: result3.barCls, legend: result3.legend }));
+  check("节奏卡排在分段卡片之前（整篇分配先于逐段细节）",
+    result3.paneKids.length >= 2 && result3.paneKids[0].indexOf("page-card") >= 0
+      && result3.paneKids[1].indexOf("script-list") >= 0,
+    JSON.stringify(result3.paneKids));
+  // 每段语速 = 字数 ÷ **净口播秒数**（时间轴把段间停顿算在段里，必须减掉）。
+  // 期望值按桩现算：字数 ÷ (时间轴跨度 − 段间停顿)，目标取 params.rate。
+  // ⚠ 忘了减停顿的话每段都会被读成偏慢，而那是**系统性偏差**、不是某一段的问题 ——
+  //   这条断言钉的就是它（第一段的期望值与"没减停顿"的值差得足够明显）。
+  check("每段语速按「字数 ÷ 净口播秒数」算，且超目标 10% 走 .over 红",
+    result3.rateCount === result3.cardCount
+      && result3.rateTexts[0] === "5.2 字/秒 · 目标 4.5"
+      && result3.rateTexts[1] === "4.0 字/秒 · 目标 4.5"
+      && result3.rateOver.join(",") === "true,false,false,false",
+    JSON.stringify({ texts: result3.rateTexts, over: result3.rateOver }));
+  check("人味标记回到正文：命中词在 .card-text 里加下划线，卡脚给出处数",
+    result3.markCount === 2 && result3.marksInText && result3.markTipCount === 2,
+    JSON.stringify({ marks: result3.markCount, inText: result3.marksInText,
+                     tips: result3.markTipCount }));
+
+  // ── 今日选题 / 情报源（B 线，§2.2 与 §2.4/§2.5）────────────────
+  // 这一组守的核心是「**一处声明、四处一致**」：分区、chip、计数、情报源表
+  // 四处都由 META 里那份 intel_sources（= pack.yaml 的声明）渲染。
+  // 桩里特意留了一个 enabled:false 的源，好让「未接入 N」这条有活样本 ——
+  // 没有它，那条断言会在"全部接入"的桩上永远绿（空转）。
+  // ⚠ 阅读面宽度必须在**切到选题视图之前**量：`#chat-stream` 在选题视图里是
+  // hidden，量出来是 0，那条"同档宽"的断言会变成拿 780 比 0（恒不成立）。
+  // ⚠ 比的是**阅读面那一档 token**（--w-stream），不是某个容器的实际宽度：
+  //   `#chat-stream` 自己是通栏（内层 `.msg` 才限宽），量它会得到 1026 这种
+  //   "看起来不一样"的假结论。§2.8 定的口径就是"同一档宽度 + 居中"，
+  //   所以判据落在 token 上，两边都读同一个数。
+  const streamW = await evalIn(`return parseFloat(getComputedStyle(document.documentElement)
+    .getPropertyValue('--w-stream')) || 0;`);
+  await evalIn(`window.__refreshCalls = 0; window.__ignoredKeys = [];
+    document.getElementById('btn-topics').click(); return true;`);
+  await sleep(600);
+  // ⚠ evalIn 的包装是 `(() => { <expr> })()`（**块体**），所以这里必须显式 return ——
+  //   写成裸 IIFE 的话返回值被丢掉，拿到 undefined，后面每条断言都读属性报 TypeError。
+  const topicsGeo = await evalIn(`return (function(){
+    var on = document.getElementById('view-topics');
+    var chat = document.getElementById('view-chat');
+    var cards = on.querySelectorAll('#topics-root .page-card');
+    var groups = on.querySelectorAll('#topics-root .kb-group');
+    // ⚠ 这一段在**模板字符串内部**，所以注释与代码里都不许出现反斜杠转义
+    //   （Node 会先把它转成真换行/真制表符，浏览器拿到的就是未闭合字符串，
+    //    整段 evaluate 直接 SyntaxError: Invalid or unexpected token）。
+    //   换行符一律用 String.fromCharCode(10) 现算。
+    var NL = String.fromCharCode(10);
+    var heads = [...groups].map(g => g.querySelector('.kb-group-t').textContent.trim().split(NL)[0]);
+    var decl = (window.__tsMeta.packs.filter(function(p){ return p.name === 'elevator'; })[0] || {}).intel_sources || [];
+    var declaredHead = function (h) {
+      return decl.some(function (sc) { return h.indexOf(sc.label + ' \u00b7 ' + sc.role) === 0; }); };
+    var chips = [...on.querySelectorAll('#src-chips .m-chip')].map(c => c.textContent.trim());
+    var srcRows = on.querySelectorAll('#sources-table tr');
+    var srcHead = srcRows[0] ? [...srcRows[0].children].map(t => t.textContent.trim()) : [];
+    var accCol = srcRows.length > 1 ? [...srcRows[1].children].map(t => t.textContent.trim()) : [];
+    var inner = on.querySelector('.topics-inner').getBoundingClientRect();
+    return {
+      topicsVisible: !on.classList.contains('hidden'),
+      chatHidden: chat.classList.contains('hidden'),
+      navOn: document.getElementById('btn-topics').classList.contains('on'),
+      rightView: document.getElementById('right').dataset.view,
+      refreshBtnVisible: getComputedStyle(document.getElementById('btn-refetch')).display !== 'none',
+      groupCount: groups.length, heads: heads, cardCount: cards.length,
+      allHeadsDeclared: heads.every(declaredHead),
+      declLabels: decl.map(function (sc) { return sc.label + ' \u00b7 ' + sc.role; }),
+      chips: chips,
+      navCount: document.getElementById('topics-count').textContent,
+      metaText: document.getElementById('topics-meta').textContent,
+      srcHead: srcHead, accCol: accCol, srcRowCount: srcRows.length - 1,
+      // ⚠ 表体列数必须等于表头列数：少一列时**表头看着完全正常**，
+      //   只有数据行整体左移（「今日命中」跑到「上次抓取」下面）。
+      //   实测就是这样抓到的：表体里那个 last 变量写了却没进模板。
+      srcBodyCols: srcRows.length > 1 ? [...srcRows[1].children].length : 0,
+      topicsWidth: +inner.width.toFixed(1),
+      dashForUncomputable: /—/.test(on.textContent),
+      // 信号条拿到 --w 了没有：宽度是**数据驱动**的，必须走 CSSOM 写入。
+      // ⚠ 这里量的是"写进去了"，不是"有没有 style 属性" —— CSSOM 的 setProperty
+      //   本身就会生成 style 属性，那是规范允许的做法（§2.4 明写"数据驱动的宽度
+      //   一律走 CSSOM"）。真正不许的是**源码里的 style= 字面量**，那条由本文件
+      //   既有的 securitypolicyviolation 监听覆盖（CSP 无 'unsafe-inline' 会拦下它）。
+      barsWithW: [...on.querySelectorAll('.sig-track > i')]
+        .filter(i => i.style.getPropertyValue('--w') !== '').length,
+      barCount: on.querySelectorAll('.sig-track > i').length,
+    }; })()`);
+  check("点左栏「今日选题」切到选题视图（左栏与会话列表常驻，不跳页、不开二级窗）",
+    topicsGeo.topicsVisible && topicsGeo.chatHidden && topicsGeo.navOn
+      && topicsGeo.rightView === "topics",
+    JSON.stringify({ v: topicsGeo.topicsVisible, c: topicsGeo.chatHidden,
+                     n: topicsGeo.navOn, r: topicsGeo.rightView }));
+  check("头部那两颗情报动作只在选题视图出现（用 #right[data-view] 控显隐）",
+    topicsGeo.refreshBtnVisible, String(topicsGeo.refreshBtnVisible));
+  // ⚠ 不能断言"组数 == 今天有货的源数"：一屏只放 5 条，**只有本页涉及的源**
+  //   才会出现分区。要守的是另外两件事：每个组标题都来自声明（渲染层真的在读
+  //   配置，而不是自己写死平台名）；以及组数 **严格小于本页卡片数** ——
+  //   后者正是"桶按 x.label 找、而桶里存的是 x.g"那个 bug 的判据
+  //   （每张卡各成一组，组标题重复，实测就是这样被这条抓出来的）。
+  check("分区按来源渲染：组标题逐条来自声明的 label · role，且不是每张卡各成一组",
+    topicsGeo.groupCount >= 1 && topicsGeo.allHeadsDeclared
+      && topicsGeo.groupCount < topicsGeo.cardCount,
+    JSON.stringify({ n: topicsGeo.groupCount, cards: topicsGeo.cardCount,
+                     heads: topicsGeo.heads, decl: topicsGeo.declLabels }));
+  check("筛选行 chip 含「全部 N」+ 各源计数 + 「未接入 N」（只列有货的源）",
+    topicsGeo.chips.some(c => c.indexOf("全部 8") === 0)
+      && topicsGeo.chips.some(c => c.indexOf("下拉词 4") === 0)
+      && topicsGeo.chips.some(c => c.indexOf("未接入 1") === 0),
+    JSON.stringify(topicsGeo.chips));
+  check("左栏 nav 键帽计数 = 今日条目总数（不是「未读数」——那要多存一个状态）",
+    topicsGeo.navCount === "8" && /共 8 条/.test(topicsGeo.metaText),
+    JSON.stringify({ nav: topicsGeo.navCount, meta: topicsGeo.metaText }));
+  check("算不出的 D/S/E 显示「—」而不是 0（0 与「没数据」结论相反）",
+    topicsGeo.dashForUncomputable, String(topicsGeo.dashForUncomputable));
+  check("选题阅读面与正文同档宽（--w-stream，§2.8 的列宽统一口径）",
+    Math.abs(topicsGeo.topicsWidth - streamW) <= 1,
+    JSON.stringify({ topics: topicsGeo.topicsWidth, stream: streamW }));
+  check("信号条宽度走 CSSOM 写入（源码内联 style 由既有的 CSP 违规监听守着）",
+    topicsGeo.barCount > 0 && topicsGeo.barsWithW === topicsGeo.barCount,
+    JSON.stringify({ bars: topicsGeo.barCount, withW: topicsGeo.barsWithW }));
+  check("情报源表：`接入` 与 `上次抓取` 是两根正交列，且表体列数与表头一致",
+    topicsGeo.srcHead.indexOf("接入") >= 0 && topicsGeo.srcHead.indexOf("上次抓取") >= 0
+      && topicsGeo.srcRowCount === 4
+      && topicsGeo.srcBodyCols === topicsGeo.srcHead.length,
+    JSON.stringify({ head: topicsGeo.srcHead, rows: topicsGeo.srcRowCount,
+                     bodyCols: topicsGeo.srcBodyCols }));
+
+  // 「换一批」是在池子里翻页，**不是重新抓** —— 判据是刷新请求数没涨。
+  await evalIn(`document.getElementById('btn-more').click(); return true;`);
+  await sleep(120);
+  const paged = await evalIn(`return { label: document.getElementById('btn-more').textContent,
+    calls: window.__refreshCalls || 0,
+    firstCard: document.querySelector('#topics-root .page-card .card-title').textContent };`);
+  check("「换一批」纯前端翻页：不触发重抓请求（要新数据点顶栏那颗重抓）",
+    paged.calls === 0 && /第 2\//.test(paged.label),
+    JSON.stringify(paged));
+
+  // 「忽略」只影响今天：本地摘掉 + 落一条忽略记录（服务端按日期判"连续几天沉底"）。
+  await evalIn(`document.getElementById('btn-more').click();
+    window.__firstTitle = document.querySelector('#topics-root .page-card .card-title').textContent;
+    document.querySelector('#topics-root .page-card [data-act="ignore"]').click(); return true;`);
+  await sleep(300);
+  const ignored = await evalIn(`return { keys: window.__ignoredKeys || [],
+    // ⚠ 判据是"那张卡真的从 DOM 里没了"，不是只看 data.items.length ——
+    //   只过滤 data.items 而不过滤 g.items 时，计数变了、卡还在，
+    //   后者才是用户看到的东西（实测这条弱断言漏过了一次）。
+    gone: ![...document.querySelectorAll('#topics-root .page-card .card-title')]
+            .some(t => t.textContent === window.__firstTitle),
+    navCount: document.getElementById('topics-count').textContent };`);
+  check("「忽略」落一条记录并本地摘掉该卡（只影响今天，明天同题还会回来）",
+    ignored.keys.length === 1 && ignored.gone && ignored.navCount === "7",
+    JSON.stringify(ignored));
+
+  // 「去生成」= 切回会话 + 写主题 + 填参数，**不自动发送**（一次生成几十秒真金白银）。
+  // ⚠ 在同一次 evaluate 里读一次主题：分开两次读的话，"谁把主题清掉的"
+  //   会变成一个说不清的问题（实测就是这样 —— 分开读只能看到结果为空）。
+  const clicked = await evalIn(`var b = document.querySelector('#topics-root .page-card [data-act="gen"]');
+    var t = b ? b.closest('.page-card').querySelector('.card-title').textContent : '';
+    window.__genCalls = 0;
+    if (b) b.click();
+    return { had: !!b, cardTitle: t,
+             topicRightAfter: document.getElementById('topic').value,
+             viewRightAfter: document.getElementById('right').dataset.view };`);
+  await sleep(300);
+  const went = await evalIn(`return { view: document.getElementById('right').dataset.view,
+    chatVisible: !document.getElementById('view-chat').classList.contains('hidden'),
+    topic: document.getElementById('topic').value,
+    navOn: document.getElementById('btn-topics').classList.contains('on'),
+    refetchVisible: getComputedStyle(document.getElementById('btn-refetch')).display !== 'none',
+    genCalls: window.__genCalls || 0 };`);
+  check("「去生成」切回会话视图并填好主题，但**不自动发送**（留改参数的机会）",
+    went.view === "chat" && went.chatVisible && went.topic.length > 0
+      && !went.navOn && !went.refetchVisible && went.genCalls === 0,
+    JSON.stringify(Object.assign({}, went, clicked)));
 
   // ── 输出 ─────────────────────────────────────────────────
   console.log("\n════════ 界面回归结果 ════════");

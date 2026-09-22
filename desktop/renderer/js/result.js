@@ -153,6 +153,107 @@ function renderBanners(r, ch, opts) {
 }
 
 // ── 3) 分段卡片 ─────────────────────────────────────────────
+/** 某一段的实际语速（字/秒）。`null` = 算不出（没时间轴 / 没字数）。
+
+ *  口播稿的第一约束是**时间**不是字数，而"这段念太快"正是最该被看见的问题 ——
+ *  `pack.yaml` 的 `rate_by_style` 一直配着每档目标语速、checker 也算得出实际值，
+ *  但界面上从来没出现过（§2.7 ②）。
+ *
+ *  ⚠ 时间轴把**段间停顿（0.5 秒）算在段里**（`pipeline._compute_timings`：
+ *    `dur = 字数/语速 + (0.5 if 不是最后一段)`），所以还原"念这段话的语速"
+ *    必须把那 0.5 秒减掉 —— 不减的话每段都被读成偏慢，而这是**系统性偏差**，
+ *    不是某一段的问题。
+ */
+function segRate(r, i) {
+  const tm = (r.timings || [])[i];
+  const info = segChars(r, i);
+  if (!tm || !info || !info.chars) return null;
+  const last = (r.sections || []).length - 1;
+  const dur = (tm.end - tm.start) - (i < last ? 0.5 : 0);
+  return dur > 0 ? info.chars / dur : null;
+}
+
+/** 节奏条（§2.7 ①）：整篇的时间分配一眼可见。
+ *
+ *  修复前"9s / 35s / 14s"只散在每段的 `.meta` 文字里，看不出整篇分配 ——
+ *  而口播是时间的东西，超配额的段本该一眼被认出来。
+ *  `--w` 走 CSSOM 写（内联 style 属性会被 CSP 静默忽略）。 */
+function renderTempo(r) {
+  const secs = r.sections || [];
+  const tms = r.timings || [];
+  if (secs.length < 2 || tms.length !== secs.length) return null;
+  const span = tms[tms.length - 1].end - tms[0].start;
+  if (!(span > 0)) return null;
+  const rows = secs.map((s, i) => {
+    const dur = Math.max(0, tms[i].end - tms[i].start);
+    const info = segChars(r, i);
+    return { type: s.type, dur: dur, pct: Math.round(dur / span * 100),
+             over: !!(info && info.quota && info.chars > info.quota * 1.3) };
+  });
+  const byType = (t) => rows.filter(x => x.type === t);
+  const sum = (xs) => xs.reduce((a, x) => a + x.dur, 0);
+  const hook = byType("hook"), point = byType("point"), cta = byType("cta");
+  const pct = (d) => Math.round(d / span * 100);
+  const bar = rows.map(x =>
+    `<i class="${x.type}${x.over ? " over" : ""}" data-w="${Math.round(x.dur / span * 100)}"></i>`).join("");
+  const over = rows.filter(x => x.over).length;
+  return `<div class="page-card">
+    <div class="res-top"><b class="card-title">节奏</b>
+      <span class="hint">目标 ${r.params?.duration ?? "-"}s · 预计 ${r.check?.estimated_seconds ?? "-"}s</span>
+      <span class="topics-grow"></span>
+      <span class="m-chip ${over ? "bad" : "good"}">${over ? `${over} 段超配额` : "各段都不超配额"}</span></div>
+    <div class="tempo">${bar}</div>
+    <div class="tempo-legend">
+      <span>开场钩子 ${hook.length} 段 ${sum(hook).toFixed(1)}s（${pct(sum(hook))}%）</span>
+      <span>要点 ${point.length} 段 ${sum(point).toFixed(1)}s（${pct(sum(point))}%）</span>
+      <span>结尾引导 ${cta.length} 段 ${sum(cta).toFixed(1)}s（${pct(sum(cta))}%）</span>
+    </div>
+  </div>`;
+}
+
+/** 把命中的 tell 词在正文里标出来（§2.7 ③：**可定位**）。
+ *
+ *  只加下划线，**不改文字色** —— 拿 `--warn` 当正文色就撞上 §2.6 那笔
+ *  「状态药丸族对比度不达标」的欠账（正文比药丸更该守住 4.5:1）。
+ *
+ *  ⚠ 在 `fmtText` **之后**做，所以要绕开 HTML 标签：按 `<...>` 切开，
+ *    只在文本片段里替换 —— 否则会插进 `<strong>` 的属性或标签名里，把标签拆坏。
+ */
+function markTells(html, words) {
+  const ws = [...new Set((words || []).filter(Boolean))].sort((a, b) => b.length - a.length);
+  if (!ws.length) return html;
+  const rx = new RegExp(ws.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g");
+  const parts = String(html).split(/(<[^>]*>)/);
+  return parts.map((p, idx) => idx % 2 === 1
+    ? p                                        // 奇数下标是标签，原样放回
+    : p.replace(rx, m => `<span class="tell-mark" data-tell="1">${m}</span>`)
+  ).join("");
+}
+
+/** 该段命中的 tell 词（后端 `TellHit.words` 给的**原文片段**，不是展示串）。 */
+function tellWords(r, i) {
+  const hits = (r.check?.ai_tells || {}).hits || [];
+  const want = `第${i + 1}段`;
+  return hits.filter(h => h.where === want).flatMap(h => h.words || []);
+}
+
+/** 文案面板 = 节奏卡 + 分段卡片。
+ *
+ *  节奏条放在最上面：口播的第一约束是时间，而"整篇怎么分配"是读分段卡片
+ *  读不出来的（每段只知道自己那 9s / 35s / 14s，看不出 24% 花在了结尾）。
+ */
+function renderScriptPane(r, opts) {
+  const wrap = el("div", "script-pane");
+  const tempo = renderTempo(r);
+  if (tempo) wrap.insertAdjacentHTML("beforeend", tempo);
+  wrap.appendChild(renderSections(r, opts));
+  // 节奏条里那些 `--w` 必须在这里补写：它是 insertAdjacentHTML 进来的，
+  // 不在 renderSections 的查询范围里（漏了它条就是全 0 宽，界面不报错）。
+  wrap.querySelectorAll(".tempo > i").forEach(i =>
+    i.style.setProperty("--w", i.dataset.w || 0));
+  return wrap;
+}
+
 function renderSections(r, opts) {
   const segs = el("div", "script-list");
   let pi = 0;
@@ -167,14 +268,29 @@ function renderSections(r, opts) {
       ? `<span class="quota ${over ? "over" : ""}"
              title="${over ? "超过配额 30% 以上，建议压缩" : "后端统计字数 / 该段配额"}">${info.chars}${info.quota ? "/" + info.quota : ""} 字</span>`
       : "";
+    // 每段语速 vs 目标（§2.7 ②）：`rate_by_style` 的目标语速一直配着、
+    // checker 也算得出实际值，但界面上从来没露过。超目标 10% 走现成的 `.over` 红。
+    const rate = segRate(r, i);
+    const target = Number(r.params?.rate) || 0;
+    const fast = rate !== null && target > 0 && rate > target * 1.1;
+    const rateChip = rate === null || !target ? ""
+      : `<span class="rate${fast ? " over" : ""}"
+             title="这段念出来的语速（字数 ÷ 净口播秒数，已扣掉段间 0.5s 停顿）vs 本风格目标">`
+        + `${rate.toFixed(1)} 字/秒 · 目标 ${target}</span>`;
+    const marks = tellWords(r, i);
+    const markTip = marks.length
+      ? `<span class="tell-jump" data-goto="smell" title="点一下看这条人味标记的明细">`
+        + `${marks.length} 处人味标记</span>` : "";
     card.innerHTML = `
       <div class="card-head">
         <span class="seg-tag ${s.type}">${esc(label)}</span>
         ${quota}
+        ${rateChip}
         <span class="meta">${tm ? sec(tm.start) + "–" + sec(tm.end) : ""}${tm ? " · " : ""}字幕：${esc(s.subtitle || "—")}</span>
       </div>
-      <div class="card-text">${fmtText(s.text)}</div>
+      <div class="card-text">${markTells(fmtText(s.text), marks)}</div>
       <div class="card-foot">
+        ${markTip}
         <button class="ghost rw"${opts.rwOk ? "" : " disabled"} title="${opts.rwOk
           ? "单段重写：只改这一段并重跑校验，不整篇回炉"
           : "历史记录不可局部重写（后台作业已释放），可用「换一版」整体重生成"}">✎ 重写本段</button>
@@ -219,7 +335,7 @@ function renderResultTabs(r, ch, hardN, opts) {
 
   const defs = [
     { id: "script", label: "文案", badge: "",
-      render: () => renderSections(r, opts) },
+      render: () => renderScriptPane(r, opts) },
     { id: "story", label: "分镜", badge: `${(r.storyboard || []).length} 镜`,
       render: () => renderStoryboard(r),
       hide: !(r.storyboard || []).length },

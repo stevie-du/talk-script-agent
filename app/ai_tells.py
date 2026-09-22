@@ -94,10 +94,18 @@ class TellHit:
     count: int
     where: str        # 定位：段落序号 / 句序，让人能去找而不是重写一篇
     detail: str
+    #: 命中处**原文里能被下划线标出来的那几段字**（§2.7 ③「人味标记回到正文」）。
+    #: 为什么单独给一份、而不是让渲染层去解析 `detail`：`detail` 是**给人读的
+    #: 展示串**（「品质保证×1」「3 连并列占该段 62%：…」），改一个标点就会让
+    #: 前端的解析静默失效 —— 这正是本项目反复出现的"把判据绑在文案上"。
+    #: 结构类里能定位的（排比串）给原文；定位不到具体字词的（通篇零具体、
+    #: 段长等长）给空元组，前端据此不下划线。
+    words: tuple[str, ...] = ()
 
     def as_dict(self) -> dict:
         return {"id": self.id, "severity": self.severity, "count": self.count,
-                "where": self.where, "detail": self.detail}
+                "where": self.where, "detail": self.detail,
+                "words": list(self.words)}
 
 
 class AITells:
@@ -161,7 +169,8 @@ class AITells:
                     continue
                 hits.append(TellHit("parallel_triple", self.sev("parallel_triple"),
                                     len(items), f"第{i}段",
-                                    f"{len(items)} 连并列占该段 {cover:.0%}：{clause_run[:24]}…"))
+                                    f"{len(items)} 连并列占该段 {cover:.0%}：{clause_run[:24]}…",
+                                    words=(clause_run,)))
         return hits
 
     def _list_enumeration(self, sections) -> list[TellHit]:
@@ -258,7 +267,8 @@ class AITells:
         w = next((w for w in sorted(words, key=lambda w: -len(w)) if sent.startswith(w)), None)
         if not w:
             return []
-        return [TellHit(tid, self.sev(tid), 1, f"第{i}段", f"开场以「{w}」起：{sent[:16]}…")]
+        return [TellHit(tid, self.sev(tid), 1, f"第{i}段",
+                        f"开场以「{w}」起：{sent[:16]}…", words=(w,))]
 
     def _lexical(self, tid: str, sections) -> list[TellHit]:
         words = self.lexicon.get(tid) or []
@@ -282,7 +292,8 @@ class AITells:
             if self.sev(tid) == STRONG or n >= WEAK_MIN:
                 hits.append(TellHit(tid, self.sev(tid), n, f"第{i}段",
                                     "、".join(f"{w}×{c}" for w, c in sorted(
-                                        found.items(), key=lambda kv: -kv[1])[:4])))
+                                        found.items(), key=lambda kv: -kv[1])[:4]),
+                                    words=tuple(found)))
         return hits
 
     # ── 汇总 ─────────────────────────────────────────────
