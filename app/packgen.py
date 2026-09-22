@@ -40,8 +40,9 @@ from .llm import LLMClient
 # 跨进程/多引擎实例同样挡不住（这是进程内的一张表）。
 # 用「正在创建」集合做 slug 级互斥。
 _creating_lock = threading.Lock()
-# slug -> **这一次占位的凭证**。原来是一张 set，于是"归还"无从判断还得掉的是谁的：
-# 同一条建包有两个归还点（`start_packgen` 的兜底与 `_run_packgen` 的 finally），
+# slug -> **这一次占位的凭证**（键是大小写折叠过的，见 `_table_key`）。
+# 原来"归还"无从判断还得掉的是谁的：同一条建包有三个归还点（目录已存在的早退、
+# `start_packgen` 的兜底、`_run_packgen` 的 finally），
 # 而 CPython 3.14 的 `Thread.start()` 是"先起线程、再 `_started.wait()`"——
 # 工作线程跑完之后 `start()` 自己被打断是完全可能的，两次归还之间挤进别人的
 # 同名占位，第二次 discard 就把那个**活着的**占位偷走了（第 16 轮复核实测：
@@ -51,6 +52,7 @@ _creating: dict[str, str] = {}
 _claim_seq = 0
 NO_CLAIM = "no-claim"     # 空 slug：本次不占位（正式判定留给 create_pack 里那句）
 ANY_OWNER = "any"         # 显式"不管是谁，摘掉" —— 只给测试的兜底清理用
+_MISSING = object()       # "这条根本不在表里"与"在表里但凭证是 None"的区分哨兵
 
 
 def _new_token() -> str:
@@ -178,6 +180,39 @@ def preview_slug(industry: str) -> str:
     return slugify(industry.strip())
 
 
+# Windows 保留设备名（不分大小写、带扩展名也保留）：这类目录名 mkdir 会直接失败，
+# 而失败点在 `_materialize` —— 那时候模型的钱已经花完了（第 18 轮复核 P3-4）。
+_RESERVED_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)} | {f"LPT{i}" for i in range(1, 10)})
+# NTFS 单个路径段上限 255 个 UTF-16 码元；留一点余量（中文一个字就是 1 个码元，
+# 但拼上父目录与 generated/ 之类还要走整条路径）。
+_MAX_SLUG_UNITS = 120
+
+
+def _utf16_units(s: str) -> int:
+    return sum(2 if ord(c) > 0xFFFF else 1 for c in s)
+
+
+def slug_problem(slug: str) -> str:
+    """目录名能不能真建出来。返回人话原因，空串 = 没问题。
+
+    判据放在花钱**之前**跑：`start_packgen` 里 `preview_slug` 之后、`claim_slug` 之前。
+    实测过的情形：`CON` / `nul.` / `com1` 这类保留名与 300 字的长名字，
+    旧流程会先付一份 token、再在 `_materialize` 的 mkdir 上炸掉，
+    用户看到的是"生成失败"，而那两个字段的钱已经花掉了。
+    """
+    if not slug:
+        return ""
+    if slug.upper().rstrip(" .") in _RESERVED_NAMES:
+        return (f"「{slug}」是 Windows 的保留设备名，做不了目录名 —— "
+                "请在行业名里加一点实际文字（如「CON 建材」）")
+    if _utf16_units(slug) > _MAX_SLUG_UNITS:
+        return (f"行业名太长了（目录名 {_utf16_units(slug)} 个字符，上限 {_MAX_SLUG_UNITS}）—— "
+                "请用更短的行业名，创建后可以在包详情里改显示名")
+    return ""
+
+
 def claim_slug(slug: str) -> str | None:
     """P2-46 的后半：**在花钱之前**把目录名占住，返回这一次占位的**凭证**。
 
@@ -191,12 +226,24 @@ def claim_slug(slug: str) -> str | None:
     """
     if not slug:
         return NO_CLAIM                   # 空 slug（符号名）走 create_pack 里的正式判定
+    key = _table_key(slug)
     with _creating_lock:
-        if slug in _creating:
+        if key in _creating:
             return None
         token = _new_token()
-        _creating[slug] = token
+        _creating[key] = token
         return token
+
+
+def _table_key(slug: str) -> str:
+    """占位表的键：**大小写折叠过的** slug。
+
+    第 18 轮复核实测：原来表按原样作键，而 NTFS/APFS 的目录名不区分大小写 ——
+    `Probe Case` 与 `probe case` 各拿到一份凭证（c1/c2）、两条作业双双起、双双进模型，
+    盘上却只有一个目录（实测：写盘 2 次、目录 1 个、两条作业都报 done）。
+    P2-46 那句"花钱之前就把同名挡住"对大小写变体完全失效。折叠后与文件系统同域。
+    """
+    return slug.casefold()
 
 
 def release_slug(slug: str, owner: str) -> bool:
@@ -206,15 +253,24 @@ def release_slug(slug: str, owner: str) -> bool:
     摘掉（第 16 轮复核量到的 P1）。传 `ANY_OWNER` 才是"不管是谁都摘"，
     今天只有测试的兜底清理用它。
     """
-    if not slug:
-        return True
     with _creating_lock:
-        if owner == ANY_OWNER:
-            return _creating.pop(slug, None) is not None
-        if _creating.get(slug) == owner:
-            del _creating[slug]
+        if not slug:
+            # 空 slug 从来不进表，所以正常路径这里是空操作；但兜底清理必须真能清得掉
+            # （第 18 轮复核 P3-1：旧写法把早退放在 pop 之前，`""` 一旦进去谁也删不掉）。
+            if owner == ANY_OWNER:
+                return _creating.pop("", None) is not None
             return True
-        return False
+        key = _table_key(slug)
+        if owner == ANY_OWNER:
+            return _creating.pop(key, None) is not None
+        # ⚠ 必须先确认"这条在表里"，再比凭证：`_creating.get(key)` 对**不存在**的键
+        #   返回 None，于是 `owner=None` 会"匹配"上一个根本不存在的占位，
+        #   紧接着的 `del` 直接 KeyError（第 18 轮复核复量 P1-2 时当场撞出来的形态）。
+        held = _creating.get(key, _MISSING)
+        if held is _MISSING or held != owner:
+            return False
+        del _creating[key]
+        return True
 
 
 def create_pack(root: Path, llm: LLMClient, industry: str, description: str, *,
@@ -304,6 +360,11 @@ def create_pack(root: Path, llm: LLMClient, industry: str, description: str, *,
         # 走到这里说明调用方没在花钱之前拦（`start_packgen` 会拦）。
         # 宁可现在报错，也不把目录名交给模型的 display_name（P2-51）。
         raise ValueError("行业名称里没有任何可用作目录名的字符，请换成含文字或数字的名称")
+    bad = slug_problem(slug)
+    if bad:
+        # 同一形态在 `start_packgen` 就该拦住；这里兜住**直接**调用 create_pack 的人，
+        # 免得白写出一个永远建不完整的目录（钱已经在那一次模型调用里花掉了）。
+        raise ValueError(bad)
     if should_abort and should_abort():
         # 检查点放在这里：上面那次模型调用是全部开销所在，往下就该建目录了。
         raise JobCancelled("已取消")
@@ -321,7 +382,19 @@ def create_pack(root: Path, llm: LLMClient, industry: str, description: str, *,
         if d.exists():
             raise FileExistsError(f"行业包已存在：{slug}")
 
+        created_here = False
         try:
+            # 独占创建。`d.exists()` 那道检查只证明"检查那一刻"目录不在：
+            # 两个引擎进程、或同一台机器上的大小写变体（NTFS 不分大小写，见 `_table_key`），
+            # 都可能在我们检查之后把同名目录建出来。第 18 轮复核量到：`4bb65cb` 把回收圈
+            # 扩到最后一次写盘之后，"失败时顺手 rmtree"就会把**别人建好的那个包**删掉 ——
+            # 受害的那条作业还在报 done。所以现在先证明这目录是我建的，才允许回收。
+            try:
+                d.mkdir()
+            except FileExistsError:
+                raise FileExistsError(f"行业包已存在：{slug}") from None
+            created_here = True
+
             match_notes = _materialize(d, base, out, slug, industry, description,
                                        segments, audiences, personas)
             checklist = _checklist(out, slug)
@@ -337,11 +410,12 @@ def create_pack(root: Path, llm: LLMClient, industry: str, description: str, *,
                               + "\n".join(f"- [ ] {t}" for t in audit_notes))
             write_atomic(d / "校对清单.md", checklist)
         except Exception:
-            # 从"我们决定要建这个目录"到"最后一次写盘"整段都在这里的保护圈内
+            # 从"我们独占建出了这个目录"到"最后一次写盘"整段都在这里的保护圈内，
+            # 而回收网只在 `created_here` 为真时才动手（第 18 轮复核 P1-1）。
             # （第 16 轮复核：修复前 try 只裹住 `_materialize`，而 `校对清单.md`
             #  是它**外面**的最后一次写盘 —— 那一步炸掉（磁盘满 / Windows 杀软
             #  正扫着刚建的 23 个文件）会留下一个 `Pack` 能加载、会出现在包列表里
-            #  的包，作业却记为失败；重试同名永远 409，而应用里没有删包的入口）。
+            #  的包，作业却记为失败；重试同名永远 409，而应用里没有删包的入口。）
             # 上面 `if d.exists(): raise` 特意留在这个 try 之外：那是"别人的目录"，
             # 回收网不许碰它。
             #
@@ -349,7 +423,7 @@ def create_pack(root: Path, llm: LLMClient, industry: str, description: str, *,
             # 当成成功，于是半成品目录留在那儿，下次建包照样被 409 挡住，
             # 而我们已经把成功当成既定事实，连日志都不会有 —— 用户看到的现象
             # 永远是「重试一直失败」，却查不出为什么。
-            if not rmtree_resilient(d):
+            if created_here and not rmtree_resilient(d):
                 log.warning("半成品目录未能清除，下次建包同名行业会被挡：%s", d)
             raise
 

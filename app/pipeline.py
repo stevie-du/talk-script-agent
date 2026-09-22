@@ -43,7 +43,7 @@ from .jobs import (JOB_BUDGET_SECONDS, TERMINAL_STATES, Job,  # noqa: F401
                    new_job_id)
 from .knowledge import Pack, PackError, param_audit  # noqa: F401
 from .llm import EmptyContentError, LLMClient
-from .packgen import claim_slug, create_pack, preview_slug, release_slug
+from .packgen import claim_slug, create_pack, preview_slug, release_slug, slug_problem
 from .prompts import PromptRenderer
 from .schemas import (GenerateRequest, RewriteSegmentRequest,
                       ScriptResult, ScriptSection, StoryboardShot, TopicPlan)
@@ -254,6 +254,12 @@ class Pipeline:
         if not slug:
             raise ValueError("行业名称里没有任何可用作目录名的字符（纯符号起不了名），"
                              "请换成含中文、字母或数字的名称")
+        # 保留设备名（CON / NUL / COM1…）与过长的名字，目录压根建不出来：
+        # 拦在占位与模型调用**之前**，否则用户付完一份 token 才看到"生成失败"
+        #（第 18 轮复核 P3-4）。
+        problem = slug_problem(slug)
+        if problem:
+            raise ValueError(problem)
         if slug and (self.root / "packs" / slug).exists():
             raise FileExistsError(f"行业包已存在：{slug}")
         # P2-46 后半：名字要在**起作业之前**占住。占不到就是同步 409 ——

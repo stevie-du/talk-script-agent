@@ -331,6 +331,11 @@ window.__addCount = 0;
   // 界面里"读不到就当没有"的那一支于是永远不跑（第 12 轮复核 P1）。
   var PG_STREAM = { phase: '行业包生成', reasoning_tail: '先想这个行业的细分领域……',
                     reasoning_len: 512, content_len: 0 };
+  // 建包作业也真的有步骤：引擎里 _retry_logger 会往 job.steps 记一条「接口自动重试」
+  // （app/pipeline.py 的 _run_packgen），而原来 pgSnap 硬编码 steps 为空数组 ——
+  // 于是界面"建包作业也有进度步骤"那一支在门禁里从未跑过（第 16 轮复核 P2-4）。
+  var PG_STEPS = [{ key: 'retry', title: '接口自动重试·第 1/2 次',
+                    ts: '2026-09-20T10:00:05', data: { note: '模型返回空内容' } }];
   // 两句 404 属于两条不同路由（app/server.py 的 job_status 与 job_cancel），
   // 各起一个名字：桩/服务端对账才能按路由比，而不是"文件里出现过这句就算过"。
   var ERR_JOB_GONE_GET = '作业不存在或已随重启释放';
@@ -339,12 +344,21 @@ window.__addCount = 0;
   function pgSnap(pid) {
     var j = PG_JOBS[pid];
     // 字段集对齐 Job.snapshot()：id/kind/state/params/steps/error/created_at，
-    // 外加 include_result 时的 result 与设过 stream_phase 时的 stream。
-    // ⚠ result 在"终态但非 done"时是 **null 而不是缺键** —— 引擎就是这么给的。
-    return mk({ id: pid, kind: 'packgen', state: j.state, created_at: bornAt(pid, 2000),
-                error: j.error || null, stream: PG_STREAM, steps: [],
-                params: { industry: j.industry },
-                result: j.state === 'done' ? PG_RESULT : null });
+    // 外加进过终态才有的 result 与设过 stream_phase 才有的 stream。
+    // ⚠ 在途与终态之间只差 **result 一个键**（引擎轮询走 include_result=False）。
+    //   原来在途那一份是轮询分支里另写的字面量，少了 created_at 与 error ——
+    //   界面里「已用 N 秒」和"读不到 error 就不显示"那两支对建包作业永远跑不到
+    //   （第 16 轮复核 P2-4）。现在两条路共用这一个函数，字段集不再有第二份。
+    //   三个终态名与 app/jobs.py 的 TERMINAL_STATES 同源，由
+    //   test_job_state_vocabulary_consistency 对账，不在这里另立一份真相。
+    var o = { id: pid, kind: 'packgen', state: j.state, created_at: bornAt(pid, 2000),
+              error: j.error || null, stream: PG_STREAM, steps: PG_STEPS,
+              params: { industry: j.industry } };
+    if (j.state === 'done' || j.state === 'failed' || j.state === 'cancelled') {
+      // ⚠ result 在"终态但非 done"时是 **null 而不是缺键** —— 引擎就是这么给的。
+      o.result = j.state === 'done' ? PG_RESULT : null;
+    }
+    return mk(o);
   }
   // 包名的合法性判定与 app/server.py 的 _safe_name 同方向（不合法 → 400，排在"包存在吗"
   // 之前，与引擎一致：_safe_name 在前、Pack(root,name) 在后）。
@@ -888,12 +902,10 @@ window.__addCount = 0;
       calls.pg++;             // 全局"建包被轮询了几次"的观测值（断言用它判"少传参数时不许开轮询"）
       pj.polls++;
       if (pj.polls <= 2) {
-        return mk({ id: pid, kind: 'packgen', state: 'packing',
-          params: { industry: pj.industry },
-          steps: [{ key: 'retry', title: '接口自动重试·第 1/2 次',
-                    ts: '2026-09-20T10:00:05', data: { note: '模型返回空内容' } }],
-          stream: { phase: '行业包生成', reasoning_tail: '先想这个行业的细分领域……',
-                    reasoning_len: 512, content_len: 0 } });
+        // 在途的那一份也走 pgSnap：字段集与终态只差 result 一个键（引擎轮询
+        // include_result=False）。原来这里另写一份字面量，缺 created_at 与 error，
+        // 于是界面「已用 N 秒」对建包作业在门禁里从未被量到（第 16 轮复核 P2-4）。
+        return pgSnap(pid);
       }
       PG_CLAIMED = PG_CLAIMED.filter(function(x){ return x !== pj.slug; });
       PG_CREATED[pj.slug] = 1;                       // 目录从此在那儿了：下一句 409 换措辞
@@ -5885,7 +5897,10 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     // 终态快照的字段集必须与引擎一致（缺一个键，界面那条"读不到就算了"的分支永不跑）
     var sub = await api('/api/packs/create', { industry: '推拿所戊', description: '社区推拿，面向上班族' });
     var sid = sub.b.job_id;
-    await api('/api/jobs/' + sid);
+    var infl = await api('/api/jobs/' + sid);
+    out.inKeys = Object.keys(infl.b || {}).sort().join(',');
+    out.inSteps = ((infl.b || {}).steps || []).length;
+    out.inHasCreated = !!((infl.b || {}).created_at);
     await api('/api/jobs/' + sid + '/cancel', {});
     var term = await api('/api/jobs/' + sid);
     out.termKeys = Object.keys(term.b || {}).sort().join(',');
@@ -5912,7 +5927,12 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     pgFileGate.getCode === '404:作业不存在或已随重启释放'
       && pgFileGate.cancelCode === '404:作业不存在'
       && pgFileGate.termKeys === 'created_at,error,id,kind,params,result,state,steps,stream'
-      && pgFileGate.termResult === 'null' && pgFileGate.termStream === '行业包生成',
+      && pgFileGate.termResult === 'null' && pgFileGate.termStream === '行业包生成'
+      // 在途那一份：引擎轮询走 include_result=False，所以是同一套键**少 result**；
+      // 少了 created_at / error 就是在骗界面（第 16 轮复核 P2-4），而建包确实有进度步骤
+      // （引擎里 _retry_logger 会往 job.steps 记一条）。
+      && pgFileGate.inKeys === 'created_at,error,id,kind,params,state,steps,stream'
+      && pgFileGate.inSteps === 1 && pgFileGate.inHasCreated === true,
     JSON.stringify(pgFileGate));
   check("桩：占位回收时限可注入，到点落 failed 并归还名字（不会永久 409）",
     pgFileGate.sweptState === 'failed' && pgFileGate.sweptErr === '作业超时未收工'

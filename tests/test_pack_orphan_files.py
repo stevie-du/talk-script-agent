@@ -60,6 +60,9 @@ SKIP_PREFIXES = ("private/",)
 # 建包时引擎写给**人**看的交付物，每个生成包里都有一份，不该指望 skill.yaml 接线。
 # （第 16 轮实测：往 packs/ 里放一个生成过的包 —— 例如开发者用仓库根跑一次建包 ——
 #  守卫会因为这份 `校对清单.md` 而红，把一次正常操作变成一条假故障。）
+# ⚠ 按**精确相对路径**免检，不是按文件基名：第 18 轮复核量到基名免检会连带放过
+#   `knowledge/校对清单.md`、`rules/校对清单.md` 这类放错地方、引擎永不注入的文件 ——
+#   同一笔提交刚把 HUMAN_ONLY 从"按相对路径跨包豁免"改成"按 包/路径"，理由一模一样。
 HUMAN_ARTIFACTS = {"校对清单.md"}
 
 
@@ -96,7 +99,7 @@ def _orphans(pack_dir: Path) -> list:
         rel = f.relative_to(pack_dir).as_posix()
         if rel.startswith(SKIP_PREFIXES) or rel == "README.md":
             continue
-        if rel.rsplit("/", 1)[-1] in HUMAN_ARTIFACTS:
+        if rel in HUMAN_ARTIFACTS:
             continue
         if rel not in refs:
             found.append(rel)
@@ -162,6 +165,12 @@ def test_the_guard_really_catches_a_new_unwired_file(tmp_path):
         f"前置：elevator 的孤儿都应已按 包/路径 登记，未登记的是 {sorted(found)}"
     (dst / "knowledge" / "新加而没接线.md").write_text("# 标题\n\n正文\n", encoding="utf-8")
     assert "knowledge/新加而没接线.md" in _orphans(dst), "加了没接线的文件却抓不到，守卫空转"
+    # 免检清单按**精确路径**：根目录那份是引擎生成的交付物，子目录里那份不是（第 18 轮 P3-2）
+    (dst / "校对清单.md").write_text("# 校对清单\n", encoding="utf-8")
+    assert "校对清单.md" not in _orphans(dst), "根目录那份生成物被误当成孤儿"
+    (dst / "knowledge" / "校对清单.md").write_text("# 放错地方的那份\n", encoding="utf-8")
+    assert "knowledge/校对清单.md" in _orphans(dst), \
+        "按基名免检会连带放过子目录里那份没接线、引擎也永不注入的文件"
 
 
 def test_the_engine_wiring_check_needs_both_names_in_one_function():

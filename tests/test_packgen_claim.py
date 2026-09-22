@@ -155,6 +155,69 @@ def test_a_late_release_cannot_steal_a_claim_made_in_between():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_the_worker_side_release_is_also_token_scoped(monkeypatch):
+    """三个归还点里**每条件建包都会走**的那一个（worker 的 finally）也必须认凭证。
+
+    第 18 轮复核 P2-1：把这一处改成 `release_slug(slug, ANY_OWNER)`（按名字硬摘）时
+    全量用例全绿 —— 交错用例钉的是入口兜底那一个点。这里把 worker 这一点也钉上：
+    同一个交错反过来（A 先还、worker 后还），硬摘同样会摘掉 B 活着的占位。
+    """
+    import app.pipeline as plmod
+    from app.jobs import Job
+
+    pl, tmp, client = _pipeline()
+    slug = plmod.preview_slug("探针壬")
+    ta = packgen.claim_slug(slug)
+    assert ta and packgen.release_slug(slug, ta) is True, "前置：A 占上又还掉"
+    tb = packgen.claim_slug(slug)                    # B 现在持有这个名字
+    assert tb
+
+    job = Job("pg-late-2", "packgen",
+              {"industry": "探针壬", "description": "探针用的行业说明"})
+    job.claim_token = ta                             # worker 迟到归还的是 A 那份旧凭证
+    pl.add_job(job)
+
+    def fake_create_pack(root, _client, industry, _desc, **_kw):
+        raise RuntimeError("模型那边炸了")
+
+    monkeypatch.setattr(plmod, "create_pack", fake_create_pack)
+    try:
+        pl._run_packgen(job, client, slug)
+        assert job.state == "failed", job.state
+        assert packgen._creating.get(slug.casefold()) == tb, \
+            "worker 的 finally 把别人活着的占位摘走了（等于回到硬摘）"
+        assert packgen.claim_slug(slug) is None, \
+            "第三条请求此刻能与 B 并行建同一个目录"
+    finally:
+        packgen.release_slug(slug, tb)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_reserved_or_oversized_names_are_refused_before_any_money_is_spent():
+    """Windows 保留设备名与超长行业名：起作业之前就拒掉，一分钱都不花（第 18 轮 P3-4）。
+
+    旧形态：这类名字要等模型返回、走到 `_materialize` 的 mkdir 才失败 ——
+    钱花完了、占位拿掉了，用户只看到一句"生成失败"。
+    """
+    pl, tmp, client = _pipeline()
+    try:
+        for name in ("CON", "nul.", "com1", "LPT9", "x" * 300):
+            with pytest.raises(ValueError) as ei:
+                pl.start_packgen(name, "描述文字够长了吧确实够长了")
+            assert client.calls == 0, f"{name}：先烧了模型才报错（{client.calls} 次）"
+            assert str(ei.value) and "packs" not in str(ei.value), name
+            assert packgen.slugify(name) not in packgen._creating, "占位没还或被占上"
+        jid = pl.start_packgen("宠物医院", "社区医院，面向养宠家庭")
+        while pl.get_job(jid).state not in TERMINAL_STATES:
+            time.sleep(0.05)
+        assert pl.get_job(jid).state == "done", pl.get_job(jid).error
+        assert client.calls == 1, "合法名字被误拒或多烧了一次"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+        for s in list(packgen._creating):
+            packgen.release_slug(s, packgen.ANY_OWNER)
+
+
 def test_cancel_after_the_pack_is_written_leaves_no_orphan_dir(monkeypatch):
     """取消落在写盘之后：刚建出来的包必须被回收，否则"已取消"与"下次同名 409"同时成立。
 
@@ -352,6 +415,28 @@ def test_claim_and_release_are_pairwise():
     assert packgen.release_slug(s, tb) is True
     assert packgen.claim_slug(""), "空 slug 交给正式判定，不占位"
     assert packgen.claim_slug("") == packgen.NO_CLAIM
+    assert "" not in packgen._creating, "NO_CLAIM 进表了：那个键谁也删不掉（含兜底清理）"
+
+    # 表必须与文件系统同域：NTFS/APFS 的目录名不分大小写，`Probe-Case` 与 `probe-case`
+    # 是**同一个目录**（第 18 轮复核 P1-2 实测：两条大小写变体各拿到一份凭证、双双起作业、
+    # 双双进模型，盘上只有一个目录，而两条都报 done）。
+    tc = packgen.claim_slug("Probe-Case")
+    assert tc
+    assert packgen.claim_slug("probe-case") is None, "大小写变体绕过了占位互斥"
+    assert packgen.claim_slug("PROBE-CASE") is None, "同上：折叠要覆盖所有大小写形式"
+    assert packgen.release_slug("probe-case", tc) is True, "归还也得认折叠后的键"
+    td = packgen.claim_slug("PROBE-CASE")
+    assert td and packgen.release_slug("PROBE-CASE", td) is True
+    assert packgen._creating == {}, "兜底归还之后表没清干净"
+    # 凭证不能"匹配上表里根本没有的项"：`_creating.get(k)` 对缺项返回 None，
+    # 于是 owner=None 会走进删除分支、紧接着 del 抛 KeyError
+    #（第 18 轮复核复量 P1-2 时当场撞出来的一格）。
+    assert packgen.release_slug("从来没有这个包", None) is False
+    assert packgen.release_slug("从来没有这个包", "") is False
+    te = packgen.claim_slug("凭证边界")
+    assert packgen.release_slug("凭证边界", te) is True
+    assert packgen.release_slug("凭证边界", None) is False, "重复归还应该只是 False，不是抛错"
+    assert packgen._creating == {}
 
 
 def _stub_slug():

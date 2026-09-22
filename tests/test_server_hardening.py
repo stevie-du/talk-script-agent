@@ -572,6 +572,71 @@ def test_packgen_rollback_never_touches_a_preexisting_pack(tmp_path=None):
     shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_packgen_rollback_ignores_a_dir_created_after_the_check():
+    """检查说"目录不在"之后别人才把它建出来：这次失败也不许收走那个目录。
+
+    第 18 轮复核 P1-1 —— `4bb65cb` 把回收圈扩到最后一次写盘，而 `d.exists()` 只证明
+    "检查那一刻"不在：两个引擎进程、或同一台机器上的大小写变体（NTFS 不分大小写，
+    见 P1-2）都能在检查之后把同名目录建出来。于是我们这边失败时 `rmtree` 掉的是
+    **别人建好的包**，而那条作业还在报 done。修法：先独占 `mkdir`，
+    只有本次真的建出了目录才允许回收。
+    """
+    tmp = _tmp_root()
+    from app import packgen
+
+    slug = packgen.slugify("半成品行业")
+    d = tmp / "packs" / slug
+    real_exists = Path.exists
+    lied = {"n": 0}
+
+    def lie(self):
+        if lied["n"] == 0 and self.parent == tmp / "packs" and self.name == slug:
+            lied["n"] += 1                      # 就在这一刻，另一个创建者把目录建好了
+            d.mkdir(parents=True)
+            (d / "owner.yaml").write_text("owner: other\n", encoding="utf-8")
+            return False
+        return real_exists(self)
+
+    real_write = packgen.write_atomic
+
+    def boom(path, text, *a, **kw):
+        if str(path).endswith("pack.yaml"):
+            raise OSError("磁盘满了")
+        return real_write(path, text, *a, **kw)
+
+    with patch.object(Path, "exists", lie), \
+         patch.object(packgen, "write_atomic", side_effect=boom):
+        try:
+            packgen.create_pack(tmp, _FakeLLM(Partial), "半成品行业", "测试描述文本")
+            raise AssertionError("应当抛错")
+        except (OSError, FileExistsError):
+            pass
+
+    assert lied["n"] == 1, "存在性检查没被走到，这条什么都没测到"
+    assert (d / "owner.yaml").read_text(encoding="utf-8") == "owner: other\n", \
+        "回收网删掉了不是本次建的目录：别人的包没了，我们这边只记了一次失败"
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_history_route_rejects_a_jid_with_trailing_whitespace():
+    """`_JID_RE` 那半边的 fullmatch 迁移也得有用例（第 18 轮复核 P2-2）。
+
+    Python 的 `$` 放过结尾换行：`20260101-000000-abcdef\\n` 在旧写法下算合法 jid。
+    包名那半边有 `test_stub_pack_name_check_agrees_with_the_engine` 守着（改回旧写法会红），
+    jid 这半边当时**没有任何判据** —— 把它改回 `^...$` + `.match` 全量仍然绿。
+    """
+    tmp = _tmp_root_mock()
+    try:
+        c = _client(tmp)
+        for tail in ("%0a", "%0d", "%20", "%0a%20"):
+            r = c.get(f"/api/history/20260101-000000-abcdef{tail}")
+            assert r.status_code == 400, (tail, r.status_code, r.text[:80])
+        ok = c.get("/api/history/20260101-000000-abcdef")
+        assert ok.status_code != 400, f"合法 jid 也被拒了：{ok.status_code} {ok.text[:80]}"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_packgen_cleanup_retries_when_locked(tmp_path=None):
     """清理半成品时若文件被瞬时占用，要重试，而不是静默留下目录。
 
@@ -1532,3 +1597,26 @@ def test_packgen_stub_sends_exactly_what_the_engine_says():
             assert f"'{why}：'" in stub, f"桩里没有「{why}：」这一句（与服务端不同源）"
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_packgen_stub_snapshot_keys_are_the_engine_key_list():
+    """桩里那两条"快照有哪些键"的清单，必须就是 `Job.snapshot()` 现算出来的那两条。
+
+    第 16 轮复核 P2-4：门禁里比对键名用的是**手抄的字面量**，在途那一份甚至少带
+    `created_at` 与 error 也照样绿 —— 因为没人拿引擎的真键集去比。
+    这里把两份清单变成可算的：引擎加了/改/删一个快照字段，桩与这两条 JS 字面量都会红。
+    """
+    from app.jobs import Job
+
+    j = Job("jobpg-key-probe", "packgen", {"industry": "探针辛"})
+    j.stream_phase = "行业包生成"              # 引擎只在设过 phase 之后才带 stream 键
+    inflight = ",".join(sorted(j.snapshot(include_result=False)))
+    j.state = "done"                          # 只为取终态那一份的键集，不走状态机
+    terminal = ",".join(sorted(j.snapshot(include_result=False)))
+
+    stub = (ROOT / "_verify" / "verify.js").read_text(encoding="utf-8")
+    for label, keys in (("在途", inflight), ("终态", terminal)):
+        assert f"'{keys}'" in stub, (
+            f"桩里{label}快照的键名清单与引擎不同源：引擎现在给的是 {keys}")
+    # 两条清单的差别本身也是判据：轮询走 include_result=False，未终态不带 result
+    assert "result" in terminal and "result" not in inflight, (inflight, terminal)
