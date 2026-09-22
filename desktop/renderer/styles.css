@@ -1,21 +1,23 @@
 /* ============================================================
-   TalkScript 设计系统 · v5（中性墨色 / macOS 质感）
+   TalkScript 设计系统 · v6（中性墨色 / 扁平克制 / 亮+暗双主题）
 
    ── 改样式的正确姿势 ──
-   只改本文件顶部 :root 的 token，组件层一律引用变量、不写死值：
+   只改本文件顶部 :root 的 token，组件层一律引用变量、不写死值。
+   **颜色一律写 `light-dark(亮, 暗)`**：由 color-scheme 决定取哪一支，
+   不复制两份 token、不写 media query、不动 JS（详见 :root 顶部注释）。
 
-     主题色   --ink（主操作/选中文字） --sel-bg（选中底） --ring-focus（聚焦光圈）
-     文本      --text-1 / -2 / -3
-     表面      --surface（白卡） --fill（hover 灰） --fill-strong（更深 hover）
+     页面平面 --page（窗口底） --surface（卡片/输入，亮色必须保持纯白）
+     主题色   --ink（主操作底/选中文字） --sel-bg（选中底） --ring-focus（聚焦光圈）
+     文本      --text-1 / -2 / -3   反色 --text-inv
+     填充      --fill（hover 灰） --fill-strong（更深 hover） --fill-hover
      分隔线    --line（发丝线） --line-strong（描边）
      状态      --ok / --warn / --bad（+ 各自的 -soft 底色）
-     圆角      --r-xs ~ --r-xl / --r-pill
+     圆角      --r-ctl / --r-card / --r-pop / --r-pill（旧名 --r-xs ~ --r-xl 是别名）
      高度      --h-ctl（输入控件） --h-btn / --h-btn-lg / --h-btn-sm / --h-icon
-     字阶      --f-min ~ --f-xl
-     阴影      --shadow-ink / -raised / -input / -focus / -selected
-               --shadow-pop（弹层） --shadow-composer（输入区）
-     玻璃       --glass（半透明白） --glass-blur（毛玻璃滤镜）
-     动效       --ease（常规） --ease-pop（弹性） --dur
+     字阶      --f-2xs / -sm / -md / -xl（旧名 --f-min/-xs/-base/-lg 是别名）
+     阴影      层次三档 --e1 / --e2 / --e3；状态环 --shadow-focus / -flash
+     玻璃      --glass（= --page 的近不透明版，只给输入区那条固定带） + --glass-blur
+     动效      --ease（常规） --ease-pop（弹性） --dur
 
    ── 命名约定 ──
    tabs/tab = 设置抽屉一级切换
@@ -24,70 +26,109 @@
    select-wrap = 自绘下拉（原生 select 收进 .native-hidden 只作值容器）
    ============================================================ */
 :root {
-  color-scheme: light;
+  /* ── 双主题怎么生效 ──
+     所有颜色 token 写成 `light-dark(亮, 暗)`，取值由 color-scheme 决定：
+     `light dark` = 跟随系统外观（Electron/Chromium 按 OS 的 prefers-color-scheme
+     报给 light-dark()）。将来要在设置里加「浅色/深色/跟随系统」开关，
+     只需给 <html> 挂 data-theme 并覆盖 color-scheme，token 层不用动。
+
+     ⚠ 亮色那一支**逐字保留 v5 的原值**，不要顺手"调得更准"：
+     `_verify/verify.js` 有 13 处拿计算后的 `rgb(...)` 字面量比对文字色与状态色
+     （--text-1 / --text-2 / --warn / --bad / --bad-hover），亮色值一改就把断言弄红，
+     而那 13 处守的是「这里吃的是哪一档灰」，不是「这一档灰具体多深」。 */
+  color-scheme: light dark;
 
   /* ── 文本 ── */
-  --text-1: #1d1d1f;
-  --text-2: #6e6e73;
+  --text-1: light-dark(#1d1d1f, #ecebe6);
+  --text-2: light-dark(#6e6e73, #a3a19a);
   /* 第三档灰**并进第二档**。原来 --text-3 是 #a1a1a6，白底实算 2.57:1，
      而它有 44 处用法几乎都在承载信息（副标题、meta、占位说明、计数、图标）。
      想同时满足「≥4.5:1」和「与 --text-2 看得出差别」在数学上没有位置：
      达标的下限约 #707075，与 #6e6e73 只差 2~3 个色阶，等于没有第三档。
      纯装饰的弱色请改用 --line / --line-strong / --fill-*，不要拿文字色当装饰色。 */
   --text-3: var(--text-2);
-  --text-inv: #ffffff;
+  --text-inv: light-dark(#ffffff, #1c1b19);
 
-  /* ── 字体 ── */
+  /* ── 字体 ──
+     顺序不动：Windows 上是 Segoe UI Variable Text 落地，把没随包分发的
+     Inter 提到首位，会让"装了 Inter 的机器"换一套字形度量 —— 同一份 CSS
+     在两台机器上截断位置不一样，这不是美化该引入的变量。 */
   --font: "Segoe UI Variable Text", "Inter", "Segoe UI", "PingFang SC",
           "Microsoft YaHei UI", system-ui, sans-serif;
 
-  /* ── 表面 ── */
-  --surface: #ffffff;
-  --surface-side: rgba(246, 246, 248, .72);
-  --fill: rgba(0, 0, 0, .04);
-  --fill-strong: rgba(0, 0, 0, .07);
-  --fill-hover: #fafafa;                 /* 描边按钮 hover */
+  /* ── 平面（亮色 = v5 的纯白精致路线，暗色 = 哑光）──
+     亮色下 --surface **必须留在纯白**：`_verify/verify.js` 有两条按
+     `rgb(255, 255, 255)` 字面量守「输入卡是白底」，而参考图实测填充也正是 255。
+     2026-09-21 二改：--page 亮色曾压成 #f7f7f5 暖灰，用户回读「之前浅色好看」——
+     暖灰在同屏上发闷，纯白才是这套界面的底色；侧栏 / 输入条恢复 v5 的半透明玻璃。 */
+  --page: light-dark(#ffffff, #171614);
+  --surface: light-dark(#ffffff, #232220);
+  --surface-side: light-dark(rgba(246, 246, 248, .72), rgba(23, 22, 20, .85));
+  --fill: light-dark(rgba(0, 0, 0, .04), rgba(255, 255, 255, .07));
+  --fill-strong: light-dark(rgba(0, 0, 0, .07), rgba(255, 255, 255, .11));
+  --fill-hover: light-dark(#fafafa, #2a2926);   /* 描边按钮 hover */
   /* 不可点控件的底色。单独开一个而不是复用 --fill：--fill 是「卡面」的色，
      不可点控件一旦跟它所在卡面同色就彻底消失（发送键在浅灰卡面上踩过这个坑）。
      它的约束是「明显深于任何卡面」，不是「淡」。 */
-  --fill-disabled: rgba(0, 0, 0, .10);
-  --bubble: #ededee;                     /* 用户消息气泡 */
-  --scrim: rgba(29, 29, 31, .30);        /* 弹层遮罩 */
-  --toast-bg: rgba(29, 29, 31, .88);
+  --fill-disabled: light-dark(rgba(0, 0, 0, .10), rgba(255, 255, 255, .20));
+  --bubble: light-dark(#ededee, #2e2d29);       /* 用户消息气泡 */
+  --scrim: light-dark(rgba(29, 29, 31, .30), rgba(10, 10, 9, .62));   /* 弹层遮罩 */
+  /* toast 的文字吃 --text-inv，所以它的底在两主题下**反着走**：
+     亮色是墨底白字，暗色是白底墨字。 */
+  --toast-bg: light-dark(rgba(29, 29, 31, .88), rgba(236, 235, 230, .94));
 
-  --scrollbar: rgba(0, 0, 0, .18);
-  --scrollbar-hover: rgba(0, 0, 0, .32);
+  --scrollbar: light-dark(rgba(0, 0, 0, .18), rgba(255, 255, 255, .18));
+  --scrollbar-hover: light-dark(rgba(0, 0, 0, .32), rgba(255, 255, 255, .34));
+  --sel-face: light-dark(rgba(0, 0, 0, .10), rgba(255, 255, 255, .22));
 
   /* 分隔线（0.5px 级发丝线，不用实线色块切割）── */
-  --line: rgba(0, 0, 0, .07);
-  --line-strong: rgba(0, 0, 0, .12);
+  --line: light-dark(rgba(0, 0, 0, .07), rgba(255, 255, 255, .10));
+  /* --line-strong 亮色值受一条实算约束：输入卡的描边是「1px × 这个色」，
+     verify.js 量 alpha × spread ≥ 0.09，现状 .12 过。改浅要先想清楚这条。 */
+  --line-strong: light-dark(rgba(0, 0, 0, .12), rgba(255, 255, 255, .18));
 
-  /* ── 墨色：主操作 / 强调 / 选中文字（不用彩色）── */
-  --ink: #26262b;
-  --ink-press: #17171a;
-  --sel-bg: rgba(0, 0, 0, .05);
-  --ring-focus: rgba(0, 0, 0, .07);
 
-  /* ── 功能状态（低饱和，仅小面积文字）── */
-  --ok: #248a3d;
-  --ok-soft: rgba(36, 138, 61, .08);   /* .rh-state.ok 用得到，漏定义会让底色整块失效 */
-  --warn: #b25e00;
-  --warn-soft: rgba(178, 94, 0, .09);
-  --bad: #d70015;
-  --bad-soft: rgba(215, 0, 21, .07);
-  --bad-hover: #c20014;
+  /* ── 墨色：主操作 / 强调 / 选中文字（不用彩色）──
+     暗色下整套**反相**：主操作底变成近白，--text-inv 跟着变近黑。 */
+  --ink: light-dark(#26262b, #ecebe6);
+  --ink-hover: light-dark(#3a3a40, #ffffff);
+  --ink-press: light-dark(#17171a, #d5d3cd);
+  --sel-bg: light-dark(rgba(0, 0, 0, .05), rgba(255, 255, 255, .09));
+  --ring-focus: light-dark(rgba(0, 0, 0, .07), rgba(255, 255, 255, .10));
 
-  /* ── 复合值：渐变 / 阴影 / 毛玻璃（避免到处硬编码）── */
-  --grad-ink: linear-gradient(150deg, #4a4a50, #26262b 60%, #0f0f12);
-  --grad-btn: linear-gradient(180deg, #434349, #26262b);
-  --grad-btn-hover: linear-gradient(180deg, #4c4c53, #2e2e34);
+  /* ── 功能状态（低饱和，仅小面积文字）──
+     亮色三个值逐字保留 v5（verify.js 按 rgb(...) 字面量比对 --warn/--bad/--bad-hover）；
+     暗色那一支提亮一档，否则 #d70015 落在近黑底上只有 3.x:1。 */
+  --ok: light-dark(#248a3d, #57c173);
+  --ok-soft: light-dark(rgba(36, 138, 61, .08), rgba(87, 193, 115, .14));   /* .rh-state.ok 用得到，漏定义会让底色整块失效 */
+  --warn: light-dark(#b25e00, #e0a453);
+  --warn-soft: light-dark(rgba(178, 94, 0, .09), rgba(224, 164, 83, .16));
+  --bad: light-dark(#d70015, #ff6f61);
+  --bad-soft: light-dark(rgba(215, 0, 21, .07), rgba(255, 111, 97, .15));
+  --bad-hover: light-dark(#c20014, #ff8a80);
+
+  /* ── 复合值：主操作底 / 层次 ──
+     **默认（暗色）是哑光实心**：`--ink` 在暗色下是近白，实心白键 + 墨字。
+     亮色的三段渐变 + 内高光（v5 那颗"会反光的塑料键"）在下方的
+     `@media (prefers-color-scheme: light)` 块里给 —— 渐变 / 内高光是
+     background-image 与 box-shadow 的整串值，light-dark() 管不了，只能写媒体块。
+     ⚠ 无论哪支都要保持 background-image 非 none：
+     `_verify/verify.js` 的「停止键仍是实心按钮」量的是 `backgroundImage !== "none"`
+     （它要拦的是"淡化成看不见的灰底"那一类回归）。 */
+  --grad-ink: linear-gradient(var(--ink), var(--ink));
+  --grad-btn: linear-gradient(var(--ink), var(--ink));
+  --grad-btn-hover: linear-gradient(var(--ink-hover), var(--ink-hover));
 
   /* ── 层次（elevation）只有三档 ──
      边界一律靠 0.5px 发丝线立住，阴影只做"离开纸面一点点"，透明度 ≤ .10。
-     一个元素只用一档，不得与描边 / 玻璃 / 渐变叠加（docs/UI视觉规范.md §3）。 */
+     一个元素只用一档，不得与描边 / 玻璃 / 渐变叠加（docs/UI视觉规范.md §3）。
+     v6：卡片那一档的抬起压到 .03 —— 页面本身已经是哑光灰平面，白卡靠发丝线
+     就分得开，再抬一层就把"卡片"读成了"贴纸"。 */
   --e1: 0 0 0 0.5px var(--line);
-  --e2: 0 0 0 0.5px var(--line), 0 1px 2px rgba(0, 0, 0, .04);
-  --e3: 0 0 0 0.5px var(--line-strong), 0 8px 24px rgba(0, 0, 0, .10);
+  --e2: 0 0 0 0.5px var(--line), 0 1px 2px light-dark(rgba(0, 0, 0, .03), rgba(0, 0, 0, .30));
+  /* --e3 的 24px 模糊是**被断言钉住的**：verify.js「聚焦比未聚焦多一层真实抬升」
+     量最大模糊半径 ≥16px。想收小阴影先想这条。 */
+  --e3: 0 0 0 0.5px var(--line-strong), 0 8px 24px light-dark(rgba(0, 0, 0, .08), rgba(0, 0, 0, .55));
   /* 原来 12 个阴影名各写一套数值，同一语义有两种线宽、层级靠"谁叠得多"区分。
      现在全部并进上面三档 —— 保留旧名只为少改 50 多处引用，不要再新增使用点。 */
   --shadow-input: var(--e1);
@@ -102,24 +143,35 @@
   --shadow-composer: var(--e3);
   --shadow-pop: var(--e3);
   /* 状态环是**状态**不是**层次**，单独一族，不得拿来表达层级 */
-  --shadow-focus: 0 0 0 1px rgba(0, 0, 0, .22), 0 0 0 4px var(--ring-focus);
-  --shadow-flash: 0 0 0 3px rgba(0, 0, 0, .09);
-  /* 深色实心主 CTA 专用，不扩散到卡片 */
-  --shadow-ink: 0 1px 3px rgba(0, 0, 0, .26), inset 0 1px 0 rgba(255, 255, 255, .20);
-  --shadow-ink-lg: 0 4px 14px rgba(0, 0, 0, .26), inset 0 1px 0 rgba(255, 255, 255, .24);
+  --shadow-focus: 0 0 0 1px light-dark(rgba(0, 0, 0, .22), rgba(255, 255, 255, .34)),
+                  0 0 0 4px var(--ring-focus);
+  --shadow-flash: 0 0 0 3px var(--ring-focus);
+  /* 深色实心主 CTA 专用，不扩散到卡片。v6：去掉原来那条 `inset 0 1px 0 白` 的
+     内高光 —— 那是让按钮"鼓起来"的反光，哑光实心不需要它。 */
+  --shadow-ink: 0 1px 2px light-dark(rgba(0, 0, 0, .20), rgba(0, 0, 0, .40));
+  --shadow-ink-lg: 0 4px 14px light-dark(rgba(0, 0, 0, .20), rgba(0, 0, 0, .45));
 
-  --glass: rgba(255, 255, 255, .72);
-  --glass-strong: rgba(255, 255, 255, .85);
+  /* ── 玻璃：亮色 = v5 的半透明毛玻璃，暗色 = 近不透明 ──
+     亮色下内容从侧栏 / 输入条后面滚过去时仍然隐约透光，这是这套界面
+     "精致"的一部分，用户回读「之前浅色好看」后恢复。
+     玻璃仍然只允许出现在浮在滚动内容之上的固定层（规范 §3），卡面一律不许用。 */
+  --glass: light-dark(rgba(255, 255, 255, .72), rgba(23, 22, 20, .94));
   --glass-blur: saturate(1.6) blur(20px);
+
 
   /* ── 间距：一律 4 的倍数（docs/UI视觉规范.md §2）── */
   --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s6: 24px; --s8: 32px;
 
-  /* ── 字阶：四档 ── */
+  /* ── 字阶：六档 ── */
   --f-2xs: 11px;   /* 字段标签、小标、计数 */
   --f-sm: 13px;    /* 控件、列表、提示文字 */
   --f-md: 15px;    /* 正文与卡片标题（标题靠字重与正文区分，不靠字号）*/
   --f-xl: 20px;    /* 页标题 */
+  /* 2026-09-21 加的两档**页面级**标题：只给页头 / 结果主标题 / 空态 hero，
+     卡片级标题仍走 --f-md 靠字重区分 —— 这两档是"页面在说什么"，
+     不是"这张卡叫什么"。 */
+  --f-display: 24px;  /* 页面级标题：设置页标题 / 结果主标题 / 面板空态标题 */
+  --f-hero: 28px;     /* 首页问候语（全站唯一 hero 字号） */
   /* 旧名并入上面四档。保留别名只为少改几十处引用，**不要再新增使用点**：
      10/12/14/16 这四个值已经没有自己的位置了。 */
   --f-min: var(--f-2xs); --f-xs: var(--f-2xs);
@@ -159,18 +211,34 @@
   --w-stg-3col: 1160px; /* 设置页三列（菜单/条目/详情）限宽，比单列宽 */
 }
 
+/* ── 亮色专属：v5 的渐变主键 + 内高光 ──
+   2026-09-21 二改：用户回读「之前浅色好看」—— 亮色恢复 v5 的精致路线，
+   主按钮 / 图标砖重新走三段渐变 + 内高光（一颗微微反光的键）。
+   暗色继续用 :root 里的哑光实心（--ink 在暗色下是近白）。
+   渐变与内高光是整串 background-image / box-shadow，light-dark() 管不了，
+   只能用 prefers-color-scheme 区分；保持背景非 none 的要求见 :root 渐变注释。 */
+@media (prefers-color-scheme: light) {
+  :root {
+    --grad-ink: linear-gradient(150deg, #4a4a50, #26262b 60%, #0f0f12);
+    --grad-btn: linear-gradient(180deg, #434349, #26262b);
+    --grad-btn-hover: linear-gradient(180deg, #4c4c53, #2e2e34);
+    --shadow-ink: 0 1px 3px rgba(0, 0, 0, .26), inset 0 1px 0 rgba(255, 255, 255, .20);
+    --shadow-ink-lg: 0 4px 14px rgba(0, 0, 0, .26), inset 0 1px 0 rgba(255, 255, 255, .24);
+  }
+}
+
 /* ══════════════ 基础 ══════════════ */
 * { box-sizing: border-box; margin: 0; }
 html { height: 100%; }
 body {
   font-family: var(--font);
   font-feature-settings: "ss01", "cv11", "tnum";
-  background: var(--surface); color: var(--text-1); height: 100vh;
+  background: var(--page); color: var(--text-1); height: 100vh;
   display: flex; flex-direction: column; overflow: hidden;
   font-size: var(--f-md); font-variant-numeric: tabular-nums;
   -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
 }
-::selection { background: rgba(0, 0, 0, .10); }
+::selection { background: var(--sel-face); }
 /* 图标只有一套笔画（docs/UI视觉规范.md §2·5）。
    SVG 的 stroke-width 是 presentation attribute，CSS 声明能盖住它，
    所以这一条就把全站 1.8 / 2 / 2.4 三种粗细归了档 —— 不必逐个改 HTML。 */
@@ -410,6 +478,12 @@ main { display: flex; flex: 1; min-height: 0; }
    修复前：选中态底线被全局 button 的圆角弯成 U 形 + 合规绿徽标太抢眼。 */
 .res-tabs-wrap { margin-top: var(--s4); }
 .res-tabs {
+  /* 结果出来后自动滚到底，页签条曾被整条推出视野（实测 top 为负），用户以为
+     产物只有一屏口播文案。吸在滚动容器上沿。
+     ⚠ 粘的对象是**条**而不是 `.res-tabs-wrap`：wrap 把页签条和产物区一起包住、
+     比视口高得多，粘在它上面等于没粘（实测 top 仍是负的）。 */
+  position: sticky; top: 0; z-index: 2;
+  background: var(--page);
   display: flex; align-items: stretch; gap: 4px;
   border-bottom: 0.5px solid var(--line); margin-bottom: var(--s4);
 }
@@ -720,7 +794,7 @@ select {
    判据由 verify.js 现算（容器圆角 === 行圆角 + 容器内边距），不写死数字。 */
 .select-menu {
   position: absolute; top: calc(100% + var(--s1)); left: 0; z-index: 80;
-  background: var(--glass-strong); border-radius: var(--r-card);
+  background: var(--surface); border-radius: var(--r-card);
   backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);
   box-shadow: var(--shadow-pop); padding: var(--s1); max-height: 264px; overflow: auto;
   animation: pop .15s var(--ease-pop);
@@ -817,7 +891,10 @@ select {
    滚动态看到的间距就是这 16px。非滚动态要读到同一个 16px，第一个分组标签
    就不能再叠加自己的 padding-top（见 .group-lbl:first-child）。 */
 .left-top { flex: 0 0 auto; padding: var(--s4) var(--s3) var(--s4);
-  display: flex; flex-direction: column; gap: var(--s4); }
+  /* gap 是「新建对话 ↔ 搜索框」的组内距（12 = --s3）；组间距（搜索框 ↔ 会话列表）
+     由 padding-bottom: 16 承担。组内 8 实测太挤（用户反馈），12 仍小于组间 16、
+     分组感还在 —— 若两段相等会读成"三块等距、没有分组"。 */
+  display: flex; flex-direction: column; gap: var(--s3); }
 /* 会话列表：从顶部开始排，多了由容器滚动。
    历史上这里用过 justify-content: flex-end（贴底）—— 那会让溢出发生在顶部，
    且不计入 scrollHeight（实测 scrollHeight == clientHeight、maxScrollTop == 0），
@@ -960,7 +1037,7 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
 .grp-menu {
   position: absolute; top: calc(100% + var(--s1)); right: var(--s1); z-index: 85;
   min-width: 168px; padding: var(--s1);
-  background: var(--glass-strong); border-radius: var(--r-card);
+  background: var(--surface); border-radius: var(--r-card);
   backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);
   box-shadow: var(--shadow-pop);
   animation: pop .15s var(--ease-pop);
@@ -1181,7 +1258,7 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
 .page-head-titles {
   flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: var(--s1);
 }
-.page-head-titles h2 { font-size: var(--f-xl); font-weight: 600; letter-spacing: -.02em; margin-bottom: 0; }
+.page-head-titles h2 { font-size: var(--f-display); font-weight: 600; letter-spacing: -.02em; margin-bottom: 0; }
 /* 操作组：与左栏底部 / page-actions 同一套间距（gap=--s2），
    padding-top 让按钮垂直基线和标题第二行 hint 顶对齐 */
 .page-head-actions {
@@ -1195,8 +1272,11 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
    改成整圈发丝边之后，那条线不再存在，`:first-of-type` / `#gen-sec-detail`
    两处"去线"补丁一并删掉 —— 不再需要按 DOM 位置猜谁该有线。 */
 .page-card {
-  padding: var(--s4);
-  display: flex; flex-direction: column; gap: var(--s4);
+  padding: var(--s6);
+  display: flex; flex-direction: column; gap: var(--s6);
+  /* 圆角必须走 --r-card（容器档 12）—— 2026-09-21 曾误用 --r-pop(16)，
+     与 kb-body / 菜单（12）同语义不同圆角，违反「同一种东西只有一种画法」；
+     弹层（dialog 16）才是 --r-pop 的归属。 */
   border-radius: var(--r-card); background: var(--surface); box-shadow: var(--e2);
 }
 .page-card .fg { display: flex; flex-direction: column; gap: var(--s4); }
@@ -1330,7 +1410,7 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
   border: 0.5px solid var(--line);
 }
 .pg-empty-ic svg { width: 28px; height: 28px; }
-.pg-empty-t { font-size: var(--f-lg); font-weight: 600; color: var(--text-1); letter-spacing: -.02em; }
+.pg-empty-t { font-size: var(--f-display); font-weight: 600; color: var(--text-1); letter-spacing: -.02em; }
 .pg-empty-d { font-size: var(--f-sm); color: var(--text-2); line-height: 1.6; max-width: 38em; }
 /* 表单：中段左对齐 + 整行 480px 宽，比居中卡片稍窄以提示"这里要打字"。
    字段间距与设置页其他卡一致（.fg 的 --s4）—— 原来是 --s3，同一层级的
@@ -1359,7 +1439,7 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
   display: flex; flex-direction: column; gap: var(--s4);
   text-align: left; padding: var(--s6) var(--s8) 0;
 }
-.pg-summary-t { font-size: var(--f-md); font-weight: 600; color: var(--text-1); }
+.pg-summary-t { font-size: var(--f-display); font-weight: 600; color: var(--text-1); }
 .pg-summary-stats { display: flex; gap: var(--s6); }
 .pg-stat { display: flex; align-items: baseline; gap: var(--s1); font-size: var(--f-sm); color: var(--text-2); }
 .pg-stat b { font-size: var(--f-md); font-weight: 600; color: var(--text-1); }
@@ -1406,7 +1486,7 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
    backdrop-filter，所以这一层挂在 <body> 下、与 <main> 平级）。 */
 .screen {
   position: fixed; inset: 0; z-index: 60;
-  display: flex; background: var(--surface);
+  display: flex; background: var(--page);
   animation: screenIn .16s var(--ease);
 }
 @keyframes screenIn { from { opacity: 0; } }
@@ -1894,9 +1974,9 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
 /* 结果头部 */
 .res-head { margin-bottom: var(--s3); }
 .res-top { display: flex; align-items: flex-start; gap: var(--s4); flex-wrap: wrap; }
-.res-title { font-size: var(--f-lg); font-weight: 600; letter-spacing: -.02em; min-width: 0; margin-right: auto; }
+.res-title { font-size: var(--f-display); font-weight: 600; letter-spacing: -.02em; min-width: 0; margin-right: auto; }
 .res-tools { display: flex; gap: var(--s2); flex-wrap: wrap; }
-.res-tools button { height: var(--h-sm); font-size: var(--f-xs); padding: 0 var(--s2); }
+.res-tools button { height: var(--h-sm); font-size: var(--f-sm); padding: 0 var(--s2); }
 .res-metric-list { display: flex; gap: var(--s2); flex-wrap: wrap; margin-top: var(--s3); }
 .res-banners { margin-bottom: var(--s2); }
 
@@ -2056,8 +2136,8 @@ td.bad { color: var(--bad); font-weight: 500; }
    三手法叠加（渐变 + 阴影 + 圆角）且把「实心深色」这一档用在了非主 CTA 上（§3）。
    首页的主角是输入卡，标识退成一根安静的墨线字形。 */
 .empty-mark { display: block; color: var(--text-2); }
-.empty-mark svg { width: 32px; height: 32px; }
-.empty h3 { margin: 0; color: var(--text-1); font-size: var(--f-xl); font-weight: 600; letter-spacing: -.02em; }
+.empty-mark svg { width: 40px; height: 40px; }
+.empty h3 { margin: 0; color: var(--text-1); font-size: var(--f-hero); font-weight: 600; letter-spacing: -.02em; }
 
 /* 起手示例：合成器下方的一行胶囊。
    改前是 hero 里的 2×2 白卡（标签 + 标题 + 说明三行），hover 同时改底色、加描边、
@@ -2149,6 +2229,14 @@ td.bad { color: var(--bad); font-weight: 500; }
   box-shadow: none;
 }
 .quick-bar .qp-more:hover { background: var(--fill); color: var(--text-1); box-shadow: none; }
+/* 焦点环被特异性压掉的一类通病：下面这三条规则各自的 `box-shadow` 写法
+   （胶囊 (0,2,1)、齿轮 (0,2,1)、发送键 (1,1,0)）都高于全局
+   `button:focus-visible`（(0,1,1)），于是键盘 Tab 到这一排时**看不见焦点**
+   —— 实测 computed boxShadow 仍是 none。同排的 .sample-card 反而是有的。
+   按同一个 token 显式补回来，不改任何底色与形状。 */
+.select-wrap.pill .select-btn:focus-visible,
+.quick-bar .qp-more:focus-visible,
+#btn-generate.send:focus-visible { outline: none; box-shadow: var(--shadow-focus); }
 /* 模型与参数胶囊**只差颜色**：尺寸（高 28 / 字号 13 / 字重 500 / 内边距 8 / 圆角 8）
    全部由上面那条 .select-wrap.pill 给，这一排六个控件逐项相等（规范 §2·5.6
    「同层级同呼吸：并排的两个控件不得出现 1px 的底边差」）。
@@ -2230,7 +2318,7 @@ td.bad { color: var(--bad); font-weight: 500; }
   animation: fadeIn .18s var(--ease);
 }
 .dialog {
-  background: var(--surface); border-radius: var(--r-xl); padding: var(--s6);
+  background: var(--surface); border-radius: var(--r-xl); padding: var(--s8);
   width: 470px; max-height: 86vh; overflow-y: auto;
   box-shadow: var(--shadow-pop);
   animation: pop .24s var(--ease-pop);
@@ -2251,7 +2339,6 @@ pre#pg-checklist {
 .toast {
   position: fixed; bottom: 32px; left: 50%; transform: translateX(-50%);
   background: var(--toast-bg);
-  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
   color: var(--text-inv); padding: var(--s2) var(--s4); border-radius: var(--r-pill);
   font-size: var(--f-sm); z-index: 99; box-shadow: var(--shadow-pop);
   animation: toastUp .24s var(--ease-pop);
