@@ -132,6 +132,10 @@ node _verify/e2e-live.js              # 真实端到端（真引擎 + 真页面 
 ```bash
 cd desktop && npm run dist
 # 产物在 desktop/dist/：TalkScript Setup 0.2.0.exe（NSIS 安装包）+ TalkScript 0.2.0.exe（portable）
+# 打完必须认证一遍（逐项比包内引擎与当前源码，缺一步都算没过）：
+cd desktop && npm run verify:package
+# 它查五样：app/ 逐文件一致、renderer/ 逐文件一致、packs/ 逐文件一致（private/ 按设计不出厂）、
+# 包内不许出现 private 文件、两个 exe 的时间戳不许早于最新源码改动（防"改了没重打"）。
 ```
 
 打包包含引擎代码、行业包与渲染层。**不含任何配置**（连模板都不带）——用户自己配置：

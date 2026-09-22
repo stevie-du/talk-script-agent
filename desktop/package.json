@@ -10,7 +10,8 @@
     "start": "electron .",
     "start:no-sandbox": "electron . --no-sandbox",
     "build:python": "node scripts/build-python-runtime.mjs",
-    "dist": "electron-builder --win"
+    "dist": "electron-builder --win",
+    "verify:package": "node scripts/verify-package.mjs"
   },
   "devDependencies": {
     "electron": "^33.2.0",
