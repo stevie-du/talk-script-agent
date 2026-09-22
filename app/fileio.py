@@ -69,6 +69,28 @@ def yaml_error_brief(e: Exception) -> str:
     return "，".join(parts)
 
 
+class YamlError(str):
+    """`read_yaml_file` 的错误说明：**就是一个字符串**（照旧拼进 `pack_error`、照旧下发给
+    界面），额外带一个 `retryable` —— 「重读一次有没有可能变好」。
+
+    为什么要这个标记：`read_yaml_cached` 把错误连同 `(mtime, size)` 一起缓存，
+    而**读失败时文件的 mtime/size 根本没变** —— 于是 Windows 上一次瞬时占用
+    （杀毒软件/搜索索引按住刚落盘的 `pack.yaml`）会被钉进进程级缓存，
+    解除占用后照样读不出来：这个包在设置页一直标红、生成一直 409，直到重启应用。
+    实测（第 22 轮，`msvcrt.locking` 造真实占用）：解除后 `Pack()` 仍然抛
+    `PackBrokenError: pack.yaml 读取失败（[Errno 13] Permission denied）`。
+
+    用 `str` 子类而不是改成三元组：调用点全在判真假和插值，改成元组要动所有读 YAML 的路径。
+    """
+
+    retryable: bool = False
+
+    def __new__(cls, text: str, *, retryable: bool = False) -> "YamlError":
+        obj = super().__new__(cls, text)
+        obj.retryable = retryable
+        return obj
+
+
 def read_yaml_file(p: Path) -> tuple[dict, str]:
     """读一个 YAML 文件，返回 `(数据, 错误说明)`；错误说明为空串表示读成功。
 
@@ -79,7 +101,7 @@ def read_yaml_file(p: Path) -> tuple[dict, str]:
     而后者正是「合规校验静默全过」的来源。
 
     只读不缓存 —— 缓存策略由调用方决定（`knowledge.read_yaml_cached`
-    按 mtime/size 缓存，并且**连错误一起缓存**，避免每次调用都刷一条 WARNING）。
+    按 mtime/size 缓存；**但 `retryable` 的那类不缓存**，见 `YamlError`）。
     """
     if not p.exists():
         return {}, ""
@@ -88,14 +110,16 @@ def read_yaml_file(p: Path) -> tuple[dict, str]:
         with open(p, encoding="utf-8") as f:
             data = yaml.safe_load(f)
     except yaml.YAMLError as e:
-        return {}, f"{p.name} 语法有误（{yaml_error_brief(e)}）"
+        return {}, YamlError(f"{p.name} 语法有误（{yaml_error_brief(e)}）")
     except OSError as e:
-        return {}, f"{p.name} 读取失败（{e}）"
+        # 读不出字节 ≠ 文件坏：这类结论下次重读可能就不成立了，所以标成可重试，
+        # 让 `read_yaml_cached` 把它留在缓存外面（理由见 `YamlError`）。
+        return {}, YamlError(f"{p.name} 读取失败（{e}）", retryable=True)
     if data is None:
         return {}, ""
     if not isinstance(data, dict):
         # 文件能解析但顶层不是映射（例如整份被写成了一个字符串）
-        return {}, f"{p.name} 顶层应为键值映射，实际是 {type(data).__name__}"
+        return {}, YamlError(f"{p.name} 顶层应为键值映射，实际是 {type(data).__name__}")
     return data, ""
 
 # replace 失败后的重试次数与间隔。Windows 上刚落盘的文件会被杀毒软件 /

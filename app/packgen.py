@@ -22,6 +22,7 @@ import os
 import re
 import shutil
 import threading
+import time
 from pathlib import Path
 
 import yaml
@@ -63,6 +64,12 @@ def _new_token() -> str:
     return f"c{_claim_seq}"
 
 log = logging.getLogger(__name__)
+
+# 判定"这个包加载不出来"之前先重读几次的等待（秒）。
+# 存在的理由不是模型，而是操作系统：Windows 上刚落盘的 YAML 会被杀毒软件/搜索索引
+# 短暂占用（`fileio` 为 replace 做的重试就是为同一件事），此刻读它拿到的是
+# PermissionError —— 不加这圈就会把用户付过钱的整包当成坏包删掉。
+_RELOAD_WAITS = (0.25, 1.0)
 
 # 建包时从模板包**原样复制**的文件（不走模型）。
 # 这些文件在新包里会被**每轮注入**（$hooks / $growth / $voice_block），
@@ -482,9 +489,11 @@ def _pack_audit(root: Path, slug: str) -> list[str]:
 
     返回空列表 = 体检通过。模型输出的包常有「segment 与 topics 章节标题对不上」
     「风格没配语速」「平台没配词表」这类静默降级 —— param_audit 把它们逐项列出；
-    而**结构坏到 `Pack()` 都过不去**时不在这里兜：直接抛，让作业失败、半成品被回收
+    而**结构坏到 `Pack()` 反复都过不去**时不在这里兜：直接抛，让作业失败、半成品被回收
     （第 21 轮复核 P1-1：以前这里吞掉异常只留一句说明，于是作业报 done、盘上是一个
     谁也打不开的包，清单还写着"这不是包结构错误"）。
+    ⚠ 判"坏"之前先按 `_RELOAD_WAITS` 重读（第 22 轮）：读不出文件与文件本身坏
+    在异常类型上分不开，只在"等一会儿再读一遍"上分得开。
 
     ⚠ "捕捉后给一句说明"必须覆盖**整个体检**，不是只盖住 `Pack(...)` 那一行
     （第 20 轮复核 P2）：体检后半段的 `pk.skill()` / `file_text` / `file_slice` /
@@ -501,15 +510,40 @@ def _pack_audit(root: Path, slug: str) -> list[str]:
     notes: list[str] = []
     try:
         pk = Pack(root, slug)
-    except Exception as e:                       # noqa: BLE001
-        # 加载都过不去 ≠ "体检某一步没跑完"。以前这里吞掉异常、只留一句说明，
-        # 于是**作业报 done、盘上是一个谁也打不开的包、清单还叫用户去核对参数**
-        #（第 21 轮复核实测：skill.yaml 语法坏时清单写着「这不是包结构错误」）。
-        # 现在如实失败：钱已经花了这点改不了，但半成品目录由 `created_here` 那圈
-        # 回收走，下次同名提交不会被 409 永久挡住，用户看到的是"生成失败 + 原因"。
-        raise ValueError(
-            f"模型生成的行业包连加载都过不去：{type(e).__name__}: {e}"
-            " —— 本次目录已回收，请补充或换个更具体的业务描述再试一次") from None
+    except Exception as first:                   # noqa: BLE001
+        # **"读不出来"不等于"包是坏的"**，所以在判定回收之前先重读几次（第 22 轮）。
+        # 真实形态（`msvcrt.locking` 造占用实测）：刚落盘的 `pack.yaml` 被杀毒软件/
+        # 搜索索引按住 → `read_yaml_file` 拿到 PermissionError → `pack_info.pack_error`
+        # → `Pack()` 抛 `PackBrokenError`。原形状在这里直接判死：一次瞬时占用就把
+        # 用户付了一份模型钱的整包删掉，还会叫用户"换个更具体的业务描述"。
+        #
+        # ⚠ 这里**故意不按异常类别分流**：上一轮的复核建议是"收窄成
+        # `except (PackError, PackBrokenError)`，其余落回下面那条说明分支"。实测各种
+        # 坏法（语法坏、顶层不是映射、version 不是整数、options 重复、词表坏、
+        # skill 坏…）**全部**以 PackError 家族出来，瞬时 IO 故障也一样 ——
+        # 收窄那条臂永远走不到，是一次安慰剂修复。真正的分界在"能不能重读出来"。
+        pk = None
+        for wait in _RELOAD_WAITS:
+            time.sleep(wait)
+            try:
+                pk = Pack(root, slug)
+                break
+            except Exception:                    # noqa: BLE001  还是不行，等下一次
+                continue
+        if pk is None:
+            # 加载都过不去 ≠ "体检某一步没跑完"。以前这里吞掉异常、只留一句说明，
+            # 于是**作业报 done、盘上是一个谁也打不开的包、清单还叫用户去核对参数**
+            #（第 21 轮复核实测：skill.yaml 语法坏时清单写着「这不是包结构错误」）。
+            # 现在如实失败：钱已经花了这点改不了，但半成品目录由 `created_here` 那圈
+            # 回收走，下次同名提交不会被 409 永久挡住，用户看到的是"生成失败 + 原因"。
+            raise ValueError(
+                f"模型生成的行业包连加载都过不去：{type(first).__name__}: {first}"
+                f" —— 隔 {sum(_RELOAD_WAITS):g} 秒重读 {len(_RELOAD_WAITS)} 次还是过不去，"
+                "本次目录已回收（同名重建不会被挡住）。请重新生成一次；"
+                "如果每次都卡在同一句，原因里点名的那个文件就是问题所在") from None
+        notes.append(f"首次加载这个包时读不出文件（{type(first).__name__}: {first}）"
+                     "—— 稍后重读已通过，多半是杀毒软件或搜索索引短暂占用；"
+                     "如果设置页把这个包标成坏了，等几秒刷新一次再看")
     try:
         skill = pk.skill() or {}
         for stage, cfg in (skill.get("stages", {}) or {}).items():

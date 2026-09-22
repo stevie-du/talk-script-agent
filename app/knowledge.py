@@ -105,8 +105,13 @@ def read_yaml_cached(path: Path) -> tuple[dict, str]:
     data, err = read_yaml_file(path)
     if err:
         log.warning("YAML 读取失败：%s —— %s", path, err)
-    with _cache_lock:
-        _yaml_cache[key] = (st.st_mtime, st.st_size, data, err)
+    if not getattr(err, "retryable", False):
+        # 只缓存"重读也不会变好"的那类（内容/语法坏，以及成功读取）。
+        # 读不出字节（瞬时占用）如果也缓存，就把一个瞬时故障钉成永久：缓存键是
+        # (mtime, size)，而读失败时这两个都没变 —— 下次命中缓存返回的还是那条错误，
+        # 解除占用也救不回来，只能重启应用。实测见 `fileio.YamlError`。
+        with _cache_lock:
+            _yaml_cache[key] = (st.st_mtime, st.st_size, data, err)
     return data, err
 
 
