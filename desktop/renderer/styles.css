@@ -1463,7 +1463,6 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
   transition: transform var(--dur) var(--ease);
 }
 .pg-more[open] > summary::before { transform: rotate(90deg); }
-.pg-more pre { margin-top: var(--s2); }
 /* 生成中说明：复用 .hint 的字色字号，只让它与按钮组隔开一格 */
 .pg-working { margin-top: var(--s2); }
 /* 区块标题：比字段标签大一号、用正文色，明确"这是新章节"而非另一个字段名 */
@@ -2193,7 +2192,10 @@ td.warn { color: var(--warn); font-weight: 500; }
      白底上放白卡、描边又太弱，读出来是「一个框」而不是「一张卡」。
      所以这里守的是「描边够深」，不是「面色跟页面不一样」。 */
   background: var(--surface);
-  border-radius: var(--r-xl);
+  /* 卡片圆角走 --r-card（12）：合成器输入卡是**卡片**不是弹层。
+     曾误用 --r-xl（= --r-pop 16），是 UI视觉规范.md 点过名的同一错误
+     （「卡片圆角曾误用 16，已按档位拉回 12：容器/卡片 = 12，弹层 = 16」）。 */
+  border-radius: var(--r-card);
   box-shadow: 0 0 0 1px var(--line-strong);
   transition: box-shadow var(--dur) var(--ease);
 }

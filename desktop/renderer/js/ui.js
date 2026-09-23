@@ -304,7 +304,7 @@ function renderQuickParams() {
   more.type = "button";
   more.title = "更多参数与设置（风格 / 人设 / 结尾引导 / 输出内容 / 补充资料）";
   more.setAttribute("aria-label", "更多参数与设置");
-  more.innerHTML = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none"
+  more.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none"
     stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
     aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/>
     <circle cx="18" cy="18" r="2.2"/><circle cx="12" cy="6" r="2.2"/>
@@ -332,7 +332,7 @@ export function beautifySelects(scope = document) {
     btn.type = "button";
     btn.setAttribute("aria-haspopup", "listbox");
     btn.innerHTML = `<span class="sel-text"></span>
-      <svg class="chev" viewBox="0 0 12 8" width="11" height="8" fill="none" stroke="currentColor"
+      <svg class="chev" viewBox="0 0 12 8" width="12" height="8" fill="none" stroke="currentColor"
            stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M1 1.5L6 6.5L11 1.5"/></svg>`;
     const menu = el("div", "select-menu hidden");
