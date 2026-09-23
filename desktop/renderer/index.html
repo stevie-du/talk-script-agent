@@ -360,6 +360,14 @@
               <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 15.5-6.3L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.5 6.3L3 16"/><path d="M3 21v-5h5"/></svg>
               刷新
             </button>
+            <!-- 导入第三方技能包（2026-09-23，方案 docs/技能包系统方案.md）。
+                 zip 走 /api/packs/import（四道安全校验在服务端）；file input
+                 藏起来由它触发 —— 原生文件选择器没法用按钮直接开。 -->
+            <button class="ghost bordered" id="pi-import" title="导入第三方技能包（zip 文件）">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V3"/><path d="M7 8l5-5 5 5"/><path d="M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/></svg>
+              导入
+            </button>
+            <input type="file" id="pi-import-file" accept=".zip" class="hidden" />
             <button class="primary slim" id="pi-newpack" title="新建一个行业包（模型生成初稿，需人工校对）">
               <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
               新建
@@ -407,7 +415,13 @@
               </div>
             </div>
             <div class="page-actions">
+              <!-- 导入包的来源（2026-09-23，方案 §6）：作者/许可证原样展示。
+                   ⚠ 只是展示，不是我们的裁决 —— MIT-NC 就显示 MIT-NC，
+                   让用户自己看见他装的是什么（方案 §9 红线 4）。 -->
+              <span class="hint hidden" id="pi-import-src"></span>
               <button class="ghost hidden" id="pi-undraft" title="人工校对完成后，去掉草稿标记">标记为已校对</button>
+              <!-- 卸载：只对导入的包显示（内置播种包服务端也会拒，双保险） -->
+              <button class="ghost danger hidden" id="pi-remove" title="卸载这个导入的技能包">卸载</button>
             </div>
           </div>
         </div>

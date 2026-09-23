@@ -27,6 +27,7 @@ const { probeSource } = require("./lib/overflow");
 const SECTIONS = {
   topics: require("./sections/topics"),
   contrast: require("./sections/contrast"),
+  packimport: require("./sections/packimport"),
 };
 const ONLY = (process.argv[2] || "").trim();
 
@@ -157,6 +158,12 @@ const META = {
       ] },
     { name: "fitment", display_name: "全屋定制包", draft: true,
       params: { segment: { label: "细分领域", default: "全屋定制", options: ["全屋定制"] } } },
+    // 导入的技能包（2026-09-23，方案 §6）：**必须有一个导入包的活样本** ——
+    // 没有它，「来源徽标 / 右列来源行 / 卸载按钮可见性」这几条断言会在
+    // "全部内置"的桩上永远绿（空转）。imported 三个字段与 PackInfo 对齐。
+    { name: "imported-pack", display_name: "社区导入包", draft: false, imported: true,
+      import_author: "社区作者", import_license: "MIT",
+      params: { segment: { label: "细分领域", default: "维保", options: ["维保"] } } },
   ],
 };
 
@@ -1395,12 +1402,45 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   };`);
   check("桩已注入且页面脚本为模块化加载", boot.injected && boot.ts, JSON.stringify(boot));
   check("无 JS 运行错误", errs.length === 0, errs.join(" | "));
-  check("meta 载入且行业包下拉已填充", boot.meta && boot.packs === 2, `packs=${boot.packs}`);
+  check("meta 载入且行业包下拉已填充", boot.meta && boot.packs === 3, `packs=${boot.packs}`);
   check("工具条渲染出参数胶囊", boot.quickPills >= 3, `pills=${boot.quickPills}`);
   check("空状态示例卡渲染", boot.samples === 4, `samples=${boot.samples}`);
   check("会话列表渲染 6 条并分组", boot.sessions === 6 && boot.groups >= 4,
     `rows=${boot.sessions} groups=${boot.groups}`);
   check("请求带上了访问令牌", await evalIn("return window.__sawToken === true;"), "");
+
+  // ── 1a-2) 搜索无结果提示：XSS 探针 ─────────────────────────
+  // el() 的第三参数走 innerHTML，所以任何拼进 el() 的用户输入都必须 esc。
+  // 五路审查（2026-09-23 P0-2）抓到三处漏 esc，这里是「搜索词」那一条的哨兵：
+  // 往真实搜索框粘一段 payload，判据盯**DOM 里出了什么**——
+  //   · 正确实现：提示是一个纯文本 <p>，payload 只是文本，img 永远不会被创建；
+  //   · 漏 esc：payload 被 innerHTML 解析，<img> 真的进 DOM 并触发 onerror。
+  // 注意 CSP 只拦网络请求、不拦事件，所以 onerror 照样能跑 —— 必须靠 esc 兜。
+  const xss = await evalIn(`return (function(){
+    var box = document.getElementById('sess-search');
+    if (!box) return { noBox: true };
+    window.__xssFired = 0;
+    window.addEventListener('error', function(){ window.__xssFired++; }, true);
+    var payload = '<img src=x onerror="window.__xssFired++">';
+    box.value = payload;
+    box.dispatchEvent(new Event('input', { bubbles: true }));
+    var hint = document.querySelector('#session-list .sess-empty');
+    return {
+      hintShown: !!hint,
+      hintHTML: hint ? hint.innerHTML.slice(0, 120) : '',
+      hintText: hint ? hint.textContent.trim() : '',
+      // 判据不是"文本里有没有 <img"（esc 后文本里照样有这 4 个字符），
+      // 而是**DOM 里有没有真的元素**：漏 esc 时这里会是 1。
+      injectedTags: hint ? hint.querySelectorAll('img,script,svg,iframe').length : -1,
+      fired: window.__xssFired,
+    }; })()`);
+  check("搜索无结果提示不含注入元素（用户输入走 esc，el() 是 innerHTML）",
+    xss.hintShown && xss.injectedTags === 0 && xss.fired === 0
+      && xss.hintText.indexOf("<img") >= 0,
+    JSON.stringify(xss));
+  // 复原：把搜索清掉，否则后面断言看到的是空列表
+  await evalIn(`var b = document.getElementById('sess-search');
+    b.value = ''; b.dispatchEvent(new Event('input', { bubbles: true })); return true;`);
 
   // ── 1b) 首页（landing）：合成器就是 hero ──────────────────
   // 2026-09-20 参考 ZCode 重排。改前 hero 是五个居中块（深色图标砖 / 标题 / 副标题 /
@@ -3027,11 +3067,15 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     bottomActions: [].slice.call(
       document.querySelectorAll('#pane-packinfo .pane-detail > .page-actions button')
     ).map(function(b){ return b.id || b.textContent.trim(); }) };`);
-  check("包详情底部只剩「标记为已校对」（导出 / 返回 已移除，不残留隐藏 DOM）",
+  // 2026-09-23：底部多了一个「卸载」（pi-remove，导入包的卸载钮，默认 hidden
+  // 由 JS 按“这个包是不是导入的”显隐）。语义从“只剩一个”改成“只剩这两个” ——
+  // 导出 / 返回仍然不许残留，新增的卸载是方案 §6 的正式成员。
+  check("包详情底部只剩「标记为已校对」与「卸载」（导出 / 返回 已移除，不残留隐藏 DOM）",
     !piActions.exportBtn && !piActions.exportHint && !piActions.closeBtn
       && piActions.undraftBtn
-      && piActions.bottomActions.length === 1
-      && piActions.bottomActions[0] === 'pi-undraft',
+      && piActions.bottomActions.length === 2
+      && piActions.bottomActions.indexOf('pi-undraft') >= 0
+      && piActions.bottomActions.indexOf('pi-remove') >= 0,
     JSON.stringify(piActions));
 
   // 三个设置面板的 page-head 结构必须一致（2026-09-17）：
@@ -3500,9 +3544,16 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     window.__ts.setPane('gen');
     return out;
   })()`);
-  check("两个列表型面板的 headbar 同构（刷新 ghost + 主操作 primary）",
+  // 同构语义 = 「若干 ghost 次级操作 + 恰好一个 primary 主操作收尾」。
+  // 2026-09-23：packinfo 多了「导入」（ghost），n 不再写死 2 —— 写死就会
+  // 每加一个次级按钮红一次，而红的是“按钮个数”不是“结构坏了”。
+  // 真正的判据是：主操作唯一且是 primary，其余全是 ghost。
+  check("两个列表型面板的 headbar 同构（ghost 次级操作们 + 唯一 primary 主操作）",
     ['packinfo','llm'].every(p => headbar[p]
-      && headbar[p].n === 2 && headbar[p].kinds.join() === 'ghost,primary'),
+      && headbar[p].kinds.length >= 2
+      && headbar[p].kinds[headbar[p].kinds.length - 1] === 'primary'
+      && headbar[p].kinds.slice(0, -1).every(k => k === 'ghost')
+      && headbar[p].kinds.filter(k => k === 'primary').length === 1),
     JSON.stringify(headbar));
 
   // 2026-09-17（用户报「按钮大小，文字大小等等」不统一）：
@@ -4983,7 +5034,7 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     pack: document.getElementById('pack').value,
     options: document.getElementById('pack').options.length };`);
   check("保存设置后仍保持选中的行业包（不再跳回默认包）",
-    kept.pack === "fitment" && kept.options === 2, JSON.stringify(kept));
+    kept.pack === "fitment" && kept.options === 3, JSON.stringify(kept));
 
   // ── 12c) 未配置模型时的入口 ──────────────────────────────
   // 2026-09-20：空态 hero 的「配置引导」那一态整块下线（用户原话「太难看，直接
@@ -6302,7 +6353,7 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       && pgFileGate.noPackPriv === 404 && pgFileGate.priv === 403
       && pgFileGate.noRel === 404 && pgFileGate.badName === 400
       && pgFileGate.badNameDet === 400 && pgFileGate.unkDet === 404
-      && pgFileGate.listed === 2,
+      && pgFileGate.listed === 3,          // 2026-09-23：桩加了 imported-pack 活样本（3 个包）
     JSON.stringify(pgFileGate));
   check("桩：未知作业按路由发各自的 404 原文，终态快照带齐引擎那 9 个键",
     pgFileGate.getCode === '404:作业不存在或已随重启释放'

@@ -821,6 +821,14 @@ export const bindSettings = bindOnce(function bindSettings() {
     renderPackList();
     openPackInfo().catch(e => toast("刷新失败：" + e.message, 3500));
   };
+  // ── 技能包导入 / 卸载（2026-09-23，方案 docs/技能包系统方案.md §4/§6）──
+  // 原生文件选择器只能由 <input type=file> 打开，按钮负责点它。
+  $("pi-import").onclick = () => $("pi-import-file").click();
+  $("pi-import-file").onchange = (e) => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = "";               // 清掉，否则同一个文件第二次选不触发 change
+    if (f) importPackFile(f);
+  };
   // 生成中这一枚就是「取消生成」（P1-43）：取消检查点在模型返回之后、写盘之前，
   // 所以通常不会留下目录。**边界**：取消来得太晚（写盘已完成）时包会完整落盘、
   // 作业状态记 cancelled（见 pipeline 的 _run_packgen 二次检查）—— 那时它就在 packs/ 里，
@@ -1035,7 +1043,9 @@ function renderPackGroups(name, p, container) {
       icon.innerHTML = ROLE_ICON[key] || ROLE_ICON.package;
       row.appendChild(icon);
       const meta = el("div", "kb-meta");
-      meta.appendChild(el("span", "kb-name", f.rel));
+      // ⚠ f.rel 是磁盘原样路径（可来自导入的 zip）：el() 第三参数是 innerHTML，
+      //   不 esc 就是 XSS（五路审查 P0-2）。
+      meta.appendChild(el("span", "kb-name", esc(f.rel)));
       row.appendChild(meta);
       const sizeTxt = f.size > 1024
         ? (f.size / 1024).toFixed(1) + " KB"
@@ -1273,6 +1283,49 @@ async function onPackDone() {
  *  桩原来无论请求哪个包都翻 elevator 的草稿位，这条一直绿着）。 */
 let piName = "";
 
+// ── 技能包导入 / 卸载（2026-09-23，方案 docs/技能包系统方案.md §4/§6）────
+
+/** 导入一个 zip。服务端的四道校验（白名单/逃逸/manifest/同名冲突）失败时
+ *  detail 就是人话，原样 toast 出来 —— 不自己翻译（翻译即失真）。 */
+async function importPackFile(file) {
+  if (!/\.zip$/i.test(file.name)) {
+    toast("请选择 .zip 文件", 3500);
+    return;
+  }
+  try {
+    const r = await api.importPack(file);
+    // 导入成功也要说清**装进来了什么**：名字/版本/作者/许可证/是否覆盖。
+    // 尤其是 license —— 用户有权在装完之后看见它（方案 §9 红线 4）。
+    const bits = [`已导入「${r.name}」v${r.version}`];
+    if (r.author) bits.push(`作者 ${r.author}`);
+    if (r.license) bits.push(`许可证 ${r.license}`);
+    if (r.has_private) bits.push("含私有内容（private/）");
+    if (r.replaced) bits.push("已覆盖同名包");
+    toast(bits.join(" · "), 5000);
+    state.meta = await api.meta();
+    emit("meta", state.meta);
+    renderPackList();
+    await openPackInfo(r.name);       // 直接打开新导入的这个包，不用用户再点
+  } catch (e) { toast("导入失败：" + e.message, 6000); }
+}
+
+/** 卸载导入的包。内置播种包服务端会拒（400）—— 照实显示那句人话，
+ *  不在前端预先判断（前端没有 .imported.json 的权威信息，猜就是静默降级）。 */
+async function removeImportedPack(name) {
+  const ok = await appConfirm("卸载技能包",
+    `确认卸载「${name}」？它的文件会从 ${state.meta && state.meta.packs_dir || "行业包目录"} 删除。\n`
+    + "内置行业包不能卸载（删了下一次启动会被重新放回来）。");
+  if (!ok) return;
+  try {
+    await api.removePack(name);
+    toast("已卸载");
+    state.meta = await api.meta();
+    emit("meta", state.meta);
+    renderPackList();
+    openPackInfo().catch(() => {});
+  } catch (e) { toast("卸载失败：" + e.message, 3500); }
+}
+
 async function undraftPack() {
   const name = piName || $("pack").value;
   const ok = await appConfirm("标记为已校对",
@@ -1347,8 +1400,18 @@ function packItem(p) {
 
   const txt = el("span", "pl-txt");
   txt.appendChild(el("span", "pl-t", esc(p.display_name || p.name)));
-  txt.appendChild(el("span", "pl-s",
-    esc(p.draft ? "草稿 · 待校对" : "已校对")));
+  // 副标题 = 状态 + **来源**（2026-09-23 技能包导入，方案 §6）。
+  // 导入的包必须让用户始终看得见"这是别人做的、许可证是什么" ——
+  // 平台中立的前提是不隐藏（方案 §9 红线 4：license 展示但不裁决）。
+  const sub = p.draft ? "草稿 · 待校对" : "已校对";
+  if (p.imported) {
+    const bits = ["导入"];
+    if (p.import_author) bits.push(esc(p.import_author));
+    if (p.import_license) bits.push(esc(p.import_license));
+    txt.appendChild(el("span", "pl-s imported", `${sub} · ${bits.join(" · ")}`));
+  } else {
+    txt.appendChild(el("span", "pl-s", sub));
+  }
   // ⚠ 2026-09-17：去掉 description 行。中列窄（258px），再加一行字就两行，
   // 看起来像「右侧空 / 左侧堆字」。description 已在右列 headbar 显示，
   // 这里不再重复。
@@ -1378,6 +1441,24 @@ async function openPackInfo(name) {
   $("pi-desc").textContent = (p.description || "")
     + (p.draft ? "（草稿包：内容需人工校对后投产）" : "");
   $("pi-undraft").classList.toggle("hidden", !p.draft);
+  // 导入包的来源行 + 卸载按钮（2026-09-23）。p 来自 /api/packs/{name}——
+  // 注意它**不带** imported 字段（那个在 /api/meta 的列表项上），所以从
+  // meta 列表里取当前包的条目补上；取不到就不显示（内置包）。
+  const metaItem = ((state.meta && state.meta.packs) || []).find(x => x.name === name);
+  const src = $("pi-import-src");
+  const rm = $("pi-remove");
+  if (metaItem && metaItem.imported) {
+    const bits = ["第三方导入"];
+    if (metaItem.import_author) bits.push(`作者 ${metaItem.import_author}`);
+    if (metaItem.import_license) bits.push(`许可证 ${metaItem.import_license}`);
+    src.textContent = bits.join(" · ");
+    src.classList.remove("hidden");
+    rm.classList.remove("hidden");
+    rm.onclick = () => removeImportedPack(name);
+  } else {
+    src.classList.add("hidden");
+    rm.classList.add("hidden");
+  }
   const cw = $("pi-checklist-wrap");
   if (p.checklist) {
     cw.classList.remove("hidden");

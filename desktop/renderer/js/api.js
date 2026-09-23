@@ -50,13 +50,20 @@ export function modelSetupGap(meta) {
  *  设置页修不了它，跳过去只会把用户引到更没用的地方。 */
 export const MODEL_SETUP_REPLY = /设置\s*→\s*模型接口|模型接口」里/;
 
-async function request(path, { method = "GET", body, timeout = 0 } = {}) {
+async function request(path, { method = "GET", body, form, timeout = 0 } = {}) {
   const opts = {
     method,
     headers: { "Content-Type": "application/json" },
   };
   if (TOKEN) opts.headers["X-TalkScript-Token"] = TOKEN;
   if (body !== undefined) opts.body = JSON.stringify(body);
+  if (form !== undefined) {
+    // 文件上传（/api/packs/import）：FormData 自带 multipart boundary，
+    // **不能**手设 Content-Type —— 设了就把 boundary 抹掉，服务端解析失败。
+    // 所以这里连 JSON 的那个头一起删掉，让浏览器按 FormData 自己写。
+    opts.body = form;
+    delete opts.headers["Content-Type"];
+  }
   if (timeout) {
     const ac = new AbortController();
     opts.signal = ac.signal;
@@ -113,6 +120,16 @@ export const api = {
       { method: "POST", body: { index, feedback: feedback || null } }),
 
   pack: (name) => request(`/api/packs/${encodeURIComponent(name)}`),
+  // 技能包导入（方案 docs/技能包系统方案.md）：收 zip 文件。失败时服务端的
+  // detail 是一句人话（zip 坏 / 类型不符 / 你改过的包…），ApiError 原样带给界面。
+  importPack: (file) => {
+    const fd = new FormData();
+    fd.append("file", file, file.name);
+    return request("/api/packs/import", { method: "POST", form: fd, timeout: 30000 });
+  },
+  // 卸载**导入的**包。内置播种包服务端会拒（400 + 人话），界面照实显示。
+  removePack: (name) =>
+    request(`/api/packs/${encodeURIComponent(name)}`, { method: "DELETE" }),
   // 建包 = 后台作业（P1-43）：返回 {job_id}，进度与结果用 job(id) 轮询取。
   createPack: (industry, description) =>
     request("/api/packs/create", { method: "POST", body: { industry, description } }),

@@ -1729,6 +1729,14 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
   font-size: var(--f-2xs); color: var(--text-2); line-height: 1.35;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+/* 导入包的来源徽标（2026-09-23，方案 §6）：副标题里"导入 · 作者 · license"
+   那一段用主题色区分 —— 让用户一眼看出"这个包不是出厂带的"。
+   不用新颜色：--accent 是界面既有的强调色，徽标只是既有色的一次复用。 */
+.pl-item .pl-s.imported { color: var(--accent); }
+/* 卸载按钮（ghost.danger）：删除类动作用警示色。primary.danger 早已有，
+   这是 ghost 变体 —— 行业包面板的 page-actions 里都是 ghost，统一语汇。 */
+button.ghost.danger { color: var(--bad); }
+button.ghost.danger:hover { background: var(--bad-soft); color: var(--bad); }
 /* 这里原本有一条「坏包条目转警示红」（.pl-item.bad 的 .pl-t / .pl-s / .pl-ic）。
    已删除：`renderPackGroups()` 对坏包的处理是**在下拉选项上标「（损坏）」+
    在右栏顶部亮一条 warn 横幅**，不给列表条目加 `.bad` 类 ——
