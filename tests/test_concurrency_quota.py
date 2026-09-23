@@ -161,8 +161,15 @@ def test_every_live_state_occupies_quota():
     assert live == set(TRANSITIONS) - TERMINAL_STATES, (
         "状态机加了新状态，请同步判断它占不占额度 —— 默认应当占")
     assert set(ALL_BUSY_STATES) == set(BUSY_STATES) | set(INTEL_BUSY_STATES)
-    assert not (set(BUSY_STATES) & set(INTEL_BUSY_STATES)), \
-        "两族额度不许重叠 —— 重叠的作业会被两条闸各数一次，额度凭空翻倍"
+    # ⚠ 口径变更（P0-4，2026-09-23）：这条原来断言"两族 states 不许重叠"，
+    # 但 queued 是 generate/packgen/intel **共同的起始态**，两族必然重叠 ——
+    # 硬要不重叠就只能把 queued 从情报族剔掉，而那正是额度窗口的病灶
+    # （作业以 queued 插入、transition 在 worker 线程，N 个并发 refresh
+    # 可以同时过检）。防双算改由 **kind 分族** 保证：add_if_room /
+    # running_count 只数同族作业，一个作业只可能属于一族。
+    assert set(BUSY_STATES) & set(INTEL_BUSY_STATES) == {"queued"}, (
+        "两族 states 的重叠只许是 queued（共同起始态）；多出任何一个状态，"
+        "先确认它不会让一个作业被两条闸各数一次")
     for st in live:
         reg = JobRegistry()
         job = Job("x", "generate", {})

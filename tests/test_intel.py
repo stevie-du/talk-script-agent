@@ -37,10 +37,12 @@ from fastapi.testclient import TestClient                        # noqa: E402
 
 from app import intel as I                                       # noqa: E402
 from app.config import load_config                               # noqa: E402
-from app.jobs import (INTEL_BUSY_STATES, MAX_CONCURRENT_INTEL,    # noqa: E402
+from app.jobs import (BUSY_STATES, INTEL_BUSY_STATES,            # noqa: E402
+                      MAX_CONCURRENT_INTEL,
                       TERMINAL_STATES)
 from app.knowledge import Pack, pack_info                        # noqa: E402
-from app.pipeline import Pipeline, wait_job                      # noqa: E402
+from app.pipeline import (MAX_CONCURRENT_JOBS, Pipeline,         # noqa: E402
+                          wait_job)
 from app.schemas import IntelPackRequest                         # noqa: E402
 from app.server import create_app                                # noqa: E402
 
@@ -525,3 +527,38 @@ def test_intel_fetch_has_its_own_limit():
     with pytest.raises(StateConflict):
         pl.start_intel_fetch("elevator")
     assert pl.registry.running_count(INTEL_BUSY_STATES) == MAX_CONCURRENT_INTEL
+
+
+# ── P0-4：情报额度从 queued 就算，不等 worker transition 到 fetching ──
+# 病灶：INTEL_BUSY_STATES 原来只有 fetching，而作业**以 queued 插入**、
+# transition 到 fetching 在 worker 线程里。N 个并发 refresh 可以在 transition
+# 之前同时过检 —— 实测三个 queued intel 全部放行（上限 2）。
+# 上面那条 start_intel_fetch 版本是**竞态**的（worker 线程可能还没 transition），
+# 所以这里不起线程、直接按插入形态造 queued 作业，把窗口钉死。
+def test_intel_quota_counts_from_queued_not_from_fetching():
+    from app.jobs import Job, JobRegistry, new_job_id
+    reg = JobRegistry()
+    for i in range(MAX_CONCURRENT_INTEL):
+        job = Job(new_job_id(), "intel", {"pack": "elevator"})
+        assert job.state == "queued", "夹具前提：插入态必须是 queued"
+        assert reg.add_if_room(job, MAX_CONCURRENT_INTEL, INTEL_BUSY_STATES), \
+            f"第 {i + 1} 条就该放行"
+    third = Job(new_job_id(), "intel", {"pack": "elevator"})
+    assert not reg.add_if_room(third, MAX_CONCURRENT_INTEL, INTEL_BUSY_STATES), \
+        "queued 的抓取不占情报额度 —— 并发 refresh 可同时过检，上限形同虚设"
+
+
+# 同一病灶的另一面：queued 与 BUSY_STATES 重叠，而 add_if_room 原来**不按
+# kind 分族**，于是 queued 的 intel 作业会把**生成**的名额占掉
+# （INTEL_BUSY_STATES 注释里承诺"不会发生"的事）。修法：计数按族过滤。
+def test_intel_queued_does_not_consume_model_quota():
+    from app.jobs import Job, JobRegistry, new_job_id
+    reg = JobRegistry()
+    for _ in range(MAX_CONCURRENT_JOBS):
+        reg.add(Job(new_job_id(), "intel", {"pack": "elevator"}))   # 直接落册，态即 queued
+    gen = Job(new_job_id(), "generate", {})
+    assert reg.add_if_room(gen, MAX_CONCURRENT_JOBS), \
+        "queued 的情报抓取占了模型额度 —— 用户会看到「生成已达上限」，" \
+        "而占着名额的是不花钱的 HTTP 请求（INTEL_BUSY_STATES 注释承诺过不会）"
+    assert reg.running_count(BUSY_STATES, kind="generate") == 1
+    assert reg.running_count(INTEL_BUSY_STATES, kind="intel") == MAX_CONCURRENT_JOBS

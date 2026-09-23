@@ -67,8 +67,27 @@ BUSY_STATES = frozenset({"queued", "selecting", "writing", "checking", "rewritin
 # "生成已达上限"，而占着名额的是一个不花钱的 HTTP 请求。
 # 为什么仍然走 Job 管道而不是同步请求：抓取要几十秒、要能取消、要能在
 # 关窗后回来接上进度 —— 这三条正是 `start_packgen`（P1-43）当初走 Job 的理由。
-INTEL_BUSY_STATES = frozenset({"fetching"})
+#
+# ⚠ queued 也在这一族里（五路审查 P0-4，2026-09-23）：作业**以 queued 插入**，
+# 而 transition 到 fetching 要等 worker 线程（`pipeline.start_intel_fetch` 里
+# `_spawn` 之后）。只数 fetching 的话，N 个并发 refresh 可以在 transition 之前
+# 同时过检 —— 实测三个 queued intel 全部放行（上限 2），额度形同虚设。
+# queued 与 BUSY_STATES 重叠（generate/packgen 也从 queued 起步）不会双算：
+# `add_if_room`/`running_count` 按 **kind 分族**（见 MODEL_JOB_KINDS），
+# 一个作业只可能属于一族 —— 防双算靠这个，不是靠 states 不相交。
+INTEL_BUSY_STATES = frozenset({"queued", "fetching"})
 MAX_CONCURRENT_INTEL = 2
+
+#: 模型族的作业 kind（generate / packgen 花模型的钱，共享 MAX_CONCURRENT_JOBS）。
+#: 其余 kind（intel）走独立额度。**新 kind 必须在这里归类** —— 忘了归类会
+#: 静默落进模型族（`not in MODEL_JOB_KINDS` 的默认分支），把不花钱的作业
+#: 算成名額占用，或反过来。concurrency_quota 的对账断言守的就是这件事。
+MODEL_JOB_KINDS = frozenset({"generate", "packgen"})
+
+
+def same_quota_family(kind_a: str, kind_b: str) -> bool:
+    """两个作业是否属于同一并发额度族（模型族 / 情报族）。"""
+    return (kind_a in MODEL_JOB_KINDS) == (kind_b in MODEL_JOB_KINDS)
 
 #: 所有"占额度"的状态（回收网要按这个判，别只看 BUSY_STATES ——
 #: 否则一条卡死的情报抓取永远不会被摘额度，症状是"一个都没在跑，重抓却报已达上限"）。
@@ -378,8 +397,10 @@ class JobRegistry:
         `Job.transition()` 修的是同一类 TOCTOU（检查与置位同锁），
         这里照同一套做法收口：**把判断和写入放进同一个临界区**。
 
-        插入时 `job.state` 已是 `queued`（在 `BUSY_STATES` 里），
-        所以额度从这一刻起就被占住，不必等 `_spawn` 起线程。
+        插入时 `job.state` 已是 `queued`（在 `BUSY_STATES` / `INTEL_BUSY_STATES`
+        里），所以额度从这一刻起就被占住，不必等 `_spawn` 起线程。
+        ⚠ 两族都以 queued 起步，所以 states 集合**必然重叠**（queued 两族都有）——
+        防"同一作业被两条闸各数一次"靠的是下面的 **kind 分族**，不是 states 不相交。
 
         `states`：要按哪一族状态计数。默认是模型额度（`BUSY_STATES`）；
         B4 的情报抓取传 `INTEL_BUSY_STATES`，于是它与生成**互不占名额**
@@ -388,7 +409,8 @@ class JobRegistry:
         self._reap_stranded()      # 第二道网：先还额度再判（见 prune 的说明）
         with self._lock:
             if sum(1 for j in self._jobs.values()
-                   if j.state in states and not j.stranded) >= limit:
+                   if same_quota_family(j.kind, job.kind)
+                   and j.state in states and not j.stranded) >= limit:
                 return False
             self._jobs[job.id] = job
             return True
@@ -443,13 +465,18 @@ class JobRegistry:
             jobs = list(self._jobs.values())
         return [j.snapshot(include_result=include_result) for j in jobs]
 
-    def running_count(self, states: frozenset[str] = BUSY_STATES) -> int:
+    def running_count(self, states: frozenset[str] = BUSY_STATES,
+                      kind: str | None = None) -> int:
         """占用**某一族**并发额度的作业数（默认是模型额度 `BUSY_STATES`）。
 
         后端从 B4 起有**两族**额度：模型额度与情报抓取的独立额度
         （`INTEL_BUSY_STATES`）。所以这里必须能按族取数 —— 只回一个数的话，
-        「4 个生成在跑」与「4 个生成 + 1 个抓取在跑」是同一个值，
+        「4 个生成在跑」与「4 个生成 + 1 个抓取在飞」是同一个值，
         诊断时看不出抓取占没占名额。
+
+        `kind`：按作业族过滤（P0-4）。不传 = 不过滤（只按 states 数，
+        诊断老口径）。准入判断请用 `add_if_room()`（同锁内判+写），
+        不要用"先 running_count 再 add"—— 那是 TOCTOU。
 
         **不是**「非终态作业数」：待确认的作业不该算并发 ——
         否则 4 张没人理的确认卡就能把后续所有生成永久挡在 409 之外。
@@ -466,7 +493,8 @@ class JobRegistry:
         """
         with self._lock:
             return sum(1 for j in self._jobs.values()
-                       if j.state in states and not j.stranded)
+                       if (kind is None or same_quota_family(j.kind, kind))
+                       and j.state in states and not j.stranded)
 
     def prune(self, keep: int = 200) -> None:
         """回收终态作业，只保留最近 `keep` 个，防止长跑进程内存无界增长。
