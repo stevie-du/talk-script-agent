@@ -38,7 +38,7 @@ from .checker import Banwords, Quota, check_script, count_chars
 from .config import AppConfig, load_config
 from .fileio import rmtree_resilient
 from . import jobs as _jobs                              # noqa: F401
-from .intel import fetch_pack
+from .intel import PROMPT_HEAD, fetch_pack
 from .jobs import (INTEL_BUSY_STATES, JOB_BUDGET_SECONDS,  # noqa: F401
                    MAX_CONCURRENT_INTEL, TERMINAL_STATES, Job,
                    JobBudget, JobCancelled, JobRegistry, StateConflict,
@@ -726,14 +726,16 @@ class Pipeline:
 
     def _select(self, job: Job, pack: Pack, skill: dict, p: dict,
                 client: LLMClient) -> TopicPlan:
-        pr = PromptRenderer(pack)
+        pr = PromptRenderer(pack, data_dir=self.data_dir)
         ctx = pr.select_ctx(p)
         system, user = self._render_stage(job, pr, "select", ctx)
+        self._step_intel(job, pr)
         # P1-8：「换一版」的提温原来只作用于 write —— 于是「换一版」重掷出的
         # plan 与上一版几乎一样，白白花 74~173s。select 同样提温。
         temp = (min(1.0, float(client.cfg.temperature) + 0.25)
                 if p.get("reroll") else None)
-        key = None if p.get("reroll") else self._plan_key(client, system, user)
+        key = None if p.get("reroll") else self._plan_key(
+            client, system, user, ctx.get("intel_key", ""))
         if key:
             hit = self._cache_lookup(key)
             if hit is not None:
@@ -832,12 +834,38 @@ class Pipeline:
     PLAN_CACHE_MAX = 32
 
     @staticmethod
-    def _plan_key(client: LLMClient, system: str, user: str) -> str:
-        # base_url 必须在指纹里：只算 model 名的话，用户在设置里把同一个模型名
-        # 换到另一家的服务（deepseek 官方 ↔ 第三方中转，实测同名不同质量），
-        # reload_llm() 之后仍会命中上一家的选题缓存 —— 那是"静默用了另一个模型的产物"。
-        raw = (f"{client.cfg.base_url}\n{client.cfg.model}\n{system}\n{user}").encode("utf-8")
+    def _plan_key(client: LLMClient, system: str, user: str, intel_key: str = "") -> str:
+        """选题缓存指纹。
+
+        ⚠ 情报块**整块都不进指纹**，只进它的短键（`intel_key` = 选中项 id + 出处）。
+        这是 §2.9 B-3 定死的：整块进指纹的话，"情报刷新"会让**所有**历史版本
+        全部失效（每一次刷新都等于重选题，白花一次 4000 token）；
+        而只带短键时，选中的还是那几条 → 指纹不变 → 同一条选题仍可复现。
+
+        base_url 必须在指纹里：只算 model 名的话，用户在设置里把同一个模型名
+        换到另一家的服务（deepseek 官方 ↔ 第三方中转，实测同名不同质量），
+        reload_llm() 之后仍会命中上一家的选题缓存 —— 那是"静默用了另一个模型的产物"。
+        """
+        # 块在提示词**末尾**，所以按它的首行标记切一刀就能拿掉（见 intel.PROMPT_HEAD）。
+        base = user.split(PROMPT_HEAD, 1)[0] if intel_key else user
+        raw = (f"{client.cfg.base_url}\n{client.cfg.model}\n{system}\n{base}\n{intel_key}").encode("utf-8")
         return hashlib.sha1(raw).hexdigest()
+
+    def _step_intel(self, job: Job, pr) -> None:
+        """把"情报注进去了 / 被摘掉了"记进作业日志 —— 两件都要看得见。
+
+        注入本身是**静默**的（提示词里多一截没人知道），被禁用词摘掉的条目更静默。
+        两者都不记的话，事后没法回答"这条选题到底有没有参考情报"。
+        """
+        if pr.intel_dropped:
+            self._step(job, "intel_drop",
+                       f"{len(pr.intel_dropped)} 条情报因含禁用词未注入提示词",
+                       {"titles": pr.intel_dropped[:6],
+                        "hint": "含 banwords hard 词的条目进正文层会让模型照抄后被判违规"})
+        keys = [k for k in str(pr.intel_key or "").split(",") if k]
+        if keys:
+            self._step(job, "intel_inject", f"注入 {len(keys)} 条情报（只带文号与出处，不带原文）",
+                       {"count": len(keys)})
 
     def _remember_plan(self, key: str, plan: TopicPlan) -> None:
         with self._plan_lock:
@@ -859,9 +887,10 @@ class Pipeline:
         返回 `(plan, draft_dict, usage)`；draft_dict 与 write 路径的
         `ScriptDraft(...).model_dump()` 同形，回炉循环不用区分来源。
         """
-        pr = PromptRenderer(pack)
+        pr = PromptRenderer(pack, data_dir=self.data_dir)
         ctx = pr.draft_ctx(p)
         system, user = self._render_stage(job, pr, "draft", ctx)
+        self._step_intel(job, pr)
         temp = (min(1.0, float(client.cfg.temperature) + 0.25)
                 if p.get("reroll") else None)
         usage: dict = {}

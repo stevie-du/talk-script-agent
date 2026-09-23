@@ -73,6 +73,11 @@ stages:
       4. cta：结尾引导，动作唯一，**用户指定的动作是「$cta」**，不得自换别的动作
       5. 不出现绝对化承诺、权威背书、无法核实的资历数字、行业红线表述
       输出 JSON 字段：angle, hook_type, hook_line, points, cta
+      # B7：情报块（intel_block 变量）由引擎注入 —— 按 segment 取最相关 3 条、只带标题与
+      # 出处（文号 / 来源 / URL），**不带原文**。放在模板**末尾**是前缀缓存的规矩
+      # （与回炉反馈块 feedback_block 同一条）：动态内容放最后，前面的静态体才能命中缓存。
+      # 指纹里只留"选中项 id + 出处"（§2.9 B-3），情报刷新不会让历史版本全部失效。
+      $intel_block
     # 钩子库不在这里声明：$hooks 由引擎按风格切片注入（`Pack.hooks_slice`，
     # 整份 5 套语气模板每轮只用 1 套，其余是噪声）。
     # 行业红线与 write 同源：select 阶段定角度/钩子/要点/CTA 时手里就得有红线，
@@ -156,6 +161,11 @@ stages:
           {"type": "cta", "text": "结尾引导文案", "subtitle": "字幕关键词"}
         ]
       }
+      # B7：情报块（intel_block 变量）由引擎注入 —— 按 segment 取最相关 3 条、只带标题与
+      # 出处（文号 / 来源 / URL），**不带原文**。放在模板**末尾**是前缀缓存的规矩
+      # （与回炉反馈块 feedback_block 同一条）：动态内容放最后，前面的静态体才能命中缓存。
+      # 指纹里只留"选中项 id + 出处"（§2.9 B-3），情报刷新不会让历史版本全部失效。
+      $intel_block
     files:
       ideas: knowledge/ideas.md#选题库
       growth: patterns/growth.md

@@ -13,6 +13,7 @@ import logging
 import re
 from string import Template
 
+from .intel import select_for_prompt
 from .knowledge import Pack
 
 log = logging.getLogger(__name__)
@@ -29,9 +30,13 @@ _PLACEHOLDER = re.compile(r"\$\{?([a-zA-Z_][a-zA-Z0-9_]*)\}?")
 class PromptRenderer:
     """按 skill.yaml 渲染各阶段的提示词。引擎不认识行业，只认识这些字段。"""
 
-    def __init__(self, pack: Pack):
+    def __init__(self, pack: Pack, data_dir=None):
         self.pack = pack
         self.skill = pack.skill() or {}
+        # `data_dir` 是情报的落点（B2）。不传 = 这个渲染器不注情报 ——
+        # 单元测试与不需要情报的场合都传空即可，于是"有没有情报"是**显式**的
+        # 一件事，而不是靠模板里有没有那个占位符去猜。
+        self.data_dir = data_dir
         # 本轮「模板引用了、但注入回来是空的」知识占位符：{stage: [名字]}。
         # 为什么单独记：`safe_substitute` 只认「ctx 里有没有这个键」，
         # 值为空串也算填过了 —— 于是 `## 核心术语` 被改名后 `$terms` 是 ""，
@@ -134,12 +139,44 @@ class PromptRenderer:
             "quota_cta": str(q.get("cta", "")),
         }
 
+    # ── 情报注入（B7 / §2.9 B-3）─────────────────────────────
+    #: 本次被**禁用词拦掉**的条目标题（调用方要把它记进作业日志 —— 摘了要看得见）。
+    intel_dropped: list[str] = ()
+    #: 本次注入的条目短键（"id|出处"，逗号分隔）。`pipeline._plan_key` 用它当指纹的一部分。
+    intel_key: str = ""
+
+    def _intel(self, ctx: dict, p: dict) -> None:
+        """把 `$intel_block` 填进上下文。
+
+        恒设 ctx 键、**无内容给空串**（与 `facts_block` 同一条规矩）：没抓过情报是
+        **新装的正常状态**，不是配置问题 —— 若走 `_note()`，每次生成都会刷一条
+        「占位符未填充」进入作业日志，把真问题（模板拼错占位符）淹掉。
+
+        ⚠ 块放在 `user_template` **末尾**：与 `$feedback_block` 同一条前缀缓存
+        的规矩（P1-40），动态内容放最后，前面的静态体才能命中缓存。
+        指纹只带「选中项 id + 出处」由 `pipeline._plan_key` 处理，不在这里。
+        """
+        ctx["intel_block"] = ""                    # 模板引用了就该有键，空串也是一种答案
+        ctx["intel_key"] = ""
+        self.intel_dropped = []
+        if not self.data_dir:
+            return
+        hard = (self.pack.banwords_data() or {}).get("hard") or []
+        banned = tuple(w for w in hard if isinstance(w, str) and len(w) >= 2)
+        block, keys, dropped = select_for_prompt(self.data_dir, self.pack.name,
+                                                 p.get("segment"), banned=banned)
+        ctx["intel_block"] = block
+        ctx["intel_key"] = ",".join(keys)
+        self.intel_dropped = dropped
+        self.intel_key = ctx["intel_key"]
+
     def select_ctx(self, p: dict) -> dict:
         ctx = self.base_ctx(p)
         self.stage_files("select", ctx)
         # 细分/受众切片是「引擎按参数值注入」的三块知识，不走 stages.files，
         # 所以也得手工登记空不空（P1-1：`维保` 在 topics_map 里没有落点时，
         # 选题拿到的是空串，与拼错占位符是同一种失效，必须同样可见）。
+        self._intel(ctx, p)
         ctx["topics_slice"] = self.pack.topics_slice(p["segment"])
         self._note("select", "topics_slice", ctx["topics_slice"])
         ctx["audience_slice"] = self.pack.audience_slice(p["audience"])
@@ -161,6 +198,7 @@ class PromptRenderer:
         """
         ctx = self.base_ctx(p)
         self.stage_files("draft", ctx)
+        self._intel(ctx, p)
         ctx["topics_slice"] = self.pack.topics_slice(p["segment"])
         self._note("draft", "topics_slice", ctx["topics_slice"])
         ctx["audience_slice"] = self.pack.audience_slice(p["audience"])

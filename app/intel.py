@@ -709,6 +709,77 @@ def is_stale(data: dict, sources: list[IntelSource], now: datetime | None = None
     return (now - t).total_seconds() >= min(days) * 86400
 
 
+# ── 注入提示词（B7 / §2.9 B-3）─────────────────────────────────
+#: 块的首行标记。`_plan_key` 靠它把整块从指纹里**摘掉**。
+#: ⚠ 改这一行要同步 `pipeline._plan_key`（它按这个标记切字符串）。
+PROMPT_HEAD = "【政策与行业动态（引用须带文号，不得照搬原文）】"
+#: 进提示词的条数（§2.2 定的是"按 segment 取最相关 3 条"）。
+PROMPT_LIMIT = 3
+#: 单条标题的截断长度（进提示词的文本要短，别把 token 花在长标题上）。
+PROMPT_TITLE_MAX = 64
+
+
+def _prompt_rank(it: dict, segment: str) -> tuple:
+    """排序键：本细分领域 > 通用 > 别的领域；有出处的优先；再看机会分与新鲜度。"""
+    seg = str(it.get("segment") or "")
+    by_seg = 0 if (segment and seg == segment) else (1 if not seg else 2)
+    has_src = 0 if (it.get("published") or it.get("url")) else 1
+    sc = it.get("score") or {}
+    return (by_seg, has_src, -(sc.get("opportunity") or 0), -(sc.get("E") or 0),
+            str(it.get("title") or ""))
+
+
+def select_for_prompt(data_dir: Path, pack: str, segment: str | None, *,
+                      limit: int = PROMPT_LIMIT,
+                      banned: tuple[str, ...] = ()) -> tuple[str, list[str], list[str]]:
+    """按细分领域挑最相关的 N 条情报 → `(要注入的文本块, 指纹短键列表, 被摘掉的标题)`。
+
+    三件事各有一个理由，都是对着 `需求方案` 里写明的顾虑来的：
+
+    1. **只给标题 + 出处（来源 / 日期 / URL），不给原文。**
+       待确认 #7 的顾虑是「政策原文含『政府补贴』这类 banwords hard 词，进正文层
+       会让模型照抄后被判违规、陷入回炉死循环」。只给标题与出处，模型拿到的是
+       "有这么一份文件"这样一个**可引用的线索**，而不是一段可以直接抄的正文。
+    2. **含 hard 禁用词的条目直接不进块**（`banned` 由调用方从 `pack.banwords_data()`
+       取）。这是上面那条顾虑的**第二道闸**：光靠"不给原文"挡不住标题里就带
+       禁用词的情况 —— 政策与通报的标题里确实有。被摘掉的标题返回给调用方，
+       由它记进作业日志（**摘了要看得见**，否则又是一次静默）。
+    3. **块放在提示词末尾**（与 `$feedback_block` 同一条规矩，P1-40 的前缀缓存），
+       且**指纹只带"选中项的 id + 出处"**（§2.9 B-3）—— 情报一刷新不该让所有
+       历史版本失效，同一条选题仍要可复现。
+
+    ⚠ 没数据时返回空串而不是"没有这类情报"之类的话术：那是**把没数据说成
+    "这类没有"**，与 `no_specific` 那条同类的静默降级。
+    """
+    data = load_latest(data_dir, pack)
+    rows: list[dict] = []
+    dropped: list[str] = []
+    for it in data.get("items") or []:
+        title = str(it.get("title") or "").strip()
+        if not title:
+            continue
+        blob = title + " " + str(it.get("desc") or "")
+        if any(b and b in blob for b in banned):
+            dropped.append(title)
+            continue
+        rows.append(it)
+    rows.sort(key=lambda it: _prompt_rank(it, str(segment or "")))
+    picked = rows[:max(0, int(limit))]
+    if not picked:
+        return "", [], dropped
+    lines = [PROMPT_HEAD]
+    keys: list[str] = []
+    for i, it in enumerate(picked, 1):
+        title = str(it.get("title") or "").strip()[:PROMPT_TITLE_MAX]
+        src = " · ".join(str(x) for x in (it.get("source_label"), it.get("published"),
+                                          it.get("url")) if x)
+        lines.append(f"{i}. {title}" + (f"　—— {src}" if src else ""))
+        keys.append(f"{it.get('guid') or title}|{it.get('published') or it.get('url') or ''}")
+    lines.append("（写角度时可以**引用上面的文号或结论**，但不得整段照搬原文；"
+                 "正文里没有的事实照旧用 {{待补：xxx}} 占位。）")
+    return "\n".join(lines) + "\n", keys, dropped
+
+
 def today(data_dir: Path, pack: str, sources: list[IntelSource]) -> dict:
     """给 `/api/intel/today` 的只读视图。
 
