@@ -575,7 +575,7 @@ class Pipeline:
             release_slug(slug, job.claim_token)
 
     # ── B4：情报抓取（走 Job 管道 + **独立**并发额度）────────────
-    def start_intel_fetch(self, pack_name: str) -> str:
+    def start_intel_fetch(self, pack_name: str, http=None) -> str:
         """跑一遍本包声明的全部情报源。返回 `{job_id}`，进度看 `/api/jobs/{id}`。
 
         为什么走 Job 管道（README B4 明确点名）：抓取要几十秒、要能取消、
@@ -587,8 +587,10 @@ class Pipeline:
         "点一次重抓"把生成的名额占掉，用户看到「生成已达上限」，
         而占着名额的是一个不花钱的请求。
 
-        能在开跑前确定的错误（包不存在 / 包坏了）仍然同步抛：不花一分钱、
-        也不用等几十秒才知道包名写错了。
+        `http` 是**测试注入点**（生产不传）：`fetch_pack` 本就支持，但 Job 管道
+        把调用包在线程里，不从这里透传就注入不进去 —— 那条"没配 Key 不碰模型"
+        的测试于是只能真联网（20 个 seed × 每源 12s 预算，沙箱代理下稳定超时）。
+        语义不变：注入后仍走完整 Job 管道，只是不发真实请求。
         """
         pack = Pack(self.root, pack_name)     # 不存在 → PackError(404)；坏 → 409
         jid = new_job_id()
@@ -598,7 +600,7 @@ class Pipeline:
                 f"同时进行的情报抓取已达上限（{MAX_CONCURRENT_INTEL} 个），"
                 "请等其中一次完成后再试")
         try:
-            self._spawn(job, lambda: self._run_intel_fetch(job, pack))
+            self._spawn(job, lambda: self._run_intel_fetch(job, pack, http=http))
         except BaseException as e:            # noqa: BLE001
             # P1-46 同款兜底：起不来线程也要把作业落成终态，否则那个额度
             # 要等 2× 预算才被回收网摘掉，症状是"一个都没在跑，重抓却报已达上限"。
@@ -607,7 +609,7 @@ class Pipeline:
             raise
         return jid
 
-    def _run_intel_fetch(self, job: Job, pack: Pack) -> None:
+    def _run_intel_fetch(self, job: Job, pack: Pack, http=None) -> None:
         """情报抓取作业的主体。
 
         ⚠ **失败不是异常出口**：`fetch_pack` 内部每个源各自 try，失败记进
@@ -625,7 +627,7 @@ class Pipeline:
                 pack.name, self.data_dir, sources,
                 seeds=pack.intel_seeds(), keywords=pack.intel_keywords(),
                 topics_map=pack.data.get("topics_map") or {},
-                segment_options=pack.param_options("segment"))
+                segment_options=pack.param_options("segment"), http=http)
             # 取消检查放在**写盘之后、落状态之前**：落盘是有用的副作用
             # （下次打开就有数据），但状态必须是 cancelled 而不是 done。
             self._stop_check(job)

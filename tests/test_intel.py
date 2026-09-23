@@ -188,7 +188,11 @@ def test_no_llm_call_anywhere_in_fetch(monkeypatch):
     monkeypatch.setattr(P.Pipeline, "llm", property(
         lambda self: (_ for _ in ()).throw(AssertionError("抓取路径上不该碰模型"))))
     pl = Pipeline(tmp_path, load_config(tmp_path))
-    jid = pl.start_intel_fetch("elevator")
+    # http 注入点（生产不传）：这条守的是「没配 Key 不碰模型」，本来不必真联网。
+    # 实测（2026-09-23）：demand_terms 对每个 seed 各发一次真实请求（20 个），
+    # 沙箱代理下稳定超过 60s 预算 —— 全量跑必红、单跑靠网络时序侥幸过。
+    # 注入 _fake_http 后仍走完整 Job 管道，只是不发真实请求，语义不变。
+    jid = pl.start_intel_fetch("elevator", http=_fake_http())
     snap = wait_job(pl, jid, timeout=60)
     assert snap["state"] in TERMINAL_STATES
     # 真网络可能连不上（沙箱/离线），所以**不**断言 done —— 断言的是"没碰模型"：
