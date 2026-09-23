@@ -207,8 +207,16 @@ def _swap_in(tmp_pack: Path, dst: Path) -> bool:
     return True
 
 
-def import_pack(zip_bytes: bytes, packs_dir: Path) -> ImportResult:
-    """把 zip 里的技能包导入 packs_dir。失败抛 PackImportError（人话原因）。"""
+def validate_zip(zip_bytes: bytes, tmp: Path) -> tuple[ImportResult, Path]:
+    """zip → 预检 → 解压进 tmp → manifest/结构校验。**不落盘**。
+
+    返回 (结果, 包根目录)。调用方掌握 tmp 的生命周期，自己决定接下来是
+    落盘（import_pack）还是只出报告（CLI）。
+
+    ⚠ 拆出这一层的意义：服务端导入与 `python -m app.packcheck` 校验 CLI
+    必须是**同一份代码**。各写一份的后果是 CLI 放行的包服务端拒（或反过来），
+    包作者拿着自检通过的文件兴冲冲导入失败，两边文案还对不上。
+    """
     if len(zip_bytes) > MAX_ZIP_BYTES:
         raise PackImportError(f"zip 太大（{len(zip_bytes) // 1024 // 1024}MB，"
                               f"上限 {MAX_ZIP_BYTES // 1024 // 1024}MB）")
@@ -235,59 +243,72 @@ def import_pack(zip_bytes: bytes, packs_dir: Path) -> ImportResult:
                 raise PackImportError(f"zip 里 {rel} 太大（{zi.file_size // 1024}KB，"
                                       f"上限 {MAX_FILE_BYTES // 1024}KB）")
             rels.append((rel, zi))
-        with tempfile.TemporaryDirectory(prefix="packimport-") as td:
-            tmp = Path(td)
-            for rel, zi in rels:
-                dest = tmp / rel
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                with zf.open(zi) as src, open(dest, "wb") as out:
-                    shutil.copyfileobj(src, out, length=1024 * 64)
-                if dest.stat().st_size > MAX_FILE_BYTES:   # 声明的size可能说谎
-                    # 与上面解压前的 file_size 预检是**同一上限的两道**
-                    # （预检防"声明超大"，这道防"元数据说谎"——恶意 zip 才有）。
-                    raise PackImportError(f"{rel} 解压后超过 {MAX_FILE_BYTES // 1024}KB")
-                # 解压后再复核一次路径（防 dest 被 symlink 目录导出去——
-                # 上面禁了 zip 内 symlink，这里兜底文件系统层面的）
-                if not dest.resolve().is_relative_to(tmp.resolve()):
-                    raise PackImportError(f"{rel} 解压后跑到了临时目录外")
+        for rel, zi in rels:
+            dest = tmp / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(zi) as src, open(dest, "wb") as out:
+                shutil.copyfileobj(src, out, length=1024 * 64)
+            if dest.stat().st_size > MAX_FILE_BYTES:   # 声明的size可能说谎
+                # 与上面解压前的 file_size 预检是**同一上限的两道**
+                # （预检防"声明超大"，这道防"元数据说谎"——恶意 zip 才有）。
+                raise PackImportError(f"{rel} 解压后超过 {MAX_FILE_BYTES // 1024}KB")
+            # 解压后再复核一次路径（防 dest 被 symlink 目录导出去——
+            # 上面禁了 zip 内 symlink，这里兜底文件系统层面的）
+            if not dest.resolve().is_relative_to(tmp.resolve()):
+                raise PackImportError(f"{rel} 解压后跑到了临时目录外")
 
-            pack_root = _find_pack_root(tmp)
-            man = _read_manifest(pack_root)
-            _check_structure(pack_root, man["banwords_rel"])
-            name = man["name"]
+        pack_root = _find_pack_root(tmp)
+        man = _read_manifest(pack_root)
+        _check_structure(pack_root, man["banwords_rel"])
+        return ImportResult(
+            ok=True, name=man["name"], version=man["version"],
+            author=man["author"], license=man["license"],
+            has_private=(pack_root / PRIVATE_DIR_NAME).exists()), pack_root
 
-            dst = packs_dir / name
-            replaced = dst.exists()
-            if replaced:
-                if _user_modified(packs_dir, name) is True:
-                    raise PackImportError(
-                        f"你改过内置包 {name} —— 导入会丢掉你的修改。"
-                        "请先备份你的版本（或把它改名），再导入")
-                if (dst / IMPORT_MARK).exists():
-                    # 覆盖一个已导入的包：用户自己的选择，但要说清覆盖了什么
-                    pass
 
-            # 自包含来源标记：作者/许可证/导入时间。license 只是展示，
-            # 引擎不裁决（方案 §9 红线 4）。
-            mark = {"author": man["author"], "license": man["license"],
-                    "imported_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                    "pack_version": man["version"]}
-            (pack_root / IMPORT_MARK).write_text(
-                json.dumps(mark, ensure_ascii=False, indent=1), encoding="utf-8")
-
-            has_private = (pack_root / PRIVATE_DIR_NAME).exists()
-            try:
-                _swap_in(pack_root, dst)
-            except PackImportError:
-                raise
-            except OSError as e:
-                raise PackImportError(f"搬进用户目录失败：{e}")
-
+def validate_dir(pack_dir: Path) -> ImportResult:
+    """校验一个**已解压的**包目录（CLI 的目录模式）。zip 层不适用。"""
+    pack_root = _find_pack_root(pack_dir)
+    man = _read_manifest(pack_root)
+    _check_structure(pack_root, man["banwords_rel"])
     return ImportResult(
-        ok=True, name=name, version=man["version"],
+        ok=True, name=man["name"], version=man["version"],
         author=man["author"], license=man["license"],
-        has_private=has_private, replaced=replaced,
-        note=("已覆盖同名包 v%s" % man["version"]) if replaced else "新导入")
+        has_private=(pack_root / PRIVATE_DIR_NAME).exists())
+
+
+def import_pack(zip_bytes: bytes, packs_dir: Path) -> ImportResult:
+    """把 zip 里的技能包导入 packs_dir。失败抛 PackImportError（人话原因）。"""
+    with tempfile.TemporaryDirectory(prefix="packimport-") as td:
+        r, pack_root = validate_zip(zip_bytes, Path(td))
+        name = r.name
+
+        dst = packs_dir / name
+        replaced = dst.exists()
+        if replaced:
+            if _user_modified(packs_dir, name) is True:
+                raise PackImportError(
+                    f"你改过内置包 {name} —— 导入会丢掉你的修改。"
+                    "请先备份你的版本（或把它改名），再导入")
+
+        # 自包含来源标记：作者/许可证/导入时间。license 只是展示，
+        # 引擎不裁决（方案 §9 红线 4）。
+        mark = {"author": r.author, "license": r.license,
+                "imported_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "pack_version": r.version}
+        (pack_root / IMPORT_MARK).write_text(
+            json.dumps(mark, ensure_ascii=False, indent=1), encoding="utf-8")
+
+        try:
+            _swap_in(pack_root, dst)
+        except PackImportError:
+            raise
+        except OSError as e:
+            raise PackImportError(f"搬进用户目录失败：{e}")
+
+    r.replaced = replaced
+    r.note = ("已覆盖同名包 v%s" % r.version) if replaced else "新导入"
+    return r
 
 
 def delete_pack(name: str, packs_dir: Path) -> dict:
