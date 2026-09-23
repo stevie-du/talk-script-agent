@@ -471,6 +471,58 @@ if len(sys.argv) >= 3 and sys.argv[1] == "-k":
 # 所以每次改文件之前先把原内容写进日志，还原成功后删掉它；
 # 启动时若发现日志还在，说明上次没跑完 —— 先按日志还原，再开始。
 JOURNAL = ROOT / "_verify" / ".mutate-journal.json"
+# 并发锁：本仓库长期有多个会话同时干活（2026-09-23 实测：两个 mutate 进程
+# 撞在一起，一个的 orig 读到另一个改了一半的文件，finally 还原又把文件写成
+# 混合态 —— 症状是一条变异假绿 + 工作区留下删了列的 topics.js）。
+# 锁文件用**写 PID + 探活**：进程死了（断电 / kill -9）锁要能自动失效，
+# 否则一次意外就把工具永久锁死，那比没有锁更糟。
+LOCK = ROOT / "_verify" / ".mutate.lock"
+
+
+def _lock_held_by_living_process() -> bool:
+    """锁文件里的 PID 还活着吗。读不出来 / PID 不存在都当作没锁。
+
+    ⚠ **Windows 上不能写 `os.kill(pid, 0)`**：Windows 不支持 POSIX 信号语义，
+    Python 在那里把任意 sig 值当作 TerminateProcess 用 —— 探活会**真的把那个
+    进程杀掉**（实测：锁里写着当前 shell 的 PID，跑一次变异 shell 就没了）。
+    改用 OpenProcess 只问"能不能打开"（SYNCHRONIZE 权限最小），拿到句柄即活着。
+    """
+    import os
+    try:
+        pid = int(LOCK.read_text(encoding="utf-8").strip())
+    except Exception:                       # noqa: BLE001
+        return False
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        SYNCHRONIZE = 0x00100000
+        k32 = ctypes.windll.kernel32
+        k32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_bool, ctypes.c_uint32]
+        k32.OpenProcess.restype = ctypes.c_void_p
+        handle = k32.OpenProcess(SYNCHRONIZE, False, pid)
+        if handle:
+            k32.CloseHandle(ctypes.c_void_p(handle))
+            return True
+        return False                        # 打不开 = 进程没了（或拒绝访问）
+    try:
+        os.kill(pid, 0)                     # POSIX：信号 0 = 只探活不发送
+    except ProcessLookupError:
+        return False
+    except PermissionError:                 # 进程在，但不属于当前用户
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _acquire_lock() -> None:
+    import os
+    if LOCK.exists() and _lock_held_by_living_process():
+        print(f"🔴 另一个变异进程正在跑（PID {LOCK.read_text().strip()}）—— "
+              "并发跑会互相踩文件（实测出过假绿 + 工作区残留），等它跑完再来")
+        sys.exit(2)
+    LOCK.write_text(str(os.getpid()), encoding="utf-8")
 
 
 def _recover() -> None:
@@ -494,6 +546,7 @@ def _recover() -> None:
     print("（恢复完成 —— 建议 git status 再确认一遍）")
 
 
+_acquire_lock()          # 先拿锁再恢复：并发跑的工具互相踩文件比残留更毒
 _recover()
 
 bad = skipped = 0
@@ -517,7 +570,10 @@ for name, path, old, new, selector in MUTATIONS:
     #                界面侧的断言同样要能证伪，否则"新加了一堆 check"只是看着热闹。
     #   其余       → 当成 pytest 的 -k 选择器。
     if selector.startswith("verify:"):
-        cmd = [str(NODE), str(ROOT / "_verify/verify.js")]
+        # ⚠ `verify:` 后面那段是分组名，**必须真的传进去**。它以前只是个装饰：
+        #   每条 UI 变异都完整跑一遍整网（127s），8 条就是 17 分钟。
+        kw = selector.split(":", 1)[1].strip()
+        cmd = [str(NODE), str(ROOT / "_verify/verify.js")] + ([kw] if kw else [])
     else:
         cmd = [str(ROOT / ".venv/Scripts/python.exe"), "-m", "pytest", "-q",
                *shlex.split(selector)]
@@ -525,6 +581,15 @@ for name, path, old, new, selector in MUTATIONS:
         r = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)
         out = (r.stdout or "") + (r.stderr or "")
         if selector.startswith("verify:"):
+            # ⚠ **分组真的生效了**才配信这个数：分组参数被无视而跑成整网时，
+            #   输出是 353/357，会被读成"分组报红"，而真相是压根没按分组跑。
+            #   verify.js 在分组模式下必打「（分组：x）」，没有这一行就是工具错，
+            #   与"断言报红"是两回事 —— 混在一起就是静默假绿。
+            if kw and f"（分组：{kw}）" not in out:
+                print(f"[全绿 !! 工具错] {name} —— 分组没生效（输出里没有「分组：{kw}」），"
+                      f"跑的很可能是整网：\n{out[-400:]}")
+                bad += 1
+                continue
             m = re.search(r"(\d+)/(\d+) 通过", out)
             if m and m.group(1) == m.group(2):
                 print(f"[全绿 !! 漏检] {name} —— 界面断言全过（{m.group(0)}）")
@@ -573,4 +638,9 @@ for name, path, old, new, selector in MUTATIONS:
 print("\n共 %d 条变异，%d 条不合格%s"
       % (len(MUTATIONS) - skipped, bad,
          ("（跳过 %d 条）" % skipped) if skipped else ""))
+# 释放锁（atexit 兜底：中途抛异常 / 被 KeyboardInterrupt 打断也要放，
+# 否则锁文件留着，下次 _lock_held_by_living_process 探活失败才自动失效 ——
+# 那期间另一个人跑来会被误拒）。清空而不是删文件：沙箱会把删除工作区文件拦下。
+import atexit
+atexit.register(lambda: LOCK.write_text("", encoding="utf-8"))
 sys.exit(1 if bad else 0)
