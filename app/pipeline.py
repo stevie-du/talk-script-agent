@@ -167,9 +167,11 @@ PARAMS_DROPPED: dict[str, str] = {
     "reroll": "本次「换一版」的开关，不属于产物属性",
     "points": "已由提示词占位符 $points 消费；产物里的要点数看 len(plan.points)",
 }
-# 4) 运行期由 `_run_generate` 附加（P3-14），**不进 `_normalize`** ——
+# 4) 运行期由 `_run_generate` 从 client.cfg 附加（P3-14），**不进 `_normalize`** ——
 #    `_normalize` 是纯参数归一，不读 self.llm（测试直接调它时会没有客户端）。
-#    它们最终仍落进 result.json 的 params（PERSISTED_PARAMS 已含）。
+#    键名只在这里声明一次，`_run_generate` 遍历本元组附加，别在调用点再抄一遍。
+#    ⚠ 这三个键**必须**同时出现在 PERSISTED_PARAMS 里：result.json 的 params 是
+#    按 PERSISTED_PARAMS 逐键取的，少一个就静默不进产物（测试有子集断言守着）。
 RUNTIME_PARAMS: tuple[str, ...] = ("model", "max_tokens", "temperature")
 
 #: 回炉改写范围三档各自给模型的那句话（A-2，对标 shuorenhua 的三档）。
@@ -459,9 +461,10 @@ class Pipeline:
             client = self.llm
             # P3-14：产物参数记下「当时用的什么配置」，事后才能解释
             # 「这条为什么慢 / 为什么长这样」—— 之前排查只能靠当前 config 倒推。
-            p["model"] = client.cfg.model
-            p["max_tokens"] = client.cfg.max_tokens
-            p["temperature"] = client.cfg.temperature
+            # 键名走 RUNTIME_PARAMS 单一声明：这里只负责从 client.cfg 取值，
+            # 不重复抄键名（抄第二份的教训见 params 四张表那条注释）。
+            for k in RUNTIME_PARAMS:
+                p[k] = getattr(client.cfg, k)
             if "draft" in (skill.get("stages") or {}):
                 # 方案 10：合并包（skill.yaml 声明 stages.draft）选题与正文一次调用，
                 # 不进 selecting —— 省掉 select 单独一轮的思考与往返。

@@ -2353,10 +2353,6 @@ td.warn { color: var(--warn); font-weight: 500; }
 .dialog-actions { display: flex; gap: var(--s2); margin-top: var(--s6); align-items: center; }
 .dialog-actions .ghost, .dialog-actions .primary { width: auto; }
 .cd-msg { color: var(--text-2); line-height: 1.6; }
-pre#pg-checklist {
-  white-space: pre-wrap; background: var(--fill); padding: var(--s3);
-  border-radius: var(--r-md); font-size: var(--f-xs); max-height: 46vh; overflow: auto;
-}
 
 /* Toast */
 .toast {

@@ -199,6 +199,13 @@ def test_normalize_keys_are_all_accounted_for(degraded):
     assert not (set(PERSISTED_PARAMS) & set(PARAMS_ELSEWHERE))
     assert not (set(PERSISTED_PARAMS) & set(PARAMS_DROPPED))
     assert not (set(PARAMS_ELSEWHERE) & set(PARAMS_DROPPED))
+    # P3-14：RUNTIME_PARAMS 是「运行期附加」的键，最终要经 PERSISTED_PARAMS
+    # 才进 result.json 的 params（pipeline.py 按 PERSISTED_PARAMS 逐键取）。
+    # 少一个不报错、只会静默不进产物 —— 子集关系必须单独断言：上面三条
+    # 「互不重叠」管不到这张表，它本来就是 PERSISTED 的子集。
+    assert set(RUNTIME_PARAMS) <= set(PERSISTED_PARAMS), (
+        f"运行期键 {sorted(set(RUNTIME_PARAMS) - set(PERSISTED_PARAMS))} 不在 "
+        "PERSISTED_PARAMS 里：_run_generate 附加了也不会写进 result.json 的 params")
     assert all(v for v in PARAMS_DROPPED.values()), "被丢弃的键必须写清理由"
 
 
@@ -211,6 +218,20 @@ def test_everything_in_elsewhere_really_lands_in_the_result(degraded):
         assert key in r, f"{key} 声明落在 result['{key}']，实际没有"
         assert r[key] == out[key] or (key == "pack" and r[key] == out[key]), \
             f"{key} 的落盘值与内存值不一致：{r[key]!r} != {out[key]!r}"
+
+
+def test_every_runtime_param_really_lands_in_the_result(degraded):
+    """P3-14：`RUNTIME_PARAMS` 声明了运行期附加，就得真的在产物 params 里找到。
+
+    与 `PARAMS_ELSEWHERE` 那条同构：声明了落点就要能在产物里验到 ——
+    「算了、也算对了，却在落盘时被滤掉」正是本项目反复踩的坑。
+    变异：删掉 `_run_generate` 里遍历 RUNTIME_PARAMS 的附加 → 报红。
+    """
+    r = degraded["result"]
+    for key in RUNTIME_PARAMS:
+        assert key in r["params"], (
+            f"{key} 声明由 _run_generate 运行期附加，产物 params 里没有 —— "
+            "要么附加被删了，要么它掉了 PERSISTED_PARAMS（静默不进产物）")
 
 
 # ── 第 4 组：其它出口也要带上信号 ────────────────────────────
