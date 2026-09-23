@@ -431,7 +431,7 @@ MUTATIONS = [
         CSS_F,
         "--ok: light-dark(#1b7030, #57c173);",
         "--ok: light-dark(#248a3d, #57c173);",
-        "verify:",
+        "verify:contrast",
     ),
     # ── P3-14 运行期键对账（2026-09-23 复审补）────────────────────
     # 原守卫只查了 PERSISTED/ELSEWHERE/DROPPED 三张表两两不重叠，唯独漏了
@@ -618,7 +618,7 @@ for name, path, old, new, selector in MUTATIONS:
     #   其余       → 当成 pytest 的 -k 选择器。
     if selector.startswith("verify:"):
         # ⚠ `verify:` 后面那段是分组名，**必须真的传进去**。它以前只是个装饰：
-        #   每条 UI 变异都完整跑一遍整网（127s），8 条就是 17 分钟。
+        #   每条 UI 变异都完整跑一遍整网，7 条累积起来是整轮里最耗时的一段。
         kw = selector.split(":", 1)[1].strip()
         cmd = [str(NODE), str(ROOT / "_verify/verify.js")] + ([kw] if kw else [])
     else:

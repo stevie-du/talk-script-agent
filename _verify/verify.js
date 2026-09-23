@@ -19,12 +19,15 @@ const { probeSource } = require("./lib/overflow");
 // `node _verify/verify.js topics` 只跑某一组断言（见 sections/ 目录）。
 //
 // 存在的理由很实在：变异检验里 7 条 UI 变异守的断言全在 topics 组，而它在
-// 整网里排在最后（6700 行开外）—— 每次为了这几条断言把前面 350 条的前置
-// 流程重走一遍，一次 127s，8 条变异就是 17 分钟。
+// 整网里排在最后（6700 行开外）—— 每次为了这几条断言要把前面几百条的前置
+// 流程整个重走一遍，7 条变异累积起来是整轮变异里最耗时的一段。
 //
 // ⚠ 只跑一组就拿不到整网的"全绿"信号了，所以**默认（不带参数）仍然跑全量**，
 //   分组入口只用在"我知道要看哪几条"的场合（目前只有 mutate.py）。
-const SECTIONS = { topics: require("./sections/topics") };
+const SECTIONS = {
+  topics: require("./sections/topics"),
+  contrast: require("./sections/contrast"),
+};
 const ONLY = (process.argv[2] || "").trim();
 
 const RENDERER = path.resolve(__dirname, "..", "desktop", "renderer");
@@ -1235,28 +1238,6 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     return r.result.value;
   };
 
-  // ── 分组早退：只要这一组，就不必把整网的前置流程走完 ──────────────
-  if (ONLY) {
-    const suite = SECTIONS[ONLY];
-    // ⚠ 两个静默降级都必须堵死，否则分组入口就是一台假绿发生器：
-    //   ① 分组名写错 → suite 是 undefined，什么都不跑、退出码 0 = "全绿"；
-    //   ② 分组跑完一条断言都没落 → 同样是"全绿"。
-    //   两条都直接判失败，绝不允许"没跑到"被读成"跑过了"。
-    if (!suite) {
-      console.error(`FAIL: 没有叫「${ONLY}」的分组，可选：${Object.keys(SECTIONS).join(" / ")}`);
-      cleanupAll();
-      process.exit(3);
-    }
-    await suite({ evalIn, sleep, check });
-    if (!results.length) {
-      console.error(`FAIL: 分组「${ONLY}」一条断言都没跑到（分组是空的？）`);
-      cleanupAll();
-      process.exit(4);
-    }
-    report(ONLY);
-    return;
-  }
-
   // ── 状态色 token 解析辅助（规范 §7.2：断言比对 token 解析值，不抄 rgb 字面量）
   // 亮色 token 曾逐字锁进断言；要加深 --warn 达标对比度时，字面量断言就成了
   // 「改值先改断言」的负担。这里把"这颗胶囊吃的是不是 --warn"的判据换成：
@@ -1280,23 +1261,32 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     const hi = Math.max(la, lb), lo = Math.min(la, lb);
     return (hi + 0.05) / (lo + 0.05);
   })()`);
-  {
-    // 对**当前主题的实际宿主底**算：verify 页面可能跑在暗色（prefers-color-scheme: dark），
-    // 亮色分支的 token 只该对白底、暗色分支只该对暗底。硬编码白底会把暗色分支
-    // 误判成不达标（它们本来就不设计给白底）。
-    const [okC, warnC, badC, surfaceC] = await Promise.all([
-      resolvedToken("--ok"), resolvedToken("--warn"), resolvedToken("--bad"),
-      resolvedToken("--surface"),
-    ]);
-    const ratios = {
-      ok: await contrastRatio(okC, surfaceC),
-      warn: await contrastRatio(warnC, surfaceC),
-      bad: await contrastRatio(badC, surfaceC),
-    };
-    check("状态色对当前宿主底对比度 ≥4.5（§5，防 token 调浅回退）",
-      ratios.ok >= 4.5 && ratios.warn >= 4.5 && ratios.bad >= 4.5,
-      JSON.stringify(ratios));
+
+  // ── 分组早退：只要这一组，就不必把整网的前置流程走完 ──────────────
+  if (ONLY) {
+    const suite = SECTIONS[ONLY];
+    // ⚠ 两个静默降级都必须堵死，否则分组入口就是一台假绿发生器：
+    //   ① 分组名写错 → suite 是 undefined，什么都不跑、退出码 0 = "全绿"；
+    //   ② 分组跑完一条断言都没落 → 同样是"全绿"。
+    //   两条都直接判失败，绝不允许"没跑到"被读成"跑过了"。
+    if (!suite) {
+      console.error(`FAIL: 没有叫「${ONLY}」的分组，可选：${Object.keys(SECTIONS).join(" / ")}`);
+      cleanupAll();
+      process.exit(3);
+    }
+    // ⚠ resolvedToken / contrastRatio 也一起传：对比度组要用，而它们**只在
+    //   verify.js 里定义一份**（整网里还有 8 处断言在用），分组不能自己抄一份。
+    await suite({ evalIn, sleep, check, resolvedToken, contrastRatio });
+    if (!results.length) {
+      console.error(`FAIL: 分组「${ONLY}」一条断言都没跑到（分组是空的？）`);
+      cleanupAll();
+      process.exit(4);
+    }
+    report(ONLY);
+    return;
   }
+
+  await SECTIONS.contrast({ evalIn, sleep, check, resolvedToken, contrastRatio });
 
   // ── 截图辅助（**定义在最前面**，任何一步都能用）───────────
   // 原来它定义在脚本末尾的「截图区」，于是流程中段想拍一张图只能用裸 cdp 重写一遍
