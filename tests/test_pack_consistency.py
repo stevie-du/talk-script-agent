@@ -39,22 +39,39 @@ def _md_files():
 
 
 def _texts():
-    return {str(p.relative_to(PACK)): p.read_text(encoding="utf-8") for p in _md_files()}
+    out = {str(p.relative_to(PACK)): p.read_text(encoding="utf-8") for p in _md_files()}
+    # yaml 也会带着口径进提示词（`private/service.yaml` 经 pack.yaml files.private
+    # 注入，其 `maintenance.cycle` 在三副本时代是**第三处没人守的抄件**）——
+    # 只扫 md 会漏掉 yaml 出现"半月/季度"这种行。2026-09-23 把 service.yaml 的
+    # cycle 改成空（口径收敛到 standards.md 单点），这条文本想再漂就得走这里。
+    svc = PACK / "private" / "service.yaml"
+    if svc.exists():
+        out["private/service.yaml"] = svc.read_text(encoding="utf-8")
+    return out
 
 
 def test_maintenance_cycle_is_stated_the_same_way_everywhere():
-    """凡同时出现这四类里 ≥3 个的行，必须是同一套四类、同一个顺序。"""
+    """凡同时出现这四类里 ≥3 个的行（或**相邻两行**拼起来算的段），
+    必须是同一套四类、同一个顺序。
+
+    只查单行会漏掉 yaml 的 `cycle: "半月 / 季度 / 半年 / 年度"` ——
+    它的四个词被折成 `cycle:` 与值两行，单行永远凑不齐 3 个（2026-09-23
+    变异实测：把 service.yaml 的 cycle 装回去，单行守卫绿着放过去了）。
+    所以对每一行，都再算一次「本行 + 下一行」的拼接。
+    """
     offenders = []
     for rel, text in _texts().items():
-        for line in text.splitlines():
-            found = [c for c in CYCLE if c in line]
+        lines = text.splitlines()
+        for i, line in enumerate(lines):
+            chunk = line + (lines[i + 1] if i + 1 < len(lines) else "")
+            found = [c for c in CYCLE if c in chunk]
             if len(found) < 3:
                 continue
             if tuple(found) != CYCLE:
-                offenders.append(f"{rel}: {line.strip()[:60]} → 列出的顺序/集合是 {found}")
+                offenders.append(f"{rel}: {chunk.strip()[:60]} → 列出的顺序/集合是 {found}")
             for bad in BAD_CYCLE:
-                if bad in line and not any(n in line for n in NEGATION):
-                    offenders.append(f"{rel}: 自造周期「{bad}」：{line.strip()[:60]}")
+                if bad in chunk and not any(n in chunk for n in NEGATION):
+                    offenders.append(f"{rel}: 自造周期「{bad}」：{chunk.strip()[:60]}")
     assert not offenders, "维保周期口径漂移：\n" + "\n".join(offenders)
 
 

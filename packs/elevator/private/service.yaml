@@ -30,7 +30,7 @@ coverage:
 
 # ── 维保服务内容 ──────────────────────────
 maintenance:
-  cycle: "半月 / 季度 / 半年 / 年度"   # 按 TSG T5002 表述
+  cycle: ""                   # 维保周期四类见 standards.md（半月/季度/半年/年度，TSG T5002）——本字段不再自抄一份
   includes:
     - "清洁、润滑、检查、调整、更换易损件"
   record_method: ""           # 例：电子工单 + 纸质记录双留痕
