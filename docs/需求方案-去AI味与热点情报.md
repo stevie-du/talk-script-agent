@@ -601,3 +601,24 @@ E（事件）        = exp(−Δ天 / τ)，τ 按来源角色（热榜 3 / 雷�
 - **排序键**：本领域 > 通用 > 别的领域；有出处优先；机会分/新鲜度兜底 ——
   与 `_prompt_rank` 一致。被 hard 禁用词摘掉的条目**返回给调用方记作业日志**
   （`intel_drop` step），否则"摘了"无人知晓。
+
+#### 状态药丸族对比度：用户拍板后走 ①，一条真红一条假绿（2026-09-23）
+
+§2.6 那笔欠账（30 项里 16 项 <4.5:1）用户拍板"按统一规范来"，落成：
+
+- **token 加深（Lighthouse -700 法）**：`--ok #248a3d→#1b7030`、`--warn #b25e00→#995100`、
+  `--bad #d70015→#c00117`；`.m-chip/.rh-state/.tag-default` 基础字色提 `--text-1`。
+  `_chip-probe.js` 复测 **30 项全达标**，暗色分支复核未受损。
+- **verify.js 断言换"比对 token 解析值"**（§7.2 要求）：新增 `resolvedToken(name)`
+  —— 建一个探针 span、`el.style.color = 'var(--ok)'`、读 computed color 再移除。
+  `light-dark()` 由浏览器解析，拿到的是**当前主题分支**的计算色，不用手动拆。
+- **一条假绿的教训**：初版对比度守卫硬编码"对白底 ≥4.5"，而 verify 页面实际跑
+  **暗色**（`prefers-color-scheme: dark` 不模拟时跟随系统）—— 暗色分支的 token
+  本来就不设计给白底，于是守卫算出 3.4 全红。改成对**当前 `--surface`** 算才对：
+  亮色分支对白底、暗色分支对暗底，各算各的。
+- **intel 测试超时是同族的"环境依赖型假红"**：`test_no_llm_call_anywhere_in_fetch`
+  全量跑稳定 TimeoutError、单跑靠网络时序侥幸过。faulthandler 栈实证卡在
+  `demand_terms` 对**每个 seed 各发一次真实请求**（20 个种子 × 沙箱代理慢请求）。
+  修法：`start_intel_fetch` 透传 `http` 注入点（`fetch_pack` 本就支持，Job 管道
+  把调用包进线程导致注不进去），测试注入 `_fake_http()`。语义不变（仍走完整
+  Job 管道 + monkeypatch 守着"不碰模型"）。
