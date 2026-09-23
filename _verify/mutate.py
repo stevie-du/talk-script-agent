@@ -549,10 +549,57 @@ def _recover() -> None:
 _acquire_lock()          # 先拿锁再恢复：并发跑的工具互相踩文件比残留更毒
 _recover()
 
+# ── 基线检查 ────────────────────────────────────────────────
+# 判据是「改回去必须红」，前提是「**没改的时候是绿的**」。
+# 基线本身是红的时候（并发会话正在改同一个文件、或界面/用例基线真有欠账），
+# 每条变异都会"报红" —— 看起来全过，其实一条都没守住。这种假绿最难发现：
+# 输出里是清一色的「[报红 OK]」，跟真守住长得一模一样。
+# 所以每个 selector 先跑一次**未变异**的基线，不绿就判「判定无意义」。
+_baseline = {}
+
+
+def _run_selector(selector):
+    """跑一次 selector（未变异状态），返回 (输出, 退出码)。"""
+    if selector.startswith("verify:"):
+        kw = selector.split(":", 1)[1].strip()
+        cmd = [str(NODE), str(ROOT / "_verify/verify.js")] + ([kw] if kw else [])
+    else:
+        cmd = [str(ROOT / ".venv/Scripts/python.exe"), "-m", "pytest", "-q",
+               *shlex.split(selector)]
+    r = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)
+    return (r.stdout or "") + (r.stderr or ""), r.returncode
+
+
+def _is_green(selector, out, rc):
+    """这条 selector 现在是绿的吗？（返回 是否绿 + 一句依据）"""
+    if selector.startswith("verify:"):
+        kw = selector.split(":", 1)[1].strip()
+        if kw and f"（分组：{kw}）" not in out:
+            return False, f"分组没生效（输出里没有「分组：{kw}」）"
+        m = re.search(r"(\d+)/(\d+) 通过", out)
+        if not m:
+            return False, "没读到「N/M 通过」结果行"
+        return m.group(1) == m.group(2), m.group(0)
+    ran = re.search(r"^[.sxFEX]+\s*\[\s*100%\]", out, re.M) is not None
+    if not ran:
+        return False, "pytest 没跑成用例"
+    return rc == 0, f"退出码 {rc}"
+
+
 bad = skipped = 0
 for name, path, old, new, selector in MUTATIONS:
     if _only and _only not in name:
         skipped += 1
+        continue
+    # ⚠ 先确认基线是绿的：不绿的话下面那条「报红 OK」是假的 —— 它证明的是
+    #   "工作区现在本来就是红的"，而不是"这条断言守住了"。
+    if selector not in _baseline:
+        _baseline[selector] = _run_selector(selector)
+    b_ok, b_why = _is_green(selector, *_baseline[selector])
+    if not b_ok:
+        print(f"[基线不绿 !! 判定无意义] {name} —— 未变异时就已经是红的"
+              f"（{b_why}），这条变异的「报红」什么都证明不了，先修基线")
+        bad += 1
         continue
     orig = path.read_text(encoding="utf-8")
     if old not in orig:
