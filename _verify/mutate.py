@@ -72,6 +72,13 @@ MUTATIONS = [
         '        if re.search(r"\\d|[一二三四五六七八九十百]+\\s*(天|次|台|元|块|米|层|分钟|小时|起|个|位|%|％)", full):',
         "tests/test_ai_tells.py -k measure",
     ),
+    (
+        "A-4 list_enumeration 阈值退回 ≥3（正当分步讲解被误判成清单体）",
+        AI,
+        "        if len(seq) >= 4:",
+        "        if len(seq) >= 3:",
+        "tests/test_ai_tells.py -k list_enumeration",
+    ),
     # ── A-3 三方对账（需求方案 §2.1 / yaml / 函数名）────────────
     (
         "A-3 yaml 里把 tell 名拼错（slogan_closing → slogan_close）",
