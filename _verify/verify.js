@@ -1215,6 +1215,37 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     el.style.color = 'var(${name})'; document.body.appendChild(el);
     var c = getComputedStyle(el).color; el.remove(); return c;`);
 
+  // ── 状态色对比度守卫（对比度欠账 §2.6 修复后固化，防 token 回退）────────
+  // _chip-probe.js 是 30 项全量的独立探针；这里放最小可执行守卫：
+  // --ok/--warn/--bad 对白底 ≥4.5（§5）。谁把亮色档调浅回去，这里立刻红。
+  // 页面默认是亮色（verify 不模拟 prefers-color-scheme），直接对白底算。
+  const contrastRatio = (a, b) => evalIn(`return (function(){
+    const L = (c) => { const m = /rgba?\\(([\\d.]+),\\s*([\\d.]+),\\s*([\\d.]+)/.exec(c);
+      if (!m) return 0;
+      const f = (v) => { v /= 255; return v <= 0.03928 ? v/12.92 : Math.pow((v+0.055)/1.055, 2.4); };
+      return 0.2126*f(+m[1]) + 0.7152*f(+m[2]) + 0.0722*f(+m[3]); };
+    const la = L('${a}'), lb = L('${b}');
+    const hi = Math.max(la, lb), lo = Math.min(la, lb);
+    return (hi + 0.05) / (lo + 0.05);
+  })()`);
+  {
+    // 对**当前主题的实际宿主底**算：verify 页面可能跑在暗色（prefers-color-scheme: dark），
+    // 亮色分支的 token 只该对白底、暗色分支只该对暗底。硬编码白底会把暗色分支
+    // 误判成不达标（它们本来就不设计给白底）。
+    const [okC, warnC, badC, surfaceC] = await Promise.all([
+      resolvedToken("--ok"), resolvedToken("--warn"), resolvedToken("--bad"),
+      resolvedToken("--surface"),
+    ]);
+    const ratios = {
+      ok: await contrastRatio(okC, surfaceC),
+      warn: await contrastRatio(warnC, surfaceC),
+      bad: await contrastRatio(badC, surfaceC),
+    };
+    check("状态色对当前宿主底对比度 ≥4.5（§5，防 token 调浅回退）",
+      ratios.ok >= 4.5 && ratios.warn >= 4.5 && ratios.bad >= 4.5,
+      JSON.stringify(ratios));
+  }
+
   // ── 截图辅助（**定义在最前面**，任何一步都能用）───────────
   // 原来它定义在脚本末尾的「截图区」，于是流程中段想拍一张图只能用裸 cdp 重写一遍
   // （生成中那一态就这么绕过两次）。它只依赖 evalIn / sleep / cdp / fs / SHOT_DIR，
