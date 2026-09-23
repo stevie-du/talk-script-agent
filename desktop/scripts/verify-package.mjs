@@ -174,7 +174,9 @@ function sourceNewest() {
   const dirs = ['app', path.join('desktop', 'renderer'), 'packs'];
   const files = [path.join('desktop', 'package.json'), 'requirements-runtime.txt',
                  'requirements.txt', path.join('desktop', 'main.js'),
-                 path.join('desktop', 'preload.js')];
+                 path.join('desktop', 'preload.js'),
+                 path.join('desktop', 'engine-path.js'),
+                 path.join('desktop', 'engine-dialogs.js')];
   for (const rel of dirs) {
     const abs = path.join(ROOT, rel);
     if (!existsSync(abs)) continue;

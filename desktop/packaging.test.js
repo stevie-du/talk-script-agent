@@ -56,3 +56,25 @@ test('privatePackLeak：没有排除规则时报出目录', () => {
   assert.deepStrictEqual(privatePackLeak([{ from: '../packs', filter: ['**/*', '!**/private/**'] }], dirs), []);
   assert.deepStrictEqual(privatePackLeak([], []), []);   // 没打包内容也没私有目录 → 不该拦
 });
+
+// ── main.js 的每个同级 require 都必须在 build.files 里 ──────────
+// 病灶（2026-09-23 五路审查 P0-1）：engine-dialogs.js 从 main.js 拆出来时
+// 忘了加进 build.files。electron-builder 的 files 是**白名单、替换默认值**，
+// 漏一个 sibling 文件的表现是「构建成功、装完启动即 MODULE_NOT_FOUND」，
+// 一句提示都没有。而 verify-package 判据 E 只正向核对 files 列出的文件在不在
+// asar 里，从不反向枚举 main.js require 了什么 —— 所以 1112 文件对账全绿，
+// 照样认证出一个坏包。
+// 这条断言就是那个盲区的守卫：**枚举 require，而不是枚举 files**。
+// 以后任何人再从 main.js 拆模块忘加 files，这里立刻红。
+test('main.js require 的每个同级模块都在 build.files 白名单里', () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+  const reqs = [...mainSrc.matchAll(/require\('\.\/([\w.-]+)'\)/g)].map(m => m[1]);
+  assert.ok(reqs.length >= 2, 'main.js 里一个同级 require 都没解析到，本断言会空转');
+  // require 不带后缀（require('./engine-path')），files 里带（"engine-path.js"）——
+  // 两边都褪掉 .js 再比，否则这条断言会因为"形状不同"恒红，白挨。
+  const norm = new Set(((cfg.build && cfg.build.files) || [])
+    .map(f => String(f).replace(/\.js$/, '')));
+  const missing = reqs.filter(r => !norm.has(r));
+  assert.deepStrictEqual(missing, [],
+    '这些模块被 main.js require，但不在 build.files 里 —— 打出来的包装完即崩：' + missing.join(', '));
+});

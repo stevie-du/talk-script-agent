@@ -26,7 +26,8 @@
     "files": [
       "main.js",
       "preload.js",
-      "engine-path.js"
+      "engine-path.js",
+      "engine-dialogs.js"
     ],
     "beforePack": "scripts/before-pack.js",
     "extraResources": [
