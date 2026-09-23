@@ -433,6 +433,25 @@ MUTATIONS = [
         "--ok: light-dark(#248a3d, #57c173);",
         "verify:",
     ),
+    # ── P3-14 运行期键对账（2026-09-23 复审补）────────────────────
+    # 原守卫只查了 PERSISTED/ELSEWHERE/DROPPED 三张表两两不重叠，唯独漏了
+    # RUNTIME ⊆ PERSISTED —— 运行期键掉出后者时 result.json 的 params 按
+    # PERSISTED 逐键取，静默不进产物，没有任何断言红（实测老方程全绿）。
+    (
+        "P3-14 运行期键掉出 PERSISTED_PARAMS（temperature）→ 子集 + 落盘双红",
+        PIPE_F,
+        '    "model", "max_tokens", "temperature",',
+        '    "model", "max_tokens",',
+        "tests/test_quota_degraded_signal.py",
+    ),
+    (
+        "P3-14 运行期附加整段被删（不遍历 RUNTIME_PARAMS）→ 作业直接失败",
+        PIPE_F,
+        """            for k in RUNTIME_PARAMS:
+                p[k] = getattr(client.cfg, k)""",
+        "            pass  # 变异：附加被删",
+        "tests/test_quota_degraded_signal.py",
+    ),
 ]
 
 # 子集运行：`python _verify/mutate.py -k UI` 只跑名字里含 UI 的那几条。
