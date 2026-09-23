@@ -18,7 +18,7 @@
 // 每条都落的记号等于没有记号（对照 Claude / Linear 的侧栏）。
 // 失败记录能点开看原因 —— 后端会把 job.json 摘要返回给 /api/history/{id}。
 
-import { $, el, fmtClock, fmtStamp, dayGroupKey, toast, bindOnce } from "./util.js";
+import { $, el, esc, fmtClock, fmtStamp, dayGroupKey, toast, bindOnce } from "./util.js";
 import { api } from "./api.js";
 import { state, setResult, detachJob } from "./store.js";
 import { setLeftFolded, syncBusyAffordance } from "./ui.js";
@@ -144,7 +144,9 @@ function paint(items) {
   const shown = (items || []).filter(matches);
   if (query && !shown.length) {
     list.innerHTML = "";
-    list.appendChild(el("p", "hint sess-empty", `没有匹配「${query}」的会话`));
+    // ⚠ query 是用户输入，el() 的第三参数走 innerHTML —— 不 esc 就是 XSS：
+    //   往搜索框粘 <img src=x onerror=...> 即执行（五路审查 P0-2）。
+    list.appendChild(el("p", "hint sess-empty", `没有匹配「${esc(query)}」的会话`));
     return;
   }
   items = shown;

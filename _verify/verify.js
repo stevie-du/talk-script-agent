@@ -134,7 +134,11 @@ const META = {
         segment: { label: "细分领域", default: "家用电梯", options: ["家用电梯", "维保", "加装"] },
         audience: { label: "受众", default: "业主乘客", options: ["业主乘客", "物业业委会"] },
         duration: { label: "时长（秒）", default: 60, options: [15, 30, 60, 90] },
-        platform: { label: "平台", default: "抖音", options: ["抖音", "视频号", "小红书"] },
+        platform: { label: "平台", default: "抖音", options: ["抖音", "视频号", "小红书",
+          // XSS 探针（P0-2）：pack.yaml 的 options 是可导入的第三方数据，
+          // 工具条胶囊渲染它时走 el()（innerHTML）——漏 esc 这个 option 就会
+          // 变成真 DOM 元素。默认值不含它，其余断言不受影响。
+          "<img src=x onerror=window.__xssPill=1>"] },
         style: { label: "风格", default: "口播科普", options: ["口播科普", "带货"] },
         persona: { label: "人设", default: "维保老师傅", options: ["维保老师傅", "产品经理"] },
         cta: { label: "结尾引导", default: "关注", options: ["关注", "私信", "留资"] },
@@ -541,6 +545,11 @@ window.__addCount = 0;
     {rel:'knowledge/faq.md',size:3072},
     {rel:'compliance/platform.md',size:1536},
     {rel:'patterns/hook.md',size:2560},
+    // XSS 探针（P0-2）：rel 是磁盘原样路径（可来自导入的 zip），
+    // kb-name 渲染它时走 el()（innerHTML）——漏 esc 这个文件名就会变成
+    // 真 DOM 元素。放最后一行：2483 的 target 选"第一个非 pack.yaml/
+    // 校对清单.md"，不能被它抢走；private 匹配也不含它。
+    {rel:'<img src=x onerror=window.__xssKb=1>.md',size:64},
     {rel:'rules/duration.md',size:1024},
     {rel:'private/pricing.md',size:896},
   ];
@@ -1404,6 +1413,25 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("无 JS 运行错误", errs.length === 0, errs.join(" | "));
   check("meta 载入且行业包下拉已填充", boot.meta && boot.packs === 3, `packs=${boot.packs}`);
   check("工具条渲染出参数胶囊", boot.quickPills >= 3, `pills=${boot.quickPills}`);
+  // 平台下拉的第 4 项是 XSS 探针（桩里带的 payload option）：
+  // pack.yaml 的 options 是可导入的第三方数据，el() 第三参数是 innerHTML，
+  // 漏 esc 时这个 option 会被解析成真 DOM 元素（五路审查 P0-2）。
+  const xssPill = await evalIn(`return (function(){
+    window.__xssPill = 0;
+    var sel = document.querySelector('#quick-params #p-platform');
+    if (!sel) return { noSel: true };
+    return {
+      optCount: sel.options.length,
+      // 判据盯 DOM：漏 esc 时 querySelectorAll('img') 会是 1
+      imgInSel: sel.querySelectorAll('img,script,svg,iframe').length,
+      fired: window.__xssPill,
+      hasPayload: Array.prototype.some.call(sel.options,
+        function(o){ return o.text.indexOf('<img') >= 0; }),
+    }; })()`);
+  check("工具条参数胶囊不含注入元素（pack.yaml 的 options 走 esc）",
+    xssPill.optCount === 4 && xssPill.imgInSel === 0 && xssPill.fired === 0
+      && xssPill.hasPayload,
+    JSON.stringify(xssPill));
   check("空状态示例卡渲染", boot.samples === 4, `samples=${boot.samples}`);
   check("会话列表渲染 6 条并分组", boot.sessions === 6 && boot.groups >= 4,
     `rows=${boot.sessions} groups=${boot.groups}`);
@@ -2407,6 +2435,28 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("行业包详情进入即按角色渲染文件分组（≥8 组 / ≥9 条）",
     !pi.hidden && pi.groups >= 8 && pi.items >= 9,
     JSON.stringify(pi));
+
+  // kb-name 的 XSS 探针（P0-2）：DET_FILES 末尾那行 rel 是一段 payload，
+  // settings.js 渲染它时走 el()（innerHTML）。漏 esc 时这个文件名会被解析
+  // 成真 DOM 元素；正确实现的 HTML 里是 &lt;img、DOM 里 0 个元素。
+  const xssKb = await evalIn(`return (function(){
+    window.__xssKb = 0;
+    var rows = document.querySelectorAll('#pi-groups .kb-item');
+    var hit = null;
+    rows.forEach(function(r){
+      var n = r.querySelector('.kb-name');
+      if (n && n.textContent.indexOf('<img src=x onerror') === 0) hit = n;
+    });
+    if (!hit) return { noPayloadRow: true, rows: rows.length };
+    return {
+      html: hit.innerHTML.slice(0, 90),
+      // 判据盯 DOM 里出了什么，不是文本里有没有那四个字符（esc 后文本里照样有）
+      injected: hit.querySelectorAll('img,script,svg,iframe').length,
+      fired: window.__xssKb,
+    }; })()`);
+  check("行业包面板文件名不含注入元素（磁盘路径走 esc）",
+    xssKb.injected === 0 && xssKb.fired === 0 && /&lt;img/.test(xssKb.html || ''),
+    JSON.stringify(xssKb));
 
   // ⭐ 2026-09-17 新增断言：原「知识 / 技能」两个面板的内容（skill.yaml /
   // knowledge/、rules/、patterns/、compliance/、private/）现在必须能在

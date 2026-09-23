@@ -286,7 +286,9 @@ function renderQuickParams() {
     s.id = `p-${key}`;
     s.dataset.pill = "1";        // 标记为胶囊形态，beautifySelects 据此套 .pill 变体
     for (const opt of def.options) {
-      const o = el("option", "", key === "duration" ? `${opt}s` : String(opt));
+      // ⚠ opt 来自 pack.yaml（可导入第三方包）：el() 第三参数是 innerHTML，
+      //   不 esc 就是 XSS。同函数上面模型下拉（260 行）就是这么写的。
+      const o = el("option", "", key === "duration" ? `${esc(String(opt))}s` : esc(String(opt)));
       o.value = String(opt);
       s.appendChild(o);
     }
