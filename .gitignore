@@ -81,3 +81,6 @@ _verify/.mutate-journal.json
 # 变异检验的并发锁与全量运行日志（同上：运行态不是源码）
 _verify/.mutate.lock
 _verify/.mutate-full.log
+
+# _verify 下点开头的临时日志（_* 约定不覆盖点开头）
+_verify/.*.log
