@@ -32,14 +32,18 @@ module.exports = async function topics({ evalIn, sleep, check }) {
     //   要等动态 import + intel 请求，600ms 不够 —— chip 里会整整少一组
     //   （「未接入 1」），那条断言恒红。恒红的断言在变异检验里 = 假绿。
     //   改成"等到真的渲染出来"，两边都成立，整网侧还省掉多余的等待。
-    for (let i = 0; i < 40; i++) {
-      const ready = await evalIn(`var on = document.getElementById('view-topics');
-        return !!on && !on.classList.contains('hidden')
+    let prev = "";
+    let stable = 0;
+    for (let i = 0; i < 40 && stable < 3; i++) {
+      const snap = await evalIn(`var on = document.getElementById('view-topics');
+        return on && !on.classList.contains('hidden')
           && on.querySelectorAll('#topics-root .page-card').length > 0
-          && document.querySelectorAll('#src-chips .m-chip').length > 0
-          && /全部 /.test(document.getElementById('src-chips').textContent);`);
-      if (ready) break;
-      await sleep(100);
+          ? [...document.querySelectorAll('#src-chips .m-chip')]
+              .map(function (c) { return c.textContent.trim(); }).join('|')
+          : "";`);
+      stable = (snap && snap === prev) ? stable + 1 : 0;
+      prev = snap;
+      if (stable < 3) await sleep(100);
     }
     // ⚠ evalIn 的包装是 `(() => { <expr> })()`（**块体**），所以这里必须显式 return ——
     //   写成裸 IIFE 的话返回值被丢掉，拿到 undefined，后面每条断言都读属性报 TypeError。
