@@ -2,7 +2,8 @@
 //
 // 从 verify.js 搬过来，理由与 topics 组相同：**它能被单独跑**。整网里它排在
 // 1283 行，前面只有启动与导航，但为了跑这 1 条断言也要把后面 350 条的前置
-// 全走完（127s）。现在 `node _verify/verify.js contrast` 只要几秒。
+// 全走完（整网一趟是两分钟级，数字会漂，不写死）。现在
+// `node _verify/verify.js contrast` 只要几秒。
 //
 // ⚠ resolvedToken / contrastRatio **由 verify.js 传进来**，不在这里复制一份：
 //   它们在整网里还被另外 8 处断言复用，抄一份就是"改了一处另一处静默过期"。
