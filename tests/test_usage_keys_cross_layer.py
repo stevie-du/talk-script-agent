@@ -109,5 +109,35 @@ def test_reasoning_token_name_is_not_recounted_in_engine():
         "界面的那个数字应当直接来自上游回传的 completion_tokens_details")
 
 
+def test_cache_fields_the_ui_reads_are_passthrough_upstream_names():
+    """P1-40：前端读的前缀缓存字段，必须是上游原样带回的名字，不许引擎改名。
+
+    `$feedback_block` 挪到 user_template 末尾后，回炉轮里唯一变的就是末尾那段，
+    理论上前缀缓存会命中整段静态提示词 —— 但 `prompt_cache_hit_tokens` 若不显示，
+    重排是否真省钱**观测不到**（P1-40 的"重排了没验证"）。
+
+    断言三层：
+      1. 前端真的读了这两个缓存字段（`fmtUsage` 里有）—— 没读 = 白收；
+      2. 引擎不重命名：这两个字面量**不出现在 app/ 源码**里（由上游原样带回，
+         和 `reasoning_tokens` 同一条命）；
+      3. 引擎的 usage 数值拷贝是"全量拷 int/float"（`isinstance(v,(int,float))`）
+         —— 缓存字段是顶层数值，靠这条路径天然进作业，不需要点名白名单。
+         若哪天改成"点名才拷"，这条会红，逼作者把缓存键也加进白名单。
+    """
+    js = PROGRESS_JS.read_text(encoding="utf-8")
+    for key in ("prompt_cache_hit_tokens", "prompt_cache_miss_tokens"):
+        assert key in js, f"progress.js 不再读 {key} —— 缓存命中/未命中不可见了"
+    app_src = "\n".join(p.read_text(encoding="utf-8")
+                        for p in sorted((ROOT / "app").glob("*.py")))
+    for key in ("prompt_cache_hit_tokens", "prompt_cache_miss_tokens"):
+        assert key not in app_src, (
+            f"app/ 里出现了 {key}：引擎开始自己造缓存账本了，"
+            "界面的数字应当直接来自上游回传的 usage")
+    llm = LLM.read_text(encoding="utf-8")
+    assert "isinstance(v, (int, float))" in llm, (
+        "llm.py 的 usage 拷贝不再是'全量拷 int/float'："
+        "顶层数值键（含缓存字段）可能漏收，改回全量拷或把缓存键点名加进白名单")
+
+
 if __name__ == "__main__":                       # pragma: no cover
     sys.exit(pytest.main([__file__, "-q"]))

@@ -69,6 +69,15 @@ function fmtUsage(u) {
   const parts = [];
   if (think) parts.push(`思考 ${think} token`);
   if (body) parts.push(`正文 ${body} token`);
+  // P1-40：前缀缓存命中/未命中可见。`$feedback_block` 挪到 user_template 末尾后，
+  // 回炉轮里唯一变的就是末尾那一段，理论上命中的是整段静态前缀 —— 但此前
+  // 没有任何地方显示 `prompt_cache_hit_tokens`，重排是否真省钱**观测不到**。
+  // 上游回这两个字段就显示；没回就不显示（不猜测）。命中数 > 0 时说明
+  // 这次调用享受到了前缀缓存 —— 也就是 P1-40 那步重排真的在工作。
+  const hit = Number(u.prompt_cache_hit_tokens) || 0;
+  const miss = Number(u.prompt_cache_miss_tokens) || 0;
+  if (hit > 0) parts.push(`缓存命中 ${hit} token`);
+  if (miss > 0) parts.push(`缓存未命中 ${miss} token`);
   return parts.join(" · ");
 }
 
