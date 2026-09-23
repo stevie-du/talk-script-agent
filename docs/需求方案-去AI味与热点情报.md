@@ -487,7 +487,7 @@ AI tells 落于 2d6b54d；两条 checker 返回路径都带 `ai_report`
 | 4 | 词表位置 | 每包一份 `ai_tells.yaml`，packgen 生成初稿 |
 | 5 | 弱 tell 阈值 | ≥2 处 |
 | 6 | 改写范围默认档 | `bounded` |
-| 7 | intel 进 select 还是也进 write | **只进 select**（冲突见 2.2） |
+| 7 | intel 进 select 还是也进 write | **进 select 且也进 draft**（B-3' 落地裁决，2026-09-23）：两个目标包都是合并 `draft` 路径，`select` 模板从不被调用——只接 select 等于没做；实际 `draft_ctx` 同样注入 `$intel_block`，与 select 同一套 `_intel`、同一把 hard 禁用词闸。指纹只带短键（B-3）。见 §2.9 B-3' 与 §2.11 B7 实测记录 |
 | 8 | B 线首版范围 | **已完成（B1~B7 全落地，见顶部状态）**：B1+B2+B3（抓取+落点+只读端点）+ B4（懒触发走 Job 管道+独立额度）+ B5（确定性归并，LLM 从相关性判定里拿掉）+ B6（选题视图 UI）+ B7（intel 进 select/draft 提示词，指纹只带短键）。~~B5/B6/B7 二期~~ |
 | 9 | 状态药丸族的对比度欠账（§2.5） | **已按 ① 完成（2026-09-23）**：加深 `--ok`/`--warn`/`--bad` 亮色档 + 小标记族基础字色提深，`verify.js` 判据换成 `resolvedToken()` 解析比对（§7.2），`_chip-probe.js` 30 项全达标。 |
 
