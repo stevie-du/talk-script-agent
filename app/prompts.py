@@ -216,6 +216,10 @@ class PromptRenderer:
         if private:
             facts_block += f"\n【私有知识库（优先作为事实来源）】\n{private}\n"
         ctx["facts_block"] = facts_block
+        # P3-42：「换一版」时一次给 2 个不同表达的候选正文，让用户挑。
+        # 非 reroll 给空串 → 模板里的 $alt_guide 落空、模型照旧只出主稿（单稿路径零开销）。
+        # 引导是**追加**的静态说明，放在输出结构之后 —— 不动前面的静态体，前缀缓存不破。
+        ctx["alt_guide"] = self._alt_guide(p)
         return ctx
 
     def write_ctx(self, p: dict, plan_dump: dict, feedback: str) -> dict:
@@ -235,7 +239,25 @@ class PromptRenderer:
         if private:
             facts_block += f"\n【私有知识库（优先作为事实来源）】\n{private}\n"
         ctx["facts_block"] = facts_block
+        ctx["alt_guide"] = self._alt_guide(p)
         return ctx
+
+    def _alt_guide(self, p: dict) -> str:
+        """P3-42：「换一版」时给候选引导；否则空串（单稿路径零开销）。
+
+        非 reroll 给空串 → 模板里的 `$alt_guide` 落空、模型照旧只出主稿；
+        reroll 时让模型在 `alternatives` 里一次多给 2 个不同表达的完整正文，
+        与主稿 sections 结构一致（1 hook + points + 1 cta），由引擎逐个过校验。
+        """
+        if not p.get("reroll"):
+            return ""
+        return (
+            "\n【换一版 · 候选版】本次是「换一版」：除上面的 sections 主稿外，"
+            "请在 JSON 里再给 2 个**不同表达**的候选版（alternatives 字段，"
+            "每项是完整 sections，结构同主稿：1 个 hook + 同样数量 point + 1 个 cta，"
+            "顺序固定）。候选版要换的是措辞、节奏、切入点，不是换选题角度、"
+            "不是换事实，也不许触碰红线。拿不准就只给 1 个；"
+            "每个候选都必须独立完整、可直接过合规检查。")
 
     def storyboard_ctx(self, sections: list[dict], timings: list[dict]) -> dict:
         """分镜阶段上下文：行业名（系统提示用）+ 带时间轴的段落。

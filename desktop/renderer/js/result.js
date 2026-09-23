@@ -302,6 +302,30 @@ function renderScriptPane(r, opts) {
   const tempo = renderTempo(r);
   if (tempo) wrap.insertAdjacentHTML("beforeend", tempo);
   wrap.appendChild(renderSections(r, opts));
+  // P3-42：候选版版本条 —— 「换一版」一次出多版时，正文区顶部给版本切换。
+  // picker 是视图不是新页：点击只重建 `.script-list` 那一段，不动 tempo、
+  // 不重建整个面板（否则单段重写/导出的按钮回调会失效）。
+  const alts = (r.alternatives || []).filter(a => (a.sections || []).length);
+  if (alts.length) {
+    const bar = el("div", "alt-bar");
+    const swap = (btn, idx) => {
+      const list = wrap.querySelector(".script-list");
+      if (!list) return;
+      const src = idx < 0 ? r : { ...r, sections: alts[idx].sections };
+      list.replaceWith(renderSections(src, opts));
+      bar.querySelectorAll(".alt-tab").forEach(b => b.classList.remove("on"));
+      btn.classList.add("on");
+    };
+    const mainBtn = el("button", "alt-tab on", "主稿", { type: "button" });
+    mainBtn.addEventListener("click", () => swap(mainBtn, -1));
+    bar.appendChild(mainBtn);
+    alts.forEach((a, i) => {
+      const b = el("button", "alt-tab", `候选 ${i + 1}`, { type: "button" });
+      b.addEventListener("click", () => swap(b, i));
+      bar.appendChild(b);
+    });
+    wrap.prepend(bar);
+  }
   // 节奏条里那些 `--w` 必须在这里补写：它是 insertAdjacentHTML 进来的，
   // 不在 renderSections 的查询范围里（漏了它条就是全 0 宽，界面不报错）。
   wrap.querySelectorAll(".tempo > i").forEach(i =>

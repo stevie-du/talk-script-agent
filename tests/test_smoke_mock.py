@@ -58,6 +58,7 @@ def test_end_to_end_mock():
         _case_rewrite_segment(pl, tmp, jid_direct)
         _case_pack_without_storyboard_stage(pl, tmp)
         _case_failed_check_skips_storyboard(pl, tmp)
+        _case_reroll_alternatives(pl, tmp)
         _case_packgen(pl, tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -204,6 +205,30 @@ def _case_failed_check_skips_storyboard(pl: Pipeline, tmp: Path):
     skip = [s for s in snap["steps"] if s["key"] == "storyboard_skip"]
     assert skip and skip[-1]["data"].get("passed") is False, \
         f"跳过必须留痕且说清原因：{skip}"
+
+
+# ── 3d. P3-42：「换一版」（reroll）一遍思考出多版 ─────────────
+# mock 的 write/draft 在提示词含「候选版」标记（alt_guide）时返回 2 个候选：
+#   候选 1 = 干净（_SECTIONS_CLEAN，无政府补贴）→ 应进 alternatives；
+#   候选 2 = 脏（_SECTIONS_DIRTY，含政府补贴 hard 词）→ 应被引擎拒掉并留痕。
+# 这条同时守两件事：候选过校验的进、不过的被拒（且原因可见）。
+def _case_reroll_alternatives(pl: Pipeline, tmp: Path):
+    jid = pl.start_generate(GenerateRequest(pack="elevator", topic="被困电梯怎么办",
+                                            reroll=True))
+    snap = wait_job(pl, jid)
+    assert snap["state"] == "done", snap.get("error")
+    r = snap["result"]
+
+    # 主稿照常存在（单稿路径不变式不破）
+    assert r["sections"], "主稿不应为空"
+    alts = r.get("alternatives") or []
+    # mock 给 2 个候选：1 干净 + 1 脏 → 只有干净的进 alternatives
+    assert len(alts) == 1, f"应只有 1 个干净候选进 alternatives：{len(alts)}"
+    assert all("政府补贴" not in s["text"] for s in alts[0]["sections"]), \
+        "进 alternatives 的候选不应含 hard 违规词"
+    assert alts[0]["check"]["passed"], "进 alternatives 的候选 check 应 passed"
+    assert any(s["key"].startswith("alt_reject_r") for s in snap["steps"]), \
+        "不合格候选必须被拒并留痕（否则『为什么少了一版』不可见）"
 
 
 # ── 4. 建包（mock 夹具，走后台作业）─────────────────────────

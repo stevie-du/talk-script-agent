@@ -195,6 +195,10 @@ class ScriptResult(BaseModel):
     revisions: list[dict] = []        # 回炉/重写记录
     timings: list[dict] = []          # 每段 [start, end] 秒
     logs: list[dict] = []
+    # P3-42：「换一版」一遍思考出多版时，通过校验的候选版（主稿永远是 sections）。
+    # 每项含候选的 sections + 它自己的 check 报告。默认空 = 单稿路径零开销；
+    # 旧产物反序列化自动兼容（带默认值）。
+    alternatives: list[dict] = []     # [{sections, check}]
 
 
 class IntelSource(BaseModel):

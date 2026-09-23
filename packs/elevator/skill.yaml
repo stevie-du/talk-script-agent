@@ -156,6 +156,7 @@ stages:
           {"type": "cta", "text": "结尾引导文案", "subtitle": "字幕关键词"}
         ]
       }
+      $alt_guide
       # B7：情报块（intel_block 变量）由引擎注入 —— 按 segment 取最相关 3 条、只带标题与
       # 出处（文号 / 来源 / URL），**不带原文**。放在模板**末尾**是前缀缓存的规矩
       # （与回炉反馈块 feedback_block 同一条）：动态内容放最后，前面的静态体才能命中缓存。
@@ -208,6 +209,7 @@ stages:
           {"type": "cta", "text": "结尾引导文案", "subtitle": "字幕关键词"}
         ]
       }
+      $alt_guide
 
       【要求】
       1. sections 恰好 1 个 hook + $points 个 point + 1 个 cta，顺序固定

@@ -2731,3 +2731,12 @@ input:not([type]) {
 .smell-score { display: flex; align-items: baseline; gap: var(--s3); flex-wrap: wrap; }
 .smell-score .n { font: 600 var(--f-display)/1.35 var(--mono); letter-spacing: -.02em; }
 .smell-score .u { font-size: var(--f-2xs); color: var(--text-2); }
+
+/* P3-42 候选版版本条（「换一版」一次出多版时的 picker 视图）：
+   只重建 .script-list 那一段，不重建面板，所以这里只需给条本身定样式。
+   与 .st-adv 同族：一行胶囊、.on 高亮。 */
+.alt-bar { display: flex; gap: var(--s2); flex-wrap: wrap; padding: 0 0 var(--s2); }
+.alt-tab { height: var(--h-sm); font-size: var(--f-sm); padding: 0 var(--s3);
+  color: var(--text-2); background: var(--fill); border-radius: var(--r-ctl);
+  cursor: pointer; }
+.alt-tab.on { color: var(--ink); background: var(--fill-strong); font-weight: 600; }

@@ -85,7 +85,22 @@ def response_for(task: str, user: str) -> dict:
         while len(points) > n_points:
             drop = points.pop(len(points) // 2)
             sections.remove(drop)
-        return {"plan": plan, "sections": sections}
+        out = {"plan": plan, "sections": sections}
+        # P3-42：合并路径「换一版」时同样带候选（与 write 同口径：一个干净
+        # 应进候选、一个含政府补贴应被拒）。
+        if "候选版" in user:
+            clean = [dict(s) for s in _SECTIONS_CLEAN]
+            cpts = [s for s in clean if s["type"] == "point"]
+            while len(cpts) > n_points:
+                drop = cpts.pop(len(cpts) // 2)
+                clean.remove(drop)
+            dirty2 = [dict(s) for s in _SECTIONS_DIRTY]
+            dpts = [s for s in dirty2 if s["type"] == "point"]
+            while len(dpts) > n_points:
+                drop = dpts.pop(len(dpts) // 2)
+                dirty2.remove(drop)
+            out["alternatives"] = [clean, dirty2]
+        return out
 
     if task == "write":
         n_points = 3
@@ -99,8 +114,24 @@ def response_for(task: str, user: str) -> dict:
         while len(points) > n_points:
             drop = points.pop(len(points) // 2)
             sections.remove(drop)
-        # P1-30：write 只出 sections；storyboard 由独立「分镜」阶段产出
-        return {"sections": sections}
+        # P3-42：「换一版」时模板注入 alt_guide（提示词含「换一版 · 候选版」标记），
+        # mock 在主稿之外多给 2 个候选 —— 一个干净（应进候选）、一个含政府补贴
+        # （应被引擎拒掉并说明原因），保证「过的进候选、不过的被拒」两分支都有活样本。
+        # 非 reroll 提示词没有该标记 → alternatives 空（单稿路径零开销）。
+        out = {"sections": sections}
+        if "候选版" in user:
+            clean = [dict(s) for s in _SECTIONS_CLEAN]
+            cpts = [s for s in clean if s["type"] == "point"]
+            while len(cpts) > n_points:
+                drop = cpts.pop(len(cpts) // 2)
+                clean.remove(drop)
+            dirty2 = [dict(s) for s in _SECTIONS_DIRTY]
+            dpts = [s for s in dirty2 if s["type"] == "point"]
+            while len(dpts) > n_points:
+                drop = dpts.pop(len(dpts) // 2)
+                dirty2.remove(drop)
+            out["alternatives"] = [clean, dirty2]
+        return out
 
     if task == "storyboard":
         # 分镜与段落一一对应：段数按注入的脚本行数走，时间轴沿用行里

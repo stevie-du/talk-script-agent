@@ -58,8 +58,16 @@ class ScriptDraft(BaseModel):
 
     P1-30：只出 sections —— 分镜拆成了独立阶段（见 `_storyboard`），
     正文定稿并校验通过后才生成（实测拆分后 write 从 110~127s 降到 12~23s）。
+
+    P3-42：`alternatives` 只在「换一版」（reroll）时用 —— 一遍思考给 2~3 个
+    不同表达的正文版本，让用户挑（对照度加/元器类"一次出 3 版"的公开工作流）。
+    默认空 = 单稿路径，契约与成本完全不变；reroll 时模型**可以**多给。
+    候选各自过 `check_script`，过的进候选（附各自 check），不过的被拒并在
+    步骤里说明为什么少了一版。主稿永远是 sections 那份，`result.json 存在 ⟺
+    done` 不变式不破（候选只是附加字段，不影响主稿落盘与左栏记录）。
     """
     sections: list[ScriptSection]
+    alternatives: list[list[ScriptSection]] = []
 
 
 class DraftBundle(BaseModel):
@@ -69,9 +77,13 @@ class DraftBundle(BaseModel):
     原来两轮（实测 select 占总耗时 17%~33%）。plan 在前 —— 模型先把角度/钩子/
     要点定下来，再按它写正文。sections 的结构与旧 write 契约完全一致；
     回炉轮仍走 stages.write（plan 由 $plan_json 注入），所以 write 阶段保留。
+
+    P3-42：`alternatives` 与 ScriptDraft 同义 —— 「换一版」时合并路径也
+    一遍思考给多个候选，默认空 = 单稿路径。
     """
     plan: TopicPlan
     sections: list[ScriptSection]
+    alternatives: list[list[ScriptSection]] = []
 
 
 class StoryboardDraft(BaseModel):
@@ -913,7 +925,8 @@ class Pipeline:
             deadline=job.deadline(),
             usage=usage, temperature=temp)
         plan = bundle.plan
-        draft = ScriptDraft(sections=bundle.sections).model_dump()
+        draft = ScriptDraft(sections=bundle.sections,
+                            alternatives=bundle.alternatives).model_dump()
         # 与 write 路径同一条规矩：阶段完成后再记步骤（界面把 steps 一律画成已完成）。
         self._step(job, "draft", "选题与撰写（一次调用）",
                    {"plan": plan.model_dump(),
@@ -1013,6 +1026,25 @@ class Pipeline:
             self._step(job, f"check_r{rnd}", f"校验·第 {rnd} 轮", {"report": report})
             if report["passed"] or rnd == rounds:
                 draft["check"] = report
+                # P3-42：候选版逐个过校验，过的进候选（附各自 check），
+                # 不过的被拒并在作业日志里说明为什么少了一版。
+                # 默认空 = 单稿路径，这条循环不跑，零额外开销。
+                alts = draft.get("alternatives") or []
+                if alts:
+                    kept = []
+                    for i, cand in enumerate(alts, 1):
+                        crep = check_script(cand, p["duration"], p["rate"], ban,
+                                            p["platform"], quota, tells=tells,
+                                            tolerance=tolerance)
+                        if crep["passed"]:
+                            kept.append({"sections": cand, "check": crep})
+                        else:
+                            self._step(
+                                job, f"alt_reject_r{rnd}",
+                                f"候选版 {i} 未过校验，未进候选（{len({h['word'] for h in crep['hard_hits']})}"
+                                f" 处硬违规 / 时长偏差 {crep.get('deviation_pct', 0):+.1f}%）",
+                                {"i": i, "check": crep})
+                    draft["alternatives"] = kept
                 return draft, revisions
             feedback = self._violation_feedback(report, draft.get("sections") or [],
                                                 p.get("rewrite_scope", DEFAULT_REWRITE_SCOPE))
@@ -1221,6 +1253,8 @@ class Pipeline:
             "revisions": revisions,
             "timings": timings,
             "logs": list(job.steps),
+            # P3-42：候选版（换一版时模型多给的、过了校验的那些）。
+            "alternatives": draft.get("alternatives") or [],
         }
         # 契约校验：修复前 ScriptResult / SceneItem 定义了却从未实例化，
         # docs/场景序列契约.md 的约定没有任何代码强制，字段漂移无人发现。

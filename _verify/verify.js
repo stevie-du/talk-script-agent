@@ -745,7 +745,8 @@ window.__addCount = 0;
       // 主题里带「失败」就返回一个必然失败的作业，用来覆盖失败态渲染
       window.__lastJobId = /失败/.test(gtopic) ? 'jobfail'
         : /停不掉/.test(gtopic) ? 'jobrun'
-        : /占位/.test(gtopic) ? 'jobph' : 'job1';
+        : /占位/.test(gtopic) ? 'jobph'
+        : /换一版/.test(gtopic) ? 'jobalt' : 'job1';
       return mk({ job_id: window.__lastJobId });
     }
     // 一条**永远在跑**的作业：用来验「界面接回它之后，别的作业不许把它解锁」。
@@ -795,6 +796,38 @@ window.__addCount = 0;
                 { key: 'write_r1', title: '文案撰写', ts: '2026-09-13T10:00:05', data:{} },
                 { key: 'check_r1', title: '校验·第 1 轮', ts: '2026-09-13T10:00:09', data:{} }],
         result: PH_RESULT });
+    }
+    // P3-42：「换一版」一次出多版时的产物（带 alternatives，见 /api/jobs/jobalt）。
+    if (s.indexOf('/api/jobs/jobalt') >= 0) {
+      var altResult = JSON.parse(JSON.stringify(RESULT));
+      altResult.id = 'jobalt';
+      altResult.alternatives = [
+        { sections: [
+            { type: "hook", text: "选家用电梯，别只看价格。", subtitle: "别只看价格" },
+            { type: "point", text: "第一，先想清楚装在哪。", subtitle: "装在哪" },
+            { type: "point", text: "第二，再定载重和速度。", subtitle: "载重速度" },
+            { type: "cta", text: "关注我，帮你选对梯。", subtitle: "关注" },
+          ],
+          check: { passed: true, chars_total: 40, target_total: 261, deviation_pct: -3.0,
+                   hard_hits: [], soft_hits: [], dropped_short: [],
+                   segments: [], points: 2,
+                   ai_tells: null } },
+        { sections: [
+            { type: "hook", text: "家用电梯怎么选？这三点先想明白。", subtitle: "三点先想" },
+            { type: "point", text: "首先看井道尺寸。", subtitle: "井道尺寸" },
+            { type: "point", text: "其次看维保。", subtitle: "维保" },
+            { type: "cta", text: "关注我，选梯避坑。", subtitle: "关注" },
+          ],
+          check: { passed: true, chars_total: 36, target_total: 261, deviation_pct: -4.0,
+                   hard_hits: [], soft_hits: [], dropped_short: [],
+                   segments: [], points: 2,
+                   ai_tells: null } },
+      ];
+      return mk({ id: 'jobalt', state: 'done', created_at: bornAt('jobalt', 30000),
+        params: { topic: '换一版出多版', pack: 'elevator', duration: 60 },
+        steps: [{ key: 'draft', title: '选题与撰写（一次调用）', ts: '2026-09-13T10:00:01', data:{} },
+                { key: 'check_r1', title: '校验·第 1 轮', ts: '2026-09-13T10:00:09', data:{} }],
+        result: altResult });
     }
     if (s.indexOf('/api/jobs/job1/cancel') >= 0) {
       calls.cancel++;
@@ -860,7 +893,28 @@ window.__addCount = 0;
       (window.__delIds || (window.__delIds = [])).push(decodeURIComponent(s.split('/').pop()));
       return mk({ ok: true, id: s.split('/').pop() });
     }
-    if (s.indexOf('/api/history/') >= 0) return mk(RESULT);
+    if (s.indexOf('/api/history/') >= 0) {
+      // P3-42：jobalt 是「换一版出多版」的产物，历史详情要带 alternatives，
+      // 与 /api/jobs/jobalt 同一份（不能只在 jobs 桩里有，历史详情点开就没了）。
+      var hid = decodeURIComponent(s.split('/').pop());
+      if (hid === 'jobalt') {
+        var hr = JSON.parse(JSON.stringify(RESULT));
+        hr.id = 'jobalt';
+        hr.alternatives = [
+          { sections: [
+              { type: "hook", text: "选家用电梯，别只看价格。", subtitle: "别只看价格" },
+              { type: "point", text: "第一，先想清楚装在哪。", subtitle: "装在哪" },
+              { type: "point", text: "第二，再定载重和速度。", subtitle: "载重速度" },
+              { type: "cta", text: "关注我，帮你选对梯。", subtitle: "关注" },
+            ],
+            check: { passed: true, chars_total: 40, target_total: 261, deviation_pct: -3.0,
+                     hard_hits: [], soft_hits: [], dropped_short: [],
+                     segments: [], points: 2, ai_tells: null } },
+        ];
+        return mk(hr);
+      }
+      return mk(RESULT);
+    }
     // 未配置 Key 的模式要模拟「真·首次运行」：没有 Key **也没有历史记录**，
     // 否则 boot() 会按设计跳过自动打开设置（有历史说明不是第一次用）。
     if (s.indexOf('/api/history') >= 0 && NOKEY) return mk([]);
@@ -5841,6 +5895,46 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     !phCase.missing && phCase.chipBeforeJump && phCase.jumped
       && phCase.flashedIsChip === false && phCase.flashedN === 1,
     JSON.stringify(phCase));
+
+  // ── 12l2) P3-42：候选版版本条（换一版出多版）──────────────
+  // jobalt 是带 alternatives 的产物（桩）。断言：版本条出现（主稿 + 候选 N）、
+  // 点候选后正文换成候选的段落、点回主稿恢复。picker 是视图不是新页：
+  // 只换 .script-list，不重建整个面板。
+  await evalIn(`window.__ts.newChat();
+    const el1 = document.getElementById('topic');
+    el1.value = '换一版出多版';
+    el1.dispatchEvent(new Event('input', { bubbles: true }));
+    document.getElementById('btn-generate').click(); return true;`);
+  await sleep(900);
+  const altCase = await evalIn(`return (function(){
+    var bar = document.querySelector('.script-pane .alt-bar');
+    if (!bar) return { bar: false, tabs: [], firstText: '' };
+    var tabs = Array.prototype.slice.call(bar.querySelectorAll('.alt-tab'))
+      .map(function(b){ return b.textContent; });
+    var firstText = (document.querySelector('.script-list .script-card:first-child .card-text') || {})
+      .textContent || '';
+    // 点「候选 1」：正文换成候选的段落
+    var altBtns = Array.prototype.slice.call(bar.querySelectorAll('.alt-tab'));
+    var c1 = altBtns.filter(function(b){ return /候选 1/.test(b.textContent); })[0];
+    c1.click();
+    var afterClick = (document.querySelector('.script-list .script-card:first-child .card-text') || {})
+      .textContent || '';
+    // 点回「主稿」：恢复
+    var m = altBtns.filter(function(b){ return b.textContent === '主稿'; })[0];
+    m.click();
+    var afterBack = (document.querySelector('.script-list .script-card:first-child .card-text') || {})
+      .textContent || '';
+    return { bar: true, tabs: tabs, firstText: firstText,
+      afterClick: afterClick, afterBack: afterBack };
+  })()`);
+  check("换一版出多版：产物卡出现版本条（主稿 + 候选 N）",
+    altCase.bar && altCase.tabs.length >= 2
+      && altCase.tabs[0] === "主稿" && /候选 1/.test(altCase.tabs[1]),
+    JSON.stringify(altCase));
+  check("点候选版正文换成候选内容、点回主稿恢复（picker 是视图不重建面板）",
+    altCase.bar && altCase.firstText !== altCase.afterClick
+      && altCase.afterClick !== '' && altCase.afterBack === altCase.firstText,
+    JSON.stringify(altCase));
 
   // ── 12m) 设置页是一张**焦点圈内**的模态（P2-7）──────────────────
   // ⚠ 先 focus 再 click：程序化的 .click() 在 Chrome 里**不**移动焦点，
