@@ -245,3 +245,12 @@ class PackInfo(BaseModel):
     # **不能拿它生成**（`Pack` 会抛 PackBrokenError）。列表里仍要显示这个包，
     # 但要标出来 —— 让它静默消失或静默降级都是更差的处理。
     pack_error: str = ""
+    # 这个包是**用户导入**的吗（方案 `docs/技能包系统方案.md`）？导入的包带
+    # `.imported.json` 自包含来源标记。字段只回答"哪来的"，不携带裁决 ——
+    # 内置包（播种来的）为 False，导入的为 True。界面据此显示来源徽标，
+    # 卸载时据此拒绝删内置包（删了下周播种又回来 = "卸载没用"）。
+    imported: bool = False
+    # 导入来源（仅 imported=True 时可能有值）：作者 / 许可证 / 导入时间。
+    # license 是包作者自己声明的，**原样展示、引擎不裁决**（方案 §9 红线 4）。
+    import_author: str = ""
+    import_license: str = ""

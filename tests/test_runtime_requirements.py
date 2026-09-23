@@ -54,8 +54,9 @@ def runtime():
 
 def test_runtime_file_is_not_empty(runtime):
     """前提守卫：解析出空字典的话，下面每条断言都会空转。"""
-    assert len(runtime) == 5, f"运行时应恰好 5 个依赖，实际 {sorted(runtime)}"
-    assert {"fastapi", "uvicorn", "httpx", "pydantic", "pyyaml"} == set(runtime)
+    assert len(runtime) == 6, f"运行时应恰好 6 个依赖，实际 {sorted(runtime)}"
+    assert ({"fastapi", "uvicorn", "httpx", "pydantic", "pyyaml",
+             "python-multipart"} == set(runtime))
 
 
 def test_runtime_packages_all_come_from_dev(dev, runtime):

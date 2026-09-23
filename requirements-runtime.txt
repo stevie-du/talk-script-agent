@@ -16,3 +16,5 @@ uvicorn>=0.30,<1.0
 httpx>=0.27,<1.0
 pydantic>=2.7,<3.0
 pyyaml>=6.0,<7.0
+# 文件上传（/api/packs/import 收技能包 zip）—— FastAPI 的 UploadFile 没有它直接 500
+python-multipart>=0.0.9,<1.0

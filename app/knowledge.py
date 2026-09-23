@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 import threading
@@ -157,6 +158,26 @@ def list_packs(root: Path) -> list[PackInfo]:
     return out
 
 
+def _import_mark(pack_dir: Path) -> dict:
+    """读包的导入来源标记（`.imported.json`，由 packimport 写入）。
+
+    自包含设计：标记跟着包走，删包即消失，**不依赖 packseed 台账** ——
+    台账会因升级/手动复制/老数据等原因失真，而"这个包是导入来的"这件事
+    必须始终答得出来。读不出（没有/坏掉）就当内置包 —— 那是更安全的默认
+    （内置包不给卸载，误判成导入的顶多多给一个卸载按钮，反过来则会
+    把用户导入的包当成删不动的内置包）。
+    """
+    try:
+        mark = json.loads((pack_dir / ".imported.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(mark, dict):
+        return {}
+    return {"imported": True,
+            "import_author": str(mark.get("author") or ""),
+            "import_license": str(mark.get("license") or "")}
+
+
 def pack_info(pack_dir: Path) -> PackInfo:
     """包的**展示信息**。**保证不抛** —— 一个包写坏了不该让整个列表消失。
 
@@ -222,6 +243,7 @@ def pack_info(pack_dir: Path) -> PackInfo:
             intel_sources=[IntelSourceModel(**s.as_dict())
                            for s in parse_sources(data.get("intel_sources", []))[0]],
             pack_error=err,
+            **_import_mark(pack_dir),
         )
     except Exception as e:                       # noqa: BLE001
         brief = f"{type(e).__name__}: {e}".replace("\n", " ")[:160]

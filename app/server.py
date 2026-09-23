@@ -54,7 +54,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import yaml
-from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
@@ -68,6 +68,7 @@ from .jobs import StateConflict
 from .knowledge import Pack, PackBrokenError, PackError, list_packs
 from .llm import LLMClient
 from .packseed import PRIVATE_DIR_NAME, seed_bundled_packs
+from .packimport import PackImportError, delete_pack, import_pack
 from .pipeline import MAX_CONCURRENT_JOBS, Pipeline
 from .schemas import (GenerateRequest, IntelIgnoreRequest, IntelPackRequest,
                       PackCreateRequest, RewriteSegmentRequest)
@@ -830,6 +831,39 @@ def create_app(root: Path, token: str | None = None,
             raise HTTPException(400, str(e))
         # StateConflict（额度满）由全局处理器映射成 409，与 /api/generate 同口径。
         # LLMError 不再出现在这里：它发生在作业线程里，界面在作业失败横幅上看到它。
+
+    @app.post("/api/packs/import")
+    async def packs_import(file: UploadFile = File(...)):
+        """导入第三方技能包（zip）→ `packs/<name>/`。
+
+        方案 `docs/技能包系统方案.md` §4。**这是唯一把不可信内容放进用户
+        数据目录的入口**，所以校验全在 `app/packimport.py`（zip 层/结构层/
+        冲突层/落盘层四道），这里只做「读文件 → 调导入 → 翻译错误」。
+
+        ⚠ 上传的文件先整个读进内存再校验：导入前拦不住流式攻击，而
+        MAX_ZIP_BYTES 上限（20MB）让内存代价有界。文件超大在 read 时就该
+        拒（UploadFile 有 .size 属性但不总可靠，读完用 len 兜底判一次）。
+        """
+        try:
+            data = await file.read()
+        except Exception as e:                       # noqa: BLE001
+            raise HTTPException(400, f"上传读不出来：{e}")
+        try:
+            r = import_pack(data, packs_root)
+        except PackImportError as e:
+            # 全部是人话原因（zip 坏/类型不符/逃逸/改过的包…），原样给用户。
+            raise HTTPException(400, str(e))
+        except OSError as e:
+            raise HTTPException(500, f"导入过程中文件系统出错：{e}")
+        return r.__dict__
+
+    @app.delete("/api/packs/{name}")
+    def packs_delete(name: str):
+        """卸载**导入的**包。内置播种包拒绝删（删了下周播种又回来）。"""
+        try:
+            return delete_pack(name, packs_root)
+        except PackImportError as e:
+            raise HTTPException(400, str(e))
 
     @app.post("/api/packs/{name}/undraft")
     def packs_undraft(name: str):
