@@ -22,9 +22,12 @@ ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "_verify" / "zhique-sample.json"
 AUDIT = ROOT / "data" / "zhique-audit.json"
 
-# 分层抽样：低分 / 中位 / 满分各取几篇，再加“带 {{待补}}”的样本。
-# 只抽 elevator（唯一声明了 tell 的包），每档按分数排。
-LAYERS = [("low", 4), ("mid", 4), ("high", 4), ("placeholder", 2)]
+# 分层抽样：低分 / 满分各取几篇，再加“带 {{待补}}的样本。
+# ⚠ 没有 mid（97-98）档：A-4 阈值 3→4 落码后分数分布只有两档
+#（95 篇 100 + 6 篇 96，97-98 无产物）—— 留一个永远抽空的档只会
+# 产出噪音警告。若未来分数散开（新 tell / 改权重），把 mid 加回来。
+# 只抽 elevator（唯一声明了 tell 的包）。
+LAYERS = [("low", 6), ("high", 4), ("placeholder", 2)]
 
 
 def full_text(d: dict) -> str:
@@ -61,25 +64,47 @@ def main() -> None:
 
     rows.sort(key=lambda r: r["score"])
     picked: list[dict] = []
+    used_fp: set[str] = set()          # 已选样本的选题指纹 —— 同题稿只进一篇
+    empty_layers: list[str] = []       # 抽空的层，必须明说（不能静默少几篇）
     for name, n in LAYERS:
         if name == "low":
-            pool = [r for r in rows if r["score"] < 95]
+            pool = [r for r in rows if r["score"] <= 96]      # 非满分档（当前 = uniform_para_len 拖分的 6 篇）
         elif name == "mid":
-            pool = [r for r in rows if r["score"] == 96]
+            pool = [r for r in rows if 97 <= r["score"] <= 98]
         elif name == "high":
             pool = [r for r in rows if r["score"] >= 99]
         else:
             pool = [r for r in rows if r["has_placeholder"]]
-        # 每档内再按 chars 打散，避免抽到一连串同题稿
+        # 每档内按 chars 打散；**同题稿（正文前 30 字相同）只取一篇** ——
+        # 否则抽到一连串同一选题的换版，贴朱雀 11 次只覆盖三四个选题，
+        # 相关性的信息量全废（2026-09-23 实测：旧逻辑 11 篇里 7 篇同题）。
         pool = sorted(pool, key=lambda r: -r["chars"])
-        step = max(1, len(pool) // max(1, n))
-        for r in pool[::step][:n]:
+        take = []
+        for r in pool:
+            fp = r["text"][:30]
+            if fp in used_fp:
+                continue
+            take.append(r)
+            used_fp.add(fp)
+            if len(take) >= n:
+                break
+        if not take:
+            why = ("generated/ 101 篇产物无一带 {{待补}}（引擎直写稿不留占位，"
+                   "占位是回炉/用户流程产生的）" if name == "placeholder" else "该分数段没有产物")
+            empty_layers.append(f"{name} 层抽空：{why}")
+            continue
+        for r in take:
             picked.append({"layer": name, **r})
 
     OUT.write_text(json.dumps(picked, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"已抽出 {len(picked)} 篇 → {OUT.relative_to(ROOT)}")
     for p in picked:
         print(f"  [{p['layer']:11}] L1={p['score']:3} {p['chars']:4}字  {p['path']}")
+    if empty_layers:
+        # 抽空不是"少几篇"的小事：它是"这一类样本在这批产物里不存在"的信号，
+        # 静默跳过就等于让用户以为抽过了（本项目的老规矩：失效要可见）。
+        for line in empty_layers:
+            print(f"⚠ {line}")
 
     print(f"""
 ━━━ 人工三步 ━━━
@@ -115,8 +140,11 @@ def main() -> None:
         if ai and hu:
             gap = sum(hu) / len(hu) - sum(ai) / len(ai)
             print(f"\n人味分差距（人类组均分 - AI 组均分）：{gap:+.1f}")
-            print("差距 ≥ 5 且方向为负 = L1 与朱雀同向（我们的尺子有外部支撑）；"
-                  "差距接近 0 = L1 分不出朱雀能分的东西，tell 集有盲区。")
+            # ⚠ 方向别写反：L1 分越高越像人，所以**正值**才是同向 ——
+            # 人类组均分高、AI 组均分低。负值 = L1 认为像人的稿被朱雀判 AI
+            #（反向，比接近 0 更糟：尺子不仅是盲区，还指反了）。
+            print("差距 ≥ 5 且为**正** = L1 与朱雀同向（我们的尺子有外部支撑）；"
+                  "差距为负 = L1 指反了（比盲区更糟）；接近 0 = L1 分不出朱雀能分的东西，tell 集有盲区。")
 
 
 if __name__ == "__main__":
