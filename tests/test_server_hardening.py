@@ -1680,3 +1680,46 @@ def test_packgen_stub_snapshot_keys_are_the_engine_key_list():
             f"桩里{label}快照的键名清单与引擎不同源：引擎现在给的是 {keys}")
     # 两条清单的差别本身也是判据：轮询走 include_result=False，未终态不带 result
     assert "result" in terminal and "result" not in inflight, (inflight, terminal)
+
+
+# ── P0-5：未预期异常也必须有 detail + code（五路审查 2026-09-23）────
+# 病灶：start_generate 建 job_dir 失败（磁盘满/权限）时 `_fail(job, e)` 后
+# **裸 raise 原异常**，而全局只注册了 PackError/PackBrokenError/
+# StateConflict/RequestValidationError 四个 handler —— 其余异常冒到
+# FastAPI 默认层，变成 500 + text/plain「Internal Server Error」：
+# 空 body、无 code，渲染层按 api.js 约定读不到任何原因。
+# 同族抛出点还有 start_packgen / rewrite_segment / start_intel_fetch。
+def test_unexpected_error_returns_json_detail_and_code():
+    from unittest.mock import patch
+    from app.store import ArtifactStore
+    tmp = _tmp_root_mock()          # mock Key：否则「没配 Key」的 400 会提前返回，patch 根本走不到
+    try:
+        c = _client(tmp)
+        with patch.object(ArtifactStore, "job_dir",
+                          side_effect=OSError("磁盘空间不足")):
+            r = c.post("/api/generate", json={"pack": "elevator", "topic": "探针"})
+        # 状态码仍是 500（这是真错误），但**形状**必须与其它错误一致：
+        # JSON + detail（人话，带异常原文）+ code（稳定机器码）。
+        assert r.status_code == 500, r.text
+        assert r.headers["content-type"].startswith("application/json"), \
+            f"500 的 body 不是 JSON：{r.headers.get('content-type')}"
+        body = r.json()
+        assert isinstance(body.get("detail"), str) and "磁盘空间不足" in body["detail"], body
+        assert body.get("code") == "internal_error", body
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_error_codes_are_a_closed_set():
+    """ERR_* 常量定义与 handler 里的使用对账：只加一边 = 有错误永远走默认 500 空 body。
+
+    守的是"两本账"：常量在 app/server.py 定义、handler 在 create_app 里引用。
+    维度是**常量名**（ERR_XXX），不是它的小写值 —— 两本账在名字这一层合流。
+    """
+    src = (ROOT / "app" / "server.py").read_text(encoding="utf-8")
+    import re as _re
+    defined = set(_re.findall(r'^(ERR_\w+) = "', src, _re.M))
+    assert "ERR_INTERNAL" in defined, "ERR_INTERNAL 没了 —— 未预期异常会退回 500 空 body"
+    used = set(_re.findall(r'\b(ERR_\w+)\b', src))
+    unused = defined - used
+    assert not unused, f"定义了没人用的 code：{sorted(unused)}"

@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
 import subprocess
@@ -65,6 +66,8 @@ from .config import (DEFAULT_MODEL, ensure_config_template, load_config,
 from .fileio import write_atomic
 from .intel import IntelSource as _IntelSourceDC, add_ignored, today as intel_today
 from .jobs import StateConflict
+
+log = logging.getLogger(__name__)
 from .knowledge import Pack, PackBrokenError, PackError, list_packs
 from .llm import LLMClient
 from .packseed import PRIVATE_DIR_NAME, seed_bundled_packs
@@ -144,6 +147,12 @@ ERR_PACK_BROKEN = "pack_broken"         # → 409 包在，但内容要人修
 ERR_QUOTA = "quota_exceeded"            # → 409 并发额度满（可重试）
 ERR_STATE_CONFLICT = "state_conflict"   # → 409 作业状态不允许这个操作
 ERR_FIELD_INVALID = "field_invalid"     # → 422 请求字段不合格（pydantic 挡的，不是业务挡的）
+# → 500 未预期的内部错误（磁盘满 / 线程起不来 / 任何没被上面接住的异常）。
+# 没有这一条时，这类错误冒到 FastAPI 变成 500 text/plain「Internal Server
+# Error」—— 空 body、无 code，渲染层只看到「HTTP 500」，排查无从下手
+# （五路审查 P0-5，2026-09-23：start_generate 的 job_dir 建不出来等 5 处
+# 抛出点都走这条路）。detail 带异常原文，code 稳定可判。
+ERR_INTERNAL = "internal_error"
 
 # StateConflict 的三个抛出点（app/pipeline.py 的生成 / 建包 / 单段重写额度闸）
 # 都带「已达上限」这四个字，而 jobs.py 的那一条是「作业状态为 X，无法执行该操作」。
@@ -679,6 +688,18 @@ def create_app(root: Path, token: str | None = None,
         # 只把 detail 换成人话；code 给 field_invalid，让界面将来要区分时不必猜文案。
         return _error_json(_humanize_validation(list(exc.errors() or [])),
                            422, ERR_FIELD_INVALID)
+
+    # 兜底：没被上面任何一类接住的异常（OSError 建不出目录 / RuntimeError
+    # 起不来线程 / 任何漏网的 bug）。没有这条时它们冒到 FastAPI 的默认
+    # ServerErrorMiddleware，变成 **500 + text/plain「Internal Server Error」**
+    # —— 空 body、无 code，前端只看到「HTTP 500」，与本文件顶部「每个应答都
+    # 同时给 detail 与 code」的承诺正相反。detail 带异常原文（log.exception
+    # 会把全量堆栈打进日志，这里只给人话那一句 + 类型名）。
+    @app.exception_handler(Exception)
+    async def _unhandled(_req, exc: Exception):
+        log.exception("未处理的内部错误：%s: %s", type(exc).__name__, exc)
+        return _error_json(f"引擎内部错误（{type(exc).__name__}）：{exc}",
+                           500, ERR_INTERNAL)
 
     # ── 静态资源（渲染层同源提供）───────────────────────────
     if renderer.exists():
