@@ -9,6 +9,7 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -570,6 +571,24 @@ def _run_selector(selector):
     return (r.stdout or "") + (r.stderr or ""), r.returncode
 
 
+def _baseline_with_retry(selector):
+    """采一次基线。**第一次不绿就隔 2 秒再采一次**。
+
+    并发会话正在提交时，采样那一瞬可能刚好落在"改到一半"的工作区上 ——
+    实测连跑两轮都撞出 13 条「基线不绿」，而单独重跑那 13 条条条是绿的。
+    重试能滤掉这类瞬时噪声，两轮都红才是真红。
+    ⚠ 转绿时必须**说出来**：静默重试会把"刚才有人在改代码"这件事抹掉 ——
+      那正是这次要让它可见的东西。
+    """
+    first = _run_selector(selector)
+    ok, why = _is_green(selector, *first)
+    if ok:
+        return first
+    print(f"  （基线第一次不绿：{why} —— 2 秒后重试一次，排除并发改动窗口）")
+    time.sleep(2)
+    return _run_selector(selector)
+
+
 def _is_green(selector, out, rc):
     """这条 selector 现在是绿的吗？（返回 是否绿 + 一句依据）"""
     if selector.startswith("verify:"):
@@ -594,11 +613,11 @@ for name, path, old, new, selector in MUTATIONS:
     # ⚠ 先确认基线是绿的：不绿的话下面那条「报红 OK」是假的 —— 它证明的是
     #   "工作区现在本来就是红的"，而不是"这条断言守住了"。
     if selector not in _baseline:
-        _baseline[selector] = _run_selector(selector)
+        _baseline[selector] = _baseline_with_retry(selector)
     b_ok, b_why = _is_green(selector, *_baseline[selector])
     if not b_ok:
         print(f"[基线不绿 !! 判定无意义] {name} —— 未变异时就已经是红的"
-              f"（{b_why}），这条变异的「报红」什么都证明不了，先修基线")
+              f"（{b_why}，已重试一次），这条变异的「报红」什么都证明不了，先修基线")
         bad += 1
         continue
     orig = path.read_text(encoding="utf-8")
