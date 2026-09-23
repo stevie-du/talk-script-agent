@@ -402,7 +402,11 @@ packs/elevator/
   ⚠ **不能照抄** `test_banwords_alignment.py`：它靠 ad-law.md 固定前缀词族行解析（`:23-39`），
   而 anti-ai-smell.md 是自由清单、词在句内括号里、无函数名可锚
   （`anti-ai-smell.md:14`）。需给 md 加可解析词表节 + 断言 severity 一致
-- [ ] **A4** 校准后**才**定门槛：拿 `generated/` 现成产物跑分数分布，再决定 `ai_smell` 进不进回炉。
+- [ ] **A4** 校准后**才**定门槛：分布**已出**（`_verify/ai-smell-distribution.py`，
+  101 篇 elevator 产物 min 92 / 中位 96 / max 100，strong 零命中，
+  `list_enumeration` 97% 篇命中——详见需求方案 §2.11）。**结论：按总分定线
+  没有区分度**（全部挤在 92~100，任何阈值要么放过一切要么枪毙一切），
+  待人工定线；候选判据是 strong 命中数，但需要"AI 味重"的对照稿（A-7/A-6 的活）。
   ⚠ 86/87 历史产物是 mock 夹具且含清单体（`mock_fixtures.py:39,47`）→ **按 `result.mock` 分流**统计，
   否则 ai_smell 一进门槛冒烟必挂；词表与 `skill.yaml:78` / `anti-ai-smell.md:14` 已禁的书面连接词**显式对齐**，
   否则 169/175 假命中复现
