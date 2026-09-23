@@ -57,6 +57,7 @@ def test_end_to_end_mock():
         _case_voice_and_format(pl)
         _case_rewrite_segment(pl, tmp, jid_direct)
         _case_pack_without_storyboard_stage(pl, tmp)
+        _case_failed_check_skips_storyboard(pl, tmp)
         _case_packgen(pl, tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -176,6 +177,33 @@ def _case_pack_without_storyboard_stage(pl: Pipeline, tmp: Path):
     assert snap["result"]["sections"], "正文仍应正常产出"
     assert any(s["key"] == "storyboard_skip" for s in snap["steps"]), \
         "跳过必须留痕，不能静默"
+
+
+# ── 3c. P1-30 残留半：终版不合格时不画分镜（分镜只在正文合格后画）──
+# mock 的 write 夹具首轮必带"政府补贴"（hard），recheck_rounds: 0 = 不回炉
+# → 最后一轮校验必不过。修复前这会照旧烧一次 storyboard 调用；修复后应 skip
+# 且产物空分镜（这条同时守住"校验没通过也会走到这里"的老注释被兑现）。
+def _case_failed_check_skips_storyboard(pl: Pipeline, tmp: Path):
+    dst = tmp / "packs" / "alwaysbad"
+    shutil.copytree(tmp / "packs" / "elevator", dst)
+    skill = yaml.safe_load((dst / "skill.yaml").read_text(encoding="utf-8"))
+    skill.setdefault("limits", {})["recheck_rounds"] = 0
+    (dst / "skill.yaml").write_text(
+        yaml.safe_dump(skill, allow_unicode=True), encoding="utf-8")
+
+    jid = pl.start_generate(GenerateRequest(pack="alwaysbad", topic="被困电梯怎么办"))
+    snap = wait_job(pl, jid)
+    # 终版不合格：由 `_violation_feedback` 那支后 `check` 落
+    # `passed: false`，状态仍是"终版即终版"（带 check.failed 的 done）。
+    assert snap["result"]["check"]["passed"] is False, \
+        f"终版应不合格：{snap['result']['check']}"
+    assert snap["result"]["storyboard"] == [], \
+        f"校验没过的稿子不该画分镜：{snap['result']['storyboard']}"
+    assert not any(s["key"] == "storyboard" for s in snap["steps"]), \
+        "校验不过不应跑 storyboard 阶段（这一步是真实 token 开销）"
+    skip = [s for s in snap["steps"] if s["key"] == "storyboard_skip"]
+    assert skip and skip[-1]["data"].get("passed") is False, \
+        f"跳过必须留痕且说清原因：{skip}"
 
 
 # ── 4. 建包（mock 夹具，走后台作业）─────────────────────────

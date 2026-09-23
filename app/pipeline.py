@@ -480,8 +480,12 @@ class Pipeline:
                                                         client, prebuilt=prebuilt)
             # P1-30：正文定稿 + 校验通过后，分镜单独生成（voice 模式整个跳过）。
             # ⚠ "校验通过之后"只在**回炉还在跑**的意义上成立：最后一轮不过校验时
-            #   `_write_with_recheck` 照样 return（见该方法的 `or rnd == rounds`），
-            #   所以不合格也会走到这里画分镜 —— 那一条本来就要以 failed/不合格收场。
+            #   `_write_with_recheck` 照样 return（见该方法的 `or rnd == rounds`）。
+            #   修复前不合格也会走到这里画分镜 —— 那一条本来就要以 failed/不合格
+            #   收场，画面这步是白烧的一次模型调用（P1-30 的残留半）。
+            #   现在只有 `draft["check"]["passed"]` 为真才画分镜；不合格则
+            #   记 storyboard_skip（原因=校验未通过），产物空分镜照常落盘，
+            #   界面仍看得到「为什么没有分镜」。
             # 老包（本次改造之前建的）没有 storyboard 阶段：跳过分镜而不是让
             # 整条已经写完的脚本以 KeyError 收场。
             # 分镜失败**不报废正文**：正文已通过校验，画面只是没画出来 ——
@@ -489,18 +493,24 @@ class Pipeline:
             # 路径（沿用旧分镜）同口径。修复前这里抛错会走下面的 except →
             # _fail(job)，一条合格的稿子因为画面这一步整条报废。
             storyboard = []
+            final_passed = bool((draft.get("check") or {}).get("passed"))
             if p.get("format") != "voice":
-                if (skill.get("stages") or {}).get("storyboard"):
-                    try:
-                        storyboard = self._storyboard(job, pack, draft, p, client)
-                    except JobCancelled:
-                        raise
-                    except Exception as e:  # noqa: BLE001
-                        self._step(job, "storyboard_skip", "分镜生成失败，本次产物不含分镜",
-                                   {"error": str(e)})
+                if final_passed:
+                    if (skill.get("stages") or {}).get("storyboard"):
+                        try:
+                            storyboard = self._storyboard(job, pack, draft, p, client)
+                        except JobCancelled:
+                            raise
+                        except Exception as e:  # noqa: BLE001
+                            self._step(job, "storyboard_skip", "分镜生成失败，本次产物不含分镜",
+                                       {"error": str(e)})
+                    else:
+                        self._step(job, "storyboard_skip",
+                                   "行业包缺少 storyboard 阶段，本次未生成分镜", {})
                 else:
                     self._step(job, "storyboard_skip",
-                               "行业包缺少 storyboard 阶段，本次未生成分镜", {})
+                               "终版未通过校验，不生成分镜（分镜只在正文合格后画）",
+                               {"passed": False})
             self._finalize(job, pack, p, plan, draft, storyboard, revisions, client)
         except JobCancelled:
             self._settle_cancel(job)
