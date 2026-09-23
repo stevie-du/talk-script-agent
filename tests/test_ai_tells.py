@@ -167,6 +167,33 @@ def test_genuinely_vague_script_still_fires():
     assert "no_specific" in _ids(t.scan(vague))
 
 
+# ── P0-3：副词尾字不许当量词（五路审查 2026-09-23）────────────
+# 病灶：_MEASURE_CHARS 里混着 分/成/人/起，于是「十分」「八成」「个人」
+# 「一起」全被当成"数词+量词"→ no_specific 被错误豁免。这条 tell 是
+# strong（"通篇无一个具体数字/时间/数量"），被打穿的后果是**满篇空话
+# 照样满分**。数字形式（3 分 / 8 成）走 \d 分支，不受删字影响。
+def test_adverb_tails_are_not_measure_words():
+    t = AITells({"strong": ["no_specific"]})
+    # ⚠ 样本句里**不能**再出现真量词（「一块」「一下」的 块/下 都在字符类里），
+    #   否则量词匹配会豁免掉这条 tell，测出来的就不是想测的那件事。
+    for phrase, why in [
+        ("十分重要的细节，大家都得重视，赶紧落实到位。", "十分"),
+        ("我个人认为，这件事情需要仔细琢磨，不能想当然。", "我个人"),
+        ("八成是因为这样，所以才会变成这样的结果。", "八成"),
+    ]:
+        hits = _ids(t.scan([{"type": "point", "text": phrase}]))
+        assert "no_specific" in hits, f"{why} 被误当成具体数字，空话稿漏报：{phrase}"
+
+
+def test_real_measure_words_still_exempt():
+    """反向对照：删了四个字，真·汉字量词与数字形式仍要豁免（守卫别把自己删没了）。"""
+    t = AITells({"strong": ["no_specific"]})
+    ok = [{"type": "point", "text": "全城只有两家公司肯接，三家业委会问过，一台梯子跑了五天。"}]
+    assert "no_specific" not in _ids(t.scan(ok)), t.scan(ok)
+    digits = [{"type": "point", "text": "三个人一起，三成分红，跑了 3 分 30 秒。"}]
+    assert "no_specific" not in _ids(t.scan(digits)), t.scan(digits)
+
+
 # ── A-6 #1：口号收尾只看结尾引导段 ─────────────────────────
 def test_slogan_closing_scoped_to_cta_with_exemption():
     lex = {"strong": ["slogan_closing"], "lexicon": {"slogan_closing": ["品质保证"]}}
