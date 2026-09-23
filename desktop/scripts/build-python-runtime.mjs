@@ -285,9 +285,9 @@ function installDeps() {
 //   而 3.13 的解释器加载不了它。后果是：**构建显示成功、目录看着也正常
 //   （几十 MB 都在），直到用户机器上才炸** `ModuleNotFoundError: No module named
   //   'pydantic_core._pydantic_core'`。这正是本项目一直在整治的静默降级。
-  //   实测踩过：不钉版本时 5 个依赖里 2 个（pydantic_core / pyyaml）装错 ABI。
+  //   实测踩过：不钉版本时依赖里 2 个（pydantic_core / pyyaml）装错 ABI。
   //
-  // `--only-binary=:all:` ：这 5 个依赖都有 wheel，禁止现场编译 ——
+  // `--only-binary=:all:` ：依赖都有 wheel，禁止现场编译 ——
   // 否则一旦某个包只能从源码装，构建机会悄悄依赖上编译器，换台机器就挂。
   const pyVer = PY_VERSION.split('.').slice(0, 2).join('.');
   // `--no-compile`：**不让 pip 生成字节码**。原因见下面的 compileBytecode() ——
@@ -390,8 +390,13 @@ function verifyRuntime() {
     copyDir(path.join(REPO, name), dest);
     staged.push(dest);
   }
+  // 依赖的 import 列表**显式写死**，由 tests/test_runtime_requirements.py 的
+  // 对账用例守着与 requirements-runtime.txt 一致 —— 为什么不动态读：
+  // PyPI 包名 ≠ import 名（pyyaml → yaml、python-multipart → multipart），
+  // 动态转换必然错（实测踩到：全动态版 probe 第一行就 ModuleNotFoundError）。
+  // 跨语言的两本账只能对账，没有“读一本”的捷径。
   const probe = [
-    'import fastapi, uvicorn, httpx, pydantic, yaml',
+    'import fastapi, uvicorn, httpx, pydantic, yaml, multipart',
     'import app.server',
     'print("ok")',
   ].join('; ');
@@ -408,8 +413,9 @@ function verifyRuntime() {
     for (const d of staged) fs.rmSync(d, { recursive: true, force: true });
   }
   if (!/ok/.test(out)) throw new Error('导入自检没有正常输出：' + out);
-  log('导入自检通过：5 个依赖 + app.server 都能在内嵌运行时里导入');
-}
+  const nDeps = fs.readFileSync(path.join(REPO, 'requirements-runtime.txt'), 'utf8')
+    .split('\n').filter(l => l.trim() && !l.trim().startsWith('#')).length;
+  log(`导入自检通过：${nDeps} 个依赖 + app.server 都能在内嵌运行时里导入`);}
 
 // ── 主流程 ──────────────────────────────────────────────────
 function stampFor() {

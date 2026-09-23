@@ -341,3 +341,30 @@ def test_extra_resources_points_at_the_runtime_build_output():
         f"package.json 的 extraResources 里没有 `{rel}`（现在是 {froms}）—— "
         "改了构建脚本的输出目录却忘了改打包配置？运行时不会被打进包。"
     )
+
+
+# ── probe 的 import 列表 ↔ requirements-runtime.txt 对账 ──────────
+# 为什么需要：build-python-runtime.mjs 的导入自检 probe 是**显式写死的**
+# import 列表（不能动态读：PyPI 包名 ≠ import 名，pyyaml→yaml、
+# python-multipart→multipart，动态转换必错）。写死的列表会与
+# requirements-runtime.txt 漂移 —— 漂的方向是"加了依赖没进 probe"：
+# 装出来的运行时缺那个包，而自检照样全绿（它压根没导）。
+# 实测踩过：2026-09-23 加 python-multipart 时 probe 还是旧的 5 个 import。
+IMPORT_NAME = {"pyyaml": "yaml", "python-multipart": "multipart"}
+
+
+def test_probe_imports_cover_runtime_requirements(runtime):
+    """requirements-runtime.txt 的每个包都必须出现在 probe 的 import 里。"""
+    src = (PKG.parent / "scripts" / "build-python-runtime.mjs").read_text(encoding="utf-8")
+    m = re.search(r"const probe = \[(.*?)\]\.join", src, re.S)
+    assert m, "读不到 probe 的定义（改写法了？这条断言也要跟着改）"
+    imported = set(re.findall(r"^\s*'import ([^']+)'", m.group(1), re.M))
+    modules: set[str] = set()
+    for line in imported:
+        modules.update(x.strip() for x in line.split(","))
+    need = {IMPORT_NAME.get(p, p) for p in runtime}
+    missing = sorted(need - modules)
+    assert not missing, (
+        f"这些运行依赖没进 probe 的 import 列表：{missing} —— 装了但自检不导，"
+        "缺了它们自检照样全绿。请在 build-python-runtime.mjs 的 probe 里补上"
+        "（import 名与 PyPI 包名不同的，加进本文件的 IMPORT_NAME 映射）")
