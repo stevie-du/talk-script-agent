@@ -28,24 +28,13 @@ module.exports = async function topics({ evalIn, sleep, check }) {
       .getPropertyValue('--w-stream')) || 0;`);
     await evalIn(`window.__refreshCalls = 0; window.__ignoredKeys = [];
       document.getElementById('btn-topics').click(); return true;`);
-    // ⚠ 原来是固定 sleep(600)：整网里跑到这一组时页面早就"热"了（模块已加载、
-    //   情报已取过），600ms 绰绰有余；而**单独跑这一组**时是首次进入选题视图，
-    //   要等动态 import + intel 请求，600ms 不够 —— chip 里会整整少一组
-    //   （「未接入 1」），那条断言恒红。恒红的断言在变异检验里 = 假绿。
-    //   改成"等到真的渲染出来"，两边都成立，整网侧还省掉多余的等待。
-    let prev = "";
-    let stable = 0;
-    for (let i = 0; i < 40 && stable < 3; i++) {
-      const snap = await evalIn(`var on = document.getElementById('view-topics');
-        return on && !on.classList.contains('hidden')
-          && on.querySelectorAll('#topics-root .page-card').length > 0
-          ? [...document.querySelectorAll('#src-chips .m-chip')]
-              .map(function (c) { return c.textContent.trim(); }).join('|')
-          : "";`);
-      stable = (snap && snap === prev) ? stable + 1 : 0;
-      prev = snap;
-      if (stable < 3) await sleep(100);
-    }
+    // ⚠ 这里**曾经**改成过"轮询到 chips 渲染稳定"，想解决"单独跑这一组时首次
+    //   进入选题视图、600ms 不够"的怀疑。**没能证明**：把改动退回固定 sleep(600)
+    //   后连跑 5 次仍是 12/12，当初那两次 11/12 与并发会话改 topics.js 的时间
+    //   完全重合，是环境噪声不是等待时长。
+    //   所以保留原样（固定 600ms，与整网同一条口径）。真出现抖动也不怕 ——
+    //   mutate.py 的基线守卫会把它变成"判定无意义"的明确拒绝，而不是假绿。
+    await sleep(600);
     // ⚠ evalIn 的包装是 `(() => { <expr> })()`（**块体**），所以这里必须显式 return ——
     //   写成裸 IIFE 的话返回值被丢掉，拿到 undefined，后面每条断言都读属性报 TypeError。
     const topicsGeo = await evalIn(`return (function(){

@@ -581,9 +581,12 @@ def _pytest_red(out):
     （垃圾没攒到阈值，拦截不触发）—— 完全一样的命令，两种结论。
     """
     prog = re.search(r"^([.sxFEX]+)\s*\[\s*100%\]", out, re.M)
-    if prog is None:
-        return None, "pytest 没跑成用例（进度行没到 100%）"
     fails = [ln for ln in out.splitlines() if ln.startswith("FAILED")]
+    if prog is None:
+        # 进度行没到 100% —— 但有 FAILED 行就说明确实红过（旧判据就是这个语义，
+        # 保留：宁可判红也不要漏）。否则是"压根没跑成"，判不了。
+        return (True, f"{len(fails)} 条 FAILED") if fails \
+            else (None, "pytest 没跑成用例（进度行没到 100%）")
     if fails:
         return True, f"{len(fails)} 条 FAILED"
     if "F" in prog.group(1) or "E" in prog.group(1):
