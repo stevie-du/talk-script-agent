@@ -119,17 +119,22 @@ cd desktop && npm run start:no-sandbox
 
 ```bash
 .venv\Scripts\python -m pytest        # 引擎侧（访问控制/状态机/校验器/模板/索引/建包/导出）
-node --test desktop/                  # 壳侧纯逻辑（引擎降级链 + 打包排除规则，零依赖）
+node --test "desktop/*.test.js"       # 壳侧纯逻辑（引擎降级链 + 打包排除规则，零依赖）
 node _verify/verify.js                # 界面回归（桩 fetch，百秒量级：三百多条断言跑真页面）
 node _verify/e2e-live.js              # 真实端到端（真引擎 + 真页面 + 真落盘）
 ```
 
 四条门各自的前置（实测过，别说"零依赖"）：
-`pytest` 与 `e2e-live` 要仓库根的 `.venv`（引擎虚拟环境）；`node --test desktop/` 要
-`cd desktop && npm install`（它跑纯逻辑，但用例 import 了 `electron` 与 `minimatch` ——
-干净克隆里没装就是 21 pass / 2 fail，报的是 `Cannot find module`，不是产品缺陷）；
-`verify.js` 用桩 fetch，不需要引擎在跑；`e2e-live` 会自己起引擎，缺 `.venv` 时现在直接
-报人话并以退出码 2 结束（与"门真的红了"区分开）。
+`pytest` 与 `e2e-live` 要仓库根的 `.venv`（引擎虚拟环境）；壳侧那条要
+`cd desktop && npm install`（用例 import 了 `electron` 与 `minimatch` —— 干净克隆里
+没装就是若干条 `Cannot find module` 红，不是产品缺陷）；`verify.js` 用桩 fetch，
+不需要引擎在跑；`e2e-live` 会自己起引擎，缺 `.venv` 时现在直接报人话并以退出码 2
+结束（与"门真的红了"区分开）。
+⚠ 壳侧那条**不能写成 `node --test desktop/`**（目录形式）：Node ≥22 会把目录当程序
+执行（经 package.json 的 main 找到 `main.js`，而它在 Electron 外跑必然崩在
+`app.requestSingleInstanceLock`）—— 实测 `node --test desktop/` 是 0 pass / 1 fail，
+而 `node --test "desktop/*.test.js"` 与 `cd desktop && node --test`（零参数搜 cwd）
+都是 26/26。写 glob 是为了在任何 shell 里都不依赖展开。
 `_verify/legacy/` 里是重构前写的脚本，依赖已不存在的 DOM 与全局变量，**不要运行**。
 
 ## 一条关于门禁的规矩（断言与 CSS 是一对）
