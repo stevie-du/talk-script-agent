@@ -1151,6 +1151,16 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     return r.result.value;
   };
 
+  // ── 状态色 token 解析辅助（规范 §7.2：断言比对 token 解析值，不抄 rgb 字面量）
+  // 亮色 token 曾逐字锁进断言；要加深 --warn 达标对比度时，字面量断言就成了
+  // 「改值先改断言」的负担。这里把"这颗胶囊吃的是不是 --warn"的判据换成：
+  // 现场读页面里 var(--warn) 的**计算色**，再与元素实际颜色比对 —— token 一改，
+  // 两侧一起变，断言守的是"吃这一档"而不是"这个具体的 rgb"。
+  // light-dark() 由浏览器解析，读 computed color 自动拿到当前分支，不用手动拆。
+  const resolvedToken = async (name) => evalIn(`var el = document.createElement('span');
+    el.style.color = 'var(${name})'; document.body.appendChild(el);
+    var c = getComputedStyle(el).color; el.remove(); return c;`);
+
   // ── 截图辅助（**定义在最前面**，任何一步都能用）───────────
   // 原来它定义在脚本末尾的「截图区」，于是流程中段想拍一张图只能用裸 cdp 重写一遍
   // （生成中那一态就这么绕过两次）。它只依赖 evalIn / sleep / cdp / fs / SHOT_DIR，
@@ -4252,7 +4262,7 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   // 区别（产物不合格 / 根本没跑完）由提示与 aria 的文字承担，不在点上再分一档。
   check("完成但未通过校验的记录落 6px 红点（--bad），且整格可见",
     marks.no && /dot no/.test(marks.no.dot) && marks.no.vis === "visible"
-      && marks.no.bg === "rgb(215, 0, 21)"
+      && marks.no.bg === await resolvedToken("--bad")
       && marks.no.w === "6px" && marks.no.h === "6px",
     JSON.stringify(marks.no));
   check("读屏标签带完整状态词（行上不写字，这一层只能靠 aria 与提示）",
@@ -4684,11 +4694,11 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   const delHover = await evalIn(`const d = document.querySelector('#session-list .sess-item .sess-del');
     const s = getComputedStyle(d);
     return { bg: s.backgroundColor, fg: s.color, op: s.opacity };`);
-  // --bad: #d70015 → rgb(215, 0, 21)
+  // --bad / --bad-hover 按 token 解析比对，不抄 rgb 字面量（规范 §7.2）
   // 透明底在 computedStyle 里的写法是 rgba(0, 0, 0, 0)（不是 "transparent"）；
   // 用 /0\\)$/ 匹配 alpha=0，顺带挡住任何带底色的写法。
   check("删除按钮悬停只改图标颜色、不加背景色（用户明确否掉了实色红底）",
-    /rgba?\([^)]*,\s*0\)$/.test(delHover.bg) && delHover.fg === "rgb(215, 0, 21)"
+    /rgba?\([^)]*,\s*0\)$/.test(delHover.bg) && delHover.fg === await resolvedToken("--bad")
       && delHover.op === "1",
     JSON.stringify(delHover));
 
@@ -4701,7 +4711,7 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     return { bg: s.backgroundColor, fg: s.color };`);
   await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: delPt.x, y: delPt.y, button: "left", clickCount: 1 });
   check("删除按钮按下态也不给背景色（仍是透明底 + 更深一档的红）",
-    /rgba?\([^)]*,\s*0\)$/.test(delActive.bg) && delActive.fg === "rgb(194, 0, 20)",
+    /rgba?\([^)]*,\s*0\)$/.test(delActive.bg) && delActive.fg === await resolvedToken("--bad-hover"),
     JSON.stringify(delActive));
 
   // 悬停块的几何必须与行对齐：28px 方块垂直居中、右边距与行的 padding 一致。
@@ -4885,7 +4895,7 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       && firstRun.cards === 0 && firstRun.samples === 4,
     JSON.stringify(firstRun));
   check("未配置时工具条那颗胶囊确实是警示橙（不是只挂个 class）",
-    firstRun.pillWarn === true && firstRun.pillColor === "rgb(178, 94, 0)",
+    firstRun.pillWarn === true && firstRun.pillColor === await resolvedToken("--warn"),
     JSON.stringify(firstRun));
   // 「没配过」必须看得出来。后端会把没写的字段静默兜底成内置默认值
   // （config.py 的 _effective：空 base_url → DEFAULT_MODEL），界面若不标，
@@ -5101,7 +5111,7 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   // 会不会跟着切回『想聊点什么？』」（一次性引导的 bug）。引导态已下线，
   // 同一个 bug 换了个显示位：配好了还橙着，这个警示就彻底失去可信度。
   check("保存后工具条模型胶囊从警示橙回到正文色（配好了不再误报）",
-    beforeSave.pillWarn === true && beforeSave.pillColor === "rgb(178, 94, 0)"
+    beforeSave.pillWarn === true && beforeSave.pillColor === await resolvedToken("--warn")
       && afterSave.pillWarn === false && afterSave.pillColor === "rgb(29, 29, 31)",
     JSON.stringify({ before: beforeSave, after: afterSave }));
   await evalIn(`document.getElementById('btn-close-settings').click(); return true;`);
@@ -5155,9 +5165,9 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       && /明文|http/.test(urlWarn.text),
     JSON.stringify(urlWarn));
   check("警告行用 warn 色（与配置读坏那行同一族）",
-    urlWarn.color === 'rgb(178, 94, 0)', JSON.stringify(urlWarn));
+    urlWarn.color === await resolvedToken("--warn"), JSON.stringify(urlWarn));
   check("警示用 warn 色且不顶掉原状态行",
-    cfgErr.color === 'rgb(178, 94, 0)' && /模型/.test(cfgErr.status),
+    cfgErr.color === await resolvedToken("--warn") && /模型/.test(cfgErr.status),
     JSON.stringify(cfgErr));
   // 读坏与没配过是**同一件事的两个来源**（读坏 = 整个文件读不到 →
   // 高级数值项 + 连接信息都取默认），所以两个信号必须同时出现：
@@ -5554,7 +5564,7 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       && /第 3 行第 3 列/.test(packErr.text),
     JSON.stringify(packErr));
   check("警示用 warn 色（不是普通 hint 灰）",
-    packErr.color === 'rgb(178, 94, 0)', JSON.stringify(packErr));
+    packErr.color === await resolvedToken("--warn"), JSON.stringify(packErr));
   // 这条是「为什么需要警示」的证据：坏包的参数条**真的是空的**，
   // 界面本身看不出异常 —— 除非有人明确告诉用户。
   check("坏包的参数条是空的（证明不提示就看不出异常）",

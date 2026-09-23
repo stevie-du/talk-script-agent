@@ -97,14 +97,21 @@
   --ring-focus: light-dark(rgba(0, 0, 0, .07), rgba(255, 255, 255, .10));
 
   /* ── 功能状态（低饱和，仅小面积文字）──
-     亮色三个值逐字保留 v5（verify.js 按 rgb(...) 字面量比对 --warn/--bad/--bad-hover）；
-     暗色那一支提亮一档，否则 #d70015 落在近黑底上只有 3.x:1。 */
-  --ok: light-dark(#248a3d, #57c173);
-  --ok-soft: light-dark(rgba(36, 138, 61, .08), rgba(87, 193, 115, .14));   /* .rh-state.ok 用得到，漏定义会让底色整块失效 */
-  --warn: light-dark(#b25e00, #e0a453);
-  --warn-soft: light-dark(rgba(178, 94, 0, .09), rgba(224, 164, 83, .16));
-  --bad: light-dark(#d70015, #ff6f61);
-  --bad-soft: light-dark(rgba(215, 0, 21, .07), rgba(255, 111, 97, .15));
+     亮色档 2026-09-23 加深一档（对比度欠账 §2.6 / 待确认 #9 走 ①）：
+     verify.js 对 --warn/--bad/--bad-hover 的断言已换成比对 token 解析值
+     （resolvedToken），不再抄 rgb 字面量 —— 色值可调而不改断言。
+     按 Lighthouse -700 法加深保持色相，全档对白卡与 --fill 灰底都 ≥4.5：
+       --ok   #248a3d → #1b7030  白 6.22 / fill 5.51
+       --warn #b25e00 → #995100  白 5.95 / fill 5.31
+       --bad  #d70015 → #c00117  白 6.25 / fill 5.76
+     （bad-hover #c20014 不动：fill 5.68 已达标。）
+     暗色那一支提亮一档，否则深色落在近黑底上只有 3.x:1。 */
+  --ok: light-dark(#1b7030, #57c173);
+  --ok-soft: light-dark(rgba(27, 112, 48, .08), rgba(87, 193, 115, .14));   /* .rh-state.ok 用得到，漏定义会让底色整块失效 */
+  --warn: light-dark(#995100, #e0a453);
+  --warn-soft: light-dark(rgba(153, 81, 0, .09), rgba(224, 164, 83, .16));
+  --bad: light-dark(#c00117, #ff6f61);
+  --bad-soft: light-dark(rgba(192, 1, 23, .07), rgba(255, 111, 97, .15));
   --bad-hover: light-dark(#c20014, #ff8a80);
 
   /* ── 复合值：主操作底 / 层次 ──
@@ -286,8 +293,11 @@ b, strong { font-weight: 600; }
 .tag-default {
   /* 只留面色与排布：字阶 / 字重 / 内边距 / 圆角由文件末尾「小标记一族」那条统一给，
      `display` 与 `margin-left: 0` 由下面「两个小标另起一行」那条统一给
-     （这里原来重复写了 margin-left: var(--s2)，被它静默盖掉）。 */
-  background: var(--fill-strong); color: var(--text-2);
+     （这里原来重复写了 margin-left: var(--s2)，被它静默盖掉）。
+     ⚠ 字色 2026-09-23 从 --text-2 提到 --text-1：--text-2 叠在 --fill-strong
+     （.07 黑）上只有 4.33:1，低于规范 §5 的 4.5 —— 它承载「这是内置默认」
+     这一信息，不是装饰。底色保留药丸形态。 */
+  background: var(--fill-strong); color: var(--text-1);
 }
 
 /* 标签行内的小文字按钮（「恢复默认」）：不能抢标签的视觉重量，
@@ -632,7 +642,10 @@ main { display: flex; flex: 1; min-height: 0; }
    与结果卡 tab 上的「1 镜」「通过」是同一类信息，原来却比它们高 6px（padding 4 8）
    且轻一档字重 —— 同一种记号在页头与在卡里两种尺寸。这里只留面色。 */
 .rh-state {
-  color: var(--text-2); background: var(--fill);
+  /* 字色 2026-09-23 从 --text-2 提到 --text-1：--text-2 叠 --fill 底 4.65、
+     再叠灰宿主只有 4.25（<4.5，§5 欠账）。页头的「合格/未通过」是状态信息，
+     不是装饰。带色变体（.ok/.warn/.bad）特异性更高，不被这条盖掉。 */
+  color: var(--text-1); background: var(--fill);
 }
 .rh-state:empty { display: none; }
 .rh-state.ok { color: var(--ok); background: var(--ok-soft); }
@@ -1963,7 +1976,7 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
    两条同特异性、后写的赢，于是这一族的字重与内边距一直是**写了不生效的死声明**：
    读代码的人会以为徽标比实际轻一档、padding 大一档。同一个信息只留一份表示。 */
 .m-chip, .acc-badge {
-  background: var(--fill); color: var(--text-2);
+  background: var(--fill); color: var(--text-1);
   display: inline-flex; align-items: center; gap: var(--s1); white-space: nowrap;
 }
 .m-chip.bad, .acc-badge.bad { background: var(--bad-soft); color: var(--bad); }
