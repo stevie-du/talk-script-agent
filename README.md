@@ -134,8 +134,9 @@ node _verify/e2e-live.js              # 真实端到端（真引擎 + 真页面 
 
 ## 一条关于门禁的规矩（断言与 CSS 是一对）
 
-`node _verify/verify.js` 在**提交态 HEAD** 上是 **336/336**（2026-09-23 `133e866` 起；在那之前
-它一直是 330/336 —— 红的 6 条量的是 UI 几何与层级：页签条 `position: sticky`、
+`node _verify/verify.js` 在**提交态 HEAD** 上是 **357/357**（2026-09-23 15:55 grep 实测；
+该数字随断言增删漂移 —— 当天值以 `grep -c "check(" _verify/verify.js` 减 1 为准。
+历史上它从 330/336 起步：红的 6 条量的是 UI 几何与层级 —— 页签条 `position: sticky`、
 `.page-head-titles h2` 字号、`--font-ui`、左栏 12/16 竖向节奏 ×3）。
 
 那 6 条从写下那天起就是**配着一份尚未提交的 v6 `styles.css`** 写的：断言与 CSS 是一对，
