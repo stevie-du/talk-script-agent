@@ -35,7 +35,8 @@
 <h1>朱雀对照送检页（A-7）</h1>
 <p class="tip">
 每篇：点「复制文本」→ 贴进 <b>matrix.tencent.com/ai-detect</b> → 按朱雀判定点
-「人类 / AI / 拿不准」。判定存在本页面（localStorage），关掉重开不丢。<br>
+「人类 / AI / 拿不准」，顺便把朱雀显示的 <b>AI 概率</b>填进右边小框（选填，但填了才能算相关系数）。<br>
+判定存在本页面（localStorage），关掉重开不丢。<br>
 全部点完后点「导出判定 JSON」，把内容存成项目里的
 <b>data/zhique-audit.json</b>，再跑
 <code>python _verify/zhique-sample.py --score</code> 出相关性报告。<br>
@@ -51,7 +52,15 @@
 <script>
 const SAMPLES = [{"path": "generated/20260920/20260920-101043-82b9e9/result.json", "layer": "low", "score": 96, "chars": 382, "text": "哎我跟你说／加装电梯有5个坑。新电梯用半年就抖，别全怪质量，／多半是**保养**没跟上，／**三件小事**自己查。\n\n**头一件**，装完别光高兴／你先问清：**以后谁保养**、**多久来一次**。／按规矩至少**半月**一次，也就是15天；／**季度半年**别顶数，合同没写明白，后面准扯皮。\n\n**第二件**，保养不是擦擦油就走／得做**清洁、润滑、检查、调整**，／该换的**易损件**也得换。／每次做完你都能查记录，／项目没做全，它就抖、就闹脾气。\n\n**第三件**，电梯里贴的**检验标志**／日期扫一眼，**过期**就别坐。／报警按钮也认一下，／真被困按它找人，安心等救援。／去年那12台，6到9层，我都这么说。\n\n先点个**关注**听好啊／下条我接着说：真被困电梯里，头一件事到底做啥。／别乱扒门，做错了更遭罪，／**点关注**，老师傅下条告诉你啊。"}, {"path": "generated/20260912/20260912-165127-68ff52/result.json", "layer": "low", "score": 96, "chars": 380, "text": "先记住，别不信，地铁口扶梯突然停了，／最怕的不是停住，是**你乱动**。／我干维保十几年，真见过有人当场摔。\n\n**握紧扶手带**，／双脚踩稳梯级，别急着跨。／小声提醒后面的人，**先别挤**。／你想啊，梯级一米宽，一乱容易带倒一片。／**脚下先稳**，后面才不慌，别急着回头啊。\n\n**别急着跑**。／先看清上下方向，／扶稳扶手，一步踩平，再迈下一步。／三十多度的梯级，**急跑容易打滑**，慢慢走最稳。／尤其带老人小孩的，先别听催，**稳着来**。\n\n**别蹲下去捡东西**，／也别跨梯级缝。／扶梯停下可能是安全保护，／不是闹着玩。／**找物业或维保**，说清楼层和位置。／维保记录要留清楚，别自己硬修，**听劝**。\n\n**关注我**，下期讲扶梯急停按钮在哪里。／商场地铁都常见。／你觉得最难的是站稳还是找方向？／评论区聊，别乱按，**先别慌**更安全。"}, {"path": "generated/20260912/20260912-105341-c0a327/result.json", "layer": "low", "score": 96, "chars": 379, "text": "哎，／跟你说个实在话。／家用电梯，／选贵的选好看的都没用。／维保这步没搞清楚，／以后**天天**烦你。\n\n先说最要紧的——／谁给你维保。／厂家自己，还是外包给第三方？／这家有**没有资质**？靠不靠谱？／可别等电梯坏了，／你电话打一圈没人应，／才想起这事儿，／干着急。\n\n再一个，／问维保费怎么收。／一年多少钱？／包不包配件？／上门另不另收费？／有没有隐形费用？／全写进**合同**，白纸黑字。／别光听嘴上说，／到时候扯皮，／烦都烦死你。\n\n还有个，／看维保记录怎么留。／按规定**十五天**就得来一次。／他到底来没来？／换没换件？／每回都要签字留痕。／自己再拍个照存底。／将来真扯皮，／手里有证据，／不怕他赖。\n\n你家电梯维保，／到底是找厂家，还是第三方？／一年花了多少钱？／来没来、换没换件，都签字吗？／评论区聊聊，／我帮你**把把关**，／别花冤枉钱。"}, {"path": "generated/20260920/20260920-152545-3dd8b0/result.json", "layer": "low", "score": 96, "chars": 367, "text": "你是不是以为电梯维保就是**擦擦油**？／老师傅告诉你／差的不是一星半点。／我干这行**二十年**，见多了。\n\n维保不是等电梯坏了再修／是**提前做体检**。／国家规定，**15天**一次，雷打不动。／就像你量血压，不疼也得量。／我真见过不少小区，坏了才想起我。\n\n保养不是光擦油／查的是**保命部件**。／**刹车**、**门锁**、**安全钳**，一个个试。／上个月一小区，安全钳弹簧锈了，我**没敢签字**。／这可不只是擦擦油的事。\n\n维保记录一定要留好／15天一次，谁来的、查了什么，都写上。／出了事，它就是**分清责任**的铁证。／别怕麻烦，关键时刻能省大事。／物业要是不给看，你**有权问**。\n\n你家电梯这个月**做过维保**吗？／别光看我说的，回去翻翻记录。／要是没有，你有权提出来。／**评论区聊聊**，我帮你看看。"}, {"path": "generated/20260920/20260920-145654-b58882/result.json", "layer": "low", "score": 96, "chars": 351, "text": "我跟你说，你以为电梯维保／就是**擦擦油**？／我干了十几年维保，实话告诉你／**真不是**那么回事。\n\n维保不是等电梯坏了再叫人来。／国家定的周期，记死一个数：**15天**一次。／往后还有季度、半年、年度，／一层层往上加。／哪个环节，都不能省。\n\n维保里头，关键查三样：／**刹车**、**门锁**、**速度保护**。／刹车管停得住，／门锁管关得严。／还有个速度保护，电梯跑快了能拉住。／光擦擦油不查这些，那能算维保吗？\n\n维保记录单，**别**不想看，更别随手签。／上面记着哪天维保、谁来的、查了啥。／你签了字就是认了。／将来有纠纷，白纸黑字，**谁的责任跑不掉**。\n\n再留个问号：／万一真被困电梯，第一件事做啥？／**九成人**第一步就错了。／关注我，下期拆给你听。／别等困住了，才想起来看。"}, {"path": "generated/20260912/20260912-172631-e3c708/result.json", "layer": "low", "score": 96, "chars": 347, "text": "家里装电梯／装修先封墙／电梯后上门／特别容易卡住／我干维保这行／井道尺寸卡了只能砸墙／太闹心。\n\n先量房／**井道、底坑、顶层、门洞**／提前确认／我一般先看底坑深度和顶层高度／这两个硬条件不过／产品白选／门洞宽、墙体厚／也得一起量／别嫌麻烦。\n\n按空间选方案／**能下挖**／就用有底坑／**不能挖**／考虑无底坑／别先定死装修／再回头改井道／按**320公斤**、**0.4米每秒**这类家用规格／提前对尺寸。\n\n留条件／**220V电源**、照明、通风／**检修口**别漏／我见过电梯到位／电源没留／只能拉临时线／井道照明也要单独走线／别等装完返工／别忘了提前提。\n\n你家几层／楼梯在哪／井道多大／评论区说说／我帮你捋该先问哪几条／别被一句报价带跑／条件没清／后头全返工／太常见，你回我。"}, {"path": "generated/20260920/20260920-093825-1d77ee/result.json", "layer": "high", "score": 100, "chars": 336, "text": "正确做法就三步。／第一，按轿厢里的警铃，或者对讲按钮。／第二，没人应答，就打电梯里贴的那个救援电话。／第三，说清楚你在哪个小区、哪栋楼、哪部电梯，然后原地等。\n\n先说为什么会困人。／电梯停了，很多时候不是坏了，是它在保护你。／门没关严、平层差一点，它就自动停下，这是设计好的。\n\n最危险的动作就是扒门。／轿厢很可能停在两层之间，一扒开门，外面不是楼层，是空的井道。／这个动作真的会出事。\n\n正确做法就三步。／第一，按轿厢里的警铃，或者对讲按钮。／第二，没人应答，就打电梯里贴的那个救援电话。／第三，说清楚你在哪个小区、哪栋楼、哪部电梯，然后原地等。\n\n有人担心会缺氧。／别慌，轿厢不是密封的，有通风口。／记住这三步，转发给家里人，真遇上了能救命。／关注我，电梯的事少踩坑。"}, {"path": "generated/20260907/20260907-082837-695f78/result.json", "layer": "high", "score": 100, "chars": 322, "text": "被困电梯，很多人第一反应就是错的。／修了十五年电梯，我今天把话撂这：门，千万别自己扒。\n\n正确做法就三步。／第一，按轿厢里的警铃，或者对讲按钮。／第二，没人应答，就打电梯里贴的那个救援电话。／第三，说清楚你在哪个小区、哪栋楼、哪部电梯，然后原地等。\n\n最危险的动作就是扒门。／轿厢很可能停在两层之间，一扒开门，外面不是楼层，是空的井道。／这个动作真的会出事。\n\n正确做法就三步。／第一，按轿厢里的警铃，或者对讲按钮。／第二，没人应答，就打电梯里贴的那个救援电话。／第三，说清楚你在哪个小区、哪栋楼、哪部电梯，然后原地等。\n\n有人担心会缺氧。／别慌，轿厢不是密封的，有通风口。／记住这三步，转发给家里人，真遇上了能救命。／关注我，电梯的事少踩坑。"}, {"path": "generated/20260912/20260912-153241-534071/result.json", "layer": "high", "score": 100, "chars": 205, "text": "家里装电梯／装饰先封了**电梯井**／**维保师傅**只能叹气。\n\n我跟你说／**尺寸方案**没定／就动结构封墙／**维保师傅**白跑。先定**门宽**、**轿厢尺寸**／再让装饰动／别赶工期。\n\n维保最怕扯皮／**电梯井**、**底坑深度**、**顶层高度**、**220V电源**／写进**确认单**／现场拍照。别嫌麻烦／少一项就返工。\n\n拿不准／装之前就在**评论区**发现场照片／我帮你看看尺寸和条件。"}, {"path": "generated/20260912/20260912-152825-fbd757/result.json", "layer": "high", "score": 100, "chars": 169, "text": "家里装**家用电梯**／最怕井道封完／师傅到场才说尺寸不对\n\n**先让**电梯厂家出预留图／井道尺寸、底坑、顶层高度／220V电源、楼板开孔／一起给装饰，别只留个位\n\n**再把**责任对清／谁做井道、谁留门洞／谁做收口、装完谁验收／别等瓷砖贴好、现场尺寸锁了再补方案\n\n**评论区**发一张你家电梯预留图／我帮你挑一个最常见的坑，别闷头改"}];
 const KEY = "zhique-audit-v1";
-const verdicts = JSON.parse(localStorage.getItem(KEY) || "{}");
+// 存 {path: {v: "human"|"ai"|"unsure", r: 87.3}}。旧版存的是裸字符串
+// （{path: "human"}）—— 读到时自动升级，别让老数据把页面搞挂。
+let verdicts = {};
+try {
+  const raw = JSON.parse(localStorage.getItem(KEY) || "{}");
+  for (const k of Object.keys(raw)) {
+    verdicts[k] = typeof raw[k] === "string" ? {v: raw[k], r: null} : raw[k];
+  }
+} catch (e) { verdicts = {}; }
 const LABEL = {human: "人类", ai: "AI", unsure: "拿不准"};
 
 function save() { localStorage.setItem(KEY, JSON.stringify(verdicts)); render(); }
@@ -61,7 +70,8 @@ function render() {
   list.innerHTML = "";
   let done = 0;
   SAMPLES.forEach((s, i) => {
-    const v = verdicts[s.path] || "";
+    const rec = verdicts[s.path] || {};
+    const v = rec.v || "";
     if (v) done++;
     const card = document.createElement("div");
     card.className = "card";
@@ -75,6 +85,9 @@ function render() {
       '<button data-v="ai" class="v ' + (v === "ai" ? "on" : "") + '">AI</button>' +
       '<button data-v="unsure" class="v ' + (v === "unsure" ? "on" : "") + '">拿不准</button>' +
       '<span class="v ' + v + '">' + (LABEL[v] || "未判定") + '</span>' +
+      '<span style="color:#646a73;font-size:12px;">AI 率%</span>' +
+      '<input type="number" min="0" max="100" step="0.1" class="rate" ' +
+      'style="width:72px" value="' + (rec.r == null ? "" : rec.r) + '" placeholder="如 87.3">' +
       '</div>';
     card.querySelector(".txt").textContent = s.text;
     card.querySelector('[data-act="copy"]').onclick = (e) => {
@@ -85,11 +98,20 @@ function render() {
     };
     card.querySelectorAll("[data-v]").forEach((b) => {
       b.onclick = () => {
-        if (verdicts[s.path] === b.dataset.v) delete verdicts[s.path];
-        else verdicts[s.path] = b.dataset.v;
+        const cur = verdicts[s.path] || {};
+        if (cur.v === b.dataset.v) delete verdicts[s.path];
+        else verdicts[s.path] = {v: b.dataset.v, r: cur.r == null ? null : cur.r};
         save();
       };
     });
+    card.querySelector(".rate").onchange = (e) => {
+      const cur = verdicts[s.path] || {};
+      const val = e.target.value.trim();
+      const num = val === "" ? null : Math.max(0, Math.min(100, parseFloat(val)));
+      if (num == null && !cur.v) { delete verdicts[s.path]; }
+      else { verdicts[s.path] = {v: cur.v || "unsure", r: num}; }
+      save();
+    };
     list.appendChild(card);
   });
   document.getElementById("prog").textContent =
@@ -99,8 +121,13 @@ function render() {
 }
 
 document.getElementById("export").onclick = () => {
-  const out = SAMPLES.filter((s) => verdicts[s.path])
-    .map((s) => ({path: s.path, zhique: verdicts[s.path], note: ""}));
+  const out = SAMPLES.filter((s) => verdicts[s.path] && verdicts[s.path].v)
+    .map((s) => {
+      const rec = verdicts[s.path];
+      const o = {path: s.path, zhique: rec.v, note: ""};
+      if (typeof rec.r === "number") o.ai_rate = rec.r;
+      return o;
+    });
   const text = JSON.stringify(out, null, 2);
   document.getElementById("out").style.display = "block";
   document.getElementById("out").textContent = text;

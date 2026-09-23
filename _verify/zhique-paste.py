@@ -73,7 +73,8 @@ def main() -> None:
 <h1>朱雀对照送检页（A-7）</h1>
 <p class="tip">
 每篇：点「复制文本」→ 贴进 <b>matrix.tencent.com/ai-detect</b> → 按朱雀判定点
-「人类 / AI / 拿不准」。判定存在本页面（localStorage），关掉重开不丢。<br>
+「人类 / AI / 拿不准」，顺便把朱雀显示的 <b>AI 概率</b>填进右边小框（选填，但填了才能算相关系数）。<br>
+判定存在本页面（localStorage），关掉重开不丢。<br>
 全部点完后点「导出判定 JSON」，把内容存成项目里的
 <b>data/zhique-audit.json</b>，再跑
 <code>python _verify/zhique-sample.py --score</code> 出相关性报告。<br>
@@ -89,7 +90,15 @@ def main() -> None:
 <script>
 const SAMPLES = __PAYLOAD__;
 const KEY = "zhique-audit-v1";
-const verdicts = JSON.parse(localStorage.getItem(KEY) || "{}");
+// 存 {path: {v: "human"|"ai"|"unsure", r: 87.3}}。旧版存的是裸字符串
+// （{path: "human"}）—— 读到时自动升级，别让老数据把页面搞挂。
+let verdicts = {};
+try {
+  const raw = JSON.parse(localStorage.getItem(KEY) || "{}");
+  for (const k of Object.keys(raw)) {
+    verdicts[k] = typeof raw[k] === "string" ? {v: raw[k], r: null} : raw[k];
+  }
+} catch (e) { verdicts = {}; }
 const LABEL = {human: "人类", ai: "AI", unsure: "拿不准"};
 
 function save() { localStorage.setItem(KEY, JSON.stringify(verdicts)); render(); }
@@ -99,7 +108,8 @@ function render() {
   list.innerHTML = "";
   let done = 0;
   SAMPLES.forEach((s, i) => {
-    const v = verdicts[s.path] || "";
+    const rec = verdicts[s.path] || {};
+    const v = rec.v || "";
     if (v) done++;
     const card = document.createElement("div");
     card.className = "card";
@@ -113,6 +123,9 @@ function render() {
       '<button data-v="ai" class="v ' + (v === "ai" ? "on" : "") + '">AI</button>' +
       '<button data-v="unsure" class="v ' + (v === "unsure" ? "on" : "") + '">拿不准</button>' +
       '<span class="v ' + v + '">' + (LABEL[v] || "未判定") + '</span>' +
+      '<span style="color:#646a73;font-size:12px;">AI 率%</span>' +
+      '<input type="number" min="0" max="100" step="0.1" class="rate" ' +
+      'style="width:72px" value="' + (rec.r == null ? "" : rec.r) + '" placeholder="如 87.3">' +
       '</div>';
     card.querySelector(".txt").textContent = s.text;
     card.querySelector('[data-act="copy"]').onclick = (e) => {
@@ -123,11 +136,20 @@ function render() {
     };
     card.querySelectorAll("[data-v]").forEach((b) => {
       b.onclick = () => {
-        if (verdicts[s.path] === b.dataset.v) delete verdicts[s.path];
-        else verdicts[s.path] = b.dataset.v;
+        const cur = verdicts[s.path] || {};
+        if (cur.v === b.dataset.v) delete verdicts[s.path];
+        else verdicts[s.path] = {v: b.dataset.v, r: cur.r == null ? null : cur.r};
         save();
       };
     });
+    card.querySelector(".rate").onchange = (e) => {
+      const cur = verdicts[s.path] || {};
+      const val = e.target.value.trim();
+      const num = val === "" ? null : Math.max(0, Math.min(100, parseFloat(val)));
+      if (num == null && !cur.v) { delete verdicts[s.path]; }
+      else { verdicts[s.path] = {v: cur.v || "unsure", r: num}; }
+      save();
+    };
     list.appendChild(card);
   });
   document.getElementById("prog").textContent =
@@ -137,8 +159,13 @@ function render() {
 }
 
 document.getElementById("export").onclick = () => {
-  const out = SAMPLES.filter((s) => verdicts[s.path])
-    .map((s) => ({path: s.path, zhique: verdicts[s.path], note: ""}));
+  const out = SAMPLES.filter((s) => verdicts[s.path] && verdicts[s.path].v)
+    .map((s) => {
+      const rec = verdicts[s.path];
+      const o = {path: s.path, zhique: rec.v, note: ""};
+      if (typeof rec.r === "number") o.ai_rate = rec.r;
+      return o;
+    });
   const text = JSON.stringify(out, null, 2);
   document.getElementById("out").style.display = "block";
   document.getElementById("out").textContent = text;

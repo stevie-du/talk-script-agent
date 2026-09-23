@@ -34,6 +34,17 @@ def full_text(d: dict) -> str:
     return "\n\n".join(s.get("text", "") for s in (d.get("sections") or []))
 
 
+def _norm_path(p: str) -> str:
+    """路径归一化：Windows 反斜杠与正斜杠视为同一个 path。
+
+    ⚠ 为什么必须做：`picked` 里的 path 是 `relative_to(ROOT)` 的字符串，
+    Windows 上是反斜杠；而人工写 audit json 时路径十有八九是从 git 输出/
+    编辑器里复制的**正斜杠**版本。不归一化就会"一篇都对不上"—— 而那句
+    提示不说是分隔符问题，用户只会以为样本变了。
+    """
+    return p.replace("\\", "/")
+
+
 def main() -> None:
     sys.path.insert(0, str(ROOT))
     from app.ai_tells import AITells, score_of, _PLACEHOLDER_RE
@@ -112,11 +123,13 @@ def main() -> None:
 2. 把判定按这个模板写进 {AUDIT.relative_to(ROOT)}（没有就新建）：
 
    [
-     {{"path": "generated/.../result.json", "zhique": "human", "note": ""}},
+     {{"path": "generated/.../result.json", "zhique": "human", "ai_rate": 3.2, "note": ""}},
      ...
    ]
 
    zhique 取值：human（判人类）/ ai（判 AI）/ unsure（拿不准）
+   ai_rate：朱雀显示的 AI 概率百分数（如 87.3）——**能抄就抄**。
+     有二值判定只能做分组对比；有概率值能算连续相关系数，后者信息量大得多。
 3. 再跑一次 `python _verify/zhique-sample.py --score` 出相关性报告
 """)
 
@@ -124,19 +137,50 @@ def main() -> None:
         if not AUDIT.exists():
             print(f"还没看到 {AUDIT.relative_to(ROOT)} —— 先按上面模板把朱雀判定写进去")
             return
-        verdict = {a["path"]: a["zhique"] for a in json.loads(AUDIT.read_text(encoding="utf-8"))}
-        have = [p for p in picked if p["path"] in verdict]
+        audit = json.loads(AUDIT.read_text(encoding="utf-8"))
+        verdict = {_norm_path(a["path"]): a["zhique"] for a in audit}
+        rate = {_norm_path(a["path"]): a.get("ai_rate") for a in audit
+                if isinstance(a.get("ai_rate"), (int, float))}
+        have = [p for p in picked if _norm_path(p["path"]) in verdict]
         if not have:
             print("判定文件里没有一篇能对上抽样清单的 path")
+            print("（若你确信写对了：看看是不是分隔符问题 —— Windows 反斜杠与"
+                  "正斜杠现已归一化，旧版本工具曾因此对不上）")
             return
-        ai = [p["score"] for p in have if verdict[p["path"]] == "ai"]
-        hu = [p["score"] for p in have if verdict[p["path"]] == "human"]
-        un = [p["score"] for p in have if verdict[p["path"]] == "unsure"]
+        ai = [p["score"] for p in have if verdict[_norm_path(p["path"])] == "ai"]
+        hu = [p["score"] for p in have if verdict[_norm_path(p["path"])] == "human"]
+        un = [p["score"] for p in have if verdict[_norm_path(p["path"])] == "unsure"]
         print(f"\n对上 {len(have)}/{len(picked)} 篇")
         for name, ss in (("朱雀判 AI", ai), ("朱雀判人类", hu), ("拿不准", un)):
             if ss:
                 print(f"  {name:8} {len(ss):2} 篇  L1 均分 {sum(ss)/len(ss):5.1f}  "
                       f"区间 {min(ss)}~{max(ss)}")
+        # ── 连续相关性：L1 分数 vs 朱雀 AI 概率 ──────────────────
+        # 为什么它比分组均值差重要：分组把 87% 和 12% 压成同一个"ai"标签，
+        # 丢掉概率里的刻度；而 10 篇样本的分组均值差抖动很大。有概率值就能
+        # 算 Pearson 相关系数 —— r 显著为负 = L1 与朱雀连续同向。
+        pairs = [(p["score"], float(rate[_norm_path(p["path"])]))
+                 for p in have if _norm_path(p["path"]) in rate]
+        if len(pairs) >= 4:
+            xs = [a for a, _ in pairs]
+            ys = [b for _, b in pairs]
+            mx, my = sum(xs) / len(xs), sum(ys) / len(ys)
+            num = sum((x - mx) * (y - my) for x, y in pairs)
+            dx = sum((x - mx) ** 2 for x in xs) ** 0.5
+            dy = sum((y - my) ** 2 for y in ys) ** 0.5
+            r = num / (dx * dy) if dx and dy else 0.0
+            print(f"\n连续相关性（{len(pairs)} 篇有概率值）：")
+            print(f"  Pearson r（L1 分数 vs 朱雀 AI 概率）= {r:+.3f}")
+            if r <= -0.6:
+                print("  r ≤ -0.6：L1 与朱雀**连续同向** —— 分数越低朱雀越判 AI，尺子有外部支撑。")
+            elif r >= 0.6:
+                print("  r ≥ +0.6：**指反了** —— L1 打低分的稿朱雀反而判人类。tell 集有系统性偏差，"
+                      "把 r 最高/最低的几篇拉出来读。")
+            else:
+                print("  |r| < 0.6：相关性弱 —— L1 分不出朱雀能分的东西。把「朱雀高概率、"
+                      "L1 却满分」的稿子拉出来读，那就是新 tell 的需求清单。")
+        elif rate:
+            print(f"\n（有概率值的只有 {len(pairs)} 篇，少于 4 篇算不了相关系数 —— 先补齐）")
         if ai and hu:
             gap = sum(hu) / len(hu) - sum(ai) / len(ai)
             print(f"\n人味分差距（人类组均分 - AI 组均分）：{gap:+.1f}")
