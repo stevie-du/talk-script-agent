@@ -6,7 +6,8 @@
 // `node _verify/verify.js contrast` 只要几秒。
 //
 // ⚠ resolvedToken / contrastRatio **由 verify.js 传进来**，不在这里复制一份：
-//   它们在整网里还被另外 8 处断言复用，抄一份就是"改了一处另一处静默过期"。
+//   resolvedToken 在整网里还被另外 8 处断言复用（contrastRatio 只在整网的
+//   contrast 组用）——抄一份就是"改了一处另一处静默过期"。
 module.exports = async function contrast({ evalIn, sleep, check, resolvedToken, contrastRatio }) {
     {
       // 对**当前主题的实际宿主底**算：verify 页面可能跑在暗色（prefers-color-scheme: dark），

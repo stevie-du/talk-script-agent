@@ -28,6 +28,7 @@ const SECTIONS = {
   topics: require("./sections/topics"),
   contrast: require("./sections/contrast"),
   packimport: require("./sections/packimport"),
+  xss: require("./sections/xss"),
 };
 const ONLY = (process.argv[2] || "").trim();
 
@@ -1413,62 +1414,15 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("无 JS 运行错误", errs.length === 0, errs.join(" | "));
   check("meta 载入且行业包下拉已填充", boot.meta && boot.packs === 3, `packs=${boot.packs}`);
   check("工具条渲染出参数胶囊", boot.quickPills >= 3, `pills=${boot.quickPills}`);
-  // 平台下拉的第 4 项是 XSS 探针（桩里带的 payload option）：
-  // pack.yaml 的 options 是可导入的第三方数据，el() 第三参数是 innerHTML，
-  // 漏 esc 时这个 option 会被解析成真 DOM 元素（五路审查 P0-2）。
-  const xssPill = await evalIn(`return (function(){
-    window.__xssPill = 0;
-    var sel = document.querySelector('#quick-params #p-platform');
-    if (!sel) return { noSel: true };
-    return {
-      optCount: sel.options.length,
-      // 判据盯 DOM：漏 esc 时 querySelectorAll('img') 会是 1
-      imgInSel: sel.querySelectorAll('img,script,svg,iframe').length,
-      fired: window.__xssPill,
-      hasPayload: Array.prototype.some.call(sel.options,
-        function(o){ return o.text.indexOf('<img') >= 0; }),
-    }; })()`);
-  check("工具条参数胶囊不含注入元素（pack.yaml 的 options 走 esc）",
-    xssPill.optCount === 4 && xssPill.imgInSel === 0 && xssPill.fired === 0
-      && xssPill.hasPayload,
-    JSON.stringify(xssPill));
   check("空状态示例卡渲染", boot.samples === 4, `samples=${boot.samples}`);
   check("会话列表渲染 6 条并分组", boot.sessions === 6 && boot.groups >= 4,
     `rows=${boot.sessions} groups=${boot.groups}`);
   check("请求带上了访问令牌", await evalIn("return window.__sawToken === true;"), "");
 
-  // ── 1a-2) 搜索无结果提示：XSS 探针 ─────────────────────────
-  // el() 的第三参数走 innerHTML，所以任何拼进 el() 的用户输入都必须 esc。
-  // 五路审查（2026-09-23 P0-2）抓到三处漏 esc，这里是「搜索词」那一条的哨兵：
-  // 往真实搜索框粘一段 payload，判据盯**DOM 里出了什么**——
-  //   · 正确实现：提示是一个纯文本 <p>，payload 只是文本，img 永远不会被创建；
-  //   · 漏 esc：payload 被 innerHTML 解析，<img> 真的进 DOM 并触发 onerror。
-  // 注意 CSP 只拦网络请求、不拦事件，所以 onerror 照样能跑 —— 必须靠 esc 兜。
-  const xss = await evalIn(`return (function(){
-    var box = document.getElementById('sess-search');
-    if (!box) return { noBox: true };
-    window.__xssFired = 0;
-    window.addEventListener('error', function(){ window.__xssFired++; }, true);
-    var payload = '<img src=x onerror="window.__xssFired++">';
-    box.value = payload;
-    box.dispatchEvent(new Event('input', { bubbles: true }));
-    var hint = document.querySelector('#session-list .sess-empty');
-    return {
-      hintShown: !!hint,
-      hintHTML: hint ? hint.innerHTML.slice(0, 120) : '',
-      hintText: hint ? hint.textContent.trim() : '',
-      // 判据不是"文本里有没有 <img"（esc 后文本里照样有这 4 个字符），
-      // 而是**DOM 里有没有真的元素**：漏 esc 时这里会是 1。
-      injectedTags: hint ? hint.querySelectorAll('img,script,svg,iframe').length : -1,
-      fired: window.__xssFired,
-    }; })()`);
-  check("搜索无结果提示不含注入元素（用户输入走 esc，el() 是 innerHTML）",
-    xss.hintShown && xss.injectedTags === 0 && xss.fired === 0
-      && xss.hintText.indexOf("<img") >= 0,
-    JSON.stringify(xss));
-  // 复原：把搜索清掉，否则后面断言看到的是空列表
-  await evalIn(`var b = document.getElementById('sess-search');
-    b.value = ''; b.dispatchEvent(new Event('input', { bubbles: true })); return true;`);
+  // ── 1a-2) XSS 探针（P0-2，搬进 sections/xss.js 以便单独跑）────
+  // 覆盖其中两条 boot 后即可判的（搜索提示 / 参数胶囊 option）；第三条
+  // （行业包面板文件名 kb-name）依赖 packinfo 面板，留在下面原位置。
+  await SECTIONS.xss({ evalIn, sleep, check });
 
   // ── 1b) 首页（landing）：合成器就是 hero ──────────────────
   // 2026-09-20 参考 ZCode 重排。改前 hero 是五个居中块（深色图标砖 / 标题 / 副标题 /

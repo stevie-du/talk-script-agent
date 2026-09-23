@@ -27,7 +27,29 @@ PROMPTS_F = ROOT / "app/prompts.py"
 CSS_F = ROOT / "desktop/renderer/styles.css"
 VERIFY_F = ROOT / "_verify/verify.js"
 SKILL_F = PACK / "skill.yaml"
-NODE = ("C:/Users/78470/.workbuddy-ai/binaries/node/versions/22.22.2-2/node.exe")
+
+
+def _find_node() -> str:
+    """node 可执行文件：**不写死版本号**。
+
+    五路审查 P2 报过"NODE 写死某用户 workbuddy 路径，换机器即崩"，
+    2026-09-23 当场发作：环境把 node 从 22.22.2-**2** 升到 **-3**，
+    写死的旧路径让 mutate 跑到第 39 条（第一条 verify: 变异）才
+    FileNotFoundError —— 前 38 条 pytest 变异全绿，反而更危险
+    （看起来像跑完了）。解析顺序：PATH → versions 目录里最新的。
+    """
+    import shutil
+    found = shutil.which("node") or shutil.which("node.exe")
+    if found:
+        return found
+    cands = sorted(Path.home().glob(
+        ".workbuddy-ai/binaries/node/versions/*/node.exe"))
+    if cands:
+        return str(cands[-1])
+    raise SystemExit("找不到 node 可执行文件：PATH 与 versions 目录都没有")
+
+
+NODE = _find_node()
 
 MUTATIONS = [
     (
@@ -326,15 +348,17 @@ MUTATIONS = [
     (
         "B 两族额度配错（INTEL_BUSY_STATES 写成 BUSY_STATES）",
         JOBS_F,
-        'INTEL_BUSY_STATES = frozenset({"fetching"})',
+        'INTEL_BUSY_STATES = frozenset({"queued", "fetching"})',
         "INTEL_BUSY_STATES = BUSY_STATES",
         "tests/test_intel.py -k does_not_consume_model_quota",
     ),
     (
         "B add_if_room 无视 states 参数（两族额度合成一族）",
         JOBS_F,
-        "                   if j.state in states and not j.stranded) >= limit:",
-        "                   if j.state in BUSY_STATES and not j.stranded) >= limit:",
+        "                   if same_quota_family(j.kind, job.kind)\n"
+        "                   and j.state in states and not j.stranded) >= limit:",
+        "                   if same_quota_family(j.kind, job.kind)\n"
+        "                   and j.state in BUSY_STATES and not j.stranded) >= limit:",
         "tests/test_intel.py -k its_own_limit",
     ),
     (
@@ -460,6 +484,70 @@ MUTATIONS = [
         "            pass  # 变异：附加被删",
         "tests/test_quota_degraded_signal.py",
     ),
+    # ── 五路审查 P0 五条（2026-09-23 当轮修，逐条实测复现过）──────────
+    (
+        "P0-1 engine-dialogs.js 从 build.files 漏掉（装完启动即 MODULE_NOT_FOUND）",
+        ROOT / "desktop/package.json",
+        '      "engine-path.js",\n      "engine-dialogs.js"\n',
+        '      "engine-path.js"\n',
+        "node:desktop/packaging.test.js",
+    ),
+    (
+        "P0-2 搜索提示退回不 esc（用户输入进 innerHTML = XSS）",
+        TOPICS_F if False else ROOT / "desktop/renderer/js/sessions.js",
+        '`没有匹配「${esc(query)}」的会话`',
+        '`没有匹配「${query}」的会话`',
+        "verify:xss",
+    ),
+    (
+        "P0-2 参数胶囊 option 退回不 esc（pack.yaml 数据进 innerHTML = XSS）",
+        UI_F,
+        'const o = el("option", "", key === "duration" ? `${esc(String(opt))}s` : esc(String(opt)));',
+        'const o = el("option", "", key === "duration" ? `${String(opt)}s` : String(opt));',
+        "verify:xss",
+    ),
+    (
+        "P0-2 面板文件名退回不 esc（磁盘路径进 innerHTML = XSS）",
+        ROOT / "desktop/renderer/js/settings.js",
+        'meta.appendChild(el("span", "kb-name", esc(f.rel)));',
+        'meta.appendChild(el("span", "kb-name", f.rel));',
+        "verify:",
+    ),
+    (
+        "P0-3 量词字符类加回 分/成/人/起（副词尾字误吞，no_specific 漏报）",
+        AI,
+        '_MEASURE_CHARS = ("天次台元块米层个位条家间辆口份部套户站年月日秒点倍手脚轮趟宗件种项类款档期批")',
+        '_MEASURE_CHARS = ("天次台元块米层个位条家间辆口份部套户站年月日秒分点成倍人手脚轮趟宗件种项类款档期批起")',
+        "tests/test_ai_tells.py -k adverb",
+    ),
+    (
+        "P0-4 queued 剔出情报族（并发 refresh 可同时过检，额度上限形同虚设）",
+        JOBS_F,
+        'INTEL_BUSY_STATES = frozenset({"queued", "fetching"})',
+        'INTEL_BUSY_STATES = frozenset({"fetching"})',
+        "tests/test_intel.py -k queued",
+    ),
+    (
+        "P0-4 add_if_room 去掉 kind 分族（intel 的 queued 会占生成名额）",
+        JOBS_F,
+        """            if sum(1 for j in self._jobs.values()
+                   if same_quota_family(j.kind, job.kind)
+                   and j.state in states and not j.stranded) >= limit:""",
+        """            if sum(1 for j in self._jobs.values()
+                   if j.state in states and not j.stranded) >= limit:""",
+        "tests/test_intel.py -k queued",
+    ),
+    (
+        "P0-5 删通用 Exception handler（未预期异常退回 500 text/plain 空 body）",
+        SRV_F,
+        """    @app.exception_handler(Exception)
+    async def _unhandled(_req, exc: Exception):
+        log.exception("未处理的内部错误：%s: %s", type(exc).__name__, exc)
+        return _error_json(f"引擎内部错误（{type(exc).__name__}）：{exc}",
+                           500, ERR_INTERNAL)""",
+        "    # 变异：通用 handler 删掉",
+        "tests/test_server_hardening.py -k unexpected_error",
+    ),
 ]
 
 # 子集运行：`python _verify/mutate.py -k UI` 只跑名字里含 UI 的那几条。
@@ -571,6 +659,10 @@ def _run_selector(selector):
     if selector.startswith("verify:"):
         kw = selector.split(":", 1)[1].strip()
         cmd = [str(NODE), str(ROOT / "_verify/verify.js")] + ([kw] if kw else [])
+    elif selector.startswith("node:"):
+        # node --test 的用例（desktop/*.test.js：打包接线/对话框脱敏）。
+        # 退出码在这里是可靠的（没有 pytest 那种收尾清理撞沙箱的问题）。
+        cmd = [str(NODE), "--test", *shlex.split(selector[len("node:"):])]
     else:
         cmd = [str(ROOT / ".venv/Scripts/python.exe"), "-m", "pytest", "-q",
                *shlex.split(selector)]
@@ -629,6 +721,11 @@ def _is_green(selector, out, rc):
         if not m:
             return False, "没读到「N/M 通过」结果行"
         return m.group(1) == m.group(2), m.group(0)
+    if selector.startswith("node:"):
+        m = re.search(r"^# fail (\d+)", out, re.M)
+        if not m:
+            return False, "没读到 node --test 的 # fail 行"
+        return m.group(1) == "0" and rc == 0, f"node --test fail={m.group(1)}"
     red, why = _pytest_red(out)
     if red is None:
         return False, why
@@ -675,6 +772,8 @@ for name, path, old, new, selector in MUTATIONS:
         #   每条 UI 变异都完整跑一遍整网，7 条累积起来是整轮里最耗时的一段。
         kw = selector.split(":", 1)[1].strip()
         cmd = [str(NODE), str(ROOT / "_verify/verify.js")] + ([kw] if kw else [])
+    elif selector.startswith("node:"):
+        cmd = [str(NODE), "--test", *shlex.split(selector[len("node:"):])]
     else:
         cmd = [str(ROOT / ".venv/Scripts/python.exe"), "-m", "pytest", "-q",
                *shlex.split(selector)]
@@ -702,6 +801,20 @@ for name, path, old, new, selector in MUTATIONS:
                 bad += 1
             else:
                 print(f"[报红 OK] {name}（{m.group(0) if m else '退出码非零'}）")
+            continue
+        if selector.startswith("node:"):
+            # node --test 的退出码是可靠的（没有 pytest 收尾清理撞沙箱的问题），
+            # 但也要看一眼 # fail 行，把"用法错误/收集失败"与"用例红"分开。
+            m = re.search(r"^# fail (\d+)", out, re.M)
+            if m and m.group(1) != "0":
+                print(f"[报红 OK] {name}（node --test {m.group(1)} 条失败）")
+            elif r.returncode != 0:
+                print(f"[全绿 !! 工具错] {name} —— node --test 非零退出但没有失败计数："
+                      f"\n{out[-400:]}")
+                bad += 1
+            else:
+                print(f"[全绿 !! 漏检] {name} —— node --test 全过")
+                bad += 1
             continue
         # ⚠ 退出码 5 = "一条用例都没收集到"，用法错误也是非零 —— 直接当"报红"就是把
         #   「选择器写错了」误读成「断言守住了」。必须显式区分。
