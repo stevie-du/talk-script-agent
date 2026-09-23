@@ -22,7 +22,10 @@ PACK = ROOT / "packs/elevator"
 YAML_F = PACK / "ai_tells.yaml"
 TOPICS_F = ROOT / "desktop/renderer/js/topics.js"
 UI_F = ROOT / "desktop/renderer/js/ui.js"
-UI_F = ROOT / "desktop/renderer/js/ui.js"
+PROMPTS_F = ROOT / "app/prompts.py"
+CSS_F = ROOT / "desktop/renderer/styles.css"
+VERIFY_F = ROOT / "_verify/verify.js"
+SKILL_F = PACK / "skill.yaml"
 NODE = ("C:/Users/78470/.workbuddy-ai/binaries/node/versions/22.22.2-2/node.exe")
 
 MUTATIONS = [
@@ -400,6 +403,35 @@ MUTATIONS = [
         '        start = next(i for i, ln in enumerate(lines) if ln.startswith("### 2.1"))',
         "        start = 0",
         "tests/test_aitells_alignment.py -k spec_table",
+    ),
+    # ── B7：情报进提示词（2026-09-23）────────────────────────────
+    (
+        "B7 模板摘掉 $intel_block 引用（接线断：引擎注入了但模板不用）",
+        SKILL_F,
+        "      $intel_block\n",
+        "      # 变异：摘掉引用\n",
+        "tests/test_intel_b7.py -k reference",
+    ),
+    (
+        "B7 禁用词闸门失效（含 hard 词的条目被放行进提示词）",
+        INTEL_F,
+        "        if any(b and b in blob for b in banned):\n            dropped.append(title)\n            continue",
+        "        if False:  # 变异：闸门失效\n            dropped.append(title)\n            continue",
+        "tests/test_intel_b7.py -k picks_relevant",
+    ),
+    (
+        "B7 指纹退回整块进指纹（情报一刷新所有历史版本失效）",
+        PIPE_F,
+        "        base = user.split(PROMPT_HEAD, 1)[0] if intel_key else user",
+        "        base = user  # 变异：整块进指纹",
+        "tests/test_intel_b7.py -k stable_across",
+    ),
+    (
+        "状态色 --ok 亮色调回旧值（对比度 4.40 掉到 4.5 以下）",
+        CSS_F,
+        "--ok: light-dark(#1b7030, #57c173);",
+        "--ok: light-dark(#248a3d, #57c173);",
+        "verify:",
     ),
 ]
 
