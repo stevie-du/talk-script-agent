@@ -76,3 +76,49 @@ def test_every_declared_prefix_actually_matches_a_line():
         + "、".join(dead)
         + "。要么前缀写错了（注意要比的是**正文行**开头，不是小节标题），"
           "要么那一族正文行被改写了。")
+
+
+# ── P2-39：platform.md 高危词与词表的对账 ─────────────────────
+# 与 ad-law 对账同一条命：platform.md 是「平台侧人工核实清单」，词表是
+# 「机器可读实现」，两边手工同步必漂。但 platform.md 的结构不是词族行，
+# 而是「高危词」小节里散在 `- **标签**：` 行上的词列表 —— 只抽那些行，
+# 抽完把可拦截的词（≥2 字）逐词与 hard ∪ soft ∪ 各平台 extra_hard 对账。
+#
+# 有意**不**对账两类：
+#   - 平台通用红线（「涉政敏感/色情低俗/…」是行为约束，不是可拦截词）；
+#   - 行为引导（「未实际使用的推荐」「编造个人经历」）—— 拦不住也不该拦。
+PLATFORM_MD = ROOT / "packs" / "elevator" / "compliance" / "platform.md"
+_PLATFORM_LABEL = re.compile(r"^-\s*\*\*[^*]+\*\*\s*[:：]\s*")
+# 行为引导类（拦不住也不该拦的词）：「未实际使用的推荐」「编造个人经历」是
+# 小红书的**内容要求**，不是可拦截词 —— 词表去拦"推荐"会误伤到正常推荐。
+_PLATFORM_SKIP = ("未实际使用的推荐", "编造个人经历")
+
+
+def _platform_highrisk_words() -> set[str]:
+    words: set[str] = set()
+    for line in PLATFORM_MD.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line.startswith("- **"):
+            continue
+        body = _PLATFORM_LABEL.sub("", line)
+        body = re.sub(r"[（(][^）)]*[）)]", "", body)      # 去掉括号说明
+        for w in _SPLIT.split(body):
+            w = w.strip("`'\"，、。")
+            if len(w) >= 2 and w not in _PLATFORM_SKIP:
+                words.add(w)
+    return words
+
+
+def test_platform_highrisk_words_are_covered_by_banwords():
+    data = yaml.safe_load(BANWORDS.read_text(encoding="utf-8")) or {}
+    bank = set(data.get("hard", [])) | set(data.get("soft", []))
+    for rules in (data.get("platform") or {}).values():
+        bank |= set(rules.get("extra_hard", []))
+    missing = sorted(
+        w for w in _platform_highrisk_words()
+        if not any(b in w or w in b for b in bank))
+    assert not missing, (
+        "platform.md 高危词在 banwords.yaml 里没有覆盖（子串互含判定，含 extra_hard）："
+        + "、".join(missing)
+        + " —— 平台加严词不能只靠人工记得。"
+          "补进词表（若平台专属就放 platform.<p>.extra_hard）后本条自然变绿")
