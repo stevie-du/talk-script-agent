@@ -132,6 +132,26 @@ def test_honest_gaps_are_still_exempted():
     assert r["placeholders"]["count"] == 4 and r["placeholders"]["per_100"] > 0
 
 
+# ── A-4：list_enumeration 阈值 ≥4（2026-09-23 A-4 决策预实验）─────
+def test_list_enumeration_requires_four_increasing():
+    """阈值 3→4：恰好 3 句递增（正当分步讲解）不报；真·4 句连排才报。
+
+    ⚠ 阈值 3→4 由 A-4 决策预实验定（`0864e73`）：电梯包 101 篇产物里
+    「第一…第二…第三」是标准答法模板（97% 命中、无区分度），≥3 把这类
+    正当内容结构误判成清单体；≥4 后误伤清零、真 4 连排照抓。
+    ⚠ 变异检验要求：**恰好 3 句递增**是唯一能把 ≥3 与 ≥4 分开的样本 ——
+    若实现改回 ≥3，本用例必须报红（three_steps 会被误判成命中）。
+    """
+    t = AITells({"weak": ["list_enumeration"]})
+    # 恰好 3 句递增（句号句）——阈值 ≥4 时不报、若实现退回 ≥3 必须报红
+    three_steps = [{"type": "point",
+                    "text": "第一，先别扒门。第二，按警铃。第三，等救援。"}]
+    assert "list_enumeration" not in _ids(t.scan(three_steps)), t.scan(three_steps)
+    four_steps = [{"type": "point",
+                   "text": "第一要定期维保。第二要注意卫生。第三要查紧急装置。第四要做记录。"}]
+    assert "list_enumeration" in _ids(t.scan(four_steps)), t.scan(four_steps)
+
+
 # ── A-6 #7：汉字数词+量词也算具体 ──────────────────────────
 def test_hanzi_measure_words_count_as_specific():
     """「两家公司」与「2 家公司」必须给同一个结论 —— 口播里汉字写法更自然。"""

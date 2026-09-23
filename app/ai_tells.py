@@ -174,11 +174,17 @@ class AITells:
         return hits
 
     def _list_enumeration(self, sections) -> list[TellHit]:
-        """清单体：连续 ≥3 句以「第一/第二/第三」或「一是/二是」递增开头。
+        """清单体：连续 ≥4 句以「第一/第二/第三」或「一是/二是」递增开头。
 
         刻意保守 —— banwords 曾因为裸「第一」造成 169/175 轮假命中
         （「第一件事」「第一步」是正常用法），所以这里要求**递增序列**，
         孤立出现一次不算。
+
+        ⚠ 阈值是 **≥4** 不是 ≥3（2026-09-23 A-4 决策预实验，`0864e73`）：
+        电梯包 101 篇产物里「正确做法就三步」的**标准答法模板**刚好凑 3 句
+        递增，≥3 就把这类正当内容结构 94 段全误判成清单体（97% 命中、
+        无区分度）；提到 ≥4 后 101 篇命中归零、误伤清零。≥4 的真问题稿
+        （连排 4+ 步的机械清单）照样抓。
         """
         hits = []
         num = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8}
@@ -193,7 +199,7 @@ class AITells:
                 ch = m.group(1) or m.group(2)
                 if ch and (not seq or num[ch] == seq[-1] + 1):
                     seq.append(num[ch])
-            if len(seq) >= 3:
+            if len(seq) >= 4:
                 hits.append(TellHit("list_enumeration", self.sev("list_enumeration"),
                                     len(seq), f"第{i}段", f"清单体连排：第一…第{len(seq)}"))
         return hits
