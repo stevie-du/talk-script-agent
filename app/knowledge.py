@@ -1144,6 +1144,25 @@ UNVERIFIED_KEY = "_未核实"
 UNVERIFIED_NOTE = ("这条没有出处（source/verified 为空）：只能写成 "
                    "{{待补：…}} 占位，不许当既成事实播报，也不要替它编一个来源")
 
+# P0-17 ② 条目级示例判定（2026-09-23 补）：包作者在条目里夹「示例：」字符串时，
+# 整条照旧以【私有知识库（优先作为事实来源）】注入 —— 模型把模板占位台量当交付业绩
+# 念出去，就是这条（真实产物里查到了"去年那12台"）。
+# 原来的 `strip_empty` 只在**叶子字符串**上判"示例："，一条里只要还有别的非空值
+# （哪怕只是 `units: 12` 这种示例数字），整条就漏进来。修法：
+#   - 显式标记 `_example: true` 才是"这是示例条目"的权威说法（不靠猜字符串）……
+#   - ……但旧包（含模板）都用"示例："开头，所以**两者都认**：任一命中即整条剔除。
+# 保留"剥掉示例叶子"（示例值不在字面量里出现，本来就是假数据），但"条目级"才是
+# 真正的账。2026-09-23 实测量：`{"name": "示例：X", "units": 12}` 修复前整条注入。
+_EXAMPLE_KEYS = ("_example", "example")
+
+def _is_example_entry(d: dict) -> bool:
+    """dict 是否显式示例（`_example: true` / `example: 任意真值`）或任一值是
+    以「示例：」开头的字符串（旧模板的口径）。整条命中即视为占位示例。"""
+    if any(d.get(k) for k in _EXAMPLE_KEYS):
+        return True
+    return any(isinstance(v, str) and v.startswith("示例：")
+               for v in d.values())
+
 
 def strip_empty(data):
     """递归剔除空值/示例占位（value 含"示例："的条目视为未填）。
@@ -1154,8 +1173,15 @@ def strip_empty(data):
     清空示例数字只解决了"仓库里不许有假数字"，解决不了
     "用户填了真数字但没写出处" —— 那条同样会被当成既成事实念出去。
     只有出处键、别的全空的条目不打标记（否则会凭空多出一条内容）。
+
+    P0-17 ②：条目级示例判定。叶子判"示例："挡不住
+    `{"name": "示例：X", "units": 12}` —— 只要有别的非空值整条就漏进来。
+    所以 dict 先按整条判示例（显式 `_example: true` 或任一值以「示例：」开头），
+    命中即整条剔除；没命中的照旧剥空值叶子。
     """
     if isinstance(data, dict):
+        if _is_example_entry(data):
+            return None
         out = {}
         for k, v in data.items():
             v2 = strip_empty(v)

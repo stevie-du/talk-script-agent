@@ -65,6 +65,32 @@ def test_no_marker_when_provenance_keys_absent_entirely():
     assert UNVERIFIED_KEY not in str(slim)
 
 
+# ── 单元：条目级示例判定（P0-17 修 ②）────────────────────────
+def test_entry_with_example_leaf_plus_real_data_is_dropped_entirely():
+    """「示例：」混在一条的真实数据里 → 整条剔除（原来是漏进来的）。
+
+    这是 P0-17 的真实形态：`{"name": "示例：X", "units": 12}` —— 注释里
+    写明是示例，机制上却因为还有别的非空值而整条注入，模型把占位台量念成
+    交付业绩（真实产物的"去年那12台"）。修法是**条目级**判定：任一字符串值
+    以「示例：」开头 → 整条 None。
+    """
+    slim = strip_empty({"products": [{"name": "示例：曳引式A", "units": 12}]})
+    assert slim == {}, f"示例混在真实数据里的一条应该整条没了：{slim}"
+
+
+def test_explicit_example_marker_drops_entire_entry():
+    """显式 `_example: true` 是权威说法，不靠猜字符串。"""
+    slim = strip_empty({"cases": [{"name": "去年换了12台", "_example": True}]})
+    assert slim == {}, f"显式标记的示例条目应该整条没了：{slim}"
+
+
+def test_legitimate_numbered_fact_survives():
+    """不误伤：真实条目里带数字照旧注入。"""
+    data = {"products": [{"name": "曳引式A", "units": 12, "source": "手册", "verified": "2026-09-01"}]}
+    slim = strip_empty(data)
+    assert slim == data, f"非示例条目被误删了：{slim}"
+
+
 # ── 集成：标记真的到了模型眼前 ───────────────────────────────
 def test_marker_reaches_the_rendered_prompt():
     tmp = Path(tempfile.mkdtemp(prefix="unverified-"))
