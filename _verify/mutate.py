@@ -571,6 +571,26 @@ def _run_selector(selector):
     return (r.stdout or "") + (r.stderr or ""), r.returncode
 
 
+def _pytest_red(out):
+    """pytest 这一轮**真的红了吗**？返回 (是否红, 一句依据)；跑都没跑成返回 None。
+
+    ⚠ **绝不能看退出码**：pytest 收尾会清理 tmp 下的历史会话目录（一次四千多个
+    文件），沙箱的「批量删除需确认」拦截正好在那一刻打断进程 —— 于是进度行是
+    `..  [100%]`、一条 F 都没有，退出码却是 1。
+    实测全量跑时 13 条基线就是这样被误判成"红"的，而单独重跑条条是绿
+    （垃圾没攒到阈值，拦截不触发）—— 完全一样的命令，两种结论。
+    """
+    prog = re.search(r"^([.sxFEX]+)\s*\[\s*100%\]", out, re.M)
+    if prog is None:
+        return None, "pytest 没跑成用例（进度行没到 100%）"
+    fails = [ln for ln in out.splitlines() if ln.startswith("FAILED")]
+    if fails:
+        return True, f"{len(fails)} 条 FAILED"
+    if "F" in prog.group(1) or "E" in prog.group(1):
+        return True, "进度行里有 F/E"
+    return False, "进度行零 F/E"
+
+
 def _baseline_with_retry(selector):
     """采一次基线。**第一次不绿就隔 2 秒再采一次**。
 
@@ -599,10 +619,10 @@ def _is_green(selector, out, rc):
         if not m:
             return False, "没读到「N/M 通过」结果行"
         return m.group(1) == m.group(2), m.group(0)
-    ran = re.search(r"^[.sxFEX]+\s*\[\s*100%\]", out, re.M) is not None
-    if not ran:
-        return False, "pytest 没跑成用例"
-    return rc == 0, f"退出码 {rc}"
+    red, why = _pytest_red(out)
+    if red is None:
+        return False, why
+    return not red, why
 
 
 bad = skipped = 0
@@ -616,8 +636,13 @@ for name, path, old, new, selector in MUTATIONS:
         _baseline[selector] = _baseline_with_retry(selector)
     b_ok, b_why = _is_green(selector, *_baseline[selector])
     if not b_ok:
+        # ⚠ 只报"退出码 1"等于什么都没说 —— 全量跑时撞出过 13 条基线不绿，
+        #   单独重跑那 13 条又条条是绿，没有失败内容就只能靠猜。
+        #   把输出尾巴一起打出来，"为什么红"必须是看得见的。
         print(f"[基线不绿 !! 判定无意义] {name} —— 未变异时就已经是红的"
-              f"（{b_why}，已重试一次），这条变异的「报红」什么都证明不了，先修基线")
+              f"（{b_why}，已重试一次），这条变异的「报红」什么都证明不了，先修基线\n"
+              f"    ── 基线输出尾部 ──\n"
+              + "\n".join("    " + ln for ln in _baseline[selector][0].splitlines()[-15:]))
         bad += 1
         continue
     orig = path.read_text(encoding="utf-8")
@@ -680,15 +705,15 @@ for name, path, old, new, selector in MUTATIONS:
         #   只看摘要行 → 12 条**其实已经报红**的变异被读成"漏检"，
         #   而单独重跑同一批又是红的（不可复现），极容易误判成"断言是空的"。
         #   所以判据是两条一起看：进度行有没有跑完 + 退出码。
-        ran = re.search(r"^[.sxFEX]+\s*\[\s*100%\]", out, re.M) is not None
+        red, why = _pytest_red(out)
         fails = [ln for ln in out.splitlines() if ln.startswith("FAILED")]
-        if fails or (ran and r.returncode != 0):
-            print(f"[报红 OK] {name}（{len(fails) or '进度行有 F/E'} 条报红）")
-        elif not ran:
-            print(f"[全绿 !! 工具错] {name} —— pytest 没跑成用例，看输出：\n{out[-400:]}")
+        if red:
+            print(f"[报红 OK] {name}（{len(fails) or why} 条报红）")
+        elif red is None:
+            print(f"[全绿 !! 工具错] {name} —— {why}，看输出：\n{out[-400:]}")
             bad += 1
         else:
-            print(f"[全绿 !! 漏检] {name} —— 选择器选中了用例但全过")
+            print(f"[全绿 !! 漏检] {name} —— 选择器选中了用例但全过（{why}）")
             bad += 1
     finally:
         path.write_text(orig, encoding="utf-8")
