@@ -77,3 +77,7 @@ config.yaml
 
 # 变异检验的崩溃恢复日志（跑 _verify/mutate.py 时产生，是运行态不是源码）
 _verify/.mutate-journal.json
+
+# 变异检验的并发锁与全量运行日志（同上：运行态不是源码）
+_verify/.mutate.lock
+_verify/.mutate-full.log
