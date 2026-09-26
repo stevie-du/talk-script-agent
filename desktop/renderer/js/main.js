@@ -13,15 +13,15 @@ import { abort, send, autoGrowTopic, collectParams, reattachBusyJob,
   stopAllBackgroundJobs } from "./jobs.js";
 import { loadSessions, bindSessionList, busyRecords } from "./sessions.js";
 import { bindSettings, openSettings, setPane, settingsOpen, closeSettings } from "./settings.js";
-import { setHead, resultSrt, resultMarkdown, voicePlainText,
-  errorText } from "./result.js";
+import { resultSrt, resultMarkdown, voicePlainText, errorText } from "./result.js";
+import { setHead } from "./head.js";
 import {
   bindShell, renderSamples, refreshGate, gotoView, fillPackSelect, setCfgHint,
-  renderModelPicker, setLanding,
+  renderModelPicker, setLanding, applyPackSwitch,
 } from "./ui.js";
 import { BUSY_STATES } from "./progress.js";
 import { bindTopics } from "./topics.js";
-// 「关于与更新」面板（设置页第 4 个导航项）。加载上它靠的是 settings.js 里
+// 「关于我们」面板（设置页第 4 个导航项）。加载上它靠的是 settings.js 里
 // `import { refreshAbout, bindAbout } from "./about.js"` 那条（settings.js 在
 // 本文件的 import 树里），这一行是**显式声明**：index.html 只引 main.js 一个
 // 入口，漏掉 about.js 的表现是「面板结构在、逻辑没加载」——看着有、实际没接。
@@ -95,11 +95,15 @@ function newChat() {
   loadSessions().then(() => {
     const bg = busyRecords();
     // ⚠ 指路要指**那个状态下真的可见**的入口：新建对话后是 landing 态，
-    // 而「停止全部后台生成」按钮在 landing 是被 syncBusyAffordance 刻意隐藏的
-    // （composer-foot 的 28px 高度不变量）—— 原文案让用户去下方找一颗找不到的
-    // 按钮。landing 态的实况在左栏「生成中」分组（呼吸点 + 每条自带的停止）。
-    if (bg.length) toast(`这条新对话不含刚才那 ${bg.length} 条：它们仍在后台进行，`
-      + `额度满了会被拒。可在左栏「生成中」里逐条停止`, 6000);
+    //   而「停止全部后台生成」按钮在 landing 是被 syncBusyAffordance 刻意隐藏的
+    //   （composer-foot 的 28px 高度不变量）—— 原文案让用户去下方找一颗找不到的按钮。
+    //   上一版改口成"左栏「生成中」分组"，可**左栏只按天分组**（sessions.js 的
+    //   dayGroupKey，列表里压根没有「生成中」这个词），等于指了一个不存在的名词。
+    //   实况是：在跑的那几条挂在各自那天的分组里、行首一颗呼吸的灰点；
+    //   点开任意一条才会出现下方的停止键。
+    if (bg.length) toast(`这条新对话不含刚才那 ${bg.length} 条：它们仍在后台进行`
+      + `（左栏里挂着呼吸点的那几条）。点开任意一条可以接着看，或在那里停止它。`
+      + `同时最多 4 条，占满了新任务会被拒`, 7000);
   });
 }
 
@@ -148,6 +152,10 @@ window.__ts = {
   dayGroupKey,
   gotoView,
   newChat,
+  // 换包的收口函数：挂出来是因为「不派发 change 的那条换包路径」只能从这里进
+  // （行业包面板点选与 fillPackSelect 程序化指包都只调它），
+  // 而选题视图跟不跟着换包，是这条收口唯一的可证伪判据。
+  applyPackSwitch,
   // 把全部绑定函数**再跑一遍**。幂等守卫的验证入口：
   // 绑定里混着 `addEventListener`（会重复挂，一次点击触发两次）与
   // `onclick =`（天然幂等），重复挂的症状离原因很远、很难查。

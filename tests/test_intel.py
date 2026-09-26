@@ -113,6 +113,12 @@ def _fake_http(boom: set[str] | None = None, hot=("电梯困人索赔", "明星�
                 for i in range(3)]}]}}
         if "iesdouyin" in url:
             return {"word_list": [{"word": w, "hot_value": 900} for w in hot]}
+        # 头条热榜：同一个 hot_board 适配器的第二个 board（`test_same_id_sources_
+        # fail_independently` 要用它证明"同 id 的两个源失败各归各"）。
+        if "toutiao.com" in url:
+            return {"data": [{"Title": w, "Url": f"https://t/{i}",
+                              "ClusterId": f"tt{i}", "HotValue": 800}
+                             for i, w in enumerate(hot)]}
         raise RuntimeError("没打桩的端点：" + url)
 
     return get
@@ -225,11 +231,128 @@ def test_one_broken_source_does_not_break_the_rest(tmp_path):
     assert by["抖音热榜"]["state"] == "error" and by["抖音热榜"]["count"] == 0
     # ⚠ 判据不能是 `or out["errors"]`：上一行刚断言过失败源存在，errors 必然非空 ——
     #   那等于**恒真**。要钉的是「这条失败**带上了原因**」，且原因落在**这个源**上
-    #   （`errors` 的 key 是源 id，见 app/intel.py 的 `errors[spec.id]`）。
-    assert "hot_board" in out["errors"], \
+    #   （`errors` 的 key 是源 **label**，见 app/intel.py 的 `errors[spec.label]`；
+    #    原来写的是 spec.id，而 hot_board 一个适配器出三条 —— 见下面那条同 id 测试）。
+    assert "抖音热榜" in out["errors"], \
         f"失败的源没在 errors 里留下原因：{out['errors']}"
-    assert out["errors"]["hot_board"], "原因是空串 —— 等于没有原因"
+    assert out["errors"]["抖音热榜"], "原因是空串 —— 等于没有原因"
     assert by["小红书"]["state"] == "off", "主动关掉的源不是 error"
+
+
+def test_same_id_sources_fail_independently(tmp_path):
+    """一个适配器出多个源时，**一条超时不许把同 id 的别条一起标红**。
+
+    round 25 契约线 P0-2：`fetch_pack` 原来把失败写进 `errors[spec.id]`，
+    而 `today()` 的分组、界面计数统统按 `label` 走 —— 电梯包里抖音/头条/知乎
+    三条共用 `hot_board`，于是头条一次 TimeoutError 会让三行同时显示「抓取失败」、
+    计数行「N 源已接」少数两格，而它们的卡片照常出现在池子里
+    —— 一屏同时说"这个源挂了"和"这个源有 4 条命中"。
+    旧注释承诺的 `_key` 全仓不存在，所以这条以前**没有任何东西挡着**。
+    """
+    raw = [
+        {"id": "hot_board", "label": "抖音热榜", "platform": "抖音",
+         "role": "破圈触发器", "cadence": "daily",
+         "params": {"board": "douyin", "match": "keyword"}},
+        {"id": "hot_board", "label": "头条热榜", "platform": "头条",
+         "role": "破圈触发器", "cadence": "daily",
+         "params": {"board": "toutiao", "match": "keyword"}},
+    ]
+    srcs = I.parse_sources(raw)[0]
+    out = I.fetch_pack("elevator", tmp_path, srcs, seeds=["电梯困人"],
+                       keywords=["电梯"], http=_fake_http(boom={"iesdouyin"}))
+    by = {s["label"]: s for s in out["sources"]}
+    assert by["抖音热榜"]["state"] == "error", "样本没造出失败，这条测试是空的"
+    assert by["头条热榜"]["state"] == "ok", \
+        f"同 id 的另一条被连坐了：{by['头条热榜']}"
+    assert "抖音热榜" in out["errors"] and "头条热榜" not in out["errors"], \
+        f"失败归属串到同 id 的另一个源上了：{out['errors']}"
+
+
+def _shared_id_specs():
+    """三条源共用一个适配器 id（电梯包真就是这个形状：抖音/头条/知乎都走 hot_board）。"""
+    raw = [
+        {"id": "demand_terms", "label": "下拉词", "platform": "百度", "role": "雷达",
+         "cadence": "daily"},
+        {"id": "hot_board", "label": "抖音热榜", "platform": "抖音",
+         "role": "破圈触发器", "cadence": "daily", "params": {"board": "douyin"}},
+        {"id": "hot_board", "label": "头条热榜", "platform": "头条",
+         "role": "破圈触发器", "cadence": "daily", "params": {"board": "toutiao"}},
+    ]
+    return I.parse_sources(raw)[0]
+
+
+def _write_legacy_errors(tmp_path, errors: dict) -> None:
+    """把 latest.json 的 errors 换成"旧口径"（按 id 存），模拟第 4 批之前落盘的产物。"""
+    f = I.intel_dir(tmp_path, "elevator") / "latest.json"
+    data = json.loads(f.read_text(encoding="utf-8"))
+    data["errors"] = errors
+    f.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def test_legacy_id_keyed_error_still_reaches_its_row(tmp_path):
+    """按 id 存的老失败原因，必须还能落到界面上那一行（第 8 轮审查 后端 P1）。
+
+    抓取失败改成按 **label** 归属之后，盘上已有的 `errors["hot_board"]` 按 label
+    查不出来 → 那一行渲染成「已接入 · 今日命中 0」：界面上"我们没抓到"
+    变成了"平台今天没货"，而这两句话的下一步动作正好相反（等平台出数据 / 去配 Key）。
+    """
+    srcs = _specs()
+    I.fetch_pack("elevator", tmp_path, srcs, seeds=["电梯困人"], keywords=["电梯"],
+                 http=_fake_http())
+    _write_legacy_errors(tmp_path, {"hot_board": "TimeoutError: 连接超时"})
+
+    got = I.today(tmp_path, "elevator", srcs)
+    assert "hot_board" not in got["errors"], f"id 键没被归并掉：{got['errors']}"
+    assert got["errors"].get("抖音热榜", "").startswith("TimeoutError"), got["errors"]
+
+
+def test_ambiguous_legacy_id_marks_every_candidate_not_none(tmp_path):
+    """一个 id 对应多个源时**不猜**：每条都挂上原因，并明说是旧记录无法确定。
+
+    归并成一条 = 另外两条继续被说成"今天没货"；一条都不挂 = 整件事静默消失。
+    两边都比"多标一处抓取失败"更糟。
+    """
+    srcs = _shared_id_specs()
+    I.fetch_pack("elevator", tmp_path, srcs, seeds=["电梯困人"], keywords=["电梯"],
+                 http=_fake_http())
+    _write_legacy_errors(tmp_path, {"hot_board": "TimeoutError: 连接超时"})
+
+    got = I.today(tmp_path, "elevator", srcs)
+    for label in ("抖音热榜", "头条热榜"):
+        assert label in got["errors"], f"{label} 没拿到失败原因：{got['errors']}"
+        assert "无法确定是哪个源" in got["errors"][label], got["errors"][label]
+    assert "hot_board" not in got["errors"]
+
+
+def test_unknown_error_key_is_kept_not_dropped(tmp_path):
+    """认不出来的键原样留着 —— 归并逻辑不许顺手把它当噪声删掉（失败必须可见）。"""
+    srcs = _specs()
+    I.fetch_pack("elevator", tmp_path, srcs, seeds=["电梯困人"], keywords=["电梯"],
+                 http=_fake_http())
+    _write_legacy_errors(tmp_path, {"some_old_adapter": "ValueError: 不认识"})
+
+    got = I.today(tmp_path, "elevator", srcs)
+    assert got["errors"].get("some_old_adapter") == "ValueError: 不认识", got["errors"]
+
+
+def test_unknown_cadence_is_a_loud_note_not_a_silent_never_refresh():
+    """写一个引擎不认识的节奏，必须**留下话**（第 8 轮审查 P2）。
+
+    后果不是"退回默认值"：`cadence_days` 拿不到天数 → `is_stale` 永远是 False →
+    这一条从那天起再也不自动补抓，而界面上一个字都没有。
+    认得出来的写法（含 on_demand/weekly）不许跟着乱报。
+    """
+    raw = [{"id": "demand_terms", "label": "下拉词", "cadence": "hourly"},
+           {"id": "bilibili_search", "label": "B站同类", "cadence": "weekly"},
+           {"id": "hot_board", "label": "抖音热榜", "cadence": "on_demand"}]
+    specs, notes = I.parse_sources(raw)
+    # ⚠ 断言按"这条是哪一类提示"筛，不按子串：提示语本身就要把合法写法列出来
+    #   （daily、monthly、quarterly、weekly、on_demand），拿 "weekly" 当判据会误报。
+    bad = [n for n in notes if "不认识" in n]
+    assert len(bad) == 1 and "hourly" in bad[0], notes
+    hourly = next(s for s in specs if s.cadence == "hourly")
+    assert hourly.cadence_days is None
+    assert I.is_stale({}, [hourly]) is False, "认不出的节奏确实不参与自动补抓（所以才要留话）"
 
 
 def test_no_llm_call_anywhere_in_fetch(monkeypatch):
@@ -297,6 +420,57 @@ def test_load_latest_never_raises(tmp_path):
     assert got["items"] == [] and got["errors"].get("_read"), "坏文件要留下原因"
     (d / "latest.json").write_text("[1,2,3]", encoding="utf-8")
     assert I.load_latest(tmp_path, "elevator")["items"] == []
+
+
+def test_load_latest_rejects_bad_element_shapes_with_a_reason(tmp_path):
+    """顶层是映射 ≠ 元素形状对：手工改坏的 latest.json 不许把 today() 打成 500。
+
+    契约线 P1-3 里「`_read` 零覆盖」的那一半：原来只测了「坏 JSON」与「顶层不是映射」，
+    而 `items: [1,2]` / `score: []` 这类**合法 JSON、错误形状**从没跑过 ——
+    它们会让 today() 的排序与评分读取 AttributeError，正好违背 load_latest
+    「绝不抛」的承诺（B3）。规矩是：坏元素剔除 + 原因留在 errors，
+    界面才分得清「没抓过」与「抓了但文件坏了」。
+    """
+    d = I.intel_dir(tmp_path, "elevator")
+    d.mkdir(parents=True)
+    (d / "latest.json").write_text(json.dumps(
+        {"pack": "elevator", "fetched_at": "2026-09-27T01:00:00", "sources": [],
+         "items": [{"title": "好的一条"}, 1, "又一条坏的", None]}), encoding="utf-8")
+    got = I.load_latest(tmp_path, "elevator")
+    assert [it["title"] for it in got["items"]] == ["好的一条"], got["items"]
+    assert "3 个非对象条目" in got["errors"]["_read"], got["errors"]
+
+    (d / "latest.json").write_text(json.dumps({"items": {"a": 1}}), encoding="utf-8")
+    got = I.load_latest(tmp_path, "elevator")
+    assert got["items"] == [] and "items 不是列表" in got["errors"]["_read"], got
+
+    # score 坏 → 按「算不出」处理（None），不是 0、不是抛
+    (d / "latest.json").write_text(json.dumps(
+        {"items": [{"title": "t", "score": []}]}), encoding="utf-8")
+    assert I.load_latest(tmp_path, "elevator")["items"][0]["score"] is None
+    # 这条路径必须能被视图层走完 —— 500 就是违背「绝不抛」
+    view = I.today(tmp_path, "elevator", _specs())
+    assert [it["title"] for it in view["items"]] == ["t"], view["items"]
+
+
+def test_save_failure_is_reported_instead_of_shown_as_success(tmp_path, monkeypatch):
+    """抓到了但没落盘 = 这一屏写着「抓到 N 条」、下次打开是空的 —— 必须把失败说出来。
+
+    契约线 P1-3 的另一半：`errors["_save"]`（`app/intel.py` 落盘那段）从没被任何测试写过，
+    而它是「失败必须可见」在抓取路径上的唯一出口。
+    """
+    def boom(*a, **kw):
+        raise OSError("磁盘只读")
+
+    monkeypatch.setattr(I, "write_atomic", boom)
+    out = I.fetch_pack("elevator", tmp_path, _specs(), seeds=["电梯困人"],
+                       keywords=["电梯"], http=_fake_http())
+    assert out["errors"].get("_save"), out["errors"]
+    assert "磁盘只读" in out["errors"]["_save"]
+    # 本次结果照常回给界面（看见了就是看见了），但**不能**假装已经存住
+    assert out["items"], "落盘失败不该把这一次抓取的结果一起丢掉"
+    view = I.today(tmp_path, "elevator", _specs())
+    assert view["items"] == [], "没落盘就没有「下次还能看见」，别把内存结果当真"
 
 
 def test_today_reports_orphan_sources_instead_of_hiding_items(tmp_path):

@@ -12,7 +12,7 @@ import { closeOverlays, appConfirm } from "./overlays.js";
 // ui.js 与 settings.js 互相引用，但引用的都是**函数声明**（会被提升），
 // 所以循环依赖在调用时已解析完毕，安全。
 import { applyPackSwitch, fillPackSelect, closeOpenSelectMenus } from "./ui.js";
-// 「关于与更新」面板。只在这里 import 两个函数（refreshAbout / bindAbout）——
+// 「关于我们」面板。只在这里 import 两个函数（refreshAbout / bindAbout）——
 // about.js 自己不 import settings.js，没有循环依赖。settings.js 被 main.js
 // 的 import 树覆盖，about.js 随之被覆盖；main.js 里那条显式 `import "./about.js"`
 // 是给读代码的人看的（方案 §7 必改项 3），不是加载的前提。
@@ -144,10 +144,10 @@ export function openSettings(pane) {
   $("settings-screen").classList.remove("hidden");
   setPane(PANES.includes(pane) ? pane : state.settingsPane);
   // 失败必须可见：以前是空 catch，设置页会停在 HTML 初始值 / 上一次加载的值 ——
-  // 一个"看起来正常、实际没接上"的状态（与「关于与更新」面板那条同一个病灶）。
+  // 一个"看起来正常、实际没接上"的状态（与「关于我们」面板那条同一个病灶）。
   // 用 toast 而不是常驻行：下次加载成功会自己刷新，常驻行反而要额外管生命周期。
   // 失败必须可见：以前是空 catch，设置页会停在 HTML 初始值 / 上一次加载的值 ——
-  // 一个"看起来正常、实际没接上"的状态（与「关于与更新」面板那条同一个病灶）。
+  // 一个"看起来正常、实际没接上"的状态（与「关于我们」面板那条同一个病灶）。
   // 用 toast 而不是常驻行：下次加载成功会自己刷新，常驻行反而要额外管生命周期。
   preloadSettings().catch((e) => {
     toast("设置没读到（显示的是默认值）：" + (e && e.message ? e.message : e), 4500);
@@ -205,7 +205,7 @@ export function setPane(pane) {
     renderPackList();
     openPackInfo().catch(e => toast("读取失败：" + e.message, 3500));
   } else if (pane === "about") {
-    // 进入「关于与更新」：把当前状态补画一遍。状态是主进程**推**的，而推送只发生
+    // 进入「关于我们」：把当前状态补画一遍。状态是主进程**推**的，而推送只发生
     // 在状态变化的那个瞬间 —— 更新在用户打开面板之前就已下载完时，没有新事件，
     // 不补画面板就停在 HTML 里的「尚未检查更新」，而真相是「已下载完成」，
     // 「立即重启」按钮也不见（用户会以为没这功能）。
@@ -309,7 +309,7 @@ function renderStatus(c) {
   // 同理 active_model 为空（用户把开关全关了）→ 说清是「都没有启用」，
   // 而不是「没配 Key」—— 那是两种不同的缺。
   $("st-status").textContent = c.mock
-    ? `当前为 mock 模式（返回夹具，不调模型）${env}`
+    ? `当前是演示模式：不调用模型，返回内置样例文案${env}`
     : !n ? ""
       : !c.active_model ? `有 ${n} 个模型，但都没有启用${env}`
         : c.api_key_set
@@ -538,7 +538,7 @@ function clearDraft() { newDraft = null; }
  *  「必填」必须写在这里 —— 界面上只有 placeholder 暗示，用户要等到点保存
  *  才知道地址不能空（后端也是这一刻才 400）。 */
 function addModeSub() {
-  return (newDraft ? "这是一份**未保存**的新增内容，切走再回来还在。" : "")
+  return (newDraft ? "这是一份未保存的新增内容，切走再回来还在。" : "")
     + "模型 ID 与请求地址必填；Key 可以之后再补。"
     + "留空的框里，示例就是这台机器现在的内置默认（"
     + ((lastCfg && lastCfg.defaults) || {}).model + " / "
@@ -793,7 +793,7 @@ export const bindSettings = bindOnce(function bindSettings() {
   document.querySelectorAll(".stg-nav-item").forEach(n => {
     n.onclick = () => setPane(n.dataset.pane);
   });
-  // 「关于与更新」面板自己的绑定（检查更新 / 立即重启 / 订阅 updater:status）。
+  // 「关于我们」面板自己的绑定（检查更新 / 立即重启 / 订阅 updater:status）。
   // 收在这里而不是 main.js：设置页的绑定集中在一处，`window.__ts.rebind()`
   // 那条幂等断言（重复跑一遍、监听器一个都不许多）也才覆盖得到它。
   // bindAbout 自己还包了一层 bindOnce —— 双保险，且它内部全是 addEventListener，
@@ -1181,7 +1181,7 @@ async function runPackgen() {
     return;
   }
   finish();
-  if (snap.state === "cancelled") { toast("已取消生成"); return; }
+  if (snap.state === "cancelled") { toast("已停止生成"); return; }
   if (snap.state === "failed") { fail(`生成失败：${snap.error || "未知错误"}`); return; }
   const out = snap.result || {};
   state.lastCreatedPack = out.name;
@@ -1337,7 +1337,7 @@ async function importPackFile(file) {
 /** 卸载导入的包。内置播种包服务端会拒（400）—— 照实显示那句人话，
  *  不在前端预先判断（前端没有 .imported.json 的权威信息，猜就是静默降级）。 */
 async function removeImportedPack(name) {
-  const ok = await appConfirm("卸载技能包",
+  const ok = await appConfirm("卸载行业包",
     `确认卸载「${name}」？它的文件会从 ${state.meta && state.meta.packs_dir || "行业包目录"} 删除。\n`
     + "内置行业包不能卸载（删了下一次启动会被重新放回来）。");
   if (!ok) return;

@@ -11,12 +11,14 @@ import { $, toast } from "./util.js";
 import { api, ApiError, modelSetupGap, MODEL_SETUP_REPLY } from "./api.js";
 import { state, setJob, setResult, setBusy, detachJob, stopPolling } from "./store.js";
 import * as T from "./thread.js";
-import { placeholderBody, renderProgress, startTicker, stopTicker, STATE_LABEL, BUSY_STATES } from "./progress.js";
-import { renderResult, renderFailure, renderStopped, setHead, jumpToFirstPlaceholder } from "./result.js";
-import { loadSessions, busyRecords } from "./sessions.js";
+import { placeholderBody, renderProgress, startTicker, stopTicker, BUSY_STATES } from "./progress.js";
+import { STATE_LABEL } from "./words.js";
+import { renderResult, renderFailure, renderStopped, jumpToFirstPlaceholder } from "./result.js";
+import { setHead } from "./head.js";
+import { loadSessions, busyRecords, packLabel } from "./sessions.js";
 import { openSettings } from "./settings.js";
 import { closeOverlays } from "./overlays.js";
-import { setLanding, syncBusyAffordance } from "./ui.js";
+import { setLanding, syncBusyAffordance, refreshGate } from "./ui.js";
 
 const POLL_MS = 900;
 const POLL_MAX_MISSES = 3;
@@ -334,10 +336,18 @@ function prefill(act, value) {
     sel.value = String(value);
     sel.dispatchEvent(new Event("change", { bubbles: true }));
   }
-  updateStale();
-  toast(`已设为 ${value} —— 回车即可生成新版本`, 3200);
-  $("topic").focus();
   if (state.sentTopic) $("topic").value = state.sentTopic;
+  updateStale();
+  // ⚠ 主题这里是**程序化赋值**，不触发 input —— 发送键的 disabled 不会自己跟上，
+  //   而 Enter 做的事就是 `$("btn-generate").click()`：点一颗 disabled 按钮是空操作。
+  //   所以必须显式刷一次门，否则 toast 承诺"回车即可生成"而回车什么都不发生（P1）。
+  refreshGate();
+  autoGrowTopic();
+  // 两句都要真做得到：主题没填上时不许说"回车即可"。
+  const has = !!$("topic").value.trim();
+  toast(has ? `已设为 ${value} —— 回车即可生成新版本`
+            : `已设为 ${value} —— 填好主题后点发送`, 3200);
+  $("topic").focus();
 }
 
 function onFailed(snap, body, jobId) {
@@ -350,7 +360,7 @@ function onFailed(snap, body, jobId) {
   renderFailure(body, {
     title: "生成失败",
     message: err,
-    detail: `行业包：${failParams.pack || "-"} · 模型：${state.meta?.model || "-"}`,
+    detail: `行业包：${failParams.pack ? packLabel(failParams.pack) : "-"} · 模型：${state.meta?.model || "-"}`,
     retryLabel: "用同样的参数重试",
   }, {
     onRetry: () => send({ ...failParams }, { asVersionOf: body }),
@@ -372,7 +382,7 @@ function onCancelled(body, why = "cancelled") {
   setJob(null);
   // 保留主题（与 onFailed 同口径）：线程里还挂着这个主题的用户气泡和
   // 「已停止」卡，头部却回到「新对话」，两条收尾分支对同一场景两种说法（P3）。
-  setHead(state.sentTopic || "新对话", "本次生成已取消", "");
+  setHead(state.sentTopic || "新对话", "本次生成" + STATE_LABEL.cancelled, "");
   if (body) {
     const vi = body._vi;
     if (vi >= 0) body._versions[vi] = { ...body._versions[vi], state: "cancelled" };
@@ -590,9 +600,12 @@ export async function openRecord(id) {
     T.addUserMsg(state.sentTopic, { onEdit: onEditUserMsg });
     const body = T.addAssistantMsg();
     T.pushVersion(body, { id, state: r.state || "failed" });
-    const title = r.state === "cancelled" ? "这次生成被取消了"
-      : r.state === "failed" ? "这次生成失败了" : "这次生成没有完成";
-    setHead(state.sentTopic, title, r.state === "cancelled" ? "已取消" : "失败", "bad");
+    // 终态词全部取自 STATE_LABEL（words.js）：这条分支以前写「被取消了」+「已取消」，
+    // 而停止键、卡片、左栏都说「停止」—— 同一个动作两个名字，用户会找第三个按钮。
+    const stopped = r.state === "cancelled";
+    const title = stopped ? `这次生成${STATE_LABEL.cancelled}`
+      : r.state === "failed" ? `这次生成${STATE_LABEL.failed}了` : "这次生成没有完成";
+    setHead(state.sentTopic, title, stopped ? STATE_LABEL.cancelled : STATE_LABEL.failed, "bad");
     renderFailure(body, {
       title,
       message: r.error || "没有留下产物",

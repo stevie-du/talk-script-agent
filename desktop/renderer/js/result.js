@@ -13,10 +13,16 @@
 //     于是卡片上的「N/配额 字」和顶部「字数」永远对不上，卡片会莫名标红。
 //  2. 导出 SRT / MD 从不 revokeObjectURL，每导出一次泄漏一个 Blob。
 
-import { $, el, esc, fmtText, sec, copyText, download, toast } from "./util.js";
+import { $, el, esc, fmtText, sec, copyText, download, toast, wireTablist } from "./util.js";
 import { api } from "./api.js";
 import { state } from "./store.js";
 import { packLabel } from "./sessions.js";
+// 头部（#rh-title / #rh-sub / #rh-state）的唯一写入口在 head.js ——
+// 那里还管「按视图落 DOM」，所以本模块不自己碰这三个元素。
+import { setHead } from "./head.js";
+// 校验结论的话术只有一份（words.js）：页头、合规页签、合规表、导出的 md、左栏
+// 那五处以前各说一套，为什么统一成三态见 words.js 顶部。
+import { VERDICT, verdictKey, severityLabel } from "./words.js";
 
 export const TYPE_LABEL = { hook: "开场钩子", point: "要点", cta: "结尾引导" };
 
@@ -35,13 +41,6 @@ function segChars(r, i) {
   return seg && typeof seg.chars === "number" ? seg : null;
 }
 
-export function setHead(title, sub, stateText, cls) {
-  $("rh-title").textContent = title || "新对话";
-  $("rh-sub").textContent = sub || "";
-  const st = $("rh-state");
-  st.textContent = stateText || "";
-  st.className = "rh-state" + (cls ? " " + cls : "");
-}
 
 // ── 主入口 ──────────────────────────────────────────────────
 /** opts: { rwOk, onRewrite, onRerun, onRevary, onEdit, jumpToPlaceholder } */
@@ -63,14 +62,19 @@ export function renderResult(r, body, opts = {}) {
   const dev = ch.deviation_pct ?? 0;
   const hardN = (ch.hard_hits || []).reduce((a, h) => a + h.count, 0);
   const passed = passState(ch);
+  // ⚠ 三态走表，不许再写二分。改前这里是 `passed === true && hardN === 0 ? ✓合格 : ✗…`，
+  // 于是「引擎没给出结论」的产物页头挂着红色「✗ 需人工确认」，而它正下方一条横幅写着
+  // 「本次没有校验结论」—— 同一块屏幕两句话互相打脸，用户会照着红的那句反复重跑。
+  const vk = verdictKey(passed);
+  const verdict = `${VERDICT[vk].word}${vk !== "none" && hardN ? ` · ${hardN} 处硬伤` : ""}`;
 
   setHead(
     r.params?.topic || "生成结果",
     // 用显示名而不是 slug：左栏早就显示「电梯」，这里却吐 `elevator` ——
     // 同一个包在同一个窗口的两处叫法不一致，用户会以为是两个东西。
     `${packLabel(r.pack)} · ${r.params?.duration ?? "-"}s · ${r.params?.platform || ""}`,
-    passed === true && hardN === 0 ? "✓ 合格" : `✗ ${hardN ? hardN + " 处硬伤" : "需人工确认"}`,
-    passed === true && hardN === 0 ? "ok" : "bad"
+    verdict,
+    VERDICT[vk].cls
   );
 
   body.appendChild(renderHeader(r, ch, dev, hardN, opts));
@@ -83,6 +87,13 @@ export function renderResult(r, body, opts = {}) {
 
 // ── 1) 头部：主题 + 指标 + 操作 ─────────────────────────────
 function renderHeader(r, ch, dev, hardN, opts) {
+  // 容差是引擎随报告下发的数（app/checker.py 的 tolerance_pct，pack.yaml 可配，
+  // 短时长档物理上装不下绝对容差）。以前这里写死 ±10%：于是「偏差 12%」画红，
+  // 而同一张卡的结论格写着「已通过校验」—— 两处对同一个数说相反的话。
+  // 没有容差可依据（没设目标时长）时这一格**不表态**，不拿 10 当默认阈值。
+  const tol = ch.tolerance_pct;
+  const devCls = (tol === null || tol === undefined) ? ""
+    : (Math.abs(dev) <= tol ? "good" : "bad");
   const head = el("div", "res-head");
   head.innerHTML = `
     <div class="res-top">
@@ -100,7 +111,7 @@ function renderHeader(r, ch, dev, hardN, opts) {
     <div class="res-metric-list">
       <span class="m-chip">${ch.chars_total ?? "-"}/${ch.target_total ?? "-"} 字</span>
       <span class="m-chip">预计 ${ch.estimated_seconds ?? "-"}s / 目标 ${ch.duration_target ?? "-"}s</span>
-      <span class="m-chip ${Math.abs(dev) <= 10 ? "good" : "bad"}">偏差 ${dev > 0 ? "+" : ""}${dev}%</span>
+      <span class="m-chip ${devCls}">偏差 ${dev > 0 ? "+" : ""}${dev}%</span>
       <span class="m-chip ${hardN === 0 ? "good" : "bad"}">禁用词 ${hardN} 硬 · ${(ch.soft_hits || []).length} 待确认</span>
     </div>`;
   return head;
@@ -116,7 +127,7 @@ function renderBanners(r, ch, opts) {
   const revs = (r.revisions || []).filter(isFullRecheck);
   if (revs.length) {
     const why = [...new Set(revs.map(v => (v.report?.blockers || []).join("、")).filter(Boolean))]
-      .join("；") || "未通过校验";
+      .join("；") || VERDICT.no.word;
     const detail = revs.map(v => {
       const rep = v.report || {};
       const hard = (rep.hard_hits || []).map(h => `${h.word}×${h.count}`).join("、");
@@ -125,12 +136,20 @@ function renderBanners(r, ch, opts) {
         + (rep.chars_total ? `，${rep.chars_total} 字` : "");
     }).join("\n");
     items.push(`<details class="banner info why">
-        <summary>首轮${esc(why)}，已自动回炉 ${revs.length} 轮${passState(ch) === true ? "并修正为合格版本" : "后仍未达标"} —— 为什么？</summary>
+        <summary>首轮${esc(why)}，已自动回炉 ${revs.length} 轮，当前${VERDICT[verdictKey(passState(ch))].word} —— 为什么？</summary>
         <pre class="why-body">${esc(detail)}</pre>
       </details>`);
   }
-  if (passState(ch) !== true) {
+  if (passState(ch) === false) {
     items.push(`<div class="banner warn">⛔ ${esc((ch.blockers || []).join("；"))}——已达回炉上限，可点「重跑」或按下方建议调整参数</div>`);
+  } else if (passState(ch) === null) {
+    // 「没测出来」既不是不合格也不是合格：这句话得自己说清楚。
+    // 改前判据写的是 `!== true`，于是 `check` 整块缺失的产物（旧记录、未校验、
+    // mock 产物）也弹这条，而 blockers 是空的 —— 屏幕上是一句**没有主语的**
+    // 「⛔ ——已达回炉上限」，用户会照着它去反复重跑。
+    // 同一份产物在导出的 脚本.md 里可没有这句（那边按 `!== null` 过滤），
+    // 正是本仓 P3-8 修过的「看到的与拿走的不是同一份」。
+    items.push(`<div class="banner info">${VERDICT.none.word}（产物里没有校验记录）—— 下面的字数与禁用词只是统计数字，不代表任何结论。</div>`);
   }
   if ((r.placeholders || []).length) {
     items.push(`<div class="banner warn jumpable" data-jump="placeholder">⚠ 含 ${r.placeholders.length} 处占位事实：${r.placeholders.map(esc).join("、")}——点击定位首处，补充后再发布</div>`);
@@ -193,7 +212,7 @@ function renderSmell(r) {
   const wrap = el("div", "smell-pane");
   if (!a) {
     wrap.innerHTML = `<p class="hint">这个行业包没配 <code>ai_tells.yaml</code>，
-      所以本次**没有测**人味 —— 注意这与「测了、很好」是两件事
+      所以本次<b>没有测</b>人味 —— 注意这与「测了、很好」是两件事
       （报告里 <code>ai_tells</code> 落 null，而不是 100 分）。</p>`;
     return wrap;
   }
@@ -201,24 +220,27 @@ function renderSmell(r) {
   const hits = a.hits || [];
   const ph = a.placeholders || {};
   const rows = hits.map(h => `<tr>
-      <td class="${h.severity === "strong" ? "bad" : "warn"}">${esc(h.severity)}</td>
+      <td class="${h.severity === "strong" ? "bad" : "warn"}">${esc(severityLabel(h.severity))}</td>
       <td><code>${esc(h.id)}</code></td>
       <td>${esc(h.where || "")}</td>
       <td>${esc(h.detail || "")}</td>
     </tr>`).join("");
   const warns = (a.config_warnings || []).map(w => `<p class="hint">⚠ ${esc(w)}</p>`).join("");
+  // 下面那排 score-legend 必须与**真正生效的判据**同档位：这一屏只有一条线
+  // （>= 90 绿 / 其余红）。以前画三档（含 50–89 橙、< 50 灰），于是 60 分被涂成红
+  // 而图例说它是橙 —— 编出来的档位与 topics 那条「50–59 要换角度」是同一类假能力。
   wrap.innerHTML = `
     <div class="page-card">
       <div class="res-top"><b class="card-title">人味分</b>
         <span class="m-chip ${score === null ? "" : (score >= 90 ? "good" : "bad")}">${score === null ? "—" : score} / 100</span>
-        <span class="m-chip">${hits.filter(h => h.severity === "strong").length} 条 strong · ${hits.filter(h => h.severity === "weak").length} 条 weak</span>
+        <span class="m-chip">${hits.filter(h => h.severity === "strong").length} 条明显 · ${hits.filter(h => h.severity === "weak").length} 条轻微</span>
       </div>
-      <p class="hint">越高越像人说话。**这一项不进「合格」判定**（只报不拦）——
-        文风是提示，不是门槛。扣分口径：strong 每条 −12、weak 每条 −4。</p>
+      <p class="hint">越高越像人说话。<b>这一项不参与校验结论</b>（只报不拦）——
+        文风是提示，不是门槛。扣分口径：明显每条 −12、轻微每条 −4。</p>
       <div class="smell-score">
         <span class="n">${score === null ? "—" : score}</span><span class="u">/ 100</span>
         <span class="score-legend">
-          <span><i class="hi"></i>≥ 90</span><span><i class="mid"></i>50–89</span><span><i></i>&lt; 50</span>
+          <span><i class="hi"></i>≥ 90 像人说话</span><span><i class="low"></i>低于 90 只是提示</span>
         </span>
       </div>
       ${rows ? `<div class="tbl-wrap"><table>
@@ -402,7 +424,7 @@ function renderSections(r, opts) {
         ${markTip}
         <button class="ghost rw"${opts.rwOk ? "" : " disabled"} title="${opts.rwOk
           ? "单段重写：只改这一段并重跑校验，不整篇回炉"
-          : "历史记录不可局部重写（后台作业已释放），可用「换一版」整体重生成"}">✎ 重写本段</button>
+          : "单段重写只在刚生成的那条上可用；历史记录请用「换一版」整体重生成"}">✎ 重写本段</button>
         <input class="rw-feedback" placeholder="给这段的修改意见（可选），回车提交">
       </div>`;
     const input = card.querySelector(".rw-feedback");
@@ -439,7 +461,14 @@ function renderSections(r, opts) {
     绑的单段重写 / 导出按钮在切回时会失效。
 */
 function renderResultTabs(r, ch, hardN, opts) {
-  const complyOk = passState(ch) === true && hardN === 0;
+  // 与页头同一个三态口径（words.js）。改前这里写的是 `passState(ch) === true && hardN === 0`
+  // 的二分：`passed` 缺失时页签亮红「✗ 未通过」，而同一块屏幕上的横幅说「没有校验结论」。
+  const ck = verdictKey(passState(ch));
+  const comply = VERDICT[ck];
+  // 人味分三态：`ai_tells` 缺失 = 这个包没配词表、**本次没测**，不是"测了、很差"。
+  // 改前是 `(smellScore() ?? -1) >= 90 ? ok : bad` —— 没测的包页签直接落红，
+  // 而同一格写的明明是「未测」（三态被压成二分，与合规页签同一类病灶）。
+  const smell = smellScore(r.check?.ai_tells);
   const logs = r.logs || [];
 
   const defs = [
@@ -449,15 +478,14 @@ function renderResultTabs(r, ch, hardN, opts) {
       render: () => renderStoryboard(r),
       hide: !(r.storyboard || []).length },
     { id: "smell", label: "人味分",
-      // ⚠ 与面板同一个读取口径（`smellScore`）：缺失**不许**当成满分 ——
-      //   那会让标签显示绿、点进去却是「0 / 100」。
-      cls: (smellScore(r.check?.ai_tells) ?? -1) >= 90 ? "ok" : "bad",
-      badge: r.check?.ai_tells ? (smellScore(r.check.ai_tells) ?? "-") : "未测",
+      // ⚠ 与面板同一个读取口径（`smellScore`）：缺失**不许**当成满分，也不许当成差。
+      cls: smell === null ? "" : smell >= 90 ? "ok" : "bad",
+      badge: smell === null ? "未测" : smell,
       render: () => renderSmell(r) },
     { id: "subs", label: "字幕", badge: "",
       render: () => renderSubtitlePane(r) },
-    { id: "comp", label: "合规", cls: complyOk ? "ok" : "bad",
-      badge: complyOk ? "✓ 通过" : `✗ ${hardN ? hardN + " 处硬伤" : "未通过"}`,
+    { id: "comp", label: "合规", cls: comply.cls,
+      badge: ck === "none" ? comply.word : `${comply.word}${hardN ? ` · ${hardN} 硬伤` : ""}`,
       render: () => renderCompliance(r) },
     { id: "data", label: "数据", badge: `${logs.length} 条日志`,
       render: () => renderDataPane(r) },
@@ -497,31 +525,11 @@ function renderResultTabs(r, ch, hardN, opts) {
     panes.appendChild(pane);
   });
 
-  const tabs = () => Array.from(bar.querySelectorAll(".res-tab"));
-  function selectTab(id) {
-    for (const n of tabs()) {
-      const on = n.dataset.tab === id;
-      n.classList.toggle("on", on);
-      n.setAttribute("aria-selected", on ? "true" : "false");
-      n.tabIndex = on ? 0 : -1;
-      if (on) n.focus();
-    }
+  // 页签的 aria + 键盘接线（roving tabindex、←/→、Home/End）在 util.wireTablist，
+  // 与「今日选题」的选题 / 情报源共用同一份实现。
+  const selectTab = wireTablist(bar, ".res-tab", id => {
     panes.querySelectorAll(".res-pane").forEach(p =>
       p.classList.toggle("hidden", p.dataset.tab !== id));
-  }
-  // ←/→ 循环，Home/End 跳首尾 —— 与系统原生 tablist 行为一致
-  bar.addEventListener("keydown", e => {
-    const list = tabs();
-    const cur = list.findIndex(n => n === document.activeElement);
-    if (cur < 0) return;
-    const map = { ArrowRight: 1, ArrowLeft: -1 };
-    let next = null;
-    if (e.key in map) next = (cur + map[e.key] + list.length) % list.length;
-    else if (e.key === "Home") next = 0;
-    else if (e.key === "End") next = list.length - 1;
-    if (next === null) return;
-    e.preventDefault();
-    selectTab(list[next].dataset.tab);
   });
 
   // `[data-goto]` 的委托处理器：正文里那枚「N 处人味标记」与卡脚的提示都靠它。
@@ -648,16 +656,19 @@ export function renderCompliance(r) {
   const ch = r.check || {};
   const hardN = (ch.hard_hits || []).reduce((a, h) => a + h.count, 0);
   const dev = ch.deviation_pct ?? 0;
+  // 结论行也只从表里取词：这一格以前写「✅ 合格 / ❌ …/ 未测」，与页头、页签、
+  // 左栏是同一件事的第四种说法。未通过时把原因跟在词后面，别只留一句「未通过」。
+  const ck = verdictKey(passState(ch));
+  const verdictCell = `<span class="${ck === "ok" ? "ok" : ck === "no" ? "bad" : "hint"}">`
+    + (ck === "no" ? `${VERDICT.no.word}：${esc((ch.blockers || []).join("；"))}` : VERDICT[ck].word)
+    + `</span>`;
   const rows = [
     ["硬禁用词（必改）", hardN === 0 ? `<span class="ok">✅ 无</span>`
       : `<span class="bad">${(ch.hard_hits || []).map(h => `${esc(h.word)}×${h.count}`).join("、")}</span>`],
     ["待确认（语境相关）", (ch.soft_hits || []).length
       ? ch.soft_hits.map(h => `${esc(h.word)}×${h.count}`).join("、") : `<span class="ok">✅ 无</span>`],
     ["字数与时长", `${ch.chars_total ?? "-"}/${ch.target_total ?? "-"} 字 · 偏差 ${dev > 0 ? "+" : ""}${dev}% → `
-      + (passState(ch) === true ? `<span class="ok">✅ 合格</span>`
-        : passState(ch) === false
-          ? `<span class="bad">❌ ${esc((ch.blockers || []).join("；"))}</span>`
-          : `<span class="hint">未测</span>`)],
+      + verdictCell],
     ["占位事实", (r.placeholders || []).length
       ? `⚠ ${r.placeholders.map(esc).join("、")}` : `<span class="ok">✅ 无</span>`],
     ["回炉/重写记录", (r.revisions || []).length
@@ -749,8 +760,10 @@ export function resultMarkdown(r) {
   // 字段可能缺失（旧产物 / 不同包），不能让文档里出现 "undefined"
   const meta = [p.duration && `${p.duration}s`, p.platform, p.style, p.persona]
     .filter(Boolean).join(" / ");
+  // 交付物上写**显示名**，不写目录 slug：这一行会跟着 md 走到用户的笔记/协作工具里，
+  // 「elevator」对读的人没有意义（界面上早就叫「电梯行业包」，两处不一致＝两个东西）。
   const lines = [`# 口播脚本：${p.topic || "未命名"}`, "",
-    `- ${meta}（${r.pack}）`, "",
+    `- ${meta}（${packLabel(r.pack)}）`, "",
     "## 口播文案", ""];
   let pi = 0;
   (r.sections || []).forEach((s, i) => {
@@ -767,8 +780,12 @@ export function resultMarkdown(r) {
       ? `字数 ${ch.chars_total}${ch.target_total != null ? "/" + ch.target_total : ""} 字` : "",
     ch.estimated_seconds != null ? `预估 ${ch.estimated_seconds}s` : "",
     ch.deviation_pct != null ? `偏差 ${ch.deviation_pct}%` : "",
-    passState(ch) !== null
-      ? (passState(ch) ? "合格" : (ch.blockers || []).join("；")) : "",
+    // 「没有结论」也要写进文档：改前 `passed` 缺失时这一项被整条省掉，
+    // 屏幕上明写着「没有校验结论」，拿走的那份却像没有这回事（P3-8 同一类）。
+    (() => {
+      const k = verdictKey(passState(ch));
+      return k === "no" ? `${VERDICT.no.word}：${(ch.blockers || []).join("；")}` : VERDICT[k].word;
+    })(),
   ].filter(Boolean);
   if (stats.length) lines.push("---", stats.join(" · "));
   if (r.placeholders?.length) lines.push("", `> 占位事实：${r.placeholders.join("、")}`);

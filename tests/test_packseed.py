@@ -123,7 +123,13 @@ def test_copy_failure_leaves_user_pack_intact_and_recovers_next_run(tmp_path,
     out = packseed.seed_bundled_packs(bundled, packs, app_version="2")
     monkeypatch.undo()
 
-    assert "updated" not in out and "conflicts" not in out or True  # 汇总只进日志，不作判据
+    # 原来这条写的是 `assert "updated" not in out and "conflicts" not in out or True`：
+    # `(A and B) or True` 恒真，而左半截还**恒假**（summary 起手就带这两个键，
+    # 下面 `out2["updated"] == ["p"]` 用的就是它们）—— 一条永远为真的断言等于没写。
+    # 要钉的是：失败那次**不许认领任何更新或冲突**（认领了就等于告诉调用方
+    # "这个包换过了"，而它其实被原样还原了）。
+    assert out["updated"] == [] and out["conflicts"] == [], \
+        f"失败的播种认领了改动：{out}"
     after = {f.relative_to(packs): _read(f)
              for f in sorted((packs / "p").rglob("*")) if f.is_file()}
     assert after == before, "失败的播种把用户包改动了 —— 先删后拷回来了"

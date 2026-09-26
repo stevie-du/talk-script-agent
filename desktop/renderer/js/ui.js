@@ -13,7 +13,8 @@ import { updateStale, autoGrowTopic, getParam, stopAllBackgroundJobs } from "./j
 import { stopTicker } from "./progress.js";
 import { focusSessionSearch, busyRecords } from "./sessions.js";
 import { closeSettings, openSettings, setPane, settingsOpen } from "./settings.js";
-import { anyOverlayOpen, closeOverlays } from "./overlays.js";
+import { anyOverlayOpen, closeOverlays, appConfirm } from "./overlays.js";
+import { paintHead } from "./head.js";
 
 // 输入区工具条常显的参数：只留「生成前必须确认」的硬约束 ——
 // 写什么（细分领域）、给谁（受众）、多长（时长）、发哪（平台）。
@@ -98,6 +99,30 @@ export function fillPackSelect({ selectLast = false, prefer = null } = {}) {
 export function applyPackSwitch() {
   resetGenParams();
   renderPackParams();
+  // 换包这件事对**界面各处**都是"你看到的数据要跟着换"：选题视图的分区、
+  // 胶囊、计数、头部副标题都按包取。以前它只挂在 `#pack` 的 change 上，
+  // 而换包有三条路径、其中两条（面板点选 / fillPackSelect 程序化指包）**不派发 change**
+  // —— 于是"看着 A 包的选题、点忽略却写进 B 包"。收口在这里发一次事件，
+  // 谁需要重画谁订阅，别再各自去猜"值是不是被人改过了"。
+  emit("pack", $("pack")?.value || "");
+}
+
+/** 程序化改一个参数的**唯一**入口：写进真值 + 重画界面上的每一处视图。
+ *  ⚠ 只调 `setGenParam` 的话，发出去的是新值、屏幕上写的还是旧值 ——
+ *    「今日选题 · 去生成」当初就这么把细分领域填进了 state 却没画出来。
+ *  返回 false = 这个值在当前包的控件里**根本不存在**（选题条目的 segment 是
+ *  抓取时带回来的，不保证落在行业包声明的选项里）。这时既不写 state 也不画：
+ *  "发出去一个界面显示不出来的值"正是本仓反复修的静默降级那一类，
+ *  而且实测比"显示旧值"更坏 —— 自绘胶囊会因此显示成**空白**。
+ *  调用方拿到 false 必须**说出来**，不许静默换默认值。 */
+export function setParam(key, value) {
+  const sels = paramSelects(key);
+  const v = String(value);
+  if (!sels.length
+      || !sels.every(s => Array.from(s.options).some(o => o.value === v))) return false;
+  setGenParam(key, v);
+  paintParam(key, v);
+  return true;
 }
 
 // ── 模型选择器（工具条右侧、发送键左边）──────────────────────
@@ -145,7 +170,7 @@ export function renderModelPicker() {
   // 这一排里其他控件摆的都是**值**（维保 / 业主乘客 / 60s / 抖音），一个五位字的
   // 诊断句挤在值的位置上，读起来像报错而不像控件。三种「现在生成会被拒」的原因
   // 一条都没丢 —— 它们挪到了悬停说明（下面的 _warnNote）和菜单里。
-  const cur = m.mock ? "mock 模式"
+  const cur = m.mock ? "演示模式"
     : active ? (active.label || active.model)
       : PICKER_PLACEHOLDER;
   // 2026-09-17（任务 5）：「默认模型」整个下线 —— 工具条 picker 上不再附
@@ -175,6 +200,8 @@ export function renderModelPicker() {
   sel.appendChild(add);
   sel.value = active ? active.id : "";
   sel._mock = !!m.mock;
+  // 演示模式：按钮上写的必须是「演示模式」，不是那个没在被调用的模型名（见 sync 的 _display）。
+  sel._display = m.mock ? cur : "";
   // 橙色只留给「真的会失败」的情形 —— 三种"不能生成"各自说清原因，
   // 同一句「未配置 API Key」会把前两种指向错的地方（2026-09-17）：
   //   ① 一条模型都没有；② 有模型但都没启用；③ 启用了但没填 Key。
@@ -183,7 +210,11 @@ export function renderModelPicker() {
     : !m.active_model
       ? "没有启用任何模型 —— 生成会被拒绝，点击去「模型接口」打开一个开关"
       : m.has_api_key ? "" : "未配置 API Key —— 生成会被拒绝，点击去「模型接口」填写";
-  sel.title = `当前模型：${cur}。切换后对后续生成生效（正在跑的作业不受影响）`;
+  // 悬停说明要跟着状态走：演示模式下「当前模型：演示模式」是句不通的话，
+  // 而「切换后对后续生成生效」也不成立 —— 那时根本没有模型被调用。
+  sel.title = m.mock
+    ? "演示模式：不调用模型，返回内置样例文案"
+    : `当前模型：${cur}。切换后对后续生成生效（正在跑的作业不受影响）`;
   sel.onchange = () => pickModel(sel);
   box.appendChild(sel);
   beautifySelects(box);
@@ -393,10 +424,12 @@ export function beautifySelects(scope = document) {
     const btn = el("button", "select-btn");
     btn.type = "button";
     btn.setAttribute("aria-haspopup", "listbox");
+    // 箭头盒 14×14（规范 §4 图标档只有 14/16/18/40），字形仍是 10×4.5 居中在盒里 ——
+    // 原来写的是 12×8 的"贴着字形裁的盒"，量出来就是一个刻度外的第三档。
     btn.innerHTML = `<span class="sel-text"></span>
-      <svg class="chev" viewBox="0 0 12 8" width="12" height="8" fill="none" stroke="currentColor"
+      <svg class="chev" viewBox="0 0 14 14" width="14" height="14" fill="none" stroke="currentColor"
            stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M1 1.5L6 6.5L11 1.5"/></svg>`;
+        <path d="M2 5L7 9.5L12 5"/></svg>`;
     const menu = el("div", "select-menu hidden");
     menu.setAttribute("role", "listbox");
     // aria-activedescendant 要指到**具体某一项**，那一项就得有 id。
@@ -409,7 +442,10 @@ export function beautifySelects(scope = document) {
 
     const sync = () => {
       const o = sel.options[sel.selectedIndex];
-      btn.querySelector(".sel-text").textContent = o ? o.textContent : "";
+      // 可见名允许调用方覆盖（`_display`）：演示模式下选中的 option 仍然是某个模型名，
+      // 原样显示就成了「看起来真在用这个模型生成」—— 与这个控件一路在防的
+      // 「兜底出来的模型名」（PICKER_PLACEHOLDER 那段）是同一类静默降级。
+      btn.querySelector(".sel-text").textContent = sel._display || (o ? o.textContent : "");
       // 缺行业定制的当前值：胶囊变警示色 + 悬停给出原因。
       // 依据是 sel._audit（由 renderQuickParams 从 pack.param_audit 挂上）。
       // sel._warnNote 是给「非参数类」选择器（模型）用的显式警示 —— 它不来自
@@ -735,6 +771,9 @@ export function gotoView(name) {
   // （导航、去生成、新建对话、打开历史），集中在唯一的切屏函数里才不会漏。
   // ⚠ 不 import topics.js —— 那边已经 import 本模块，反向会绕成循环。
   $$(".nav-item").forEach(b => b.classList.toggle("on", name === "topics" && b.id === "btn-topics"));
+  // 头部跟着视图走：修复前这里什么都不做，于是切到「今日选题」顶部仍写着
+  // 「新对话」（`#rh-title` 以前只由对话链路的 setHead 写）。
+  paintHead();
 }
 
 // `bindOnce`：全局监听只注册一次（修复前「新建行业包完成」会二次 boot()，
@@ -748,7 +787,16 @@ export const bindShell = bindOnce(function bindShell() {
   //   绑定与 setPane 同域，不再两处重复。）
   // 「停止全部后台生成」：切会话 / 连点新建对话都不会取消后台作业（有意的），
   // 但额度只有 4 —— 没有这颗按钮的话，用户唯一能做的就是等，或者被 409 反复挡住。
-  $("btn-stop-all").onclick = () => stopAllBackgroundJobs();
+  // ⚠ 一次停 N 条、且已经花掉的模型调用不退 —— 这是破坏性动作，必须先问一句
+  //   （删单条记录有确认，停全部却没有：审查第 8 轮 流程 P1-1）。
+  // 数量与按钮上那颗读数同源（busyRecords 减去当前正在看的这条），不另算一份。
+  $("btn-stop-all").onclick = async () => {
+    const bg = busyRecords().filter(it => !state.job || it.id !== state.job.id);
+    if (!bg.length) return;
+    const ok = await appConfirm("停止全部后台生成",
+      `确认停止这 ${bg.length} 条在跑的生成？已经花掉的模型调用不会退回。`);
+    if (ok) await stopAllBackgroundJobs();
+  };
 
   // busy / job 任一变化都刷新门控与参数锁。
   // job 也要听：send() 先置 busy 再拿到 job_id，只听 busy 的话按钮会停在
@@ -794,7 +842,20 @@ export const bindShell = bindOnce(function bindShell() {
 
   document.addEventListener("keydown", e => {
     const mod = e.ctrlKey || e.metaKey;
-    if (mod && e.key === "Enter") { e.preventDefault(); $("btn-generate").click(); return; }
+    if (mod && e.key === "Enter") {
+      e.preventDefault();
+      // 全局快捷键要认当前视图。人在「今日选题」或设置页里按 Ctrl+Enter，
+      // 原来会**在看不见的气泡里**起一条几十秒、真金白银的作业
+      // （头部现在按视图渲染，连"标题变了"这点暗示都没有）。
+      // 按它的意图就是"发出去"，所以把人带回会话，而不是偷偷在后台发。
+      if (settingsOpen()) {
+        toast("设置页里请先返回工作区再发送（Esc）", 3200);
+        return;
+      }
+      if (($("right")?.dataset.view || "chat") !== "chat") gotoView("chat");
+      $("btn-generate").click();
+      return;
+    }
     if (mod && e.key === "\\") {
       e.preventDefault();
       setLeftFolded(!$("left").classList.contains("folded"));
@@ -836,6 +897,14 @@ export const bindShell = bindOnce(function bindShell() {
       if (settingsOpen()) { closeSettings(); return; }
       if (state.busy && state.job) {
         e.preventDefault();
+        // 「停止」是破坏性动作（已花掉的调用不退），而人在选题视图/别的会话里
+        // 按它，停的是一条**此刻看不见**的作业 —— 只得到一句「已停止本次生成」。
+        // 所以第一下先把人带回那条作业，第二下才真的停。
+        if (($("right")?.dataset.view || "chat") !== "chat") {
+          gotoView("chat");
+          toast("已带你回到正在生成的会话 —— 再按一次 Esc 停止它", 4200);
+          return;
+        }
         $("btn-generate").click();
       }
     }

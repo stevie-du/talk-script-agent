@@ -65,7 +65,7 @@ from .config import (DEFAULT_MODEL, ensure_config_template, load_config,
                      load_raw_models, public_models, save_config, save_models)
 from .fileio import write_atomic
 from .intel import (IntelError, IntelSource as _IntelSourceDC, add_ignored,
-                    today as intel_today)
+                    count_ignored_today, today as intel_today)
 from .jobs import StateConflict
 
 log = logging.getLogger(__name__)
@@ -758,6 +758,10 @@ def create_app(root: Path, token: str | None = None,
             "has_api_key": bool(cfg.llm.api_key),
             "mock": cfg.mock,
             "max_concurrent": MAX_CONCURRENT_JOBS,
+            # 左栏历史是**截断**的（`/api/history` 只回最近 HISTORY_LIMIT 条）。
+            # 搜索框空结果的文案要能说「只翻了最近 100 条（共 N 条）」——
+            # 没有这份计数，"搜不到"就会被说成"没有"（审查流程线 P2-4）。
+            "history": pipeline.store.history_stats(),
             "version": version,
         }
 
@@ -990,7 +994,7 @@ def create_app(root: Path, token: str | None = None,
         重启后从历史里彻底消失。现在摘要来自 store 的索引（只有几个字段），
         失败记录也在里面。
         """
-        items = pipeline.store.history(limit=100)
+        items = pipeline.store.history()
         known = {x["id"] for x in items}
         skip = {"done", "cancelled"}
         running = []
@@ -1020,7 +1024,10 @@ def create_app(root: Path, token: str | None = None,
                 "ghost": snap["state"] == "failed",
             })
         running.sort(key=lambda x: x["created_at"], reverse=True)
-        return (running + items)[:100]
+        # 上限只有 store.HISTORY_LIMIT 一份：这里以前另写了一个字面量 100，
+        # 于是"这个数只有一份"是假的（审查第 8 轮 P2）。在跑的作业与已落盘记录
+        # 共用这一百格（running 在前），所以界面看到的条数永远 <= 这个数。
+        return (running + items)[:pipeline.store.HISTORY_LIMIT]
 
     @app.get("/api/history/{jid}")
     def history_item(jid: str):
@@ -1142,7 +1149,12 @@ def create_app(root: Path, token: str | None = None,
             # 覆盖成一条（"我忽略过的又都回来了"，用户手上没有任何线索）。
             log.warning("忽略记录没写成：%s", e)
             return _error_json(str(e), 500, "intel_ignore_failed")
-        return {"ok": True, "ignored": len(rec)}
+        # 两个数都给：界面那行说的是"今天"，所以它要 `ignored_today`；
+        # 累计值留着（`ignored`），别拿它去配那句「只影响今天」。
+        # 计数走 intel.count_ignored_today —— 与过滤用的是同一个"今天"口径，
+        # 在这里再写一遍 strftime 就是第二份真值。
+        return {"ok": True, "ignored": len(rec),
+                "ignored_today": count_ignored_today(rec)}
 
     # ── 设置 ────────────────────────────────────────────────
     @app.get("/api/config")

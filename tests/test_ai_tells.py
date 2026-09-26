@@ -274,7 +274,49 @@ def test_script_md_carries_the_human_score():
         "placeholders": {"count": 0, "per_100": None, "cap": 1}}))
     assert "人味分 88/100" in md, md
     assert "bookish_connective" in md, "命中明细要跟着导出，否则只有分数没线索"
-    assert "不进合格判定" in md, "必须明说它不拦发布，否则 88 分会被读成不合格"
+    assert "不参与校验结论" in md, "必须明说它不拦发布，否则 88 分会被读成未通过校验"
+
+
+def test_script_md_writes_hit_lists_for_humans_not_python_repr():
+    """交付物里的命中明细要排成「词×次数」，不许是 Python 的 repr。
+
+    改前是 `f"- 硬禁用词：{ch['hard_hits'] or '无'}"` → 落到别人笔记里的是一行
+    `[{'word': '补贴', 'count': 2}]`。盘上 102 份产物恰好 hard_hits 全空，
+    所以这条一直没人看见 —— 空列表时**仍然**要写「无」，两种形状都钉住。
+    """
+    from app.store import render_script_md
+
+    hit = _md_result(None)
+    hit["check"]["hard_hits"] = [{"word": "补贴", "count": 2}]
+    hit["check"]["soft_hits"] = [{"word": "最", "count": 1}]
+    md = render_script_md(hit)
+    assert "硬禁用词：补贴×2" in md, md
+    assert "待确认：最×1" in md, md
+    assert "[{'" not in md, "交付物里出现了 Python repr"
+
+    empty = render_script_md(_md_result(None))
+    assert "硬禁用词：无" in empty, empty
+
+
+def test_script_md_says_no_verdict_when_check_is_silent():
+    """`passed` 为 None（旧产物 / 没跑校验）时，导出的 md 不许印一行光秃秃的「❌ 」。
+
+    改前这里是二分 `'✅ 合格' if ch['passed'] else '❌ ' + '；'.join(blockers)`：None 落到
+    else，而 blockers 是空的 —— 交付物上写着「❌ 」，屏幕上写着「没有校验结论」，
+    看到的与拿走的分成两份（文案线 P0-3 的另一半：`app/store.py` 也在这条线上，
+    三态词由 tests/test_job_state_vocabulary_consistency.py 与 words.js 对账钉住）。
+    """
+    from app.store import render_script_md
+
+    none_case = _md_result(None)
+    none_case["check"]["passed"] = None
+    none_case["check"]["blockers"] = []
+    md = render_script_md(none_case)
+    assert "没有校验结论" in md, md
+    assert "❌" not in md, "结论缺失不许画成失败"
+    assert "合格" not in md, "md 的用词必须跟 words.js 那张表一致 —— 表里没有「合格」"
+    # 未通过那一档把原因跟在词后面，别只留一句「未通过校验」让人去猜是哪条。
+    assert "未通过校验：太短" in render_script_md(_md_result(None))
 
 
 def test_script_md_says_nothing_when_tells_were_not_measured():

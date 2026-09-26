@@ -57,6 +57,11 @@ log = logging.getLogger(__name__)
 #: 抓取节奏 → 多少天算"该补抓了"。`on_demand` / `—` / 没写 = 不参与懒触发。
 CADENCE_DAYS: dict[str, int] = {"daily": 1, "weekly": 7, "monthly": 30, "quarterly": 90}
 
+#: 有意**不参与自动补抓**的节奏（只有用户点「重新抓取」才跑）。
+#: 与 `CADENCE_DAYS` 合起来就是 `words.js::CADENCE_LABEL` 该收的全部键 ——
+#: 两边不一致会让某个节奏在源表上印英文机器码（tests/test_intel_contract.py 钉这条）。
+AUTO_FETCH_OFF = {"on_demand", "manual", "—", "-"}
+
 #: 每个话题（源）最多保留多少条 —— 防刷屏（TrendRadar 的做法）。
 PER_SOURCE_CAP = 60
 
@@ -149,8 +154,11 @@ def parse_sources(raw) -> tuple[list[IntelSource], list[str]]:
             notes.append(f"intel_sources[{i}] 没有 id —— 已忽略（引擎按 id 找适配器）")
             continue
         # 同一个 id 声明两次：`hot_board` 是**故意**的用法（一个适配器按 `params.board`
-        # 出多个源，见 §2.2 的示例），所以重复 id **不是错**，但要能区分开 ——
-        # 界面上的分组按 `label` 走，`_key` 才是唯一键。
+        # 出多个源，见 §2.2 的示例），所以重复 id **不是错**。但界面上没有第二个键
+        # 可以区分它们：分组、计数、失败归属统统按 `label` 走（`today()` 按
+        # `spec.label` 聚合，`fetch_pack` 的 `errors` 也以 label 为键）。
+        # 旧注释在这里写过"`_key` 才是唯一键"—— 全仓没有任何地方产出或消费 `_key`，
+        # 那台不存在的零件正是一次超时标红三个源的根因。
         #
         # ⚠ 只有 `enabled: true` 且引擎没有适配器时才算问题：`enabled: false` +
         # 没有适配器是**明确决定**（§2.2 的 `xhs_board` 就是"不做逆向，所以没有"），
@@ -169,7 +177,17 @@ def parse_sources(raw) -> tuple[list[IntelSource], list[str]]:
             notes.append(f"intel_sources[{label}] 的 enabled 需要 true/false，"
                          f"现在是 {type(enabled).__name__} —— 按 true 处理")
             enabled = True
-        cadence = item.get("cadence", "")
+        cadence = str(item.get("cadence", "") or "").strip()
+        # 节奏决定"这条要不要自动补抓"（cadence_days → is_stale）。写一个引擎认不出的码，
+        # 后果不是"退回默认"，而是**永远不自动抓、且界面上零提示** ——
+        # 用户会以为选题页每天早上自己更新，实际它从那天起就没再抓过。必须留话。
+        if (cadence and cadence not in CADENCE_DAYS
+                and cadence.lower() not in AUTO_FETCH_OFF):
+            notes.append(
+                f"intel_sources[{label}] 的 cadence={cadence!r} 引擎不认识 —— "
+                "这条不会自动补抓（只在你点「重新抓取」时跑）。"
+                f"能写的节奏：{'、'.join(sorted(CADENCE_DAYS))}；"
+                "按需要手点才抓的写 on_demand")
         params = item.get("params") or {}
         if not isinstance(params, dict):
             notes.append(f"intel_sources[{label}] 的 params 需要映射，"
@@ -614,9 +632,15 @@ def fetch_pack(pack: str, data_dir: Path, sources: list[IntelSource], *,
         except Exception as e:                     # noqa: BLE001
             # 失败**不是**异常出口：记一条人话原因，其它源照跑，界面标出来。
             log.info("情报源 %s(%s) 抓取失败：%s", spec.label, spec.id, e)
-            errors[spec.id] = f"{type(e).__name__}: {e}"
+            # ⚠ 键是 **label 不是 id**：`hot_board` 这类"一个适配器出多个源"
+            #   是合法用法（elevator 包里抖音/头条/知乎三条共用它），
+            #   按 id 归属会让**一次超时把三个源全标成抓取失败** ——
+            #   而界面分组、去重、`today()` 计数统统按 label 走（见 :924）。
+            #   旧注释曾承诺"`_key` 才是唯一键"，但全仓没有任何地方产出或消费
+            #   叫 `_key` 的字段：那是用一台不存在的零件把已知风险解释成已解决。
+            errors[spec.label] = f"{type(e).__name__}: {e}"
             per_source.append({**_source_row(spec), "count": 0,
-                               "error": errors[spec.id], "state": "error"})
+                               "error": errors[spec.label], "state": "error"})
             continue
         for r in rows:
             r["source_id"] = spec.id
@@ -885,6 +909,56 @@ def select_for_prompt(data_dir: Path, pack: str, segment: str | None, *,
     return "\n".join(lines) + "\n", keys, dropped
 
 
+def ignored_today_str() -> str:
+    """「今天」的唯一口径。忽略过滤与「已忽略 N」计数必须用同一个写法，
+    否则一边按 `%Y-%m-%d` 存、另一边按别的算，计数就会在某个夜里悄悄错。"""
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def count_ignored_today(rec: dict) -> int:
+    """忽略记录里属于今天的那几条（`/api/intel/ignore` 的响应也用它，
+    这样"界面那行说的今天"与"过滤掉的今天"是同一个函数算出来的）。"""
+    t = ignored_today_str()
+    return sum(1 for v in rec.values() if v == t)
+
+
+def _attribute_legacy_errors(errors: dict[str, str],
+                             sources: list[IntelSource]) -> dict[str, str]:
+    """把按 **id** 存的历史包袱归并到按 **label** 的现行口径。
+
+    调用方只有一个：`today()`。规则（顺序敏感，先判 label 再动键）：
+      - 键已经是某个源的 label → 原样留着（现行写法，第 4 批之后的产物都是这样）；
+      - 键只对上一个源（含孤儿源：盘上有、声明里没有）→ 换成它的 label；
+      - 一个 id 对应多个源 → 给每一条都挂上同一句原因，并注明"旧记录无法确定是哪个源"；
+      - 认不出来的键 → 原样保留，**不静默丢掉**（它总归比"消失"诚实）。
+    """
+    if not errors:
+        return {}
+    by_id: dict[str, list[IntelSource]] = {}
+    for spec in sources:
+        by_id.setdefault(spec.id, []).append(spec)
+    labels = {spec.label for spec in sources}
+    out: dict[str, str] = {}
+
+    def _keep(key: str, msg: str) -> None:
+        prev = out.get(key)
+        out[key] = f"{prev}；{msg}" if prev and msg not in prev else (msg or prev or "")
+
+    for key, msg in errors.items():
+        if key in labels:
+            _keep(key, msg)
+            continue
+        cands = by_id.get(key) or []
+        if not cands:
+            _keep(key, msg)          # 认不出来也留着，不静默
+            continue
+        note = msg if len(cands) == 1 else \
+            f"（旧记录按 id={key} 存，无法确定是哪个源）{msg}"
+        for spec in cands:
+            _keep(spec.label, note)
+    return out
+
+
 def today(data_dir: Path, pack: str, sources: list[IntelSource]) -> dict:
     """给 `/api/intel/today` 的只读视图。
 
@@ -898,7 +972,7 @@ def today(data_dir: Path, pack: str, sources: list[IntelSource]) -> dict:
     # 会无声回来，界面「已忽略 0」与实际不符且无任何解释（与 latest.json
     # 的 _read 同一透出口径 —— 「别静默」不因这条路径只读而豁免）。
     ignored, ig_err = _load_ignored_checked(data_dir, pack)
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_str = ignored_today_str()
     # 忽略过滤与**写入**用同一个键（`item_key`），并且把键**下发**给渲染层
     # （`item.key`）—— 渲染层拿它去 POST /api/intel/ignore，不再自己拼一份。
     # 曾经这里漏了 url 那一档（只 `guid or title`），于是"只有 url 的条目
@@ -936,9 +1010,21 @@ def today(data_dir: Path, pack: str, sources: list[IntelSource]) -> dict:
                            "note": "", "enabled": True, "wired": True,
                            "count": len(rows), "items": rows, "state": "orphan"})
     errors = dict(data.get("errors", {}))
+    # 失败原因按 **label** 归属（第 4 批改的），但盘上的**旧产物**是按 id 写的：
+    # 那些键今天按 label 查不出来，于是「我们没抓到」在界面上变成「平台今天没货」——
+    # 两句话的下一步动作正好相反（等平台出数据 vs 去配 Key），必须归并。
+    # 歧义时**不猜**：一个 id 被多个源共用（电梯包三条共用 hot_board）就给每一条都挂上，
+    # 并明说是旧记录 —— 宁可多标一处「抓取失败」，也不许把失败说成"正常没货"。
+    errors = _attribute_legacy_errors(errors, sources)
     if ig_err:
         errors["_ignored"] = ig_err + " —— 被忽略的条目会照常显示"
+    # 「已忽略 N」在界面上配的是那句「只影响今天，明天同题会自动回来」。
+    # 原来 N 取的是 `len(ignored)` = **历史累计**：今天忽略 2 条、行上写 17，
+    # 用户拿手上的 2 去核对 17，结论只能是"这功能在撒谎"。
+    # 所以两个都给，界面按语义各取一个：`ignored_today` 给那一行，
+    # `ignored` 留作累计（沉底机制将来真做时要用）。
     return {"pack": pack, "fetched_at": data.get("fetched_at", ""),
             "groups": groups, "items": items, "errors": errors,
             "stale": is_stale(data, sources), "ignored": len(ignored),
+            "ignored_today": count_ignored_today(ignored),
             "unwired": sum(1 for g in groups if g["state"] in ("unwired", "off"))}

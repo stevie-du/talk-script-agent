@@ -1898,3 +1898,31 @@ def test_ghost_failed_entry_is_marked_openable_and_deletable(tmp_path=None):
             "摘除之后才应该是真 404"
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_history_truncation_is_visible_to_the_ui(tmp_path, monkeypatch):
+    """左栏只回最近 N 条 —— 这件事界面对外必须说得出（审查流程线 P2-4）。
+
+    「搜不到」与「没有」是两句话：搜索在**已截断**的列表里找不到时，若界面拿不到
+    total / limit 两个数，它只能说"没有这条记录" —— 那是假的，那条可能在第 101 位。
+    这里把上限压到 3 只是为了让测试跑得动（不是改产品值），钉的是
+    「截断时 truncated 为真、两个数都带得出去、而且 `history()` 真的按同一个数截」。
+    """
+    from app.store import ArtifactStore
+
+    st = ArtifactStore(tmp_path, data_dir=tmp_path)
+    fake = {f"j{i}": {"id": f"j{i}", "created_at": f"2026-09-0{i}T00:00:00"}
+            for i in range(1, 6)}
+    monkeypatch.setattr(st, "_read_index_file", lambda: fake)
+    monkeypatch.setattr(ArtifactStore, "HISTORY_LIMIT", 3, raising=True)
+
+    assert st.history_stats() == {"total": 5, "limit": 3, "truncated": True}
+    assert len(st.history()) == 3, "history() 与 history_stats() 必须吃同一个上限"
+
+    monkeypatch.setattr(ArtifactStore, "HISTORY_LIMIT", 100, raising=True)
+    assert st.history_stats() == {"total": 5, "limit": 100, "truncated": False}, \
+        "没截断时不许虚报 —— 界面那句「只翻了最近 N 条」不能常驻"
+
+    # 端点那一头：/api/meta 带上这份统计，界面才不用自己猜上限。
+    body = _client(tmp_path).get("/api/meta").json()
+    assert body["history"] == {"total": 0, "limit": 100, "truncated": False}, body["history"]

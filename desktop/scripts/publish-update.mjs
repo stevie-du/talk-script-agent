@@ -498,7 +498,7 @@ async function main() {
   // ── 6) 收尾 ──────────────────────────────────────────────
   step(6, opt.dryRun ? 'dry-run 完成' : '发布完成');
   console.log(`${TAG} 线上地址：${url}latest.yml（version ${nowMeta ? nowMeta.version : '暂无，发布后为 ' + pkg.version}）`);
-  console.log(`${TAG} 客户端：设 TALKSCRIPT_UPDATE_URL=${url} 重启应用，设置页 → 关于与更新 应显示「已是最新版本」`);
+  console.log(`${TAG} 客户端：设 TALKSCRIPT_UPDATE_URL=${url} 重启应用，设置页 → 关于我们 应显示「已是最新版本」`);
   if (!opt.dryRun) {
     console.log(`${TAG} 别忘了：README 的发布清单里记一笔（版本 / 日期 / sha512 出处）`);
   }

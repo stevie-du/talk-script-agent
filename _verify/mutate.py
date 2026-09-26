@@ -22,6 +22,14 @@ SRV_F = ROOT / "app/server.py"
 PACK = ROOT / "packs/elevator"
 YAML_F = PACK / "ai_tells.yaml"
 TOPICS_F = ROOT / "desktop/renderer/js/topics.js"
+HEAD_F = ROOT / "desktop/renderer/js/head.js"
+SESS_F = ROOT / "desktop/renderer/js/sessions.js"
+RESULT_F = ROOT / "desktop/renderer/js/result.js"
+SETTINGS_F = ROOT / "desktop/renderer/js/settings.js"
+JOBSJS_F = ROOT / "desktop/renderer/js/jobs.js"
+STORE_F = ROOT / "app/store.py"
+WORDS_F = ROOT / "desktop/renderer/js/words.js"
+HTML_F = ROOT / "desktop/renderer/index.html"
 UI_F = ROOT / "desktop/renderer/js/ui.js"
 PROMPTS_F = ROOT / "app/prompts.py"
 CSS_F = ROOT / "desktop/renderer/styles.css"
@@ -506,6 +514,378 @@ MUTATIONS = [
         '      <td class="num">${g.count}</td>',
         "verify:topics",
     ),
+    # ── s10 组（2026-09-27 头部按视图渲染 + 选题页签栏 + 筛选胶囊）──────
+    # 跑这一组：python _verify/mutate.py -k s10
+    (
+        "s10-1 head.js 不分视图，永远落会话头部（切到选题视图顶部还是「新对话」）",
+        HEAD_F,
+        '  const vh = view === "chat" ? null : viewHeads[view];',
+        '  const vh = null;',
+        "verify:topics",
+    ),
+    (
+        "s10-2 gotoView 不重画头部（问题 1 原样复发）",
+        UI_F,
+        "  paintHead();",
+        "",
+        "verify:topics",
+    ),
+    (
+        "s10-3 点左栏会话行不切回会话视图（选题视图里点会话 = 界面上毫无反馈）",
+        SESS_F,
+        '    gotoView("chat");',
+        "",
+        "verify:topics",
+    ),
+    (
+        "s10-4 筛选胶囊不带 .on（「现在筛的是哪一颗」又读不出来了）",
+        TOPICS_F,
+        '''    + ` class="src-pill${curSrc === src ? " on" : ""}"`''',
+        '''    + ` class="src-pill"`''',
+        "verify:topics",
+    ),
+    (
+        "s10-5 .src-pill.on 只改字色不改底色（选中态塌回「看不出区别」）",
+        CSS_F,
+        ".src-pill.on { background: var(--ink); color: var(--text-inv); }",
+        ".src-pill.on { color: var(--text-inv); }",
+        "verify:topics",
+    ),
+    (
+        "s10-6 页签回调不切「情报源」面（点了页签没反应）",
+        TOPICS_F,
+        '    $("topics-src").classList.toggle("hidden", id !== "sources");',
+        "",
+        "verify:topics",
+    ),
+    (
+        "s10-7 页签条给满栏内边距（与阅读面差出 --s6，左边界不再重合）",
+        CSS_F,
+        "  margin-inline: auto; margin-bottom: 0; padding: 0;",
+        "  margin-inline: auto; margin-bottom: 0; padding: 0 var(--s6);",
+        "verify:topics",
+    ),
+    # ── s11 组（2026-09-27 全方位审查后补的修复）──────────────────────
+    # 跑这一组：python _verify/mutate.py -k s11
+    (
+        "s11-1 换包收口不发事件（面板点选换包时选题视图停在旧包，看着 A 做 B）",
+        UI_F,
+        '  emit("pack", $("pack")?.value || "");',
+        "",
+        "verify:topics",
+    ),
+    (
+        "s11-2 setParam 不校验选项是否存在（把界面显示不出来的值发进引擎、胶囊显示空白）",
+        UI_F,
+        "sels.every(s => Array.from(s.options).some(o => o.value === v))",
+        "true",
+        "verify:topics",
+    ),
+    (
+        "s11-3 四格指标组间缝退回与组内同宽（「0.30 供给 S」读成一个词组）",
+        CSS_F,
+        ".sig-grid > :nth-child(3n) { margin-right: var(--s4); }",
+        "",
+        "verify:topics",
+    ),
+    (
+        "s11-4 选题分组容器不挂 .kb-groups（两组之间贴死 0px）",
+        HTML_F,
+        '<div id="topics-root" class="kb-groups"></div>',
+        '<div id="topics-root"></div>',
+        "verify:topics",
+    ),
+    (
+        "s11-5 被筛源清零后不回落「全部」（一颗选中的都没有 + 空池假象）",
+        TOPICS_F,
+        '    curSrc = "all"; page = 0; renderChips();',
+        "",
+        "verify:topics",
+    ),
+    (
+        "s11-6 抓取失败的源被算进「今天没货」（等平台 vs 去配 Key，两句话相反）",
+        TOPICS_F,
+        'const idle = groups.filter(g => g.state === "ok" && g.count === 0 && !sourceError(g.label));',
+        'const idle = groups.filter(g => g.state === "ok" && g.count === 0);',
+        "verify:topics",
+    ),
+    (
+        "s11-7 页签条不跟面走档（吸顶条盖不住 1160 的表格，内容从两侧穿出）",
+        CSS_F,
+        '#view-topics[data-face="sources"] .topics-tabs { max-width: var(--w-stg-3col); }',
+        "",
+        "verify:topics",
+    ),
+    # ── s12 组（2026-09-27 契约线 P0 修复：失败归属 / 今天口径 / 破坏性快捷键）──
+    # 跑这一组：python _verify/mutate.py -k s12
+    (
+        "s12-1 抓取失败按 id 归属（一个适配器出三个源时，一次超时把三源全标红）",
+        INTEL_F,
+        '            errors[spec.label] = f"{type(e).__name__}: {e}"',
+        '            errors[spec.id] = f"{type(e).__name__}: {e}"',
+        "tests/test_intel.py -k same_id_sources_fail",
+    ),
+    (
+        "s12-2 界面按 id 查失败原因（与后端按 label 写对不上 → 失败源被说成今天没货）",
+        TOPICS_F,
+        "    const err = sourceError(g.label);",
+        "    const err = sourceError(g.id);",
+        "verify:topics",
+    ),
+    (
+        "s12-3 「已忽略 N」用历史累计（配的句子却是只影响今天）",
+        TOPICS_F,
+        "    const today = (data && data.ignored_today) || 0;",
+        "    const today = (data && data.ignored) || 0;",
+        "verify:topics",
+    ),
+    (
+        "s12-4 选题视图里按 Esc 不把用户带回那条会话（停不停是第二步，先让他看见要停什么）",
+        # ⚠ 变异只撤 `gotoView("chat")` 这一行，不撤整块守卫：
+        #   撤整块会让第一下 Esc 真的停掉作业，后面所有依赖"这条作业跑到 done"
+        #   的断言一起崩 —— 那时判据读到的是"网崩了"而不是"这条红了"，
+        #   归因就废了（实测过）。"不许隔屏停作业"那一半由 `busy` 判据守着，
+        #   整块被删时整网会大声崩，不是静默漏过。
+        UI_F,
+        '          gotoView("chat");\n          toast("已带你回到正在生成的会话 —— 再按一次 Esc 停止它", 4200);',
+        '          toast("已带你回到正在生成的会话 —— 再按一次 Esc 停止它", 4200);',
+        "verify:",
+    ),
+    # ── s13 组（2026-09-27 文案线 P0-3 / P1-4 / P1-6：终态话术收进一张表）──
+    # 跑这一组：PYTHONUTF8=1 .venv/Scripts/python.exe _verify/mutate.py -k s13
+    # 这一组的判据全住在整网（新断言写在 verify.js 主文件里），所以门禁一律 "verify:"。
+    (
+        "s13-1 页头结论退回二分（没测出来的产物亮红 ✗，与下方横幅一屏两话）",
+        RESULT_F,
+        "  const vk = verdictKey(passed);",
+        '  const vk = passed === true && hardN === 0 ? "ok" : "no";',
+        "verify:",
+    ),
+    (
+        "s13-2 合规页签结论退回二分（同上，另一处调用点）",
+        RESULT_F,
+        "  const ck = verdictKey(passState(ch));\n  const comply = VERDICT[ck];",
+        '  const ck = passState(ch) === true && hardN === 0 ? "ok" : "no";\n  const comply = VERDICT[ck];',
+        "verify:",
+    ),
+    (
+        "s13-3 有人在渲染处写回别名（✓ 合格 / 需人工确认）——静态禁令的正对照",
+        RESULT_F,
+        "  const verdict = `${VERDICT[vk].word}${vk !== \"none\" && hardN ? ` · ${hardN} 处硬伤` : \"\"}`;",
+        '  const verdict = vk === "ok" ? "✓ 合格" : "✗ 需人工确认";',
+        "verify:",
+    ),
+    (
+        "s13-4 左栏那一行用第二套词（「未测」与表里的「没有校验结论」并存）",
+        SESS_F,
+        "    return k === \"none\" ? `${STATE_LABEL.done} · ${VERDICT.none.word}` : VERDICT[k].word;",
+        "    return k === \"none\" ? \"已完成 · 未测\" : VERDICT[k].word;",
+        "verify:",
+    ),
+    (
+        "s13-5 表里的终态词改成「已取消」（停止键与提示不同名，别名禁令也该红）",
+        WORDS_F,
+        "  cancelled: \"已停止\",",
+        "  cancelled: \"已取消\",",
+        "verify:",
+    ),
+    (
+        "s13-6 节奏列不查表直接印机器码（daily / on_demand 上屏）",
+        TOPICS_F,
+        "      <td>${esc(CADENCE_LABEL[g.cadence] || g.cadence || \"—\")}</td>",
+        "      <td>${esc(g.cadence || \"—\")}</td>",
+        "verify:topics",
+    ),
+    # ── s14 组（2026-09-27 文案线 P1-3 + P3-7：图例⇄判据⇄卡片同一套刻度）──
+    # 跑这一组：PYTHONUTF8=1 .venv/Scripts/python.exe _verify/mutate.py -k s14
+    (
+        "s14-1 卡片把机会分再除以 100 印成 0.72（与同屏图例的「≥ 60」两套刻度）",
+        TOPICS_F,
+        "      ${sigRow(\"机会分\", opp, false, true)}",
+        "      ${sigRow(\"机会分\", opp === null || opp === undefined ? null : opp / 100)}",
+        "verify:topics",
+    ),
+    (
+        "s14-2 图例的机会分阈值与引擎判据写散（改一边就没人对账）",
+        HTML_F,
+        "            <span><i class=\"hi\"></i>机会分 ≥ 60 · 值得做</span>",
+        "            <span><i class=\"hi\"></i>机会分 ≥ 70 · 值得做</span>",
+        "verify:",
+    ),
+    (
+        "s14-3 图例写回代码里不存在的规则（那条「50–59 要换角度」就是这么来的）",
+        HTML_F,
+        "            <span><i class=\"low\"></i>供给 S ≥ 0.70 · 红海，要换角度</span>",
+        "            <span><i class=\"mid\"></i>50–59 · 要换角度</span>",
+        "verify:",
+    ),
+    (
+        "s14-4 渲染层读回条目级 it.warn（引擎从不发这个键的死出口）",
+        TOPICS_F,
+        "    <div class=\"topic-quote\">${esc(it.desc || it.ev || \"\")}${from}</div>",
+        "    <div class=\"topic-quote\">${esc(it.desc || it.ev || \"\")}${from}${it.warn || \"\"}</div>",
+        "verify:",
+    ),
+    (
+        "s14-5 卡片不再渲染 flags（结论那排标记整条下线：机会分高 / 数据不足 都没了）",
+        TOPICS_F,
+        "    <div class=\"res-top\"><b class=\"card-title\">${esc(it.title)}</b>${flags}</div>",
+        "    <div class=\"res-top\"><b class=\"card-title\">${esc(it.title)}</b></div>",
+        "verify:topics",
+    ),
+    # ── s15 组（2026-09-27 文案线 P1-7 / P1-9 + 流程线 P2-4 的界面那半）──
+    # 跑这一组：PYTHONUTF8=1 .venv/Scripts/python.exe _verify/mutate.py -k s15
+    (
+        "s15-1 卸载弹窗又把同一个东西叫「技能包」（面板叫行业包，用户以为两个东西）",
+        SETTINGS_F,
+        "  const ok = await appConfirm(\"卸载行业包\",",
+        "  const ok = await appConfirm(\"卸载技能包\",",
+        "verify:",
+    ),
+    (
+        "s15-2 选择器把内部模式名直接印上屏（mock 模式 / 夹具是开发用语）",
+        UI_F,
+        "  const cur = m.mock ? \"演示模式\"",
+        "  const cur = m.mock ? \"mock 模式\"",
+        "verify:",
+    ),
+    (
+        "s15-3 演示模式的悬停说明仍写「当前模型 + 切换后生效」（根本没在调模型）",
+        UI_F,
+        "  sel.title = m.mock\n    ? \"演示模式：不调用模型，返回内置样例文案\"\n    : `当前模型：${cur}。切换后对后续生成生效（正在跑的作业不受影响）`;",
+        "  sel.title = `当前模型：${cur}。切换后对后续生成生效（正在跑的作业不受影响）`;",
+        "verify:",
+    ),
+    (
+        "s15-4 搜索空结果不把截断说出来（「这里只列最近 N 条」被去掉 = 搜不到被说成没有）",
+        SESS_F,
+        "    const atCap = cap > 0 && (items || []).length >= cap;",
+        "    const atCap = false;",
+        "verify:",
+    ),
+    # ── s16 组（2026-09-27 第 8 轮审查：类有了、规则没有 / 写死阈值 / 二分）──
+    # 跑这一组：PYTHONUTF8=1 .venv/Scripts/python.exe _verify/mutate.py -k s16
+    (
+        "s16-1 删掉页签结论色的两条规则（回到「class 有、屏幕上看不出来」）",
+        CSS_F,
+        ".res-tab.ok .rt-b { color: var(--ok); }\n.res-tab.bad .rt-b { color: var(--bad); }",
+        "",
+        "verify:",
+    ),
+    (
+        "s16-2 偏差胶囊退回写死 ±10%（不看引擎下发的 tolerance_pct）",
+        RESULT_F,
+        "  const devCls = (tol === null || tol === undefined) ? \"\"\n    : (Math.abs(dev) <= tol ? \"good\" : \"bad\");",
+        "  const devCls = Math.abs(dev) <= 10 ? \"good\" : \"bad\";",
+        "verify:",
+    ),
+    (
+        "s16-3 人味分页签退回二分（没配词表的包被画成「差」）",
+        RESULT_F,
+        "      cls: smell === null ? \"\" : smell >= 90 ? \"ok\" : \"bad\",",
+        "      cls: (smell ?? -1) >= 90 ? \"ok\" : \"bad\",",
+        "verify:",
+    ),
+    (
+        "s16-4 端点又写第二个历史上限字面量（「这个数只有一份」变假）",
+        SRV_F,
+        "        return (running + items)[:pipeline.store.HISTORY_LIMIT]",
+        "        return (running + items)[:100]",
+        "tests/test_intel_contract.py -k history_cap",
+    ),
+    (
+        "s16-5 渲染层读一个引擎从不发的键（契约扫描的正对照）",
+        TOPICS_F,
+        "    <div class=\"topic-quote\">${esc(it.desc || it.ev || \"\")}${from}</div>",
+        "    <div class=\"topic-quote\">${esc(it.desc || it.phantom_note || it.ev || \"\")}${from}</div>",
+        "tests/test_intel_contract.py -k reads_only_keys",
+    ),
+    # ── s17 组（2026-09-27 第 8 轮审查的两条后端 P1：id→label 归并 / 不引用过期快照）──
+    # 跑这一组：PYTHONUTF8=1 .venv/Scripts/python.exe _verify/mutate.py -k s17
+    (
+        "s17-1 那句限定回头引用开机快照里的总数（删过一条就说谎，且没人会红）",
+        SESS_F,
+        "    const atCap = cap > 0 && (items || []).length >= cap;",
+        "    const atCap = cap > 0 && state.meta.history.total > cap;",
+        "verify:",
+    ),
+    (
+        "s17-2 旧产物按 id 存的失败原因不再归并（「没抓到」在界面上变成「今天没货」）",
+        INTEL_F,
+        "    errors = _attribute_legacy_errors(errors, sources)",
+        "    # 不归并（回归：老 latest.json 的 id 键按 label 查不出来）",
+        "tests/test_intel.py -k legacy",
+    ),
+    (
+        "s17-3 归并时只挂第一个候选源（其余几条继续被说成正常没货）",
+        INTEL_F,
+        "        note = msg if len(cands) == 1 else \\\n            f\"（旧记录按 id={key} 存，无法确定是哪个源）{msg}\"",
+        "        note = msg",
+        "tests/test_intel.py -k ambiguous",
+    ),
+    # ── s18 组（2026-09-27 第 8 轮审查 界面 P1：破坏性动作要问 / 内部词不上屏）──
+    # 跑这一组：PYTHONUTF8=1 .venv/Scripts/python.exe _verify/mutate.py -k s18
+    (
+        "s18-1 「停止全部」回到一键生效（N 条作业说停就停，token 还不退）",
+        # ⚠ 整条语句一起换（原来只换第一行，第二行那截模板留在原地 → ui.js 语法炸，
+        #   判据读到的是"整网崩"而不是"这条红了"，归因作废 —— 变异只撤它要证伪的那件事，
+        #   但必须撤得**语法闭合**）。
+        UI_F,
+        "    const ok = await appConfirm(\"停止全部后台生成\",\n      `确认停止这 ${bg.length} 条在跑的生成？已经花掉的模型调用不会退回。`);",
+        "    const ok = true;   // 不问就直接停（回归：破坏性动作没有确认层）",
+        "verify:",
+    ),
+    (
+        "s18-2 文风强度的机器码直接上屏（读者要去猜 strong 是什么）",
+        RESULT_F,
+        "${esc(severityLabel(h.severity))}",
+        "${esc(h.severity)}",
+        "verify:",
+    ),
+    (
+        "s18-3 失败详情把包目录 slug 印给人看",
+        JOBSJS_F,
+        "行业包：${failParams.pack ? packLabel(failParams.pack) : \"-\"}",
+        "行业包：${failParams.pack || \"-\"}",
+        "verify:",
+    ),
+    (
+        "s18-4 悬停说明又替后端宣布「作业已释放」（从没核过的事实）",
+        RESULT_F,
+        "          : \"单段重写只在刚生成的那条上可用；历史记录请用「换一版」整体重生成\"}",
+        "          : \"历史记录不可局部重写（后台作业已释放），可用「换一版」整体重生成\"}",
+        "verify:",
+    ),
+    (
+        "s18-5 导出的 md 头部写目录 slug（交付物与界面两个名字）",
+        RESULT_F,
+        "    `- ${meta}（${packLabel(r.pack)}）`, \"\",",
+        "    `- ${meta}（${r.pack}）`, \"\",",
+        "verify:",
+    ),
+    # ── s19 组（2026-09-27 第 8 轮审查 后端 P2/P3：认不出的节奏要留话 / 交付物 repr）──
+    # 跑这一组：PYTHONUTF8=1 .venv/Scripts/python.exe _verify/mutate.py -k s19
+    (
+        "s19-1 引擎不认识的 cadence 不再留话（这条源从此永不自动补抓，且界面零提示）",
+        INTEL_F,
+        "        if (cadence and cadence not in CADENCE_DAYS\n                and cadence.lower() not in AUTO_FETCH_OFF):",
+        "        if False:",
+        "tests/test_intel.py -k unknown_cadence",
+    ),
+    (
+        "s19-2 交付物把命中明细按 Python repr 印出去",
+        STORE_F,
+        "              f\"- 硬禁用词：{_hits('hard_hits')}\",",
+        "              f\"- 硬禁用词：{ch.get('hard_hits') or '无'}\",",
+        "tests/test_ai_tells.py -k repr",
+    ),
+    (
+        "s19-3 中文节奏表少了 manual（两表一漂移，源表就印机器码）",
+        WORDS_F,
+        "  manual: \"手动\",",
+        "",
+        "tests/test_intel_contract.py -k cadence_tables",
+    ),
     (
         "A-3 对账解析全文扫（把文档后面别的表也当成 §2.1 的 tell 表）",
         ROOT / "tests/test_aitells_alignment.py",
@@ -909,16 +1289,27 @@ for name, path, old, new, selector in MUTATIONS:
                 bad += 1
                 continue
             m = re.search(r"(\d+)/(\d+) 通过", out)
+            reds = len(re.findall(r"^\s*❌", out, re.M))
             if m and m.group(1) == m.group(2):
                 print(f"[全绿 !! 漏检] {name} —— 界面断言全过（{m.group(0)}）")
                 bad += 1
+            elif m and reds:
+                # 「N/M 通过」这行只在**跑完**时打印（它在输出末尾），所以它 + 至少
+                # 一条 ❌ 就是"网跑完了、确实有断言红"的正证据。
+                # ⚠ 原来这一支排在下面那个 "Error" 启发式之后，于是**每一条
+                #    verify:topics 变异都被误判成「工具错」**：topics 组的输出里
+                #    天然带着 "TimeoutError: 连接超时" 这类**桩数据文本**
+                #    （抓取失败源的活样本），拿整份输出里出现过 "Error" 当"网崩了"
+                #    判据，把真红全吃掉了。判据换成"有没有跑完 + 有没有 ❌ 行"。
+                print(f"[报红 OK] {name}（{m.group(0)}，{reds} 条报红）")
             elif "FAIL:" in out or "Error" in out:
                 # 整网崩了（SyntaxError / 中途抛）—— 这**不算**报红：
                 # 崩掉的网可能压根没跑到那条断言，拿它当"守住了"是自欺。
                 print(f"[全绿 !! 工具错] {name} —— 回归网中途崩了，不是断言报红：\n{out[-400:]}")
                 bad += 1
             else:
-                print(f"[报红 OK] {name}（{m.group(0) if m else '退出码非零'}）")
+                print(f"[全绿 !! 工具错] {name} —— 没读到结果行，判不了：\n{out[-400:]}")
+                bad += 1
             continue
         if selector.startswith("node:"):
             # node --test 的退出码是可靠的（没有 pytest 收尾清理撞沙箱的问题），

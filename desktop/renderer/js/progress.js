@@ -11,20 +11,7 @@
 
 import { esc } from "./util.js";
 import { state } from "./store.js";
-
-export const STATE_LABEL = {
-  queued: "排队中",
-  selecting: "选题策划中",
-  writing: "文案撰写中",
-  rewriting: "回炉改写中",
-  checking: "代码校验中",
-  storyboarding: "分镜生成中",
-  packing: "行业包生成中",
-  fetching: "情报抓取中",
-  done: "完成",
-  failed: "失败",
-  cancelled: "已取消",
-};
+import { STATE_LABEL } from "./words.js";
 
 /** 还在跑的状态集合 —— 「要不要继续轮询」的唯一判据。
  *

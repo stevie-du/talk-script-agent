@@ -192,3 +192,44 @@ export function dayGroupKey(d) {
 
 
 export const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+/** 一组「同级内容切换」页签的 aria + 键盘接线（WAI-ARIA Tabs 模式）：
+ *  roving tabindex（Tab 键只停在选中项）、←/→ 循环、Home/End 跳首尾。
+ *
+ *  为什么收在这里：结果卡的产物分区与「今日选题」的选题 / 情报源是**同一个东西**，
+ *  而这套键盘行为原来只在 result.js 里写了一份。留两份实现，迟早只修一半
+ *  —— 本项目反复栽过的正是「同一个口径抄了几份」。
+ *
+ *  调用方负责：每个页签带上 `data-tab` 与 `aria-controls`，并在 `onSelect(id)`
+ *  里换面板显隐（面板结构两边不一样，只有这一段留给你）。
+ *  @returns 选中某个页签的函数（点击与外部跳转都走它）
+ */
+export function wireTablist(bar, tabSel, onSelect) {
+  const tabs = () => Array.from(bar.querySelectorAll(tabSel));
+  /** `focus=false` 给「程序自己把视图切回来」那条路径用（openTopics 每次回到
+   *  选题面），那条路径不该抢焦点。点击与键盘跳转都走默认的 true。 */
+  function select(id, focus = true) {
+    for (const n of tabs()) {
+      const on = n.dataset.tab === id;
+      n.classList.toggle("on", on);
+      n.setAttribute("aria-selected", on ? "true" : "false");
+      n.tabIndex = on ? 0 : -1;
+      if (on && focus) n.focus();
+    }
+    onSelect(id);
+  }
+  bar.addEventListener("keydown", e => {
+    const list = tabs();
+    const cur = list.findIndex(n => n === document.activeElement);
+    if (cur < 0) return;
+    const map = { ArrowRight: 1, ArrowLeft: -1 };
+    let next = null;
+    if (e.key in map) next = (cur + map[e.key] + list.length) % list.length;
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = list.length - 1;
+    if (next === null) return;
+    e.preventDefault();
+    select(list[next].dataset.tab);
+  });
+  return select;
+}

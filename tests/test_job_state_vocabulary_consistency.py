@@ -3,7 +3,7 @@
 
 背景
 ----
-`app/jobs.py` 的状态机与 `desktop/renderer/js/progress.js` 的中文标签是两种语言，
+`app/jobs.py` 的状态机与 `desktop/renderer/js/words.js` 的中文标签是两种语言，
 没法共享代码，于是同一份词表被写了两遍。它已经走散过一次：
 
 分步确认（`paused_awaiting_confirmation`）在 2026-09-19 被整体移除 ——
@@ -43,6 +43,12 @@ from app.jobs import (ALL_BUSY_STATES, BUSY_STATES, INTEL_BUSY_STATES,  # noqa: 
                       TERMINAL_STATES, TRANSITIONS)
 
 PROGRESS_JS = ROOT / "desktop" / "renderer" / "js" / "progress.js"
+# 2026-09-27：STATE_LABEL 从 progress.js 搬进了话术表 words.js（终态词、校验结论三态、
+# 情报源节奏名一处一份）。这份测试跟着改指路 —— 两边都还要读：BUSY_STATES 留在
+# progress.js（它是轮询判据，跟渲染无关），标签表在 words.js。
+WORDS_JS = ROOT / "desktop" / "renderer" / "js" / "words.js"
+# 交付物（导出的 脚本.md）里那句校验结论在 Python 这一侧，见最后的对账测试。
+STORE_PY = ROOT / "app" / "store.py"
 
 # `export const STATE_LABEL = { queued: "排队中", … };`
 _LABEL_BLOCK = re.compile(r"export const STATE_LABEL\s*=\s*\{(.*?)\n\};", re.S)
@@ -56,15 +62,15 @@ _SET_ENTRY = re.compile(r'"([a-z_]+)"')
 REMOVED_STATE = "paused_awaiting_confirmation"
 
 
-def _js_src() -> str:
-    src = PROGRESS_JS.read_text(encoding="utf-8")
-    assert src, f"{PROGRESS_JS} 是空的 —— 断言会空转"
+def _js_src(where: Path) -> str:
+    src = where.read_text(encoding="utf-8")
+    assert src, f"{where} 是空的 —— 断言会空转"
     return src
 
 
 def _js_labels() -> dict[str, str]:
-    m = _LABEL_BLOCK.search(_js_src())
-    assert m, "没找到 `export const STATE_LABEL = {…};` —— 改名了？" \
+    m = _LABEL_BLOCK.search(_js_src(WORDS_JS))
+    assert m, "没在 words.js 里找到 `export const STATE_LABEL = {…};` —— 改名或又搬走了？" \
               " 本测试要跟着改，别直接删"
     out = dict(_LABEL_ENTRY.findall(m.group(1)))
     assert out, "STATE_LABEL 解析结果为空 —— 断言会空转，先修正则"
@@ -72,7 +78,7 @@ def _js_labels() -> dict[str, str]:
 
 
 def _js_busy() -> set[str]:
-    m = _SET_BLOCK.search(_js_src())
+    m = _SET_BLOCK.search(_js_src(PROGRESS_JS))
     assert m, "没找到 `export const BUSY_STATES = new Set([…]);` —— " \
               "前端把「在跑」的判据挪走了？它必须与后端同名同值，见本文件顶部"
     out = set(_SET_ENTRY.findall(m.group(1)))
@@ -299,3 +305,23 @@ def test_revision_filtering_uses_a_shared_code_not_prose():
     assert len(prose) == 1, f"中文标签被当成判据用了不止一处：{prose}"
     assert "action_code === undefined" in prose[0], \
         f"唯一允许的那处必须是「老产物兜底」，且要带 action_code 判空：{prose}"
+
+
+def test_exported_md_uses_the_same_verdict_words():
+    """导出的 脚本.md 与屏幕上的结论是同一件事 —— 必须同一份词（文案线 P0-3 的跨语言那一半）。
+
+    `app/store.py::render_script_md` 是交付物里唯一写校验结论的地方，Python 与 JS 共享不了
+    代码，所以照本文件既有的套路读两边比对：只改一边就红，不靠"记得改两处"。
+    """
+    words = _js_src(WORDS_JS)
+    js_words = dict(re.findall(r'(\w+): \{ word: "([^"]+)"', words))
+    assert {"ok", "no", "none"} <= set(js_words), f"words.js 的 VERDICT 形状变了：{js_words}"
+
+    store = STORE_PY.read_text(encoding="utf-8")
+    # 只查非注释行：本仓的病灶说明一律写着旧词（「改前是 ✅ 合格」），不剥就把讲病因的人钉死。
+    code = "\n".join(l for l in store.splitlines()
+                     if not l.strip().startswith(("#", "*", '"""')))
+    for key in ("ok", "no", "none"):
+        assert js_words[key] in code, \
+            f"app/store.py 的导出少了「{js_words[key]}」—— 屏幕与产物又分成两套话"
+    assert "✅ 合格" not in code, "「合格」是表外的第四个词，导出不许再用"

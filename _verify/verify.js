@@ -91,6 +91,9 @@ const RESULT = {
   scenes: [],
   check: {
     passed: true, chars_total: 42, target_total: 261, deviation_pct: -3.2,
+    // 容差是引擎随报告下发的（app/checker.py 的 tolerance_pct）。界面写死 ±10%
+    // 就会与结论格打架，所以桩必须把它一起发出去，判据才量得到"吃的是这个数"。
+    tolerance_pct: 10,
     estimated_seconds: 58, duration_target: 60, hard_hits: [],
     soft_hits: [{ word: "最", count: 1 }], dropped_short: ["最"],
     segments: [
@@ -128,6 +131,12 @@ const RESULT = {
 const META = {
   default_pack: "elevator", model: "glm-4.7", base_url: "https://x/v4",
   has_api_key: true, mock: false, max_concurrent: 4, version: "0.2.0",
+  // 左栏历史的截断口径（app/store.py 的 history_stats）。limit 故意压成 5：
+  // 桩里只有 6 条样本，于是「列表已到上界」是**当前这一屏**就成立的事实 ——
+  // 界面用它决定那半句限定说不说（第 8 轮审查 后端 P1：不许照抄开机快照里的 total，
+  // 删一条或跨过上界之后那个快照就是假的）。
+  // 正对照走页面开关 ?hist=0：limit 100 → 没到上界 → 那半句必须消失。
+  history: { total: 148, limit: 5, truncated: true },
   packs_dir: "C:/Users/test/AppData/Roaming/TalkScript/packs",
   packs: [
     { name: "elevator", display_name: "电梯行业包", draft: false,
@@ -191,12 +200,16 @@ const META = {
 // （groups 按声明走，items 带 score/flags/ev）。
 const INTEL_TODAY = {
   pack: "elevator", fetched_at: "2026-09-23T10:12:00+08:00", stale: false,
-  ignored: 2, unwired: 1,
+  // `ignored` 是**历史累计**、`ignored_today` 才是今天：两个数故意不同，
+  // 界面那行（配的是「只影响今天」）拿错就会红。
+  ignored: 17, ignored_today: 1, unwired: 1,
   // ⚠ 必须留一个**抓取失败**的活样本：`app/intel.py` 的 `today()` 重建 groups 时
   //   state 只有 off / unwired / ok 三种 —— 失败的源在那边长得和"今天没货"
   //   一模一样（count 0），唯一携带该信息的就是 errors。
   //   桩里不留样本，「失败的源不冒充『已接入』」那条断言会永远绿（空转）。
-  errors: { policy_library: "TimeoutError: 连接超时" },
+  // ⚠ 键是**源 label**（不是 id）：`hot_board` 一个适配器出三个源，
+  //   按 id 归属会让一次超时把三行全标成失败（后端 fetch_pack 也按 label 写）。
+  errors: { 政策库: "TimeoutError: 连接超时" },
   items: [
     { guid: "g-new", title: "电梯应急更换程序指引", desc: "本周新出，几乎没人写",
       source_id: "demand_terms", source_label: "下拉词", platform: "百度",
@@ -220,7 +233,7 @@ const INTEL_TODAY = {
     { guid: "g-hot", title: "被关 30 分钟，能索赔吗", desc: "榜上 6 小时",
       source_id: "hot_board", source_label: "抖音热榜", platform: "抖音",
       role: "破圈触发器", segment: "维保", published: "", url: "",
-      ev: "本周新出", warn: "禁「包赔 / 一定赔」，命中 banwords hard",
+      ev: "本周新出",
       score: { D: 1.0, S: 0.3, E: 0.95, opportunity: 70, is_new: true,
                demand_new: 2, supply_n: 3, total_n: 3, fact_density: 0.33 },
       flags: [["good", "机会分高"]] },
@@ -667,7 +680,7 @@ window.__addCount = 0;
       return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate())
         + 'T' + p2(hh) + ':' + p2(mm) + ':00';
     }
-    return [
+    var REC = [
       { id:'s2', created_at: at(0, 15, 30), pack:'elevator',
         topic:'扶梯突然停了怎么办', platform:'抖音',
         duration:null, chars:null, passed:null, state:'writing' },
@@ -686,6 +699,14 @@ window.__addCount = 0;
       { id:'s6', created_at: at(12, 8, 50), pack:'elevator',
         topic:'电梯日常巡检要点', platform:'抖音',
         duration:60, chars:236, passed:true, state:'done' } ];
+    // 「没有校验结论」那一档在整网从没跑过：桩给每条 done 记录恒带 true/false，
+    // 于是「页头亮着红 ✗、下面横幅说没有结论」这类自相矛盾量不出来（文案线 P0-3）。
+    // 注入 window.__nullVerdict 后 s6 变成本产物 —— **列表摘要与详情 payload 同时**
+    // 改成没结论；只改一边就是桩自己在打架，不是被测代码在打架。
+    if (window.__nullVerdict) {
+      REC.forEach(function (r) { if (r.id === 's6') r.passed = null; });
+    }
+    return REC;
   }
   window.fetch = function(u, o){
     var s = String(u);
@@ -696,7 +717,15 @@ window.__addCount = 0;
     // ── 情报（今日选题 / 情报源）──
     // 这份桩是**照 pack.yaml 的声明渲染出来的**，不是手写死的一屏 HTML：
     // 分组、chip、计数、未接入 N 全由它算，所以断言测的是"渲染层真的在读声明"。
-    if (s.indexOf('/api/intel/today') >= 0) { return mk(INTEL); }
+    // ⚠ 把请求记下来：桩**不认 ?pack=**（任何包都回同一份 elevator 数据），
+    //   于是"界面到底拿哪个包去要的数据"在网里一度是不可见的 ——
+    //   整网跑到选题组时 #pack 已被前面的用例换成 fitment 且没人还原，
+    //   头部写 B 包、下面是 A 包数据，16 条断言照样全绿。
+    //   现在至少「请求带的是哪个包」可断言（见 sections/topics.js 的两条前置与收口判据）。
+    if (s.indexOf('/api/intel/today') >= 0) {
+      window.__intelReqs = (window.__intelReqs || []).concat([s]);
+      return mk(INTEL);
+    }
     if (s.indexOf('/api/intel/refresh') >= 0) {
       window.__refreshCalls = (window.__refreshCalls || 0) + 1;
       return mk({ job_id: 'inteljob1' });
@@ -704,7 +733,10 @@ window.__addCount = 0;
     if (s.indexOf('/api/intel/ignore') >= 0) {
       var ib = {}; try { ib = JSON.parse(o && o.body || '{}'); } catch (_) {}
       window.__ignoredKeys = (window.__ignoredKeys || []).concat([ib.key]);
-      return mk({ ok: true, ignored: window.__ignoredKeys.length });
+      // 两个数都按"这条刚被忽略"往前推一格，但**累计始终比今天多 17**：
+      // 界面那行如果拿错口径，读到的就是 18 而不是 2。
+      return mk({ ok: true, ignored: window.__ignoredKeys.length + 17,
+                  ignored_today: window.__ignoredKeys.length + 1 });
     }
     if (s.indexOf('/api/jobs/inteljob1') >= 0) {
       return mk({ id:'inteljob1', kind:'intel', state:'done', params:{ pack:'elevator' },
@@ -712,8 +744,14 @@ window.__addCount = 0;
                   result:{ pack:'elevator', items:4, sources:[], errors:{} } });
     }
     if (s.indexOf('/api/meta') >= 0) {
+      // 页面 URL 上的开关决定这两档（桩与页面同一上下文，location.search 读得到）：
+      //   ?mock=1  演示模式 —— 那支文案以前在整网从没渲染过（meta 桩恒 mock:false）
+      //   ?hist=0  历史没截断 —— 空结果那句「这里只有最近 N 条」的正对照
       return mk(Object.assign({}, META,
-        { has_api_key: hasKey(), mock: false, llm_defaulted: llmDefaulted(),
+        { has_api_key: hasKey(), mock: /[?&]mock=1/.test(location.search),
+          llm_defaulted: llmDefaulted(),
+          history: /[?&]hist=0/.test(location.search)
+            ? { total: 12, limit: 100, truncated: false } : META.history,
           models: publicModels(), active_model: ACTIVE,
           // 一条模型都没有时头部/选择器不该显示一个兜底出来的模型名
           model: MODELS.length ? META.model : "",
@@ -978,6 +1016,30 @@ window.__addCount = 0;
     }
     if (s.indexOf('/api/history/') >= 0) {
       var hid = decodeURIComponent(s.split('/').pop());
+      // 三态里「没有结论」那一档的真实现场：老产物 / 未校验的产物，引擎回的是
+      // **没有 passed 这个键**（app/store.py 明写 None）。见列表桩里的 __nullVerdict。
+      if (window.__nullVerdict && hid === 's6') {
+        var hnv = JSON.parse(JSON.stringify(RESULT));
+        hnv.id = 's6';
+        delete hnv.check.passed;
+        return mk(hnv);
+      }
+      // 另外三档现场（同一套机制：只改 payload，不改判据）：
+      //   __badVerdict 结论=未通过   —— 钉「未通过校验」那格页签**真的**变红
+      //   __tol=N      容差被改小     —— 钉偏差胶囊吃的是报告里的 tolerance_pct 而不是写死的 10
+      //   __noSmell    词表缺失未测   —— 钉「未测」那一档既不绿也不红（三态不许压成二分）
+      if (window.__badVerdict || typeof window.__tol === 'number' || window.__noSmell) {
+        var bp = JSON.parse(JSON.stringify(RESULT));
+        bp.id = hid;
+        if (typeof window.__tol === 'number') bp.check.tolerance_pct = window.__tol;
+        if (window.__noSmell) bp.check.ai_tells = null;
+        if (window.__badVerdict) {
+          bp.check.passed = false;
+          bp.check.blockers = ['偏差超过容差'];
+          bp.check.hard_hits = [{ word: '一定', count: 1, where: '第2段' }];
+        }
+        return mk(bp);
+      }
       // 停止时作业**已经跑完**、但产物读不出来的情形（P2-6）：那时屏幕上只有
       // 版本条、没有正文，绝不能再"产物已保存"（屏幕与承诺相反）。
       if (hid === 'jobrun' && window.__stopRecFail) {
@@ -1520,7 +1582,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   // ── 1a-4) 打开设置时配置读不到（P2-4）────────────────────
   // 修复前是空 catch：设置页会停在 HTML 初始值 / 上一次加载的值 ——
-  // 一个"看起来正常、实际没接上"的状态（与「关于与更新」面板那条同一个病灶）。
+  // 一个"看起来正常、实际没接上"的状态（与「关于我们」面板那条同一个病灶）。
   // 现在必须**说出来**（toast）。
   await evalIn(`window.__cfgFail = true;
     document.getElementById('btn-open-settings').click(); return true;`);
@@ -1730,8 +1792,14 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("首页节奏三档：问候语→卡 24、卡→起手示例 16（下边距只算一份）",
     landing.greetGap === 24 && landing.chipsGap === 16,
     JSON.stringify({ greetGap: landing.greetGap, chipsGap: landing.chipsGap }));
-  check("胶囊 hover 只用一种手法（过渡项只有一列，且就是底色，规范 §2·5.4）",
-    landing.chipTransition.length === 1 && /^background(-color)?$/.test(landing.chipTransition[0]),
+  // 判据量的是**维度**，不是"过渡只许列一项"。§2·5.4 禁的是
+  // 「hover 时又加描边又加阴影又位移」—— 也就是底色之外不许再动用形状/位置/描边。
+  // 而选中态（.src-pill.on 平涂 --ink + 反白字）换的是**底色 + 字色两样**：
+  // 字色不跟着渐变，切换那几帧就是白字压白底（标题闪没一次）。
+  // 那是同一手法（颜色）的第二项，不是第二种手法 —— 所以这里收口到"只许颜色族"。
+  check("胶囊过渡只动颜色族（底色/字色），不许出现位移·阴影·描边（规范 §2·5.4）",
+    landing.chipTransition.length > 0
+      && landing.chipTransition.every(p => /^(background(-color)?|color|fill|stroke)$/.test(p)),
     JSON.stringify(landing.chipTransition));
   check("首页输入区不挂玻璃底（规范 §3：玻璃只给浮在滚动内容上的固定层）",
     landing.glass === "none", landing.glass);
@@ -1940,6 +2008,21 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("生成中「停止」键仍是实心按钮（没被淡化成看不见的灰底）",
     running.btn.stopping && running.btn.img !== "none",
     JSON.stringify(running.btn));
+  // 全局 Esc 是**破坏性**动作（停一条作业、已花的调用不退）。人在「今日选题」里
+  // 按它，原来会停掉一条此刻**看不见**的作业，只留下一句「已停止本次生成」。
+  // 判据：第一下只把人带回那条会话，作业必须还活着（不测第二下，
+  // 后面还要靠这条作业跑到 done）。
+  await evalIn(`window.__ts.gotoView('topics'); return 1;`);
+  await sleep(120);
+  await evalIn(`document.dispatchEvent(new KeyboardEvent('keydown',`
+    + ` { key: 'Escape', bubbles: true })); return 1;`);
+  await sleep(250);
+  const afterEsc = await evalIn(`return { view: document.getElementById('right').dataset.view,
+    busy: window.__ts.busy === true,
+    title: document.getElementById('rh-title').textContent };`);
+  check("生成中在选题视图按 Esc：先带回那条会话、作业没被停（破坏性动作不许隔屏生效）",
+    afterEsc.view === "chat" && afterEsc.busy && afterEsc.title !== "今日选题",
+    JSON.stringify(afterEsc));
   // 生成中的输入区留一张特写：这一态改过配色（停止键从 --fill 淡底改回实心），
   // 只断言不够 —— 断言守的是「有没有渐变」，看不出「跟卡面拉不拉得开」。
   // 必须在这里拍、不能挪到末尾的截图区：那边生成早结束了，这一态就没了。
@@ -1970,7 +2053,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     cards: document.querySelectorAll('.script-card').length,
     metrics: document.querySelectorAll('.res-metric-list .m-chip').length,
     quotaChips: Array.from(document.querySelectorAll('.script-card .quota')).map(e => e.textContent),
-    tabs: Array.from(document.querySelectorAll('.res-tab .rt-t')).map(n => n.textContent),
+    // ⚠ 必须限定在 #chat-stream 里：.res-tabs/.res-tab 是**全站唯一那一族页签**，
+    //   「今日选题」的选题 / 情报源页签条吃的是同一份 CSS（静态 HTML，一直在 DOM 里）。
+    //   不限定就会把它那两颗一起数进这 6 个产物分区。
+    tabs: Array.from(document.querySelectorAll('#chat-stream .res-tab .rt-t')).map(n => n.textContent),
     followups: document.querySelectorAll('.followups .fu-chip').length,
     whyBlock: document.querySelectorAll('.banner.why').length,
     softBanner: !!Array.from(document.querySelectorAll('.banner')).find(b => /待确认/.test(b.textContent)),
@@ -2027,8 +2113,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("产物分区改为 6 个 tab（文案/分镜/人味分/字幕/合规/数据）",
     done.tabs.join(",") === "文案,分镜,人味分,字幕,合规,数据", JSON.stringify(done.tabs));
   check("默认停在「文案」tab（主产物不被分镜挤下去）",
-    (await evalIn(`return document.querySelector('.res-tab.on .rt-t').textContent;`)) === "文案",
-    await evalIn(`return document.querySelector('.res-tab.on .rt-t').textContent;`));
+    (await evalIn(`return document.querySelector('#chat-stream .res-tab.on .rt-t').textContent;`)) === "文案",
+    await evalIn(`return document.querySelector('#chat-stream .res-tab.on .rt-t').textContent;`));
   check("切换 tab 后对应的产物可见",
     (await evalIn(`document.querySelector('[data-tab="subs"].res-tab').click();
       return !document.querySelector('.res-pane[data-tab="subs"]').classList.contains('hidden')
@@ -2041,7 +2127,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   //    造出"产物比视口长、且已滚到底"的真状态，量完必须还原（后面还有断言在跑）。
   const tabGeo = await evalIn(`return (() => {
     const s = document.getElementById('chat-stream');
-    const wrap = document.querySelector('.res-tabs');
+    const wrap = document.querySelector('#chat-stream .res-tabs');
     const pane = document.querySelector('.res-pane.on') || wrap.parentElement;
     const prevMax = s.style.maxHeight, prevH = pane.style.height, prevScroll = s.scrollTop;
     try {
@@ -2297,7 +2383,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     // 改硬数字会让「导航项数」被无意冻结：以后再加个 nav 就是 6 → 7，
     // 这条断言会挂而报一个跟"实际坏了"无关的错。
     // 现在断言：①panes 与 navs 各数 DOM ③数据一致（panes=navs+1）
-    // 2026-09-24 自动更新方案 §4.2：新增第四节「关于」+「关于与更新」导航项，
+    // 2026-09-24 自动更新方案 §4.2：新增第四节「关于」+「关于我们」导航项，
     // panes 4 → 5、navs 3 → 4（沿用上面的规则口径，只改数字与注释）。
     return { open: !s.classList.contains('hidden'),
       covers: Math.round(r.width) === innerWidth && Math.round(r.height) === innerHeight,
@@ -2309,7 +2395,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       aboutPane: !!document.getElementById('pane-about'),
       on: document.querySelectorAll('.stg-nav-item.on').length,
       genVisible: !document.getElementById('pane-gen').classList.contains('hidden') };`);
-  check("设置页铺满窗口，panes=5 / navs=4（packgen 不占导航位；kb / skills 已并入行业包；关于与更新占一位）",
+  check("设置页铺满窗口，panes=5 / navs=4（packgen 不占导航位；kb / skills 已并入行业包；关于我们占一位）",
     stg.open && stg.covers && stg.panes === 5 && stg.navs === 4
       && stg.panes === stg.navs + 1
       && !stg.packgenNav && stg.packgenPane
@@ -3077,7 +3163,7 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   //    重组前 kb / skills 缺 .has-cols（面板窄一截）且 .stg-cols 套在
   //    .page-card 里（带 border-top + padding），看起来是两套布局 ——
   //    这条断言守住「现在只有一套」。
-  //    ⚠ 2026-09-24「关于与更新」(#pane-about) **不进**这个 ids 数组，是刻意的：
+  //    ⚠ 2026-09-24「关于我们」(#pane-about) **不进**这个 ids 数组，是刻意的：
   //       它走 packgen 形态（无 has-cols 的单列限宽卡片，自动更新方案 §4.2），
   //       没有「列表 + 详情」的两栏语义。它的限宽由 #pane-about 的 CSS 守着。
   const layoutMatch = await evalIn(`return (function(){
@@ -3464,14 +3550,14 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   // 2026-09-17 重组后导航只剩三项：生成偏好 / 模型接口（基础设置）、
   // 行业包（行业）。知识库与技能从导航里撤掉 —— 它们本来就是把同一个
   // 行业包的数据切两份看，现在统一由「行业包」面板承载。
-  // 2026-09-24 自动更新方案 §4.2：新增「关于与更新」（关于节）→ 四项。
+  // 2026-09-24 自动更新方案 §4.2：新增「关于我们」（关于节）→ 四项。
   check("设置导航：返回项 → 列表恒定 16px，四项全在且无隐藏项（搜索框已删；packgen 不占导航）",
     Math.abs(stgNavGeo.返回项到列表 - 16) <= 0.6
     && stgNavGeo.列表内上边距 === "0px"
     && stgNavGeo.导航项数 === 4 && stgNavGeo.被隐藏的项 === 0,
     JSON.stringify(stgNavGeo));
 
-  // 「关于与更新」面板（自动更新方案 §4.2，测试项 §10 界面回归）。断两件事：
+  // 「关于我们」面板（自动更新方案 §4.2，测试项 §10 界面回归）。断两件事：
   // ① 结构在：版本行 / 七态状态行 / 检查更新按钮都在，且版本行真的读到了
   //    /api/meta 的版本号（桩里是 0.2.0）—— 不是 HTML 里写死的空壳，
   //    写死的表现是「升级后这里还显示旧版本」。状态行断「元素存在」即可：
@@ -3488,22 +3574,38 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     var q = function (id) { return document.getElementById(id); };
     var shown = function (el) { return !!el && !el.classList.contains('hidden'); };
     var check = q('upd-check'), restart = q('upd-restart');
+    var status = q('upd-status');
     return {
       面板在: !!pane && !pane.classList.contains('hidden'),
+      导航文字: (document.querySelector('.stg-nav-item[data-pane="about"] .nav-t') || {}).textContent,
+      页标题: (pane.querySelector('.page-head-titles h2') || {}).textContent,
       版本行: (q('upd-version') || {}).textContent,
-      状态行: (q('upd-status') || {}).textContent,
+      状态行: (status || {}).textContent,
       检查按钮: shown(check),
+      // 「检查更新」与状态文字**同一行**（行式改造的判据）：按钮在左侧文字列的
+      // 右边，且与那一行的顶边对齐（align-items: flex-start）。
+      // ⚠ 不判"按钮落在文字列的高度区间内"：Chrome 环境没有 IPC，状态行是空串、
+      //   那一列塌得比按钮还矮，那种判据会因为**测试环境**而红，不是实现错。
+      // 改前按钮在卡底 .page-actions 里另起一排：b.left 在文字列之内、
+      // b.top 在列底之下，两个条件都不成立。
+      同行: !!(check && status && status.parentElement) && (function () {
+        var col = status.parentElement.getBoundingClientRect();
+        var b = check.getBoundingClientRect();
+        return b.left >= col.right && Math.abs(b.top - col.top) <= 4;
+      })(),
       重启按钮显形: shown(restart),
       检查按钮高: check ? getComputedStyle(check).height : '',
       重启按钮高: restart ? getComputedStyle(restart).height : '',
       控件高度档: getComputedStyle(document.documentElement)
         .getPropertyValue('--h-sm').trim(),
       面板限宽: pane ? getComputedStyle(pane).maxWidth : '' };`);
-  check("关于与更新：版本行读到 /api/meta、状态行元素与检查按钮在，两颗按钮同高且归 --h-btn-sm 档"
-    + "（非 downloaded 态「立即重启」不显形）",
+  check("关于我们：面板名与导航文字都改到位、版本行读到 /api/meta、检查更新与状态行同一行，"
+    + "两颗按钮同高且归 --h-sm 档（非 downloaded 态「立即重启」不显形）",
     aboutPane.面板在
+      && aboutPane.导航文字 === "关于我们" && aboutPane.页标题 === "关于我们"
       && /TalkScript 0\.2\.0/.test(aboutPane.版本行)
       && aboutPane.状态行 !== undefined
+      && aboutPane.同行 === true
       && aboutPane.检查按钮 && !aboutPane.重启按钮显形
       && aboutPane.检查按钮高 === aboutPane.控件高度档
       && aboutPane.重启按钮高 === aboutPane.控件高度档,
@@ -3534,7 +3636,7 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   const updPaneGeo = await evalIn(`return {
     status: (document.getElementById('upd-status') || {}).textContent,
     calls: window.__updCalls };`);
-  check("「关于与更新」打开面板：idle 常驻文案可达，且走只读 getStatus（不发检查请求）",
+  check("「关于我们」打开面板：idle 常驻文案可达，且走只读 getStatus（不发检查请求）",
     /自动更新已开启/.test(updPaneGeo.status)
       && updPaneGeo.calls.getStatus >= 1 && updPaneGeo.calls.check === 0,
     JSON.stringify(updPaneGeo));
@@ -4696,6 +4798,213 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       && /文案撰写中$/.test(marks.run.aria),
     JSON.stringify([marks.ok.aria, marks.no.aria, marks.run.aria]));
 
+  // ── 校验结论三态：同一块屏幕只许有一种说法（文案线 P0-3 / P1-4）──────
+  // 改前页头与合规页签写的是 `passed === true ? 好 : 坏` 的二分 —— 「引擎没给出结论」
+  // 的产物，页头挂着红色「✗ 需人工确认」、正下方横幅却写着「本次没有校验结论」，
+  // 一屏两话，而用户会照着红的那句去反复重跑。
+  // ⚠ 桩默认**不给**这一档（每条 done 都带 true/false），所以整网从没跑过它：
+  //   这里用 window.__nullVerdict 把 s6 变成本产物，**列表摘要与详情 payload 同时**改，
+  //   只改一边就是桩自己在打架。跑完把先前开着的那条放回去，别影响后面的断言。
+  const nvPrev = await evalIn(`var a = document.querySelector('#session-list .sess-item.active');
+    return a ? a.dataset.id : '';`);
+  await evalIn(`window.__nullVerdict = true; return 1;`);
+  await evalIn(`document.querySelector('#session-list .sess-item[data-id="s1"]').click(); return 1;`);
+  await sleep(500);
+  const nvOk = await evalIn(`return (function () {
+      var rh = document.getElementById('rh-state');
+      var row = document.querySelector('#session-list .sess-item[data-id="s1"]');
+      return { rh: rh ? rh.textContent.trim() : '',
+               ok: rh ? rh.classList.contains('ok') : false,
+               rowAria: row ? row.getAttribute('aria-label') : '' };
+    })();`);
+  check("正向对照：通过那一档在页头与左栏是同一个词",
+    /^已通过校验/.test(nvOk.rh) && nvOk.ok && /已通过校验$/.test(nvOk.rowAria),
+    JSON.stringify(nvOk));
+  await evalIn(`document.querySelector('#session-list .sess-item[data-id="s6"]').click(); return 1;`);
+  await sleep(600);
+  const nv = await evalIn(`return (function () {
+      var rh = document.getElementById('rh-state');
+      var tabs = Array.prototype.slice.call(document.querySelectorAll('.res-tab'));
+      var tab = tabs.filter(function (t) { return /合规/.test(t.textContent); })[0];
+      var ban = Array.prototype.slice.call(document.querySelectorAll('.banner'))
+        .filter(function (b) { return /^没有校验结论/.test(b.textContent.trim()); })[0];
+      var row = document.querySelector('#session-list .sess-item[data-id="s6"]');
+      return { rh: rh ? rh.textContent.trim() : '',
+               rhBad: rh ? rh.classList.contains('bad') : true,
+               tab: tab ? tab.textContent : '', tabBad: tab ? tab.classList.contains('bad') : true,
+               banner: ban ? ban.textContent.slice(0, 24) : '',
+               rowAria: row ? row.getAttribute('aria-label') : '' };
+    })();`);
+  // 「没有结论」不是「结论是坏的」：三处都不许落红（配色也走表里的空档）。
+  check("结论缺失时页头说「没有校验结论」且不落红（改前是二分到 ✗）",
+    nv.rh === "没有校验结论" && nv.rhBad === false, JSON.stringify(nv));
+  check("同一块屏幕上页签与横幅说的是同一句结论（不许一屏两话）",
+    /没有校验结论/.test(nv.tab) && nv.banner.indexOf("没有校验结论") === 0,
+    JSON.stringify({ tab: nv.tab, banner: nv.banner }));
+  check("结论缺失时合规页签不落红", nv.tabBad === false, nv.tab);
+  check("左栏那一行也说没有校验结论（三处一屏，不许两套话）",
+    /已完成 · 没有校验结论$/.test(nv.rowAria), nv.rowAria);
+  await evalIn(`window.__nullVerdict = false; return 1;`);
+  if (nvPrev) {
+    await evalIn(`var r = document.querySelector('#session-list .sess-item[data-id="${nvPrev}"]');
+      if (r) r.click(); return 1;`);
+    await sleep(450);
+  }
+
+  // ── 结论档位要在**屏幕上真看得见**（第 8 轮审查 P1：类有了、CSS 规则没有）──
+  // 上面那组只比过 classList.contains('bad') —— 而 `.res-tab.ok/.bad` 全站没有一条规则，
+  // 于是"不落红"与"落红"在屏幕上长得一模一样：失败不可见，判据也量不到。
+  // 这一组比的是 badge 那格的**计算色**，与 token 解析值对账（不抄 rgb 字面量）。
+  const colOk = await resolvedToken("--ok");
+  const colBad = await resolvedToken("--bad");
+  const colT3 = await resolvedToken("--text-3");
+  const openRec = async (id) => {
+    await evalIn(`var r = document.querySelector('#session-list .sess-item[data-id="${id}"]');
+      if (r) r.click(); return 1;`);
+    await sleep(600);
+  };
+  const readVerdict = async () => evalIn(`return (function () {
+      function grab(name) {
+        var t = Array.prototype.slice.call(document.querySelectorAll('.res-tab'))
+          .filter(function (x) { return x.textContent.indexOf(name) >= 0; })[0];
+        if (!t) return null;
+        var b = t.querySelector('.rt-b');
+        return { cls: t.className, badge: b ? b.textContent.trim() : '',
+                 colour: b ? getComputedStyle(b).color : '' };
+      }
+      var dev = Array.prototype.slice.call(document.querySelectorAll('.res-metric-list .m-chip'))
+        .filter(function (c) { return c.textContent.indexOf('偏差') === 0; })[0];
+      var rh = document.getElementById('rh-state');
+      return { comp: grab('合规'), smell: grab('人味分'),
+               devCls: dev ? dev.className : '', devText: dev ? dev.textContent.trim() : '',
+               rhBad: rh ? rh.classList.contains('bad') : false };
+    })();`);
+  await openRec("s1");                            // 先点名打开 s1：前面的流程可能停在别的记录上
+  const vOk = await readVerdict();               // 通过 + 有容差 + 有人味分
+  check("「已通过校验」那格页签的结论字真的吃 --ok（类有规则、屏幕上看得见）",
+    !!vOk.comp && vOk.comp.colour === colOk && /(^| )ok( |$)/.test(vOk.comp.cls),
+    JSON.stringify({ comp: vOk.comp, 期望ok: colOk }));
+  check("偏差胶囊吃的是报告下发的 tolerance_pct（-3.2% 在容差 10 内 = good）",
+    /\bgood\b/.test(vOk.devCls) && /偏差/.test(vOk.devText), JSON.stringify(vOk));
+
+  await evalIn(`window.__badVerdict = true; return 1;`);
+  await openRec("s1");
+  const vBad = await readVerdict();
+  check("「未通过校验」那格页签真的转红（失败必须可见）",
+    !!vBad.comp && vBad.comp.colour === colBad && vBad.rhBad === true,
+    JSON.stringify({ comp: vBad.comp, 期望bad: colBad, rhBad: vBad.rhBad }));
+
+  await evalIn(`window.__badVerdict = false; window.__noSmell = true; return 1;`);
+  await openRec("s1");
+  const vSmell = await readVerdict();
+  check("人味分「未测」那一档既不绿也不红（三态不许被压成二分）",
+    !!vSmell.smell && vSmell.smell.badge === "未测" && vSmell.smell.colour === colT3
+      && !/\b(ok|bad)\b/.test(vSmell.smell.cls),
+    JSON.stringify({ smell: vSmell.smell, 中性: colT3 }));
+
+  await evalIn(`window.__noSmell = false; window.__tol = 2; return 1;`);
+  await openRec("s1");
+  const vTol = await readVerdict();
+  check("把容差收到 2，偏差 3.2% 立刻改口落 bad（数字不变、只有脸色跟着判据走）",
+    /\bbad\b/.test(vTol.devCls) && vTol.devText === vOk.devText,
+    JSON.stringify({ dev: vTol.devText, cls: vTol.devCls }));
+  await evalIn(`window.__tol = undefined; return 1;`);
+  await openRec("s1");
+  if (nvPrev) await openRec(nvPrev);              // 把屏幕交还给流程原本停着的那条
+
+  // ── 话术表的静态对账（Node 侧，不开浏览器）───────────────────────
+  // 上面那组钉的是「同一块屏幕不许两话」，这一组钉的是「代码里不许有第二套词」：
+  // 有人在任何一处渲染里写回别名，这里就红 —— 不必等到那一屏被跑到才暴露。
+  // ⚠ 必须先剥注释：本仓的病灶说明一律写着旧词（「改前是 ✓ 合格」），不剥就把
+  //   讲病因的人钉死。剥法很粗（整行 // 与 /* */ 两块），只会漏「字符串里恰好有
+  //   空格-斜杠-斜杠-空格」这一种写法，渲染层没有 —— 它宁漏不误红，
+  //   误红那一面由上面那组屏幕对照兜着。
+  const JS_DIR = path.join(REPO_ROOT, "desktop", "renderer", "js");
+  const stripJsComments = (s) => s
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("\n").filter(l => !/^\s*\/\//.test(l)).join("\n")
+    .replace(/ \/\/ [^\n]*/g, "");
+  const ALIAS = ["合格", "已取消", "需人工确认"];
+  const aliasHits = fs.readdirSync(JS_DIR).filter(f => f.endsWith(".js")).flatMap(f => {
+    const src = stripJsComments(fs.readFileSync(path.join(JS_DIR, f), "utf8"));
+    return ALIAS.filter(a => src.includes(a)).map(a => `${f} 里还有「${a}」`);
+  });
+  check("渲染层没有第二套终态话术（合格 / 已取消 / 需人工确认 只许留在注释里）",
+    aliasHits.length === 0, aliasHits.join(" | "));
+  // 正向对照：禁令必须有东西可禁 —— 表里那四个词得真的在（表被清空时上一条会空转）。
+  const wordsSrc = fs.readFileSync(path.join(JS_DIR, "words.js"), "utf8");
+  check("话术表本身带着这四个终态词（缺一条就是上一条空转）",
+    ["已通过校验", "未通过校验", "没有校验结论", "已停止"].every(w => wordsSrc.includes(w)), "");
+  // 节奏列的机器码对账：包新加一个 cadence 而表里没词 → 源表原样印 `biweekly`（P1-6）。
+  const cadCodes = [...new Set(fs.readdirSync(path.join(REPO_ROOT, "packs"))
+    .flatMap(d => {
+      const f = path.join(REPO_ROOT, "packs", d, "pack.yaml");
+      if (!fs.existsSync(f)) return [];
+      return [...fs.readFileSync(f, "utf8").matchAll(/cadence:\s*"?([A-Za-z_]+)"?/g)].map(m => m[1]);
+    }))];
+  check("包用过的每个 cadence 机器码在话术表里都有中文",
+    cadCodes.length > 0 && cadCodes.every(c => new RegExp("\\b" + c + "\\s*:").test(wordsSrc)),
+    cadCodes.join(", "));
+
+  // ── 图例 ⇄ 引擎判据对账（文案线 P1-3 / P3-7 / 契约线 P2-5）──────────
+  // 图例是「卡片那排标记的说明书」，它说的每一条规则都必须在 app/intel.py 真存在、
+  // 且是**同一个数**。以前图例写「50–59 · 要换角度」而代码里"换角度"来自供给 S ≥ 0.7
+  // —— 界面给自己配了一条没人实现的规则；同时卡片把机会分除以 100 印成 0.72，
+  // 与图例的「≥ 60」两套刻度并排（用户无法判断手里这条够不够线）。
+  const intelPy = fs.readFileSync(path.join(REPO_ROOT, "app", "intel.py"), "utf8");
+  const htmlSrc = fs.readFileSync(path.join(REPO_ROOT, "desktop", "renderer", "index.html"), "utf8");
+  const legendBlock = (htmlSrc.match(/<div class="score-legend">([\s\S]*?)<\/div>/) || ["", ""])[1];
+  const oppTh = (intelPy.match(/elif opp >= ([0-9]+)/) || [])[1];
+  const sTh = (intelPy.match(/S is not None and S >= ([0-9.]+)/) || [])[1];
+  check("图例的机会分阈值就是引擎那条判据（写死两个数会红）",
+    !!oppTh && legendBlock.includes(`机会分 ≥ ${oppTh}`),
+    JSON.stringify({ 代码: oppTh, 图例: legendBlock.replace(/\s+/g, " ").slice(0, 60) }));
+  check("图例的红海判据就是引擎那条（供给 S ≥ 0.70，不是机会分的某个区间）",
+    !!sTh && legendBlock.includes(`供给 S ≥ ${sTh}`),
+    JSON.stringify({ 代码: sTh, 图例: legendBlock.replace(/\s+/g, " ").slice(0, 60) }));
+  check("图例不许写代码里没有的规则（那条「50–59 要换角度」就是这么来的）",
+    !/50[–-]59/.test(legendBlock) && !/先放着/.test(legendBlock),
+    legendBlock.replace(/\s+/g, " ").trim().slice(0, 90));
+  // 死出口对账：渲染层不许再读条目级 it.warn —— 引擎只在 flags 里发结论。
+  // 死出口对账：渲染层不许再读条目级 it.warn —— 引擎只在 flags 里发结论。
+  check("条目级 it.warn 这条死出口不复存在（引擎从不发这个键）",
+    !/it\.warn/.test(stripJsComments(fs.readFileSync(path.join(JS_DIR, "topics.js"), "utf8")))
+      && !/\.warn\b/.test(fs.readFileSync(path.join(REPO_ROOT, "app", "intel.py"), "utf8")),
+    "topics.js 还读 it.warn，或 intel.py 开始发条目级 warn —— 两边要一起说清是谁的通道");
+
+  // ── 一名二物与内部黑话（文案线 P1-7 / P1-9）─────────────────────
+  // 面板与导航都叫「行业包」，卸载弹窗却写「技能包」（同一个东西两个名字），
+  // 而 mock 模式在选择器与设置页上直接把内部词 `mock` / 「夹具」印给人看。
+  // 扫的是**剥掉注释之后**的代码 —— 注释里写 docs/技能包系统方案.md 是准确的出处，不算违规。
+  const jsAll = fs.readdirSync(JS_DIR).filter(f => f.endsWith(".js"))
+    .map(f => stripJsComments(fs.readFileSync(path.join(JS_DIR, f), "utf8"))).join("\n");
+  const htmlCode = htmlSrc.replace(/<!--[\s\S]*?-->/g, "");
+  const jargonHits = [["技能包", jsAll + htmlCode], ["mock 模式", jsAll], ["夹具", jsAll]]
+    .filter(([w, where]) => where.includes(w)).map(([w]) => `界面上还有「${w}」`);
+  check("界面不说一名二物与内部黑话（行业包不叫技能包；演示模式不印 mock / 夹具）",
+    jargonHits.length === 0, jargonHits.join(" | "));
+  // 空结果那句「这里只列最近 N 条」判的是**这一屏刚拿到的条数**：
+  // /api/meta 不在轮询路径上（只有开机与设置页动作会取），所以它带的 total 是开机快照 ——
+  // 引用它就会在"删过一条"或"跨过上限"之后说假话（第 8 轮审查 后端 P1）。
+  check("那句截断限定不引用 meta 快照里的总数（meta 不在轮询路径上，total 会过期）",
+    !/history\.total/.test(fs.readFileSync(path.join(JS_DIR, "sessions.js"), "utf8")),
+    "sessions.js 又去读 state.meta.history.total 了");
+  // ── 内部词不印上屏、不替后端宣布状态（第 8 轮审查 界面 P1）──────────
+  // 这三条是"字符串对字符串"的静态禁令：判据要的是**别再把机器码/slug 塞进模板**，
+  // 用 includes 而不是正则，省掉转义事故（本仓踩过三次模板串坑）。
+  const resSrc = stripJsComments(fs.readFileSync(path.join(JS_DIR, "result.js"), "utf8"));
+  const jobsSrc = stripJsComments(fs.readFileSync(path.join(JS_DIR, "jobs.js"), "utf8"));
+  check("文风强度不印机器码（strong/weak 只当判据，上屏走 SEVERITY_LABEL）",
+    !resSrc.includes("${esc(h.severity)}") && resSrc.includes("severityLabel(h.severity)"), "");
+  check("失败详情与导出的 md 都不吐包目录 slug（走 packLabel 显示名）",
+    !jobsSrc.includes('行业包：${failParams.pack || "-"}')
+      && jobsSrc.includes("packLabel(failParams.pack)") && !resSrc.includes("（${r.pack}）"), "");
+  check("局部重写的悬停说明说界面规则，不替后端宣布「作业已释放」",
+    !resSrc.includes("后台作业已释放") && resSrc.includes("只在刚生成的那条上可用"), "");
+
+  // 演示模式与「搜不到 ≠ 没有」那两条判据住在文件末尾，走**真启动**渲染：
+  // 那里解释了为什么不能用 dynamic import 改 state（量到的是另一个模块实例）。
+
   // 行与分组标签必须**同一列**。两行制时副标题从 20px 起、标题从 34px 起，
   // 同一行里两个左边缘 —— 用户报的「边距不统一」有一半是这个。
   // 现在状态点占 16px 图标盒（与分组文件夹盒同宽），标题左边缘 == 标签文字左边缘。
@@ -5088,11 +5397,11 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       && /已中断/.test(legacy.rows.old.aria)
       && !/paused_awaiting_confirmation/.test(legacy.rows.old.tip),
     JSON.stringify(legacy.rows.old));
-  check("已取消的记录不再挂呼吸点（旧点色三元表达式落到 else 的病灶）",
+  check("已停止的记录不再挂呼吸点（旧点色三元表达式落到 else 的病灶）",
     legacy.rows.cancel && /dot no/.test(legacy.rows.cancel.dot)
       && legacy.rows.cancel.anim === "none"
       && legacy.rows.cancel.act === "del"
-      && /已取消/.test(legacy.rows.cancel.aria), JSON.stringify(legacy.rows.cancel));
+      && /已停止/.test(legacy.rows.cancel.aria), JSON.stringify(legacy.rows.cancel));
   check("列表里只剩这类记录时不轮询（修复前每 3 秒空转一次、永不停止）",
     legacy.polls === 0, `3.4 秒内 /api/history 被打了 ${legacy.polls} 次`);
   check("换完列表要还原（后面的断言仍指着桩里那 6 条）",
@@ -6450,6 +6759,52 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       && !/共/.test(stopAllCase.toast) && /可稍后重试/.test(stopAllCase.toast),
     JSON.stringify(stopAllCase));
 
+  // ── 12n·2) 「停止全部」是破坏性动作，点下去先要问一句（流程 P1-1）─────
+  // 删单条记录有确认，一次停 N 条反而没有 —— 而它更不可恢复（token 不退）。
+  // 判据钉的是：**点按钮不发 cancel**（先问），确认层出现；Esc 关掉之后仍然一条没停。
+  // 底下那个真正执行停止的函数由上一条（12n 的 __ts.stopAll()）覆盖，两件事分开钉。
+  const stopConfirm = await evalIn(`return (async () => {
+    window.__ts.newChat();
+    var pad = function(n){ return String(n).padStart(2,'0'); };
+    var d = new Date();
+    var iso = d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate()) + 'T09:00:00';
+    var base = { created_at: iso, pack: 'elevator', platform: '抖音',
+                 duration: null, chars: null, passed: null, error: null };
+    var two = [ Object.assign({}, base, { id:'as1', topic:'要问一句的甲', state:'writing' }),
+                Object.assign({}, base, { id:'as2', topic:'要问一句的乙', state:'writing' }) ];
+    var orig = window.fetch, cancels = 0;
+    window.fetch = function (u, o) {
+      var s = String(u).split('?')[0];
+      if (s.indexOf('/api/history') >= 0) {
+        return Promise.resolve(new Response(JSON.stringify(two),
+          { status:200, headers:{ 'Content-Type':'application/json' } }));
+      }
+      if (s.indexOf('/cancel') >= 0) {
+        cancels++;
+        return Promise.resolve(new Response(JSON.stringify({ state:'cancelled' }),
+          { status:200, headers:{ 'Content-Type':'application/json' } }));
+      }
+      return orig.call(window, u, o);
+    };
+    await window.__ts.loadSessions();
+    document.getElementById('btn-stop-all').click();
+    await new Promise(function (r) { setTimeout(r, 350); });
+    var open = !!document.querySelector('.overlay:not(.hidden), #confirm-overlay:not(.hidden)');
+    var asked = document.body.innerText.indexOf('确认停止这 2 条') >= 0;
+    document.dispatchEvent(new KeyboardEvent('keydown', { key:'Escape', bubbles:true }));
+    await new Promise(function (r) { setTimeout(r, 300); });
+    var afterEsc = cancels;
+    var closed = !document.querySelector('.overlay:not(.hidden), #confirm-overlay:not(.hidden)');
+    window.fetch = orig;
+    await window.__ts.loadSessions();
+    return { open: open, asked: asked, cancels: cancels, afterEsc: afterEsc, closed: closed };
+  })();`);
+  check("点「停止全部」先出确认层、一条都不停（破坏性动作不许一键生效）",
+    stopConfirm.open === true && stopConfirm.asked === true && stopConfirm.cancels === 0,
+    JSON.stringify(stopConfirm));
+  check("确认层用 Esc 能关掉，关掉之后仍然一条都没停",
+    stopConfirm.afterEsc === 0 && stopConfirm.closed === true, JSON.stringify(stopConfirm));
+
   // ── 12o) 建包取消失败后按钮必须收回「取消中…」（P3-10）───────────
   await cdp.send("Page.navigate",
     { url: `http://127.0.0.1:${PORT}/?token=stubtoken&pgcancelfail=1` });
@@ -7016,18 +7371,61 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       paneVisible: pane ? !pane.classList.contains('hidden') : false,
       score: pane ? pane.querySelector('.smell-score .n').textContent.trim() : '',
       hitRows: pane ? pane.querySelectorAll('table tr').length - 1 : 0,
-      saysNotGated: pane ? /不进「合格」判定/.test(pane.textContent) : false,
+      saysNotGated: pane ? /不参与校验结论/.test(pane.textContent) : false,
       phShown: pane ? /占位事实/.test(pane.textContent) : false,
     }; })()`);
   check("人味标记可定位：点正文里的下划线真的切到「人味分」面板",
     smell.tabOn && smell.paneVisible && smell.tabLabel.indexOf("人味分") === 0,
     JSON.stringify(smell));
-  check("人味分面板：分数 + 逐条命中明细 + 明说「不进合格判定」（只报不拦）",
+  check("人味分面板：分数 + 逐条命中明细 + 明说「不参与校验结论」（只报不拦）",
     smell.score === "88" && smell.hitRows === 2 && smell.saysNotGated && smell.phShown,
     JSON.stringify({ score: smell.score, rows: smell.hitRows,
                      notGated: smell.saysNotGated, ph: smell.phShown }));
 
   await SECTIONS.topics({ evalIn, sleep, check });
+
+  // ── 演示模式与历史截断：走**真启动**渲染（流程线 P2-4 / 文案线 P1-9）──
+  // 为什么不用 dynamic import 改 state 来量这两支：那样拿到的是**另一个模块实例** ——
+  // 实测桩明明回过 meta，而 `import('/js/store.js')` 里的 `state.meta` 还是初值 null，
+  // 于是"改了再渲染"改的是一份没人用的状态。走 URL 开关 + 重新加载才叫覆盖这条分支。
+  const truncOn = await evalIn(`return (async function () {
+      var box = document.getElementById('sess-search');
+      box.value = '这条一定搜不到的题名';
+      box.dispatchEvent(new Event('input', { bubbles: true }));
+      await new Promise(function (r) { setTimeout(r, 200); });
+      var n = document.querySelector('.sess-empty');
+      return n ? n.textContent : '';
+    })();`);
+  check("列表已到上界时空结果要说清「这里只列最近 5 条」（搜不到 ≠ 没有）",
+    /这里只列最近 5 条/.test(truncOn), truncOn);
+
+  await cdp.send("Page.navigate",
+    { url: `http://127.0.0.1:${PORT}/?token=stubtoken&mock=1&hist=0` });
+  await sleep(1900);
+  const demo = await evalIn(`return (async function () {
+      var btn = document.querySelector('#model-pick .select-btn');
+      var sel = document.getElementById('p-model');
+      var box = document.getElementById('sess-search');
+      box.value = '这条一定搜不到的题名';
+      box.dispatchEvent(new Event('input', { bubbles: true }));
+      await new Promise(function (r) { setTimeout(r, 200); });
+      var n = document.querySelector('.sess-empty');
+      return { pick: btn ? btn.textContent.trim() : '', title: sel ? sel.title : '',
+               empty: n ? n.textContent : '' };
+    })();`);
+  check("演示模式那一支真的经启动渲染出来，且不印内部黑话（选择器上只有中文）",
+    demo.pick === "演示模式" && !/[A-Za-z]{3,}/.test(demo.pick), JSON.stringify(demo));
+  check("悬停说明跟着状态走：演示模式不说「当前模型 / 切换后对后续生成生效」",
+    /^演示模式：不调用模型/.test(demo.title) && !/切换后对后续生成生效/.test(demo.title),
+    demo.title);
+  check("正对照：没到上界时那半句必须消失，且不引用会过期的总数",
+    /没有匹配/.test(demo.empty) && demo.empty.indexOf("只列最近") < 0
+      && demo.empty.indexOf("共 ") < 0, demo.empty);
+
+  // 收尾回到默认页：这一组之后没有别的断言，但"量完把环境还原"是习惯，
+  // 也是下一次在这里追加断言时不会踩到的前提。
+  await cdp.send("Page.navigate", { url: `http://127.0.0.1:${PORT}/?token=stubtoken` });
+  await sleep(1500);
 
 
   // ── 输出 ─────────────────────────────────────────────────

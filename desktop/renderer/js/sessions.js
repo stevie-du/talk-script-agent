@@ -21,9 +21,10 @@
 import { $, el, esc, fmtClock, fmtStamp, dayGroupKey, toast, bindOnce } from "./util.js";
 import { api } from "./api.js";
 import { state, setResult, detachJob } from "./store.js";
-import { setLeftFolded, syncBusyAffordance } from "./ui.js";
+import { setLeftFolded, syncBusyAffordance, gotoView } from "./ui.js";
 import { attach, openRecord } from "./jobs.js";
-import { STATE_LABEL, BUSY_STATES } from "./progress.js";
+import { BUSY_STATES } from "./progress.js";
+import { STATE_LABEL, VERDICT, verdictKey } from "./words.js";
 import { appConfirm } from "./overlays.js";
 
 const index = new Map();      // id -> 该行最近一次数据（委托 handler 从这里取，闭包不会过期）
@@ -170,7 +171,15 @@ function paint(items) {
     list.innerHTML = "";
     // ⚠ query 是用户输入，el() 的第三参数走 innerHTML —— 不 esc 就是 XSS：
     //   往搜索框粘 <img src=x onerror=...> 即执行（五路审查 P0-2）。
-    list.appendChild(el("p", "hint sess-empty", `没有匹配「${esc(query)}」的会话`));
+    // 「搜不到」不等于「没有」：列表是**截断**的，超出的部分从没进过这一屏。
+    // 是否截断用**刚拿到的条数**判，不引用 /api/meta 的 history（含 total）——
+    // meta 只在开机与设置页动作时取，删一条或跨过上界后那个快照就是假的
+    // （第 8 轮审查 后端 P1：那句「共 N 条」会说谎）。宁可只说"只列最近 N 条"，
+    // 也不报一个可能过期的总数。
+    const cap = (state.meta && state.meta.history && state.meta.history.limit) || 0;
+    const atCap = cap > 0 && (items || []).length >= cap;
+    list.appendChild(el("p", "hint sess-empty",
+      `没有匹配「${esc(query)}」的会话${atCap ? `（这里只列最近 ${cap} 条）` : ""}`));
     return;
   }
   items = shown;
@@ -304,7 +313,17 @@ function stateText(it, st) {
   // 幽灵失败条目（job_dir 没建出来、store 无记录）：详情端点回的是内存快照，
   // 重启后整条消失 —— 如实说，别让用户以为这是一条能找回产物的记录（P3-2）。
   if (it.ghost) return "失败 · 未落盘（重启后消失）";
-  if (st === "done") return it.passed === false ? "未通过校验" : "已通过校验";
+  if (st === "done") {
+    // 三态词全部取自话术表 words.js：左栏这一行与产物页头是同一件事的两个入口，
+    // 各说一套（「已通过校验」/「✓ 合格」）就要用户去猜这两个词是不是两个结论。
+    // `passed` 缺失 = **没测出来**（旧记录、check 整块不在、只有 job.json 的摘要 ——
+    // `app/store.py` 就明写 `"passed": None`）。改前这里二分：不是 false 就叫
+    // 「已通过校验」，而行上画的却是一颗红点（`it.passed` 为假就落 "no"）——
+    // 一句话与一个记号互相打脸，而读屏用户听到的是"已通过"。
+    const k = verdictKey(it.passed);
+    // 「没有结论」那一档要补「已完成」：左栏只写结论词会被读成「这条没跑完」。
+    return k === "none" ? `${STATE_LABEL.done} · ${VERDICT.none.word}` : VERDICT[k].word;
+  }
   return STATE_LABEL[st] || "已中断";
 }
 
@@ -328,14 +347,18 @@ function updateRow(row, it) {
   // 状态点 = **异常记号**：正常完成的记录不画点（.dot.ok 整格不可见，
   // 但仍占 14px 图标盒，标题左边缘不动）。三档：
   //   ok  = 无记号（默认状态不该每行喊一遍）
-  //   no  = 红点（失败 / 完成但校验未通过 / 已中断）
+  //   no  = 红点（失败 / 完成但**明确**校验未通过 / 已中断）
   //   run = 灰点呼吸（真在跑）
+  // ⚠ `passed` 为 null（没测出来）**不画红点**：红点的语义是"这条有问题"，
+  //   而"引擎没给出结论"不是"结论是坏的" —— 那一档由行上的文案说
+  //   （「已完成 · 没有校验结论」）。原来写的是 `it.passed`，null 与 false
+  //   同形，于是行上挂着红点、aria 却念"已通过校验"。
   // ⚠ 呼吸只给 `BUSY_STATES` 里的状态。此前写的是
   //   `st === "done" ? … : st === "failed" ? "no" : "run"` —— 落到 else 的
   //   除了真正在跑的，还有 **cancelled** 与一切认不出来的旧枚举值，
   //   于是「已取消」的记录挂着一颗永远在呼吸的点，读成「还活着」。
   const dotCls = BUSY_STATES.has(st) ? "run"
-    : (st === "done" && it.passed) ? "ok" : "no";
+    : (st === "done" && it.passed !== false) ? "ok" : "no";
   row.querySelector(".dot").className = "dot " + dotCls;
   const aria = stateText(it, st);
   row.setAttribute("aria-label", `${it.topic || "未命名"}，${aria}`);
@@ -446,6 +469,11 @@ export const bindSessionList = bindOnce(function bindSessionList() {
     // 界面上只留下一条 3.5 秒的「无法回到这次生成」，jobs.js 里那张
     // 「这次失败了 · 用同样参数重来」的卡片从此没人能画出来（死代码）。
     // 现在：在跑的（含排队）才值得接轮询，其余一律回读落盘的记录。
+    // ⚠ 先切回会话视图：头部现在**按视图渲染**（head.js），
+    //   人在「今日选题」里点一条会话时，若不切视图，看到的仍是选题那一面
+    //   —— 而修复前这里也不是没有症状，只是症状换成"顶部标题变了、内容没变"。
+    //   点会话行的意图就是"读这条会话"，切视图应该由这一次点击负责。
+    gotoView("chat");
     BUSY_STATES.has(it.state || "") ? attach(it.id) : openRecord(it.id);
   };
   list.addEventListener("click", ev => {

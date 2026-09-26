@@ -176,11 +176,26 @@ class ArtifactStore:
                     return None
         return None
 
-    def history(self, limit: int = 100) -> list[dict]:
+    #: 左栏一次最多取多少条已结束作业。**这个数只有这里一份**：
+    #: 以前 `history(limit=100)` 的默认值与 `server.py` 里那句 `history(limit=100)`
+    #: 各写一遍，界面要说「只翻了最近 N 条」时就没有可信的 N 可引用（审查流程线 P2-4）。
+    HISTORY_LIMIT = 100
+
+    def history(self, limit: int | None = None) -> list[dict]:
         """已结束作业的摘要列表，新的在前。只读索引，不做全量 JSON 解析。"""
         idx = self._read_index_file()
         items = sorted(idx.values(), key=lambda x: x.get("created_at", ""), reverse=True)
-        return items[:limit]
+        return items[:self.HISTORY_LIMIT if limit is None else limit]
+
+    def history_stats(self) -> dict:
+        """界面上的「共 N 条 / 只翻了最近 M 条」要的是这一份，不是 `len(items)`。
+
+        为什么必须带出去：搜索框在**已经截断**的 100 条里找不到的时候，
+        说「没有这条记录」是假的 —— 它可能就在第 101 条。
+        """
+        total = len(self._read_index_file())
+        return {"total": total, "limit": self.HISTORY_LIMIT,
+                "truncated": total > self.HISTORY_LIMIT}
 
     # ── 删除 ────────────────────────────────────────────────
     def delete(self, jid: str) -> str:
@@ -392,10 +407,23 @@ def render_script_md(result: dict) -> str:
         lines.append(s["text"])
         lines.append("")
     ch = result["check"]
+    # 校验结论三态与界面**同一份词**（desktop/renderer/js/words.js 的 VERDICT）。
+    # Python 与 JS 共享不了代码，所以由 tests/test_job_state_vocabulary_consistency.py
+    # 读两个文件对账 —— 只改一边就红，不靠"记得改两处"。
+    # ⚠ 这里以前是二分 `'✅ 合格' if ch['passed'] else '❌ ' + blockers`：`passed` 为 None
+    #   （旧产物 / 没跑校验）落到 else，导出的 md 里印着一行光秃秃的「❌ 」（blockers 是空的），
+    #   而屏幕上说的是「没有校验结论」—— 看到的与拿走的又分成两份。
+    passed = ch.get("passed")
+    blockers = ch.get("blockers") or []
+    if passed is True:
+        verdict = "✅ 已通过校验"
+    elif passed is False:
+        verdict = "❌ 未通过校验" + ("：" + "；".join(blockers) if blockers else "")
+    else:
+        verdict = "没有校验结论"
     lines += ["---",
               f"字数 {ch['chars_total']}/{ch.get('target_total') or '-'} 字 · "
-              f"预估 {ch['estimated_seconds']}s · 偏差 {ch['deviation_pct']:+.1f}% · "
-              f"{'✅ 合格' if ch['passed'] else '❌ ' + '；'.join(ch['blockers'])}", ""]
+              f"预估 {ch['estimated_seconds']}s · 偏差 {ch['deviation_pct']:+.1f}% · {verdict}", ""]
     if result.get("placeholders"):
         lines += ["> 含占位事实：" + "、".join(result["placeholders"]) + "，请补充后再发布。", ""]
     if result.get("quota_degraded"):
@@ -408,12 +436,12 @@ def render_script_md(result: dict) -> str:
     # 人味分（`app/ai_tells.py`）：**只在界面上露等于导出后又变回不可见** ——
     # 与上面那条 quota_degraded 是同一条规矩（md 是最终交付物）。
     # ⚠ `ai_tells` 落 null = 这个包没配词表、**本次没测**，与"测了、很好"是两件事，
-    #   所以这里只在非 null 时输出，且明说"不进合格判定"（否则会被读成不合格）。
+    #   所以这里只在非 null 时输出，且明说"不参与校验结论"（否则会被读成未通过）。
     ai = ch.get("ai_tells") or {}
     if ai:
         lines += [f"> 人味分 {ai.get('score', '-')}/100"
                   f"（strong {ai.get('strong', 0)} 条 · weak {ai.get('weak', 0)} 条）"
-                  " —— 不进合格判定，只是「念出来像不像人」的提示。", ""]
+                  " —— 不参与校验结论，只是「念出来像不像人」的提示。", ""]
         for h in (ai.get("hits") or [])[:8]:
             lines.append(f"> - [{h.get('severity', '')}] {h.get('id', '')}"
                          f"（{h.get('where', '')}，{h.get('count', 0)} 处）：{h.get('detail', '')}")
@@ -432,7 +460,16 @@ def render_script_md(result: dict) -> str:
                          f"| {shot.get('subtitle', '')} | {shot.get('sfx', '')} "
                          f"| {shot.get('note', '')} |")
         lines.append("")
+    # 命中明细要**排给人读**：以前直接把列表塞进 f-string，交付物里出现的是
+    # `- 硬禁用词：[{'word': '补贴', 'count': 2}]` —— Python 的 repr 进了别人的笔记
+    # （盘上 102 份产物恰好 hard_hits 全空，所以这条从没暴露过）。
+    def _hits(key: str) -> str:
+        rows = ch.get(key) or []
+        return "、".join(
+            f"{h.get('word', '?')}×{h.get('count', 1)}"
+            for h in rows if isinstance(h, dict)) or "无"
+
     lines += ["", "## 合规检查", "",
-              f"- 硬禁用词：{ch['hard_hits'] or '无'}",
-              f"- 待确认：{ch['soft_hits'] or '无'}（语境正常即可放行）"]
+              f"- 硬禁用词：{_hits('hard_hits')}",
+              f"- 待确认：{_hits('soft_hits')}（语境正常即可放行）"]
     return "\n".join(lines)
