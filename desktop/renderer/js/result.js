@@ -45,20 +45,32 @@ export function setHead(title, sub, stateText, cls) {
 
 // ── 主入口 ──────────────────────────────────────────────────
 /** opts: { rwOk, onRewrite, onRerun, onRevary, onEdit, jumpToPlaceholder } */
+/** 合规结论的**唯一**读取口径。
+ *
+ *  ⚠ 以前散着三种写法：`ch.passed ?? true`（缺失当**合格**）、
+ *  `ch.passed ? …`（缺失当**不合格**）、`ch.passed != null ? …`（缺失当"没这条"）——
+ *  同一份数据在同一个窗口里能同时给出「✓ 合格」与「❌ 不合格」。
+ *  缺失**不是**任何一方的结论，是「没测出来」：这里返回 `null`，
+ *  各处按自己的语义渲染（头部中性、合规表明说"未测"）。
+ */
+function passState(ch) {
+  return typeof ch?.passed === "boolean" ? ch.passed : null;
+}
+
 export function renderResult(r, body, opts = {}) {
   body.innerHTML = "";
   const ch = r.check || {};
   const dev = ch.deviation_pct ?? 0;
   const hardN = (ch.hard_hits || []).reduce((a, h) => a + h.count, 0);
-  const passed = ch.passed ?? true;
+  const passed = passState(ch);
 
   setHead(
     r.params?.topic || "生成结果",
     // 用显示名而不是 slug：左栏早就显示「电梯」，这里却吐 `elevator` ——
     // 同一个包在同一个窗口的两处叫法不一致，用户会以为是两个东西。
     `${packLabel(r.pack)} · ${r.params?.duration ?? "-"}s · ${r.params?.platform || ""}`,
-    passed && hardN === 0 ? "✓ 合格" : `✗ ${hardN ? hardN + " 处硬伤" : "需人工确认"}`,
-    passed && hardN === 0 ? "ok" : "bad"
+    passed === true && hardN === 0 ? "✓ 合格" : `✗ ${hardN ? hardN + " 处硬伤" : "需人工确认"}`,
+    passed === true && hardN === 0 ? "ok" : "bad"
   );
 
   body.appendChild(renderHeader(r, ch, dev, hardN, opts));
@@ -113,11 +125,11 @@ function renderBanners(r, ch, opts) {
         + (rep.chars_total ? `，${rep.chars_total} 字` : "");
     }).join("\n");
     items.push(`<details class="banner info why">
-        <summary>首轮${esc(why)}，已自动回炉 ${revs.length} 轮${ch.passed ? "并修正为合格版本" : "后仍未达标"} —— 为什么？</summary>
+        <summary>首轮${esc(why)}，已自动回炉 ${revs.length} 轮${passState(ch) === true ? "并修正为合格版本" : "后仍未达标"} —— 为什么？</summary>
         <pre class="why-body">${esc(detail)}</pre>
       </details>`);
   }
-  if (!(ch.passed ?? true)) {
+  if (passState(ch) !== true) {
     items.push(`<div class="banner warn">⛔ ${esc((ch.blockers || []).join("；"))}——已达回炉上限，可点「重跑」或按下方建议调整参数</div>`);
   }
   if ((r.placeholders || []).length) {
@@ -152,6 +164,20 @@ function renderBanners(r, ch, opts) {
   return wrap;
 }
 
+/** 人味分的**唯一**读取口径（tab 与面板都用它）。
+ *
+ *  ⚠ 以前是两份：tab 用 `score ?? 100`（缺分当**满分** → 绿），面板用
+ *  `Number(score ?? 0)`（缺分当 **0 分** → 红）—— 同一份数据在同一个窗口里
+ *  给出**相反**的结论（标签绿、点进去「0 / 100」）。
+ *  缺失既不是满分也不是 0 分，是「没测出来」：这里返回 `null`，
+ *  两处都按"未测"渲染（tab 不给 ok、面板显示 —）。
+ */
+function smellScore(a) {
+  if (!a) return null;                       // 整个 ai_tells 缺失 = 没测
+  const v = a.score;
+  return (typeof v === "number" && Number.isFinite(v)) ? v : null;
+}
+
 /** 人味分面板（§2.7 ③ 的落点）。
 
  *  正文里那条下划线负责「**可定位**」，这一屏负责「可命名」与「可计数」——
@@ -171,7 +197,7 @@ function renderSmell(r) {
       （报告里 <code>ai_tells</code> 落 null，而不是 100 分）。</p>`;
     return wrap;
   }
-  const score = Number(a.score ?? 0);
+  const score = smellScore(a);
   const hits = a.hits || [];
   const ph = a.placeholders || {};
   const rows = hits.map(h => `<tr>
@@ -184,13 +210,13 @@ function renderSmell(r) {
   wrap.innerHTML = `
     <div class="page-card">
       <div class="res-top"><b class="card-title">人味分</b>
-        <span class="m-chip ${score >= 90 ? "good" : "bad"}">${score} / 100</span>
+        <span class="m-chip ${score === null ? "" : (score >= 90 ? "good" : "bad")}">${score === null ? "—" : score} / 100</span>
         <span class="m-chip">${hits.filter(h => h.severity === "strong").length} 条 strong · ${hits.filter(h => h.severity === "weak").length} 条 weak</span>
       </div>
       <p class="hint">越高越像人说话。**这一项不进「合格」判定**（只报不拦）——
         文风是提示，不是门槛。扣分口径：strong 每条 −12、weak 每条 −4。</p>
       <div class="smell-score">
-        <span class="n">${score}</span><span class="u">/ 100</span>
+        <span class="n">${score === null ? "—" : score}</span><span class="u">/ 100</span>
         <span class="score-legend">
           <span><i class="hi"></i>≥ 90</span><span><i class="mid"></i>50–89</span><span><i></i>&lt; 50</span>
         </span>
@@ -250,7 +276,7 @@ function renderTempo(r) {
   const hook = byType("hook"), point = byType("point"), cta = byType("cta");
   const pct = (d) => Math.round(d / span * 100);
   const bar = rows.map(x =>
-    `<i class="${x.type}${x.over ? " over" : ""}" data-w="${Math.round(x.dur / span * 100)}"></i>`).join("");
+    `<i class="${esc(x.type)}${x.over ? " over" : ""}" data-w="${Math.round(x.dur / span * 100)}"></i>`).join("");
   const over = rows.filter(x => x.over).length;
   return `<div class="page-card">
     <div class="res-top"><b class="card-title">节奏</b>
@@ -316,11 +342,15 @@ function renderScriptPane(r, opts) {
       bar.querySelectorAll(".alt-tab").forEach(b => b.classList.remove("on"));
       btn.classList.add("on");
     };
-    const mainBtn = el("button", "alt-tab on", "主稿", { type: "button" });
+    // ⚠ el() 只收 (tag, cls, html) 三个参：原来这两处还传了 `{ type: "button" }`
+    // 第四参，被静默忽略（el 没有 attrs 形参）。全仓没有 <form>，button 默认
+    // 类型本就是 button，不补也不会有提交副作用 —— 补 el() 的 attrs 支持是
+    // 给不存在的需求加参数，删掉这个假参数即可。
+    const mainBtn = el("button", "alt-tab on", "主稿");
     mainBtn.addEventListener("click", () => swap(mainBtn, -1));
     bar.appendChild(mainBtn);
     alts.forEach((a, i) => {
-      const b = el("button", "alt-tab", `候选 ${i + 1}`, { type: "button" });
+      const b = el("button", "alt-tab", `候选 ${i + 1}`);
       b.addEventListener("click", () => swap(b, i));
       bar.appendChild(b);
     });
@@ -362,7 +392,7 @@ function renderSections(r, opts) {
         + `${marks.length} 处人味标记</span>` : "";
     card.innerHTML = `
       <div class="card-head">
-        <span class="seg-tag ${s.type}">${esc(label)}</span>
+        <span class="seg-tag ${esc(s.type)}">${esc(label)}</span>
         ${quota}
         ${rateChip}
         <span class="meta">${tm ? sec(tm.start) + "–" + sec(tm.end) : ""}${tm ? " · " : ""}字幕：${esc(s.subtitle || "—")}</span>
@@ -409,7 +439,7 @@ function renderSections(r, opts) {
     绑的单段重写 / 导出按钮在切回时会失效。
 */
 function renderResultTabs(r, ch, hardN, opts) {
-  const complyOk = (ch.passed ?? true) && hardN === 0;
+  const complyOk = passState(ch) === true && hardN === 0;
   const logs = r.logs || [];
 
   const defs = [
@@ -419,8 +449,10 @@ function renderResultTabs(r, ch, hardN, opts) {
       render: () => renderStoryboard(r),
       hide: !(r.storyboard || []).length },
     { id: "smell", label: "人味分",
-      cls: (r.check?.ai_tells?.score ?? 100) >= 90 ? "ok" : "bad",
-      badge: r.check?.ai_tells ? String(r.check.ai_tells.score ?? "-") : "未测",
+      // ⚠ 与面板同一个读取口径（`smellScore`）：缺失**不许**当成满分 ——
+      //   那会让标签显示绿、点进去却是「0 / 100」。
+      cls: (smellScore(r.check?.ai_tells) ?? -1) >= 90 ? "ok" : "bad",
+      badge: r.check?.ai_tells ? (smellScore(r.check.ai_tells) ?? "-") : "未测",
       render: () => renderSmell(r) },
     { id: "subs", label: "字幕", badge: "",
       render: () => renderSubtitlePane(r) },
@@ -577,7 +609,11 @@ function renderFollowups(r, opts) {
     b.onclick = () => {
       const c = chips[Number(b.dataset.i)];
       if (c.act === "rewrite") {
-        const card = box.parentElement.querySelectorAll(".script-card .rw-feedback")[0];
+        // 卡片与 r.sections 同序（renderSections 按下标逐段建卡）：用 c.value
+        // （该段的绝对下标）定位。曾经恒取 [0]，「重写『要点1』」打开的是
+        // 开场钩子的输入框，value 算了没人接 —— 提交后重写并替换的是钩子段（P2-7）。
+        const card = box.parentElement
+          .querySelectorAll(".script-card .rw-feedback")[c.value];
         card?.closest(".card-foot")?.classList.add("editing");
         card?.focus();
         return;
@@ -618,8 +654,10 @@ export function renderCompliance(r) {
     ["待确认（语境相关）", (ch.soft_hits || []).length
       ? ch.soft_hits.map(h => `${esc(h.word)}×${h.count}`).join("、") : `<span class="ok">✅ 无</span>`],
     ["字数与时长", `${ch.chars_total ?? "-"}/${ch.target_total ?? "-"} 字 · 偏差 ${dev > 0 ? "+" : ""}${dev}% → `
-      + (ch.passed ? `<span class="ok">✅ 合格</span>`
-        : `<span class="bad">❌ ${esc((ch.blockers || []).join("；"))}</span>`)],
+      + (passState(ch) === true ? `<span class="ok">✅ 合格</span>`
+        : passState(ch) === false
+          ? `<span class="bad">❌ ${esc((ch.blockers || []).join("；"))}</span>`
+          : `<span class="hint">未测</span>`)],
     ["占位事实", (r.placeholders || []).length
       ? `⚠ ${r.placeholders.map(esc).join("、")}` : `<span class="ok">✅ 无</span>`],
     ["回炉/重写记录", (r.revisions || []).length
@@ -729,7 +767,8 @@ export function resultMarkdown(r) {
       ? `字数 ${ch.chars_total}${ch.target_total != null ? "/" + ch.target_total : ""} 字` : "",
     ch.estimated_seconds != null ? `预估 ${ch.estimated_seconds}s` : "",
     ch.deviation_pct != null ? `偏差 ${ch.deviation_pct}%` : "",
-    ch.passed != null ? (ch.passed ? "合格" : (ch.blockers || []).join("；")) : "",
+    passState(ch) !== null
+      ? (passState(ch) ? "合格" : (ch.blockers || []).join("；")) : "",
   ].filter(Boolean);
   if (stats.length) lines.push("---", stats.join(" · "));
   if (r.placeholders?.length) lines.push("", `> 占位事实：${r.placeholders.join("、")}`);

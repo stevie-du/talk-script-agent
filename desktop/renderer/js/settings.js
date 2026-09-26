@@ -8,12 +8,17 @@
 import { $, $$, el, esc, toast, bindOnce } from "./util.js";
 import { api } from "./api.js";
 import { state, emit } from "./store.js";
-import { closeOverlays, openOverlay, appConfirm } from "./overlays.js";
+import { closeOverlays, appConfirm } from "./overlays.js";
 // ui.js 与 settings.js 互相引用，但引用的都是**函数声明**（会被提升），
 // 所以循环依赖在调用时已解析完毕，安全。
-import { fillPackSelect, closeOpenSelectMenus } from "./ui.js";
+import { applyPackSwitch, fillPackSelect, closeOpenSelectMenus } from "./ui.js";
+// 「关于与更新」面板。只在这里 import 两个函数（refreshAbout / bindAbout）——
+// about.js 自己不 import settings.js，没有循环依赖。settings.js 被 main.js
+// 的 import 树覆盖，about.js 随之被覆盖；main.js 里那条显式 `import "./about.js"`
+// 是给读代码的人看的（方案 §7 必改项 3），不是加载的前提。
+import { refreshAbout, bindAbout } from "./about.js";
 
-const PANES = ["gen", "packinfo", "packgen", "llm"];
+const PANES = ["gen", "packinfo", "packgen", "llm", "about"];
 // 2026-09-17：「知识 / 技能」两个独立面板已并入「行业包」面板，
 // PANES 去掉 "kb" / "skills"。openPackInfo 是行业包面板右列的渲染函数，
 // 进 packinfo 时自动加载；panegen 的 [新建] 不影响。
@@ -21,7 +26,7 @@ const PANES = ["gen", "packinfo", "packgen", "llm"];
 // packgen 不在左导航里（动作不是资源），但它需要让「行业包」导航高亮，
 // 读作「你在行业包这个资源下，进了它的子动作」。
 // map: pane → 应高亮的 nav item data-pane（默认就是自身）
-const NAV_OF_PANE = { packgen: "packinfo" };
+const NAV_OF_PANE = { packgen: "packinfo", about: "about" };
 // packgen 的来源面板：gen 的 [新建] 按钮 vs packinfo headbar 的 [新建]，
 // 决定了「返回」按钮回到哪里。设成模块状态是因为 packgen 同一会话内
 // 可能从两个入口先后进，记录最后一次的来源。
@@ -138,7 +143,15 @@ export function openSettings(pane) {
   settingsOpener = document.activeElement;
   $("settings-screen").classList.remove("hidden");
   setPane(PANES.includes(pane) ? pane : state.settingsPane);
-  preloadSettings().catch(() => {});
+  // 失败必须可见：以前是空 catch，设置页会停在 HTML 初始值 / 上一次加载的值 ——
+  // 一个"看起来正常、实际没接上"的状态（与「关于与更新」面板那条同一个病灶）。
+  // 用 toast 而不是常驻行：下次加载成功会自己刷新，常驻行反而要额外管生命周期。
+  // 失败必须可见：以前是空 catch，设置页会停在 HTML 初始值 / 上一次加载的值 ——
+  // 一个"看起来正常、实际没接上"的状态（与「关于与更新」面板那条同一个病灶）。
+  // 用 toast 而不是常驻行：下次加载成功会自己刷新，常驻行反而要额外管生命周期。
+  preloadSettings().catch((e) => {
+    toast("设置没读到（显示的是默认值）：" + (e && e.message ? e.message : e), 4500);
+  });
   // 焦点必须在 setPane **之后**送：面板是谁决定了哪些控件可见。
   focusIntoSettings();
   return Promise.resolve();
@@ -185,11 +198,18 @@ export function setPane(pane) {
   const stgMain = $("settings-screen")?.querySelector(".stg-main");
   if (stgMain) stgMain.scrollTop = 0;
   state.settingsPane = pane;
-  emit("pane", pane);
+  // 原来这里有一句 `emit("pane", pane)`：没有任何地方 on("pane")，是死代码。
+  // 切面板的联动（packinfo 重拉 / llm 定位）都写在下面的 if 里，走事件反而绕。
   // 行业包详情每次进入都重拉：包可能被切换过，文件清单与草稿角标也可能变了
   if (pane === "packinfo") {
     renderPackList();
     openPackInfo().catch(e => toast("读取失败：" + e.message, 3500));
+  } else if (pane === "about") {
+    // 进入「关于与更新」：把当前状态补画一遍。状态是主进程**推**的，而推送只发生
+    // 在状态变化的那个瞬间 —— 更新在用户打开面板之前就已下载完时，没有新事件，
+    // 不补画面板就停在 HTML 里的「尚未检查更新」，而真相是「已下载完成」，
+    // 「立即重启」按钮也不见（用户会以为没这功能）。
+    refreshAbout();
   } else if (pane === "llm") {
     // 进入模型面板：右列默认停在「当前启用」那条 —— 空着的话第一眼看到的是
     // 一张空表单，会以为还没配模型。
@@ -484,24 +504,8 @@ async function removeModel(m) {
   } catch (e) { toast("删除失败：" + e.message, 3500); }
 }
 
-async function testModel(m) {
-  const name = m.label || m.model;
-  $("st-status").textContent = `正在测试「${name}」…`;
-  try {
-    // 带 model_id：编辑一条**非当前**模型时，不带 id 会错拿当前那条的 Key 去测 ——
-    // 测出来的结果与用户以为的不是一回事，而界面会照常显示「连接正常」。
-    const r = await api.testConfig({ model_id: m.id });
-    setModelWarnings(r && r.warnings);
-    $("st-status").textContent = r.ok
-      ? `「${name}」连接正常 · ${r.model}${r.detail ? " · " + r.detail : ""}`
-      : `「${name}」连接失败：${r.detail}`;
-    toast(r.ok ? "连接正常" : "连接失败，请看下方提示", r.ok ? 2000 : 4000);
-  } catch (e) {
-    $("st-status").textContent = "测试失败：" + e.message;
-    toast("测试失败：" + e.message, 4000);
-  }
-}
-
+// 旧版「测试」按钮的 testModel(m) 已随三列化模型列表删除（2026-09-26）：
+// 列表条目上不再有独立测试按钮，实际入口是 testModelDialog（对话框里的「测试」）。
 // ── 添加 / 编辑模型表单 ─────────────────────────────────────
 
 let editingId = "";
@@ -642,14 +646,16 @@ async function saveModelDialog() {
   const key = $("md-apikey").value.trim();
   if (key) body.api_key = key;
   try {
-    const out = await api.saveModel(body);
-    setModelWarnings(out && out.warnings);   // 保存成功但地址有合规风险，要说
     // 高级配置**并入同一次保存**（2026-09-17）：用户报「模型面板有两个保存」——
     // 原来高级配置折叠区底部有一个独立的「保存高级配置」，与这里的「保存」
     // 同屏并列，让人不知道该点哪个。现在一屏一个保存：点它同时存
     // 这条模型 + 全局的重试 / 超时。
-    // ⚠ 顺序：先存模型（它有校验，失败要能拦住），再存高级配置。
+    // ⚠ 顺序（P2-8）：高级配置**先**走 —— 它的越界校验在本地抛、请求根本不发。
+    //   曾经它排在 saveModel 之后：模型已在服务端落库，这里一抛被同一个 catch
+    //   统一报「保存失败」，列表不刷新 —— 模型其实存上了，显示与事实相反。
     await saveAdvancedConfig();
+    const out = await api.saveModel(body);
+    setModelWarnings(out && out.warnings);   // 保存成功但地址有合规风险，要说
     // 保存后要**停在刚保存的那条**上，而不是跳回「当前启用」那条 ——
     // 编辑一条非启用模型时跳走，用户会以为没保存上。
     const savedId = (out && out.id) || editingId;
@@ -787,6 +793,12 @@ export const bindSettings = bindOnce(function bindSettings() {
   document.querySelectorAll(".stg-nav-item").forEach(n => {
     n.onclick = () => setPane(n.dataset.pane);
   });
+  // 「关于与更新」面板自己的绑定（检查更新 / 立即重启 / 订阅 updater:status）。
+  // 收在这里而不是 main.js：设置页的绑定集中在一处，`window.__ts.rebind()`
+  // 那条幂等断言（重复跑一遍、监听器一个都不许多）也才覆盖得到它。
+  // bindAbout 自己还包了一层 bindOnce —— 双保险，且它内部全是 addEventListener，
+  // 正是那条断言要防的重复挂载。
+  bindAbout();
 
   // 生成偏好：中列「分组条目」→ 右列显示对应分组的表单。
   // 生成偏好是纯表单（没有天然列表），所以按 pack / param / adv 三块拆开，
@@ -802,6 +814,8 @@ export const bindSettings = bindOnce(function bindSettings() {
   showGenSec("pack");
 
   $("btn-close-settings").onclick = closeSettings;
+  // #btn-packinfo 只在这里绑一次（ui.js 曾也绑同一颗，两处同义、后者覆盖前者 ——
+  // 同一信息两份表示，改行为时必漏一处）。
   $("btn-packinfo").onclick = () => setPane("packinfo");
   // packgen 的两个入口：gen 的 [新建]（btn-newpack）和 packinfo headbar 的 [新建]（pi-newpack）。
   // 区别在于「取消」回哪里 —— 这就是 packgenFrom 的存在意义。
@@ -1092,7 +1106,14 @@ const PACKGEN_HINT = "模型正在生成行业结构：细分领域、受众、�
 /** 轮询建包作业直到终态；每轮把作业上的过程信息搬到界面（思考字数 / 接口重试）。
  *  `api.job` 抛错就往外抛：404 = 引擎重启、作业随内存释放，由调用方落到错误横幅。 */
 async function pollPackgen(jid, onTick) {
+  // 客户端截止：与后端 JOB_BUDGET_SECONDS=1200（20 分钟）对齐取 30 分钟宽限。
+  // 作业"丢了但没报错"（引擎重启、作业表清空）时这个循环没有别的出口。
+  // 超时抛错，由 runPackgen 的 catch 落 `finish()` 恢复按钮态 + 常驻错误横幅。
+  const t0 = Date.now();
   for (;;) {
+    if (Date.now() - t0 > 1800000) {
+      throw new Error("等待超时（30 分钟）——作业状态未知，可能仍在后台运行，请刷新页面确认结果");
+    }
     await new Promise(r => setTimeout(r, 900));
     const s = await api.job(jid);
     if (s.state === "packing" || s.state === "queued") {
@@ -1302,10 +1323,14 @@ async function importPackFile(file) {
     if (r.has_private) bits.push("含私有内容（private/）");
     if (r.replaced) bits.push("已覆盖同名包");
     toast(bits.join(" · "), 5000);
-    state.meta = await api.meta();
-    emit("meta", state.meta);
-    renderPackList();
-    await openPackInfo(r.name);       // 直接打开新导入的这个包，不用用户再点
+    // 到这里导入**已经成功**：后续的刷新 / 打开详情失败只影响观感，不该把
+    // 已成功的事说成「导入失败」（与刚出过的「已导入」自相矛盾，P3）。
+    try {
+      state.meta = await api.meta();
+      emit("meta", state.meta);
+      renderPackList();
+      await openPackInfo(r.name);     // 直接打开新导入的这个包，不用用户再点
+    } catch (e) { toast(`操作已成功，但刷新界面失败：${e.message}`, 4500); }
   } catch (e) { toast("导入失败：" + e.message, 6000); }
 }
 
@@ -1319,10 +1344,13 @@ async function removeImportedPack(name) {
   try {
     await api.removePack(name);
     toast("已卸载");
-    state.meta = await api.meta();
-    emit("meta", state.meta);
-    renderPackList();
-    openPackInfo().catch(() => {});
+    // 包已删成；后面的刷新失败只补一句，不把已成功的事说成「卸载失败」。
+    try {
+      state.meta = await api.meta();
+      emit("meta", state.meta);
+      renderPackList();
+      openPackInfo().catch(() => {});
+    } catch (e) { toast(`已卸载，但刷新界面失败：${e.message}`, 4500); }
   } catch (e) { toast("卸载失败：" + e.message, 3500); }
 }
 
@@ -1334,9 +1362,12 @@ async function undraftPack() {
   try {
     await api.undraft(name);
     toast("已标记为校对完成");
-    state.meta = await api.meta();
-    emit("meta", state.meta);
-    await openPackInfo(name);          // 刷新的必须还是**这一个**包，不是下拉里的
+    // 草稿标记已摘成；刷新失败只补一句，不反悔「已标记」。
+    try {
+      state.meta = await api.meta();
+      emit("meta", state.meta);
+      await openPackInfo(name);        // 刷新的必须还是**这一个**包，不是下拉里的
+    } catch (e) { toast(`已标记，但刷新界面失败：${e.message}`, 4500); }
   } catch (e) { toast("操作失败：" + e.message, 3500); }
 }
 
@@ -1424,7 +1455,11 @@ function packItem(p) {
 /** 选中一个包：右列加载它的详情（同时同步 #pack.value，其他代码依赖它）。 */
 function selectPack(name) {
   const sel = $("pack");
+  const changed = sel && sel.value !== name;
   if (sel) sel.value = name;
+  // ⚠ 程序化换包与下拉 change 走同一收口（P1-2）：面板点选不派发 change 事件，
+  //   曾经绕过了 genParams 清空，旧包取值原样发给新包（静默降级）。
+  if (changed) applyPackSwitch();
   document.querySelectorAll("#pi-list .pl-item").forEach(n => {
     n.classList.toggle("sel", n.dataset.id === name);
   });

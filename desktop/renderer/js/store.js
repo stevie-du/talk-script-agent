@@ -16,6 +16,10 @@ export const state = {
   pollTimer: null,
   pollMisses: 0,
   settingsPane: "gen",
+  // 新建行业包完成后的**一次性**指向（settings.js 写、fillPackSelect 的 prefer 消费、
+  // 下一次 meta 事件读后即清）。曾经动态挂在 state 上而不在这里声明 ——
+  // 「state 里有什么」这本账少了一页。
+  lastCreatedPack: null,
   // 生成参数的**唯一真值**。工具条胶囊与设置页「生成参数」卡只是同一批参数的两个视图。
   // 修前两处各存各的：胶囊带 id、卡片只有 data-key，于是卡片改了没有任何代码去读；
   // 而 style / persona / cta 只在卡片里出现 —— 界面上能选、看起来也生效，
@@ -51,9 +55,12 @@ export function setJob(job) {
   emit("job", job);
 }
 
+/** 写当前展示的结果。
+ *  ⚠ 没有 `emit("result", ...)`：渲染层没有任何地方订阅这个事件（结果的变化
+ *  由 setJob/setBusy 两条已经覆盖），发了也是白发。事件总线不是"每个 setter
+ *  都要配一个事件"—— 没有订阅者的 emit 是死代码，还会让人以为改这里能联动界面。 */
 export function setResult(result) {
   state.result = result;
-  emit("result", result);
 }
 
 export function setBusy(busy, loading = false) {

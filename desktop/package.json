@@ -1,7 +1,7 @@
 {
   "name": "talkscript",
   "productName": "TalkScript",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "description": "口播脚本智能体 — 本地引擎 + Electron 壳",
   "main": "main.js",
   "author": "talk-script-agent",
@@ -11,11 +11,16 @@
     "start:no-sandbox": "electron . --no-sandbox",
     "build:python": "node scripts/build-python-runtime.mjs",
     "dist": "electron-builder --win",
+    "publish:update": "node scripts/publish-update.mjs",
+    "serve:update": "node scripts/serve-update.mjs",
     "verify:package": "node scripts/verify-package.mjs"
   },
   "devDependencies": {
     "electron": "^33.2.0",
     "electron-builder": "^25.1.8"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
   },
   "build": {
     "appId": "com.talkscript.app",
@@ -23,22 +28,49 @@
     "directories": {
       "output": "dist"
     },
+    "publish": {
+      "provider": "generic",
+      "url": "https://updates.talkscript.invalid/talkscript/"
+    },
     "files": [
       "main.js",
       "preload.js",
       "engine-path.js",
-      "engine-dialogs.js"
+      "engine-dialogs.js",
+      "updater-core.js"
     ],
     "beforePack": "scripts/before-pack.js",
     "extraResources": [
-      { "from": "../app", "to": "engine/app", "filter": ["**/*", "!__pycache__/**"] },
-      { "from": "../packs", "to": "engine/packs",
-        "filter": ["**/*", "!**/private/**"] },
-      { "from": "renderer", "to": "engine/renderer" },
-      { "from": "vendor/py", "to": "engine/py" }
+      {
+        "from": "../app",
+        "to": "engine/app",
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**"
+        ]
+      },
+      {
+        "from": "../packs",
+        "to": "engine/packs",
+        "filter": [
+          "**/*",
+          "!**/private/**"
+        ]
+      },
+      {
+        "from": "renderer",
+        "to": "engine/renderer"
+      },
+      {
+        "from": "vendor/py",
+        "to": "engine/py"
+      }
     ],
     "win": {
-      "target": ["nsis", "portable"]
+      "target": [
+        "nsis",
+        "portable"
+      ]
     },
     "nsis": {
       "oneClick": false,

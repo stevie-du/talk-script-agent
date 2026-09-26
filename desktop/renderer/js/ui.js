@@ -9,7 +9,7 @@
 import { $, $$, el, esc, toast, bindOnce } from "./util.js";
 import { state, setBusy, on, emit, setGenParam, resetGenParams } from "./store.js";
 import { api } from "./api.js";
-import { collectParams, updateStale, autoGrowTopic, getParam, stopAllBackgroundJobs } from "./jobs.js";
+import { updateStale, autoGrowTopic, getParam, stopAllBackgroundJobs } from "./jobs.js";
 import { stopTicker } from "./progress.js";
 import { focusSessionSearch, busyRecords } from "./sessions.js";
 import { closeSettings, openSettings, setPane, settingsOpen } from "./settings.js";
@@ -25,6 +25,19 @@ const KEY_FALLBACK_LABEL = {
   segment: "细分领域", audience: "受众", duration: "时长（秒）",
   style: "风格", platform: "平台", persona: "人设", cta: "结尾引导",
   rewrite_scope: "改写范围",
+};
+
+// 选项值的展示名。pack.yaml 里 rewrite_scope 的 options 是**引擎档位名**
+// （app/knowledge.py 的 REWRITE_SCOPES 限定只能写这三个），原样显示就是英文。
+// 这里只换「给人看的那一层」：o.value 照旧发 in-place / bounded / structural，
+// 只是菜单与胶囊上的文字换成中文（三档语义见 app/pipeline.py 的 SCOPE_INSTRUCTION）。
+// 没有登记的键 → 回落原值，包作者自定义的选项不受影响。
+const OPTION_LABELS = {
+  rewrite_scope: {
+    "in-place": "只句内换词（不删句/不加句）",
+    "bounded": "定点改写（不动未点名的段落）",
+    "structural": "可合并/拆分/重排段落",
+  },
 };
 
 const SAMPLES = [
@@ -51,6 +64,7 @@ export function fillPackSelect({ selectLast = false, prefer = null } = {}) {
   if (!sel || !state.meta) return;
   const names = state.meta.packs.map(p => p.name);
   const keep = prefer || sel.value;
+  const prev = sel.value;
   sel.innerHTML = "";
   for (const p of state.meta.packs) {
     // 「（损坏）」不是装饰：坏包的 display_name 会退成目录 slug，
@@ -65,6 +79,24 @@ export function fillPackSelect({ selectLast = false, prefer = null } = {}) {
   else if (keep && names.includes(keep)) sel.value = keep;
   else sel.value = state.meta.default_pack || "";
   if (!sel.value && sel.options.length) sel.selectedIndex = 0;
+  // ⚠ 程序化换包（prefer / selectLast 落到**另一个**包上）与用户在下拉里换包
+  //   必须走同一收口（P1-2）：曾经只有 change 监听清 genParams，新建包完成后
+  //   的自动选中绕过它，旧包取值原样发给新包（静默降级）。首次填充 prev 为空、
+  //   genParams 也为空，走 reset 无副作用。
+  if (sel.value !== prev) applyPackSwitch();
+  else renderPackParams();
+}
+
+/**
+ * 换包收尾：清空旧包参数 + 重渲染参数视图 —— **唯一入口**。
+ *
+ * P1-2：换包 = 参数集与每项默认值全变，旧选择必须清空（否则新包沿用上一个包的
+ * 取值，那个值在新包里根本不存在 → 静默降级，见 app/knowledge.py param_audit）。
+ * 下拉的 change 监听、行业包面板点选（settings.selectPack）、fillPackSelect 的
+ * 程序化换包都调用这里 —— 谁改了 #pack.value，谁就负责走到这里，不许靠事件间接。
+ */
+export function applyPackSwitch() {
+  resetGenParams();
   renderPackParams();
 }
 
@@ -141,7 +173,7 @@ export function renderModelPicker() {
   const add = el("option", "", "＋ 添加模型…");
   add.value = ADD_MODEL;
   sel.appendChild(add);
-  sel.value = active ? active.id : (m.mock ? "" : "");
+  sel.value = active ? active.id : "";
   sel._mock = !!m.mock;
   // 橙色只留给「真的会失败」的情形 —— 三种"不能生成"各自说清原因，
   // 同一句「未配置 API Key」会把前两种指向错的地方（2026-09-17）：
@@ -208,6 +240,11 @@ export function renderPackParams() {
   // 没人引用的菜单。这里**不要**再补一遍 —— 重复机制只会让人以为少了它就会漏。
   front.innerHTML = "";
   const params = pack.params || {};
+  // 后端算的「哪些值没有行业定制」清单（见 app/knowledge.py 的 param_audit）。
+  // 它有两类键、落点不同，别合成一处：
+  //   参数键（在 params 里、有 options）→ 挂到各自的下拉上；
+  //   非参数键（ai_tells / intel_sources）→ 走下面的包级审计行。
+  const audit = pack.param_audit || {};
   const placed = new Set();
   // 2026-09-17（任务 2）：生成参数卡片要展示**全量**参数 —— 工具条（TOOLBAR_KEYS）
   // 既然存在就是为了快速设置，硬性把同样的字段在设置页再列一份叫「冗余」。
@@ -219,8 +256,23 @@ export function renderPackParams() {
   for (const key of Object.keys(params)) {
     if (placed.has(key)) continue;
     if (!params[key]?.options?.length) continue;
-    front.appendChild(paramSelect(key, params[key]));
+    front.appendChild(paramSelect(key, params[key], audit));
     placed.add(key);
+  }
+
+  // 非参数类的审计（`ai_tells` / `intel_sources`）：它们**不在 pack.params 里**，
+  // 没有下拉可挂 —— 但同样是"包作者以为接上了、实际没生效"的静默降级
+  // （后端注释原话：「写了 id: xhs_board 以为接上了，实际引擎没这个适配器，
+  // 表现是这个源永远 0 条，与『今天没货』长得一模一样」）。
+  // 判据是「键不在 params 里」，**不写死键名** —— 将来新增的非参数审计项自动有落点。
+  const paud = $("pack-audit");
+  if (paud) {
+    const paramKeys = new Set(Object.keys(params));
+    const notes = Object.keys(audit)
+      .filter(k => !paramKeys.has(k))
+      .flatMap(k => Object.values(audit[k] || {}).map(v => `${k}：${v}`));
+    paud.textContent = notes.length ? "⚠ 这个包有配置没生效：" + notes.join("；") : "";
+    paud.classList.toggle("hidden", !notes.length);
   }
   renderQuickParams();
   beautifySelects();
@@ -249,15 +301,23 @@ function bindParamSync(sel, key) {
   });
 }
 
-function paramSelect(key, def) {
+function paramSelect(key, def, audit) {
   const wrap = el("div");
   wrap.appendChild(el("label", "lbl", esc(def.label || KEY_FALLBACK_LABEL[key] || key)));
   const s = el("select");
   // ⚠ 不用 id（设置页参数组是整组常驻 DOM 的视图，与工具条胶囊同 key 撞 id）。
   // 真值不在 DOM 上，在 state.genParams —— 这里只挂 data-key 供视图互相同步。
   s.dataset.key = key;
+  // 与工具条胶囊**同一份依据**（`renderQuickParams` 也是这么挂的）：beautifySelects
+  // 读 `sel._audit`，把「这个值没有行业定制、会静默走通用默认」变成胶囊变色 +
+  // 菜单里的「!」。设置页是「所有可定制项的总账」—— 这里不挂，`style` 这类
+  // **只在设置页出现**的参数就永远看不到自己的降级说明（后端算了、没人接）。
+  s._audit = (audit || {})[key] || {};
+  const optLabels = OPTION_LABELS[key] || {};
   for (const opt of def.options) {
-    const o = el("option", "", esc(String(opt)));
+    // 展示名走 OPTION_LABELS（如改写范围三档），没有登记就用原值；
+    // o.value 始终是引擎认的那个原值，不受展示名影响。
+    const o = el("option", "", esc(optLabels[String(opt)] ?? String(opt)));
     o.value = String(opt);
     s.appendChild(o);
   }
@@ -684,9 +744,8 @@ export const bindShell = bindOnce(function bindShell() {
   if (localStorage.getItem("ts.left.folded") === "1") setLeftFolded(true);
   $("btn-toggle-left").onclick = () => setLeftFolded(!$("left").classList.contains("folded"));
   $("btn-open-settings").onclick = () => openSettings();
-  // 「去配置」那颗按钮随空态引导一起下线了（见 index.html 的 #empty）——
-  // 入口收敛到两处：工具条那颗模型胶囊，和设置页 headbar 的一颗「添加模型」。
-  $("btn-packinfo").onclick = () => setPane("packinfo");
+  // （#btn-packinfo 的绑定归 settings.js：那颗按钮住在设置页 headbar，
+  //   绑定与 setPane 同域，不再两处重复。）
   // 「停止全部后台生成」：切会话 / 连点新建对话都不会取消后台作业（有意的），
   // 但额度只有 4 —— 没有这颗按钮的话，用户唯一能做的就是等，或者被 409 反复挡住。
   $("btn-stop-all").onclick = () => stopAllBackgroundJobs();
@@ -728,17 +787,10 @@ export const bindShell = bindOnce(function bindShell() {
   // 不能只认 #settings-screen —— 快捷条上的时长/平台/人设才是最常被改的几个。
   document.addEventListener("change", () => { updateStale(); setCfgHint(); });
 
-  // 换行业包必须重渲染它带来的那批参数。
-  // 快捷条胶囊（#quick-params）和「生成偏好」里的 #param-front 都是**按包**生成的，
-  // 而 fillPackSelect() 只在启动 / 新建包 / meta 事件时被调用 —— 用户在下拉里换包
-  // 这条路径**没有人接**（自定义下拉的选中只做 `sel.value=… + dispatchEvent('change')`，
-  // 而 document 级那个 change 监听只管 updateStale/setCfgHint，不重渲染）。
-  // 后果不只是"显示旧字段"：`cta` 这类参数的值域来自**包**，换了包却还留着上一个包的
-  // 取值，生成时那个值在新包里不存在 → 静默降级（见 app/knowledge.py 的 param_audit），
-  // 用户以为在定制、实际没生效。所以这里必须重渲染。
-  // 换包 = 参数集与每项默认值全变，旧选择必须清空（否则新包沿用上一个包的
-  // 取值，那个值在新包里根本不存在 → 静默降级，见 app/knowledge.py param_audit）。
-  $("pack").addEventListener("change", () => { resetGenParams(); renderPackParams(); });
+  // 换行业包必须重渲染它带来的那批参数，并清空旧包的取值 —— 统一走 applyPackSwitch
+  // （导出处有完整病理注释）。fillPackSelect 的程序化换包、settings.selectPack 的
+  // 面板点选也都显式调它；自定义下拉选中时派发的 change 事件由这里接住。
+  $("pack").addEventListener("change", applyPackSwitch);
 
   document.addEventListener("keydown", e => {
     const mod = e.ctrlKey || e.metaKey;

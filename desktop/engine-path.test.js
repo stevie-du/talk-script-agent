@@ -106,6 +106,17 @@ test('令牌只经子进程环境变量交付（缺陷 1：argv 在同机任何�
   assert.deepStrictEqual(resolveEngine(base({ exists: only(PY), token: '' })).env, {});
 });
 
+test('healthNonce 也走 env（与令牌同一条通道：只有我们启动的那个引擎知道它）', () => {
+  const r = resolveEngine(base({ exists: only(PY), healthNonce: 'nz-1' }));
+  assert.strictEqual(r.env.TALKSCRIPT_HEALTH_NONCE, 'nz-1');
+  // 反向：没传就不该凭空出现 —— 否则壳以为自己在验身份，实际拿空串去比，
+  // 任何一个回 200 的本机进程都能通过（正是这条修复要堵的那个口子）。
+  assert.strictEqual(
+    resolveEngine(base({ exists: only(PY) })).env.TALKSCRIPT_HEALTH_NONCE, undefined);
+  // 也不许进 argv：同机任何进程都能读别人的命令行（与令牌同一个理由）。
+  assert.ok(!r.args.join(' ').includes('nz-1'), 'argv 泄漏了 healthNonce');
+});
+
 test('packsDir 传了才带 --packs-dir（开发态行为必须与改动前完全一致）', () => {
   const withIt = resolveEngine(base({ exists: only(PY), packsDir: 'C:\\userData\\packs' }));
   const i = withIt.args.indexOf('--packs-dir');

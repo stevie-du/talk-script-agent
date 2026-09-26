@@ -7,7 +7,7 @@
 //    但展示的其实是历史记录，提示与实际不符。
 //  · 每次生成都清空输入框且不留版本，点「换一版」看起来像结果被覆盖。
 
-import { $, toast, esc } from "./util.js";
+import { $, toast } from "./util.js";
 import { api, ApiError, modelSetupGap, MODEL_SETUP_REPLY } from "./api.js";
 import { state, setJob, setResult, setBusy, detachJob, stopPolling } from "./store.js";
 import * as T from "./thread.js";
@@ -64,8 +64,10 @@ export function collectParams() {
     // 与 quota_degraded 当年被白名单滤掉是同一类静默降级。
     rewrite_scope: getParam("rewrite_scope"),
     facts: $("facts").value.trim() || null,
-    voice: $("voice") ? $("voice").value : "strong",
-    format: $("format") ? $("format").value : "both",
+    // 元素缺失（理论上不该发生）→ null 走包默认，与 facts 同一口径：
+    // 冒充一个内置默认值，后端就把「用户没选过」当成「用户选了 strong/both」（P3）。
+    voice: $("voice") ? $("voice").value : null,
+    format: $("format") ? $("format").value : null,
   };
 }
 
@@ -368,7 +370,9 @@ function onCancelled(body, why = "cancelled") {
   setBusy(false);
   stopTicker();
   setJob(null);
-  setHead("新对话", "本次生成已取消", "");
+  // 保留主题（与 onFailed 同口径）：线程里还挂着这个主题的用户气泡和
+  // 「已停止」卡，头部却回到「新对话」，两条收尾分支对同一场景两种说法（P3）。
+  setHead(state.sentTopic || "新对话", "本次生成已取消", "");
   if (body) {
     const vi = body._vi;
     if (vi >= 0) body._versions[vi] = { ...body._versions[vi], state: "cancelled" };
@@ -388,7 +392,14 @@ function onCancelled(body, why = "cancelled") {
 // ── 停止 ────────────────────────────────────────────────────
 export async function abort() {
   const job = state.job;
-  if (!job) return;
+  // 兜底：正常入口都带 `state.job` 门控（按钮在 busy&&!job 时 disabled，
+  // Esc 也只在该态放行），走不到这里。但 abort() 是导出函数，将来任何新入口
+  // （快捷键 / 自动化）漏了门控时，静默 return 会让用户以为「停止键坏了」——
+  // 说一句「还在建立连接」，比无声无息好。
+  if (!job) {
+    if (state.busy) toast("正在建立连接，请稍候再停", 2500);
+    return;
+  }
   stopPolling();
   const body = job.body || state.activeBody;
   let snap = null, err = null;
@@ -420,15 +431,33 @@ export async function abort() {
   }
   let st = snap && snap.state;
   if (!st) {
-    // 应答里没有状态（老服务 / 精简快照）：再问一次，猜是不诚实的。
-    try { snap = await api.job(job.id); st = snap && snap.state; } catch (_) { st = "cancelled"; }
+    // 应答里没有状态（老服务 / 精简快照）：再问一次。
+    let askErr = null;
+    try { snap = await api.job(job.id); st = snap && snap.state; } catch (e) { askErr = e; }
+    if (!st && askErr) {
+      // ⚠ 以前这里写的是 `catch (_) { st = "cancelled"; }` —— 而**上一行的注释**
+      //   明明写着"猜是不诚实的"。猜成 cancelled 的后果：后端其实还在跑，
+      //   界面已经宣布"已停止"，随后又冒出一条记录（屏幕与事实相反）。
+      //   现在不猜：把"没问到状态"说出来，并把用户接回那条作业自己看。
+      toast("停止请求已发出，但没问到作业状态：" + (askErr.message || askErr), 5000);
+      reconnectToJob(job, body);
+      return;
+    }
   }
   if (st === "done") {
     // 没停下 —— 它已经成了。产物在盘上，就把结果画出来并说清「已保存」，
     // 绝不能继续演成「什么都没留下」。
-    if (!snap.result) { try { snap.result = await api.record(job.id); } catch (_) {} }
+    let gotResult = !!snap.result;
+    if (!gotResult) {
+      try { snap.result = await api.record(job.id); gotResult = true; } catch (_) { gotResult = false; }
+    }
     onDone(snap, body, job.id);
-    toast("它已经跑完了 —— 产物已保存，停止没有生效", 5200);
+    // ⚠ 产物没读出来就**不能**说"已保存"：那时屏幕上是"只有版本条、没有正文"，
+    //   与这句承诺相反（用户会以为产物在、只是没显示）。两种情形说清是哪一种。
+    toast(gotResult
+      ? "它已经跑完了 —— 产物已保存，停止没有生效"
+      : "它已经跑完了，但产物这次没读出来（下面只有版本记录）—— 到会话列表里点开看",
+      5200);
     return;
   }
   if (st === "failed") { onFailed(snap, body, job.id); return; }

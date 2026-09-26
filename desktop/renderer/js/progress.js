@@ -9,7 +9,7 @@
 // 修复前这里只有一个扁平的 pstep 列表：没有耗时、没有总时长，失败时也只把
 // 错误塞进同一行，用户看不出「哪一步失败、花了多久」。
 
-import { $, esc } from "./util.js";
+import { esc } from "./util.js";
 import { state } from "./store.js";
 
 export const STATE_LABEL = {
@@ -164,8 +164,19 @@ export function startTicker(getSnap) {
   stopTicker();
   tickTimer = setInterval(() => {
     const snap = getSnap();
-    const body = $("chat-stream")?.querySelector(".msg.msg-assistant:last-of-type .msg-body");
-    const el = body?.querySelector("#gen-elapsed");
+    // 靶子用 `state.activeBody`，**不每秒重查 DOM 找「最后一条助手消息」**：
+    //   · 查 DOM 是 O(整条消息流)，且每秒一次纯属浪费；
+    //   · 更要紧的是它找的是**当前视口里的最后一条**，而那不一定是这条作业的
+    //     气泡 —— 打开历史 / 重挂别的作业后，最后一条属于别人，写进去就是把
+    //     别的会话的进度覆盖成这一条的「已用 N 秒」。
+    // activeBody 由三个调用方（send / attach / reconnectToJob）在与作业同一
+    // 时刻设下，收尾分支（onDone / onFailed / onCancelled / detachJob）都先
+    // 停表再摘它，所以还活着的 activeBody 就是在飞的那一颗。
+    // `document.contains` 兜「气泡已被摘掉但表还没停」的那一拍（如
+    // truncateAfter 编辑重发：activeBody 先置空、紧接着 send 才设新的）。
+    const body = state.activeBody;
+    if (!body || !document.contains(body)) return;
+    const el = body.querySelector("#gen-elapsed");
     if (el && snap) el.textContent = fmtElapsed(snap);
   }, 1000);
 }

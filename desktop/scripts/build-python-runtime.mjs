@@ -423,6 +423,12 @@ function stampFor() {
     python: PY_VERSION,
     zipSha256: ZIP_SHA256,
     requirements: sha256File(RUNTIME_REQ),
+    // 脚本自身的哈希：改**构建逻辑**（pip 参数、._pth 那几行、字节码编译、
+    // 自检探针）也必须让已有产物作废。少了这一项时，改了脚本再跑会命中
+    // upToDate() 直接跳过 —— vendor/py/ 还是旧逻辑的产物，而构建显示
+    // "已是最新"，与"改了源码但不重新编译"同一类静默失败。
+    // ⚠ 它天然递归：这一行自己也参与哈希，但那正是我们要的（任何编辑都换哈希）。
+    script: sha256File(fileURLToPath(import.meta.url)),
   };
 }
 

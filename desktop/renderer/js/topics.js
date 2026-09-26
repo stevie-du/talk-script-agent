@@ -13,7 +13,7 @@
 //     会自己起作业的 GET 在轮询/预取时会被重复触发，每次都是一轮真实网络请求）。
 //  3. **「去生成」不自动发送**：一次生成几十秒真金白银，要留改参数的机会。
 //     它只做三件事：切回会话视图、写 `#topic`、把参数填进 `state.genParams`。
-import { $, esc, sleep, toast } from "./util.js";
+import { $, esc, sleep, toast, bindOnce } from "./util.js";
 import { api } from "./api.js";
 import { state, setGenParam } from "./store.js";
 import { gotoView, refreshGate } from "./ui.js";
@@ -22,8 +22,42 @@ import { BUSY_STATES, STATE_LABEL } from "./progress.js";
 /** 一屏放几张卡。「换一批」就是按这个粒度在池子里翻页（§2.5 定的是 4–6 条）。 */
 const PAGE_SIZE = 5;
 
+/** 情报源接入态的中文名。后端 `app/intel.py` 的 state 共五值：ok / unwired /
+ *  off / error（抓取时抛了异常）/ orphan（配置里已删、盘上还有旧条目）。
+ *  少映射一个，表格里就会直接冒出 error / orphan 这样的英文词。 */
+const SOURCE_STATE_LABEL = {
+  ok: "已接入",
+  unwired: "未接入",
+  off: "未启用",
+  error: "抓取失败",
+  orphan: "配置已移除",
+};
+
 /** 最近一次 `/api/intel/today` 的结果。null = 还没加载过。 */
 let data = null;
+
+/** 某个源这轮抓取失败的原因（空串 = 没失败）。
+ *
+ *  ⚠ 必须认 `errors`，**不能只看 `g.state`**：`app/intel.py` 的 `today()` 重建
+ *  groups 时 state 只有 `off` / `unwired` / `ok` 三种 —— 抓取失败的源在那边是
+ *  `state: "ok"` + `count: 0`，与"今天没货"**完全同形**。唯一携带"我们没抓到"
+ *  这个信息的字段就是 `errors[源 id]`。不认它，用户会把"平台今天没有"当成
+ *  "我们没抓"（或反过来），而这两件事的下一步动作正好相反。
+ *  （`SOURCE_STATE_LABEL` 里的 `error` / `orphan` 是给落盘记录与孤儿源用的，
+ *   其中 `error` **不会**出现在 `today()` 的 groups 里 —— 别指望它。） */
+function sourceError(id) {
+  return (data && data.errors && data.errors[id]) || "";
+}
+
+/** 框架级失败（键带下划线前缀）：`_read` = 抓取记录读不出来，`_save` = 没存下来。
+ *
+ *  后端 `intel.load_latest()` 的 docstring 写明了 `errors` 存在的唯一目的：
+ *  「界面才能把"没抓过"与"抓了但文件坏了"分开显示 —— 这两种"没有"在界面上
+ *  必须是两种样子」。源级失败由源表承担，这两条由顶部/说明行承担。 */
+function frameErrors() {
+  const e = (data && data.errors) || {};
+  return Object.keys(e).filter(k => k.indexOf("_") === 0).map(k => [k, e[k]]);
+}
 /** 当前筛选的来源（`all` 或某个源的 label）。筛选轴**只有来源这一根**，不混别的维度。 */
 let curSrc = "all";
 let page = 0;
@@ -31,12 +65,20 @@ let page = 0;
 let kickoffDone = false;
 
 function packName() {
-  return $("pack")?.value || state.meta?.default_pack || "elevator";
+  // 兜底链到 default_pack 为止 —— 硬编码 "elevator" 会让换掉默认包的用户
+  // 在下拉还没填充时静默读别的包的情报（P3）。
+  return $("pack")?.value || state.meta?.default_pack || "";
 }
 
-/** 一条条目的去重键 —— 必须与后端 `intel.dedup` 用的是同一个键，
- *  否则"忽略了但明天又出现"会变成找不到原因（忽略记录按这个键存）。 */
-const itemKey = it => it.guid || it.url || `title:${it.title}`;
+/** 一条条目的身份键（忽略记录按它存）。
+ *
+ *  ⚠ **由后端算**：`app/intel.py` 的 `item_key()` 随 `/api/intel/today` 的每条
+ *  `item.key` 下发，这里直接取。曾经两边各拼一份（前端 `guid || url || title`、
+ *  后端忽略过滤 `guid || title`），于是「只有 url、没有 guid」的条目（政策库那类）
+ *  点「忽略」之后下一轮原样回来 —— 而"忽略没用"在界面上找不到任何原因。
+ *  兜底只在后端漏给 key 时兜一下：真要漏了，verify 里那条「忽略用的是后端下发的
+ *  item.key」会先红，不必靠这里的兜底去猜。 */
+const itemKey = it => it.key || it.guid || it.url || `title:${it.title}`;
 
 // ── 渲染 ────────────────────────────────────────────────────
 function fmtPct(v) {
@@ -121,6 +163,7 @@ function visibleItems() {
 function render() {
   const root = $("topics-root");
   if (!root || !data) return;
+  const fe = frameErrors();          // 框架级失败：空态 / 计数行 / 说明行三处共用
   const shown = visibleItems();
   const pages = Math.max(1, Math.ceil(shown.length / PAGE_SIZE));
   if (page >= pages) page = 0;
@@ -137,13 +180,19 @@ function render() {
     if (!bucket) groups.push(bucket = { g, items: [] });
     bucket.items.push(it);
   }
+  // 空态分两种：**"没抓过 / 今天没货"** 与 **"抓了但记录读不出来"**。
+  // 后端专门为此把 `_read` 放进 errors（见 `intel.load_latest()` 的 docstring），
+  // 这里合成一句"池子是空的"就等于把那个信号又丢掉了。
+  const emptyText = fe.length
+    ? "抓取记录读不出来（见下方说明）—— 点顶栏那颗「重抓」重跑一轮。"
+    : "今天这个池子是空的 —— 点顶栏那颗「重抓」，或到「情报源」看哪个源没接上。";
   root.innerHTML = groups.map(({ g, items }) => `
     <div class="kb-group">
       <div class="kb-group-t">${esc(g.label)} · ${esc(g.role || "")}<span class="m-chip kb-group-c">${g.count}</span>
         ${g.note ? `<span class="hint">${esc(g.note)}</span>` : ""}</div>
       <div class="topic-grid">${items.map(card).join("")}</div>
     </div>`).join("")
-    || `<p class="topics-empty">今天这个池子是空的 —— 点顶栏那颗「重抓」，或到「情报源」看哪个源没接上。</p>`;
+    || `<p class="topics-empty">${emptyText}</p>`;
 
   // 数据驱动的宽度一律走 CSSOM：内联 style 属性会被 CSP 静默忽略
   // （style-src 'self' 且无 'unsafe-inline'），界面不会报错、条永远不显示。
@@ -155,10 +204,16 @@ function render() {
 
   const meta = $("topics-meta");
   if (meta) {
-    const on = (data.groups || []).filter(g => g.state === "ok").length;
+    // 抓取失败的源**不计入「已接」**：照 `g.state` 数会把"我们没抓到"报成
+    // "已接入"，而用户看这行字就是为了判断"今天的数据靠不靠得住"。
+    const on = (data.groups || []).filter(g => g.state === "ok" && !sourceError(g.id)).length;
+    const bad = (data.groups || []).filter(g => sourceError(g.id)).length;
     const off = (data.groups || []).filter(g => g.state !== "ok").length;
-    meta.textContent = `共 ${data.items.length} 条 · ${on} 源已接 · ${off} 源未接`
-      + (data.fetched_at ? ` · 上次抓取 ${data.fetched_at.slice(5, 16).replace("T", " ")}` : " · 还没抓过");
+    meta.textContent = `共 ${data.items.length} 条 · ${on} 源已接`
+      + (bad ? ` · ${bad} 源抓取失败` : "")
+      + ` · ${off} 源未接`
+      + (fe.length ? " · 抓取记录有问题"
+        : (data.fetched_at ? ` · 上次抓取 ${data.fetched_at.slice(5, 16).replace("T", " ")}` : " · 还没抓过"));
   }
   const more = $("btn-more");
   if (more) {
@@ -172,6 +227,16 @@ function render() {
   }
   const cnt = $("topics-count");
   if (cnt) cnt.textContent = String(data.items.length);
+
+  // 框架级失败写进 `#topics-note`：它不是"某个源没抓到"（那是源表的事），
+  // 而是"整份抓取记录坏了 / 存不下" —— 前者去情报源看，后者只能重抓。
+  // 复用 `.hint.cfg-err`（--warn-soft 底 + --warn 字），与「配置错误行」同族。
+  const note = $("topics-note");
+  if (note) {
+    note.textContent = fe.map(([k, v]) =>
+      (k === "_save" ? "抓取结果没能存下来：" : "抓取记录读不出来：") + v).join("；");
+    note.className = fe.length ? "hint cfg-err" : "hint";
+  }
 }
 
 /** 情报源那张表：`接入` 与 `上次抓取` 两根正交列 + 三带图例（§2.4）。 */
@@ -180,11 +245,11 @@ function renderSources() {
   if (!tbl || !data) return;
   const groups = data.groups || [];
   const rows = groups.map(g => {
-    const state = g.state === "ok"
-      ? `<td class="ok">已接入</td>`
-      : (g.state === "unwired" ? `<td class="warn">未接入</td>`
-        : (g.state === "off" ? `<td class="warn">未启用</td>`
-          : `<td class="warn">${esc(g.state)}</td>`));
+    // 抓取失败**优先于**"已接入"：`today()` 给失败源的 state 是 "ok"，
+    // 照 state 渲染就等于把"我们没抓到"说成"平台今天没货"。
+    const err = sourceError(g.id);
+    const st = err ? "抓取失败" : (SOURCE_STATE_LABEL[g.state] || g.state);
+    const state = `<td class="${g.state === "ok" && !err ? "ok" : "warn"}">${esc(st)}</td>`;
     const last = g.state === "ok" && g.count
       ? esc((data.fetched_at || "").slice(5, 16).replace("T", " ")) : "—";
     return `<tr>
@@ -194,14 +259,17 @@ function renderSources() {
       ${state}
       <td>${last}</td>
       <td class="num">${g.count}</td>
-      <td>${esc(g.note || "")}</td>
+      <td>${esc(err || g.note || "")}</td>
     </tr>`;
   }).join("");
   tbl.innerHTML = `<tr><th>源</th><th>角色</th><th>节奏</th><th>接入</th>
     <th>上次抓取</th><th class="num">今日命中</th><th>说明</th></tr>` + rows;
   const meta = $("sources-meta");
   if (meta) {
-    meta.textContent = data.fetched_at ? `最近一次：${data.fetched_at}` : "还没有抓取记录";
+    const fe = frameErrors();
+    meta.textContent = fe.length
+      ? `抓取记录有问题：${fe.map(([, v]) => v).join("；")}`
+      : (data.fetched_at ? `最近一次：${data.fetched_at}` : "还没有抓取记录");
   }
 }
 
@@ -211,22 +279,37 @@ function renderSources() {
  *  借它等于把抓取伪装成一次生成，用户会在选题页看到"文案撰写中"。
  *  这里只要三样：状态标签、终态、失败原因。 */
 async function awaitJob(id) {
-  const st = $("rh-state");
+  // ⚠ 状态写在本视图自己的说明行 #topics-note，**不写全局头部 #rh-state**：
+  //   那里是生成流程 setHead 的地盘 —— 重抓每 900ms 覆盖它、落地时清空，
+  //   与并发进行的生成互相打架（「情报抓取中」盖掉「生成中」、或把进行中
+  //   的生成状态整行清掉）。选题视图隐藏时这行自然看不见，不污染别的视图（P3）。
+  const st = $("topics-note");
+  const say = (text, err) => {
+    if (!st) return;
+    st.textContent = text;
+    st.className = "hint" + (err ? " cfg-err" : "");
+  };
+  // 客户端截止：后端有 JOB_BUDGET_SECONDS=1200（20 分钟作业预算），这里取 30
+  // 分钟宽于它。没有上限时，引擎"作业丢了但没报错"（进程被杀后重启、作业表被
+  // 清）会让这个循环永远转下去，用户看到「抓取中」常驻到天荒地老。
+  const t0 = Date.now();
   for (;;) {
+    if (Date.now() - t0 > 1800000) {
+      say("");
+      toast("抓取状态未知（已等待 30 分钟），请手动刷新或重试", 5000);
+      return null;
+    }
     let snap;
     try {
       snap = await api.job(id);
     } catch {
-      if (st) { st.textContent = ""; st.className = "rh-state"; }
+      say("");
       return null;
     }
     const live = BUSY_STATES.has(snap.state);
-    if (st) {
-      st.textContent = live ? (STATE_LABEL[snap.state] || "处理中") : "";
-      st.className = "rh-state" + (live ? " warn" : " ok");
-    }
+    if (live) say(`情报抓取中（${STATE_LABEL[snap.state] || "处理中"}）…`);
     if (!live) {
-      if (st) { st.textContent = ""; st.className = "rh-state"; }
+      say("");
       if (snap.state === "failed") toast(`抓取失败：${snap.error || "未知原因"}`, 3600);
       return snap;
     }
@@ -297,9 +380,21 @@ function doGenerate(key) {
 }
 
 // ── 绑定 ────────────────────────────────────────────────────
-export function bindTopics() {
+// bindOnce：`$("pack").addEventListener("change", …)` 会**重复挂**（一次切换触发
+// 两次 load），而 boot() 在「新建行业包完成」等路径上会被二次调用 —— 少这层包装
+// 时，_verify 的「再绑一遍不多监听器」断言也漏掉了这第五个绑定函数（main.js 的
+// __ts.rebind 同样要把它列进去，两边一起才算真幂等）。
+export const bindTopics = bindOnce(function bindTopics() {
   $("btn-topics").onclick = () => openTopics();
   $("btn-more").onclick = () => { page += 1; render(); };
+  // 「已忽略 N」点击给一句如实的解释（P3：曾经是一颗点了没反应的死按钮）。
+  // 忽略记录当前只有计数这一个消费面（没有忽略清单 UI），所以诚实的行为
+  // 是把语义说清，而不是装作会展开一个不存在的列表。
+  $("btn-ignored").onclick = () => {
+    const n = (data && data.ignored) || 0;
+    toast(n ? `已忽略 ${n} 条 —— 忽略只影响今天，明天同题会自动回来`
+            : "今天还没有忽略过任何条目", 3600);
+  };
   $("btn-refetch").onclick = async () => {
     try {
       const { job_id } = await api.intelRefresh(packName());
@@ -323,7 +418,7 @@ export function bindTopics() {
     curSrc = "all"; page = 0; kickoffDone = false;
     if ($("right").dataset.view === "topics") load().then(kickoffIfStale);
   });
-}
+});
 
 /** 进选题视图。左栏与会话列表**常驻**（不跳页、不开二级窗），只换右栏内容区。 */
 export async function openTopics() {

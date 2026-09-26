@@ -78,3 +78,40 @@ test('main.js require 的每个同级模块都在 build.files 白名单里', () 
   assert.deepStrictEqual(missing, [],
     '这些模块被 main.js require，但不在 build.files 里 —— 打出来的包装完即崩：' + missing.join(', '));
 });
+
+// ── verify-package.mjs 的「账」要跟着 extraResources 走 ──────────────
+// 病灶（2026-09-24 六路审查 P2-14 / P2-15）：verify-package 的口径是"多账认证"，
+// 但它自己对账的**范围**是写死的 ——
+//   · extraResources 里加一条（内嵌运行时 `vendor/py → engine/py`）没有任何提示，
+//     那条资源被删/改名时构建照样成功、"认证通过"照样打；
+//   · sourceNewest 的源码清单也是手抄的，本轮新增 updater-core.js 后它还停在 4 个
+//     文件，判据 G（产物比源码旧）对它完全失效。
+// 少看一本账 = 宣称得比证据多，所以把"账的范围"钉在配置上。
+const verifyPkgSrc = () => fs.readFileSync(
+  path.join(__dirname, 'scripts', 'verify-package.mjs'), 'utf8');
+
+test('verify-package 对每一条 extraResources 都有 compare 对账（少看一本账 = 宣称得比证据多）', () => {
+  const src = verifyPkgSrc();
+  // 期望值**从 extraResources 派生**（`to` 的末段：engine/app → app、engine/py → py），
+  // 不写死"应该有 4 条" —— 写死的话加一条资源又要改测试，而漏掉的正是它。
+  const expected = (cfg.build.extraResources || [])
+    .map(r => String(r.to).split('/')[1]).filter(Boolean);
+  assert.ok(expected.length >= 4, 'extraResources 解析不出条目，本断言会空转');
+  const labels = [...src.matchAll(/^compare\('([^']+)'/gm)].map(m => m[1]);
+  const missing = expected.filter(e => !labels.includes(e));
+  assert.deepStrictEqual(missing, [],
+    `extraResources 里有这些没被对账：${missing.join(', ')}（现有 compare：${labels.join(', ')}）`
+    + ' —— 它们被删 / 改名时构建照样成功、认证照样打"通过"');
+});
+
+test('verify-package 的源码时间戳清单从 build.files 派生，不另抄一份', () => {
+  const src = verifyPkgSrc();
+  const m = src.match(/function sourceNewest\(\)[\s\S]*?\n\}/);
+  assert.ok(m, '没解析到 sourceNewest，本断言会空转');
+  // 判据：函数体里不许再出现**写死的 .js 文件名**（如 'engine-path.js'）——
+  // 它必须从 pkg.build.files 派生。抄的那份在新增文件时不会跟着动。
+  const hardcoded = [...m[0].matchAll(/'([\w.-]+\.js)'/g)].map(x => x[1]);
+  assert.deepStrictEqual(hardcoded, [],
+    `sourceNewest 里又写死了这些文件名：${hardcoded.join(', ')} —— `
+    + '它必须从 pkg.build.files 派生（同一信息两份表示必然漂移）');
+});

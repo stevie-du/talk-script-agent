@@ -116,7 +116,17 @@ function matches(it) {
 /** 拉取并绘制会话列表。返回本次拿到的条目（首启引导要据此判断是否「真的第一次」）。 */
 export async function loadSessions() {
   let items = [];
-  try { items = await api.history(); } catch (_) { /* 引擎不可达时保留上一次列表 */ }
+  let failed = null;
+  try { items = await api.history(); } catch (e) { failed = e; }
+  if (failed) {
+    // ⚠ 以前这里写的是 `catch (_) { /* 引擎不可达时保留上一次列表 */ }` ——
+    //   但 `items` 的初值是 `[]`，失败时 `paint([])` 画出来的是**空态**
+    //   「还没有会话记录，先发一条试试」。注释与代码相反，而后果比"列表停住"
+    //   严重：用户会以为**记录丢了**。现在真的保留上一次的列表（`allItems`），
+    //   并在顶部摊出失败原因。
+    showSessError(failed);
+    return allItems;
+  }
   allItems = items;
   paint(items);
   clearTimeout(refreshTimer);
@@ -135,6 +145,20 @@ export async function loadSessions() {
  *  排除掉当前正看着的那条 —— 那一条界面上已经有进度与「停止」键，不该再算「后台」。 */
 export function busyRecords() {
   return allItems.filter(it => BUSY_STATES.has(it.state || ""));
+}
+
+/** 拉取会话列表失败时，在列表**顶部**插一条告警。
+ *
+ *  **不重建列表** —— 重建会把「还没有会话记录」画出来，而用户会读成"记录丢了"。
+ *  节点故意不带 `data-key`：`paint()` 开头会移除所有无 `data-key` 的子节点，
+ *  所以下一次**成功**的 paint 会把它清掉（不必额外写清理逻辑）。
+ *  同一时刻只留一条，免得轮询连续失败时叠成一摞。 */
+function showSessError(e) {
+  const list = $("session-list");
+  if (!list || list.querySelector(".sess-load-err")) return;
+  const msg = e && e.message ? e.message : String(e);
+  list.prepend(el("p", "hint cfg-err sess-load-err",
+    `会话列表没刷新成功（下面还是上次的结果）：${esc(msg)}`));
 }
 
 function paint(items) {
@@ -277,6 +301,9 @@ function buildRow() {
  *  而直接把 `paused_awaiting_confirmation` 这种内部标识吐给用户看，
  *  与「列表曾经直接显示 slug」是同一类毛病。 */
 function stateText(it, st) {
+  // 幽灵失败条目（job_dir 没建出来、store 无记录）：详情端点回的是内存快照，
+  // 重启后整条消失 —— 如实说，别让用户以为这是一条能找回产物的记录（P3-2）。
+  if (it.ghost) return "失败 · 未落盘（重启后消失）";
   if (st === "done") return it.passed === false ? "未通过校验" : "已通过校验";
   return STATE_LABEL[st] || "已中断";
 }

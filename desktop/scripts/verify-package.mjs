@@ -73,6 +73,12 @@ compare('app', path.join(ROOT, 'app'), path.join(ENGINE, 'app'));
 compare('renderer', path.join(ROOT, 'desktop', 'renderer'), path.join(ENGINE, 'renderer'));
 compare('packs', path.join(ROOT, 'packs'), path.join(ENGINE, 'packs'),
         [/(^|\/)private\//]);
+// ⚠ 内嵌 Python 运行时（`vendor/py → engine/py`）**也必须对账**：它是打包版能跑的
+//   唯一依据（`engine-path.js` 降级链的第 2 条）。不比它的话，extraResources 里
+//   那条被删 / 改名时构建照样成功、"认证通过"照样打 —— 少看一本账就是宣称得比证据多。
+//   标签取 extraResources 的 `to` 末段（'py'），`packaging.test.js` 按这个口径
+//   反查"每一条 extraResources 都有一句 compare"。
+compare('py', path.join(ROOT, 'desktop', 'vendor', 'py'), path.join(ENGINE, 'py'));
 
 const inPkgPrivate = [...walk(path.join(ENGINE, 'packs'), []).keys()]
   .filter((k) => /(^|\/)private\//.test(k));
@@ -172,11 +178,13 @@ function sourceNewest() {
   // 只列**会进包里**的东西。`desktop/scripts/` 是构建与认证工具，不进产物 ——
   // 把它算进来会让每次改脚本本身都变成"安装包过期"的假红（第 21 轮自己踩到）。
   const dirs = ['app', path.join('desktop', 'renderer'), 'packs'];
+  // ⚠ 这几个文件**从 `pkg.build.files` 派生**（就是上面那份 asarFiles），不另抄一份清单：
+  //   抄的那份在新增文件时不会跟着动 —— 本轮就撞上了（加了 `updater-core.js` 之后
+  //   这里还停在 4 个文件，判据 G 对它的"产物比源码旧"完全失效）。
+  //   同一信息两份表示必然漂移；`packaging.test.js` 有一条断言守着"不许再写死"。
   const files = [path.join('desktop', 'package.json'), 'requirements-runtime.txt',
-                 'requirements.txt', path.join('desktop', 'main.js'),
-                 path.join('desktop', 'preload.js'),
-                 path.join('desktop', 'engine-path.js'),
-                 path.join('desktop', 'engine-dialogs.js')];
+                 'requirements.txt',
+                 ...asarFiles.map((f) => path.join('desktop', f))];
   for (const rel of dirs) {
     const abs = path.join(ROOT, rel);
     if (!existsSync(abs)) continue;
@@ -194,7 +202,15 @@ function sourceNewest() {
 }
 
 const newestSrc = sourceNewest();
-for (const exe of ['TalkScript Setup 0.2.0.exe', 'TalkScript 0.2.0.exe']) {
+// 产物名由 electron-builder 按 package.json 生成：NSIS 安装包是
+// `${productName} Setup ${version}.exe`，portable 是 `${productName} ${version}.exe`。
+// 原来这里把 "0.2.0" 写死在两处：一改版本号，认证就去找两个不存在的文件、
+// 报一串"缺少产物"——而包明明是好的。版本只许有一个来源（package.json）。
+// productName 的取值顺序与 electron-builder 一致：build.productName > 顶层 > name。
+const productName = (pkg.build && pkg.build.productName) || pkg.productName || pkg.name;
+if (!pkg.version) problems.push('package.json 里读不到 version：产物名无从推导');
+const setupName = `${productName} Setup ${pkg.version}.exe`;
+for (const exe of [setupName, `${productName} ${pkg.version}.exe`]) {
   const p = path.join(UNPACKED, '..', exe);
   if (!existsSync(p)) { problems.push(`缺少产物 ${exe}`); continue; }
   const buf = readFileSync(p, null);
@@ -240,7 +256,7 @@ function findSevenZip() {
   return null;
 }
 
-const setupExe = path.join(ROOT, 'desktop', 'dist', 'TalkScript Setup 0.2.0.exe');
+const setupExe = path.join(ROOT, 'desktop', 'dist', setupName);
 const seven = findSevenZip();
 if (!existsSync(setupExe)) {
   skipped.push('Setup.exe 不在（F 条已经报过），载荷未对账');

@@ -21,6 +21,12 @@ import {
 } from "./ui.js";
 import { BUSY_STATES } from "./progress.js";
 import { bindTopics } from "./topics.js";
+// 「关于与更新」面板（设置页第 4 个导航项）。加载上它靠的是 settings.js 里
+// `import { refreshAbout, bindAbout } from "./about.js"` 那条（settings.js 在
+// 本文件的 import 树里），这一行是**显式声明**：index.html 只引 main.js 一个
+// 入口，漏掉 about.js 的表现是「面板结构在、逻辑没加载」——看着有、实际没接。
+// 方案 §7 必改项 3。无副作用（模块只导出两个函数）。
+import "./about.js";
 
 async function boot() {
   bindShell();
@@ -88,8 +94,12 @@ function newChat() {
   // 并把「停止全部」那颗入口指给用户 —— 静默吃一个 409 是最坏的形态（缺陷 4）。
   loadSessions().then(() => {
     const bg = busyRecords();
+    // ⚠ 指路要指**那个状态下真的可见**的入口：新建对话后是 landing 态，
+    // 而「停止全部后台生成」按钮在 landing 是被 syncBusyAffordance 刻意隐藏的
+    // （composer-foot 的 28px 高度不变量）—— 原文案让用户去下方找一颗找不到的
+    // 按钮。landing 态的实况在左栏「生成中」分组（呼吸点 + 每条自带的停止）。
     if (bg.length) toast(`这条新对话不含刚才那 ${bg.length} 条：它们仍在后台进行，`
-      + `额度满了会被拒。下方「停止全部后台生成」可以一次停掉`, 6000);
+      + `额度满了会被拒。可在左栏「生成中」里逐条停止`, 6000);
   });
 }
 
@@ -144,7 +154,7 @@ window.__ts = {
   // `_verify/verify.js` 会先数一遍监听器，调这里，再数一遍 —— 必须一个都没多。
   // 这条断言**同时**覆盖五个绑定函数：漏掉任何一个的 bindOnce 包装都会报红。
   rebind: () => {
-    bindShell(); bindSettings(); bindSessionList(); T.bindScrollPin();
+    bindShell(); bindSettings(); bindSessionList(); bindTopics(); T.bindScrollPin();
   },
 };
 

@@ -74,6 +74,11 @@ function resolveEngine(o) {
   const moduleArgs = ['-m', 'app.server', ...engineArgs];
   // 令牌：交给子进程的环境变量（app/server.py 的 TOKEN_ENV = TALKSCRIPT_TOKEN）
   const childEnv = o.token ? { TALKSCRIPT_TOKEN: o.token } : {};
+  // 健康检查的身份凭证：只用于让壳确认应答者是**它自己启动的那个引擎** ——
+  // 端口在"探测到空闲"与"引擎真正绑定"之间被别的本机进程抢到时，壳会把令牌
+  // 带进对方的请求行（见 main.js 的 waitHealth）。与令牌走**同一条** env 通道，
+  // 不知道它的进程伪造不了。它不授权任何操作，所以引擎回显它是安全的。
+  if (o.healthNonce) childEnv.TALKSCRIPT_HEALTH_NONCE = o.healthNonce;
 
   const custom = env.TALKSCRIPT_PYTHON;
   if (custom) return { cmd: custom, args: moduleArgs, env: childEnv, via: 'TALKSCRIPT_PYTHON' };

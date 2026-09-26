@@ -50,7 +50,19 @@ export function modelSetupGap(meta) {
  *  设置页修不了它，跳过去只会把用户引到更没用的地方。 */
 export const MODEL_SETUP_REPLY = /设置\s*→\s*模型接口|模型接口」里/;
 
-async function request(path, { method = "GET", body, form, timeout = 0 } = {}) {
+// ── 客户端默认超时 ─────────────────────────────────────────
+// 引擎进程活着但某个 handler 卡住（不回包也不断连）时，没有超时的 fetch 会
+// **永久 pending**：`generate` 的 await 永远不返回，state.busy 卡在 true，
+// 用户点「停止」也取消不了 —— 界面没有任何出口，只能重开窗口。
+// 所以除显式声明外每个请求都带超时，超时走 catch 分支（setBusy(false) +
+// toast + 失败卡），路径已经现成。
+// 取值：读/轮询 15s（本地回环读，够宽）；写 30s（都要落盘或起作业）。
+// ⚠ 测试连接是例外：它等的是**上游模型**的响应，后端单次超时可配到 1800s，
+//   客户端不能比后端先 abort —— 那里显式传 0（不设超时）。
+const TIMEOUT_READ = 15000;
+const TIMEOUT_WRITE = 30000;
+
+async function request(path, { method = "GET", body, form, timeout = TIMEOUT_READ } = {}) {
   const opts = {
     method,
     headers: { "Content-Type": "application/json" },
@@ -64,10 +76,11 @@ async function request(path, { method = "GET", body, form, timeout = 0 } = {}) {
     opts.body = form;
     delete opts.headers["Content-Type"];
   }
+  let timer = null;
   if (timeout) {
     const ac = new AbortController();
     opts.signal = ac.signal;
-    setTimeout(() => ac.abort(), timeout);
+    timer = setTimeout(() => ac.abort(), timeout);
   }
 
   let r;
@@ -76,6 +89,12 @@ async function request(path, { method = "GET", body, form, timeout = 0 } = {}) {
   } catch (e) {
     throw new ApiError(
       e.name === "AbortError" ? "请求超时" : `无法连接本地引擎（${e.message}）`, 0);
+  } finally {
+    // 响应落地（无论成败）就拆掉超时定时器。不清的话每个请求都留一个要挂到
+    // 超时点才自灭的定时器 —— 轮询类接口 900ms 一发，长会话里按分钟累积成
+    // 一堆无主 wake-up；它对已完成的请求虽然不再有破坏力（signal 对 resolved
+    // 的 fetch 是 no-op），但泄漏本身就该在产生的当场收掉。
+    if (timer) clearTimeout(timer);
   }
 
   if (!r.ok) {
@@ -103,8 +122,8 @@ async function request(path, { method = "GET", body, form, timeout = 0 } = {}) {
 
 export const api = {
   get: (p) => request(p),
-  post: (p, body = {}) => request(p, { method: "POST", body }),
-  del: (p) => request(p, { method: "DELETE" }),
+  post: (p, body = {}) => request(p, { method: "POST", body, timeout: TIMEOUT_WRITE }),
+  del: (p) => request(p, { method: "DELETE", timeout: TIMEOUT_WRITE }),
 
   meta: () => request("/api/meta"),
   history: () => request("/api/history"),
@@ -125,7 +144,7 @@ export const api = {
   importPack: (file) => {
     const fd = new FormData();
     fd.append("file", file, file.name);
-    return request("/api/packs/import", { method: "POST", form: fd, timeout: 30000 });
+    return request("/api/packs/import", { method: "POST", form: fd, timeout: TIMEOUT_WRITE });
   },
   // 卸载**导入的**包。内置播种包服务端会拒（400 + 人话），界面照实显示。
   removePack: (name) =>
@@ -147,7 +166,9 @@ export const api = {
   activateModel: (id) => request("/api/models/activate", { method: "POST", body: { id } }),
   packFile: (name, rel) =>
     request(`/api/packs/${encodeURIComponent(name)}/file?rel=${encodeURIComponent(rel)}`),
-  testConfig: (body) => request("/api/config/test", { method: "POST", body }),
+  // 测试连接：等的是**上游模型**的响应（后端单次超时可配到 1800s），
+  // 客户端不能比后端先 abort，所以显式 0 = 不设超时。
+  testConfig: (body) => request("/api/config/test", { method: "POST", body, timeout: 0 }),
 
   // 情报（今日选题 / 情报源）。三个端点分工：
   //   today   只读本地文件，空或坏返回空结构（**不抛**）—— 抓取失败不该让页面报错
