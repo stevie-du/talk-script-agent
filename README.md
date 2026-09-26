@@ -26,25 +26,29 @@
 │   checker   字数/时长/两级禁用词（行业包词表 × 平台分级）
 │   prompts   skill.yaml 模板渲染 + 知识文件注入（带 mtime 缓存）
 │   store     产物落盘 + 历史索引（index.json）
-│   watchdog  父进程看门狗：Electron 一没，引擎自行退出（不留孤儿占端口）
+│   watchdog  无此模块：父进程看门狗实现在 app/server.py 内（Electron 一没，引擎自行退出）
 │   packgen   输入行业名+描述 → 生成新行业包初稿（草稿态）
 │   packseed  出厂包 → 可写包目录的播种：只拷不覆盖，保住用户改过的那份
 └─ packs/<行业>/ ── 知识包（合规词库/选题库/受众库/钩子库/配额规则/私有资料）
              打包版真正使用的是**可写的那份**：%APPDATA%\TalkScript\packs
 ```
 
-单次生成的模型调用：**正常 3~5 次**（选题 1 + 撰写 1 + 回炉 0~2 轮 + 分镜 1，
-回炉轮是"撰写+校验"整体重跑；只出口播时不跑分镜，选题命中缓存时再少一次）。
+单次生成的模型调用按包形态分两档：**声明了 `draft` 段的包（默认 elevator 与模板包 `_template`
+都是）走合并路径** —— 选题与正文一次调用（`app/pipeline.py` 的 `_draft_once`，作业步骤名就叫
+「选题与撰写（一次调用）」），正常 **2~4 次**（选题+撰写 1 + 回炉 0~2 轮 + 分镜 1）；
+未声明 `draft` 的老包走 select+write 两段，正常 **3~5 次**（选题 1 + 撰写 1 + 回炉 0~2 轮 + 分镜 1）。
+回炉轮是"撰写+校验"整体重跑；只出口播时不跑分镜。
 「重写本段」是定稿后的独立动作，每次 2 个调用（改写该段 + 重画分镜）；「新建行业包」1 个调用。
-同一次应用运行内，**选题提示词逐字相同**的重复生成会跳过选题那一次（作业日志写
-「复用上次选题（本次未调用模型）」）。判据是「模型名 + 渲染后的选题 system/user」这一段指纹，
-所以改主题 / 细分 / 受众 / 时长 / 风格 / 平台 / 人设 / 结尾引导、换模型、改被注入的知识内容
-都会重新选题；而只改「补充资料」「人味档位」「输出内容」仍会复用 —— 它们不进选题提示词。
-「换一版」从不调缓存，那个按钮的语义就是要一个新角度。同参数**并发**生成也只打一次模型
-（选题加了一把 single-flight：第二条等第一条的结果，不再各花一次 4000 token）。
+两段路径的包另有一条选题缓存：同一次应用运行内，**选题提示词逐字相同**的重复生成会跳过
+选题那一次（作业日志写「复用上次选题（本次未调用模型）」；合并路径没有单独的选题调用可省，
+不走这份缓存，`_draft_once` 的 docstring 注明这是有意的）。判据是「模型名 + 渲染后的选题
+system/user」这一段指纹，所以改主题 / 细分 / 受众 / 时长 / 风格 / 平台 / 人设 / 结尾引导、
+换模型、改被注入的知识内容都会重新选题；而只改「补充资料」「人味档位」「输出内容」仍会复用
+—— 它们不进选题提示词。「换一版」从不调缓存，那个按钮的语义就是要一个新角度。两段路径下
+同参数**并发**生成也只打一次选题模型（single-flight：第二条等第一条的结果，不再各花一次 4000 token）。
 ⚠ 以上是**无故障**口径；叠加请求层重试与 JSON 解析重试，最坏是
-`逻辑调用数 × 2 × (llm.retries + 1)` 个 HTTP 请求 —— 默认 `retries: 2` 时 5 次调用为 **30**，
-`retries: 3` 则为 **40**。为免这条最坏路径把人吊在界面上干等，一条作业另有**整作业时间上界**
+`逻辑调用数 × 2 × (llm.retries + 1)` 个 HTTP 请求 —— 默认 `retries: 2` 时 4 次调用为 **24**
+（未声明 `draft` 的老包最坏 5 次则是 **30**），`retries: 3` 则为 **32**。为免这条最坏路径把人吊在界面上干等，一条作业另有**整作业时间上界**
 20 分钟（`app/jobs.py` 的 `JOB_BUDGET_SECONDS`）：到点落 `failed` 并说明"上游太慢或反复重试"，
 不再无限等下去（《审查报告-20260920》P1-5 的两半现在都收口了）。
 ⚠ 这句在**正常路径**上是绝对的；如果连"收口"这一步自己都在抛（内存耗尽一类），还有一道
@@ -119,7 +123,7 @@ cd desktop && npm run start:no-sandbox
 
 ```bash
 .venv\Scripts\python -m pytest        # 引擎侧（访问控制/状态机/校验器/模板/索引/建包/导出）
-node --test "desktop/*.test.js"       # 壳侧纯逻辑（引擎降级链 + 打包排除规则，零依赖）
+cd desktop && node --test             # 壳侧纯逻辑（引擎降级链 + 打包排除规则，零依赖）
 node _verify/verify.js                # 界面回归（桩 fetch，百秒量级：三百多条断言跑真页面）
 node _verify/e2e-live.js              # 真实端到端（真引擎 + 真页面 + 真落盘）
 ```
@@ -130,17 +134,24 @@ node _verify/e2e-live.js              # 真实端到端（真引擎 + 真页面 
 没装就是若干条 `Cannot find module` 红，不是产品缺陷）；`verify.js` 用桩 fetch，
 不需要引擎在跑；`e2e-live` 会自己起引擎，缺 `.venv` 时现在直接报人话并以退出码 2
 结束（与"门真的红了"区分开）。
-⚠ 壳侧那条**不能写成 `node --test desktop/`**（目录形式）：Node ≥22 会把目录当程序
+⚠ 壳侧那条的目录形式（`cd desktop && node --test`，零参数搜 cwd）**任何 Node 版本
+都能跑**；而 glob 形式 `node --test "desktop/*.test.js"` 要 **Node ≥21** 才展开
+通配符 —— Node 20 上它直接 `Could not find '...\desktop\*.test.js'` 退出（实测
+v20.20.1）。所以文档一律写目录形式：不挑版本，也不依赖 shell 展开。
+⚠ 更不能写成 `node --test desktop/`（带尾斜杠的目录形式）：Node ≥22 会把目录当程序
 执行（经 package.json 的 main 找到 `main.js`，而它在 Electron 外跑必然崩在
-`app.requestSingleInstanceLock`）—— 实测 `node --test desktop/` 是 0 pass / 1 fail，
-而 `node --test "desktop/*.test.js"` 与 `cd desktop && node --test`（零参数搜 cwd）
-都是 26/26。写 glob 是为了在任何 shell 里都不依赖展开。
+`app.requestSingleInstanceLock`）—— 实测 `node --test desktop/` 是 0 pass / 1 fail。
 `_verify/legacy/` 里是重构前写的脚本，依赖已不存在的 DOM 与全局变量，**不要运行**。
 
 ## 一条关于门禁的规矩（断言与 CSS 是一对）
 
-`node _verify/verify.js` 在**提交态 HEAD** 上是 **357/357**（2026-09-23 15:55 grep 实测；
-该数字随断言增删漂移 —— 当天值以 `grep -c "check(" _verify/verify.js` 减 1 为准。
+`node _verify/verify.js` 全量跑是 **379/379**（2026-09-25 实测；
+该数字随断言增删漂移 —— 复算口径是 `check(` 的调用次数，**主文件与 `_verify/sections/`
+四个文件都要计**；下面两个 grep 数字是 2026-09-24 的快照、仅作复算演算示例，别拿它当现状，
+以 verify.js 实际输出为准）：2026-09-24 两处 grep 分别为 346 与 22，合计 368 再减去 verify.js 的
+`function check(...)` 定义那一次，得 367。只 grep 主文件会漏掉整个 sections 目录 ——
+packimport 那一组 7 条就住在 sections 里，此前它们注册了却从未挂进整网，等于默认门禁
+从没覆盖过导入入口。
 历史上它从 330/336 起步：红的 6 条量的是 UI 几何与层级 —— 页签条 `position: sticky`、
 `.page-head-titles h2` 字号、`--font-ui`、左栏 12/16 竖向节奏 ×3）。
 
@@ -156,7 +167,7 @@ node _verify/e2e-live.js              # 真实端到端（真引擎 + 真页面 
 
 ```bash
 cd desktop && npm run dist
-# 产物在 desktop/dist/：TalkScript Setup 0.2.0.exe（NSIS 安装包）+ TalkScript 0.2.0.exe（portable）
+# 产物在 desktop/dist/：TalkScript Setup 0.2.2.exe（NSIS 安装包）+ TalkScript 0.2.2.exe（portable）
 # 打完必须认证一遍（逐项比包内引擎与当前源码，缺一步都算没过）：
 cd desktop && npm run verify:package
 # 它查 8 样（数目由 `desktop/scripts/verify-package.mjs` 头部那份 A./B./… 清单自己核对，
@@ -256,6 +267,116 @@ cd desktop && npm run verify:package
 实际以 `desktop/dist/` 里打出来的为准（运行时目录大小看 `du -sm desktop/vendor/py`）。
 构建缓存 `desktop/vendor/` 已 gitignore，首次打包会下载；
 版本/依赖不变时后续打包会跳过重建（`--force` 可强制）。
+
+### 自动更新
+
+NSIS 安装包支持自动更新（**portable 不支持**，见文末边界）。客户端运行期**只认一个环境变量**
+`TALKSCRIPT_UPDATE_URL`：没配（或为空串）→ 自动更新整体关闭，**一次网络请求都不发**；
+开发态（`npm start`）同样不检查。配了之后：窗口出现 15s 后第一次检查，之后每 6h 一次，
+发现新版本就后台下载，下载完退出应用时静默安装（sha512 不过关不装）。
+
+用户能看到的地方只有一处：**设置 → 关于与更新**（当前版本 + 状态行 + 【检查更新】按钮）。
+自动检查的结果也推到这个面板；失败时状态行给一句人话原因，完整日志在
+`%APPDATA%\TalkScript\logs\updater.log`（与 `engine.log` 同一套脱敏与 2 MB 轮转）。
+「版本有没有真的生效」看 `engine.log` 里那行 `TalkScript v<版本> 启动` 即可，版本号变了即生效。
+
+自己机器上启用（`setx` 后重启应用生效）：
+
+```bash
+setx TALKSCRIPT_UPDATE_URL "https://你的服务器/talkscript/"
+```
+
+⚠ **更新地址里别放机密** —— URL 会原样进 `updater.log` 与 package.json。要「知道路径才能更新」
+就在路径里放一段随机串，别放 token。
+
+#### 服务器侧（一次性）
+
+```
+/var/www/talkscript/
+├── latest.yml                          ← electron-builder 出包时自动生成，禁止手写
+├── TalkScript Setup 0.2.2.exe
+└── TalkScript Setup 0.2.2.exe.blockmap
+```
+
+nginx（一段就够；Range 请求静态文件默认支持，差分下载靠它）：
+
+```nginx
+location /talkscript/ {
+    alias /var/www/talkscript/;
+}
+```
+
+Caddy（顺带自动签 Let's Encrypt，更省事）：
+
+```
+talkscript.example.com {
+    root * /var/www/talkscript
+    file_server
+}
+```
+
+- **HTTPS 是底线**：安装包没有代码签名，`latest.yml` 里的 sha512 只保「完整」（防损坏、防错版），
+  不保「来源」—— 无签名 + 纯 HTTP = 中间人可以给你塞任何安装包。只有 IP 的纯局域网场景
+  签不了证书，风险自担。
+- generic provider 官方明确**不会自动上传**，所以「上传」这一步由发布脚本做 —— 这就是它的存在理由。
+
+#### 发布新版本
+
+```bash
+cd desktop
+npm run dist                                  # 产物在 dist/（含 latest.yml 与 blockmap）
+npm run publish:update -- \
+  --to  user@你的服务器:/var/www/talkscript \
+  --url https://talkscript.example.com/talkscript/
+```
+
+脚本按顺序做六件事，每步失败都打印**哪一步、为什么、下一步该怎么办**，不半上传：
+
+| 步 | 做什么 | 失败意味着 |
+|---|---|---|
+| 1 | 校验产物：`dist/latest.yml` 存在、其 version 与 package.json 一致、列出的 exe/blockmap 都在 dist/ | 包没打完，或 `build.publish` 没配（不配 publish 根本不生成 latest.yml） |
+| 2 | 防降级（三分支，见 `desktop/scripts/publish-update.mjs` 的版本比较段）：GET 线上 `latest.yml`，线上还没有它（404，首次发布）→ 放行；线上 version **比本次高** → **拒绝上传**；**相等** → 线上文件齐全就拒绝（无需重传），有缺失就判「上次上传中断」放行补传；线上比本次低 → 放行 | 否则旧包覆盖新包，线上版本「无声回退」；同版本拒绝的那半边防的是「同一 version 两份不同的包，客户端缓存会打架」 |
+| 3 | `scp` 三个文件（latest.yml / exe / blockmap） | — |
+| 4 | 闭环验证：再 GET 一次线上，确认 version = 本次、文件可下载（HEAD 200） | 上传完必须能回答「线上现在到底是什么版本」 |
+| 5 | `--keep N`（默认 2）：清理服务器上更老的 exe/blockmap，**正在被 latest.yml 引用的永不删** | 默认留 2 是为了回滚：发错包 / 新包有恶性 bug 时，旧 exe 没了就只能重出一个 96 MB 的包。确认一个版本周期无恙后可收紧成 1 |
+| 6 | `--dry-run`：只跑 1、2、4 的检查，不上传也不删任何文件 | 发版前先跑一遍 |
+
+版本比较按点分数字逐段（`0.2.10 > 0.2.9`），所以第 2 步的防降级与第 5 步的清理都不会被字典序骗
+（字典序会把 0.2.10 判成最旧）。服务器上**不需要**为差分保留旧安装包（基准在客户端缓存里），
+留旧包只为回滚。
+
+#### 增量更新与本地验证
+
+出包时自动为 Setup exe 生成 `.blockmap`，跟 exe 一起放上服务器即可，客户端默认差分下载：
+只拉新安装包里与缓存中旧安装包不同的块 —— 版本间不变的字节（内嵌 Python 运行时、Electron 运行时、
+行业包）一个块都不拉，典型几 MB。缓存不在（新装机 / 用户清过缓存 / 从没走过 updater）→
+自动回退全量下载，不会失败，只是慢一次。差分失败同样不静默：日志里会写
+`Cannot download differentially, fallback to full download` 并回退全量。
+
+本地起更新源验这条链，用 `desktop/scripts/serve-update.mjs`（零依赖，只绑 127.0.0.1）：
+
+```bash
+cd desktop
+node scripts/serve-update.mjs ./fake-feed --port 9000
+# fake-feed/ 里放 latest.yml + Setup exe + .blockmap，然后
+setx TALKSCRIPT_UPDATE_URL "http://127.0.0.1:9000/"
+```
+
+它是**支持 Range** 的静态服务器（回 206 + `Content-Range`，HEAD 回 Content-Length）。
+**别用 `python -m http.server` 验差分** —— 它不支持 Range（实测对 Range 请求回 200 全量），
+差分路径会被静默跳成全量：看着「下载成功」，其实差分一行都没验。
+
+#### 边界（写在这儿，不藏）
+
+- **portable 版（`TalkScript x.y.z.exe` 单文件）没有自动更新**：官方 auto-updatable targets
+  只列 NSIS。便携版用户继续「整个替换文件」这一条路。
+- **无签名**：见上，HTTPS 是底线。转签 / 换证书前要先想清楚：换了发布者名，跑着旧版的客户端
+  会拒装，那才需要老用户手动重装一次。
+- **版本错配的失效形态是「构建全部成功、客户端永远检查不到更新且报错难懂」**：`latest.yml`
+  的元数据格式随 electron-builder 大版本变（≥27 用新版 `files[]`）。当前锁 builder 25 +
+  electron-updater 6.8.9，已实测配对；升级 builder 或 updater 时要重新对版。
+- 端到端冒烟（本地伪装新版本 → 真装一次 → 版本号变化 / 差分拉取量远小于全量）按
+  `docs/自动更新方案.md` §10 手动跑过再上生产；干净机器上的安装验证见下一节。
 
 ### 安装与卸载的行为
 
@@ -428,15 +549,15 @@ packs/elevator/
   （`test_list_enumeration_requires_four_increasing`）。剩余定线判据
   候选是 strong 命中数，但需要"AI 味重"的对照稿（A-7/A-6 的活）。
   ⚠ 86/87 历史产物是 mock 夹具且含清单体（`mock_fixtures.py:39,47`）→ **按 `result.mock` 分流**统计，
-  否则 ai_smell 一进门槛冒烟必挂；词表与 `skill.yaml:78` / `anti-ai-smell.md:14` 已禁的书面连接词**显式对齐**，
+  否则 ai_smell 一进门槛冒烟必挂；词表与包内 `skill.yaml`（anti_ai 段）/ `anti-ai-smell.md`（禁用的书面连接词）已禁的书面连接词**显式对齐**，
   否则 169/175 假命中复现
 - [x] **A5** 结果页加了「**人味分**」tab（分数 + 逐条命中明细 + 占位密度，明说"不进合格判定"）
   + 正文里的 `.tell-mark` 下划线（点了跳该面板）+ `store.render_script_md` 同步一行。
   ⚠ `.banner.why` 折叠明细**没做** —— 明细已经在人味分 tab 里了，再加一份就是同一信息两份表示。
 - [ ] **A6** 真人语料：`yt-dlp + faster-whisper` 出稿 → **`data_dir/intel/samples/<style>/*.md`**
   （**不放 packs/**：pack 是可分发单元、包内文件会被 `/api/packs/{name}` 全量列出供下载
-  `server.py:371-394`，语料是运营数据不是行业知识）→ `write_ctx` 经 data_dir 读取注入 `$samples`。
-  ⚠ `$samples`/`$intel_block` **恒设 ctx 键、无内容给空串**（照 `prompts.py:116-122` 的 facts_block），
+  `app/server.py` 的 `/api/packs/{name}/file` 端点，语料是运营数据不是行业知识）→ `write_ctx` 经 data_dir 读取注入 `$samples`。
+  ⚠ `$samples`/`$intel_block` **恒设 ctx 键、无内容给空串**（照 `app/prompts.py` 的 `facts_block`），
   否则 `unfilled()` 在 strong 以外的档位每天刷未填充日志；样本进提示词前先过 banwords
 
 ### 线 B · 行业情报输入
@@ -458,7 +579,7 @@ packs/elevator/
 - [x] **B3** `GET /api/intel/today`：只读本地文件，**空或坏返回空结构不抛**。
   ⚠ 另有 `POST /api/intel/refresh`（走 Job）与 `POST /api/intel/ignore`（只影响今天）。
   【原记录，保留备查】返 plain dict 即可，
-  schemas.py 无响应模型先例；token 鉴权自动覆盖，仅 `/api/health` 白名单 `server.py:271`）。
+  schemas.py 无响应模型先例；token 鉴权自动覆盖，仅 `/api/health` 在 `PUBLIC_PATHS` 白名单里（app/server.py））。
   ⚠ 与 `private_facts()` 的失败语义**相反**（`knowledge.py` 的 `Pack.private_facts()` 读不到要中止生成）；
   这条差异要写进注释，否则将来一定有人"顺手统一"
 - [x] **B4** 懒触发：`/api/intel/today` 回 `stale`，**渲染层**补一发 POST（GET 不带副作用），
