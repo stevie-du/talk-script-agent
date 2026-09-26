@@ -42,14 +42,18 @@ def _read(p: Path) -> str:
 
 
 def test_normal_sync_updates_content_and_keeps_private(tmp_path):
-    """正对照：同步出厂更新要**传删除**、保 private —— 重写换入路径不许丢这两条。"""
+    """正对照：同步出厂更新要**传删除**、private 合并且**用户优先**——重写换入路径不许丢这两条。"""
     bundled = _make_bundled(tmp_path)
+    (bundled / "p" / "private").mkdir()
+    (bundled / "p" / "private" / "products.yaml").write_text("出厂模板\n", encoding="utf-8")
+    (bundled / "p" / "private" / "tpl-new.yaml").write_text("出厂新增模板\n", encoding="utf-8")
     packs = tmp_path / "packs"
     out = packseed.seed_bundled_packs(bundled, packs, app_version="1")
     assert out["copied"] == ["p"]
-    (packs / "p" / "private").mkdir()
     (packs / "p" / "private" / "secret.txt").write_text("用户的私有资料\n",
                                                         encoding="utf-8")
+    (packs / "p" / "private" / "products.yaml").write_text("用户填过的版本\n",
+                                                           encoding="utf-8")
     # 出厂更新：删 b.md、改 a.md、加 c.md
     (bundled / "p" / "b.md").unlink()
     (bundled / "p" / "a.md").write_text("出厂版 A 改\n", encoding="utf-8")
@@ -62,7 +66,34 @@ def test_normal_sync_updates_content_and_keeps_private(tmp_path):
     assert (packs / "p" / "c.md").exists()
     assert _read(packs / "p" / "private" / "secret.txt") == "用户的私有资料\n", \
         "private 是用户自己的东西，换入时必须原样保住"
+    assert _read(packs / "p" / "private" / "products.yaml") == "用户填过的版本\n", \
+        "private 同名文件必须用户赢（出厂模板不许覆盖用户填过的内容）"
+    assert _read(packs / "p" / "private" / "tpl-new.yaml") == "出厂新增模板\n", \
+        "出厂**新增**的 private 骨架要落地 —— _template 靠它过 packgen 的骨架检查（P1-5 第二版）"
     assert not list(packs.glob(".*.seed-*")), "换入完成后暂存/备份目录必须清干净"
+
+
+def test_seeded_template_keeps_private_skeleton_for_packgen(tmp_path):
+    """播种后的 _template 必须保住 private 骨架 —— 否则打包版新建行业包必然失败。
+
+    打包版 pipeline.root = 可写包目录的父级，`template_pack()` 加载的是**播种后**
+    的 _template：private/README.md 等骨架若没跟着出厂落地，`新建行业包` 会在
+    花钱之前就被骨架检查拦死（2026-09-26 走查实锤的流程回归）。
+    """
+    bundled = _make_bundled(tmp_path)
+    tpl = bundled / "_template"
+    tpl.mkdir()
+    (tpl / "pack.yaml").write_text("name: _template\n", encoding="utf-8")
+    (tpl / "private").mkdir()
+    for rel in ("README.md", "products.yaml", "raw/README.md"):
+        f = tpl / "private" / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("骨架模板\n", encoding="utf-8")
+    packs = tmp_path / "packs"
+    packseed.seed_bundled_packs(bundled, packs, app_version="1")
+    for rel in ("README.md", "products.yaml", "raw/README.md"):
+        assert (packs / "_template" / "private" / rel).exists(), \
+            f"骨架 {rel} 没随播种落地 —— 打包版建包会被骨架检查拦死"
 
 
 def test_copy_failure_leaves_user_pack_intact_and_recovers_next_run(tmp_path,

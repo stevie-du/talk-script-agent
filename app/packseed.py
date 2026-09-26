@@ -115,10 +115,11 @@ def _copy_pack(src: Path, dst: Path) -> None:
     _rmtree_if_exists(tmp)                    # 上次失败可能留下残骸
     try:
         shutil.copytree(src, tmp)
-        # bundled 的 private/ 是**空模板**：换入时以用户的 private 为准（老语义：
-        # 播种永不覆盖用户私有资料）—— 先把出厂那份整体清掉，再把用户的拷进来。
-        # 直接 copytree(user → tmp) 会与出厂模板撞目录（WinError 183）。
-        shutil.rmtree(tmp / PRIVATE_DIR_NAME, ignore_errors=True)
+        # private/ 用**合并、用户优先**（P1-5 第二版）：出厂的 private 骨架要落地
+        # —— `_template` 的 private 是建包必需的空模板（packgen 的骨架检查会
+        # 点名它们），曾经「先删出厂 private 再拷用户」让打包版新建行业包必然
+        # 失败；而对 elevator 这类包，用户的 private 文件覆盖出厂同名模板
+        # （copytree dirs_exist_ok：后拷的赢）—— 用户私有资料仍然一个字不动。
         if dst.exists() and (dst / PRIVATE_DIR_NAME).exists():
             shutil.copytree(dst / PRIVATE_DIR_NAME, tmp / PRIVATE_DIR_NAME,
                             dirs_exist_ok=True)

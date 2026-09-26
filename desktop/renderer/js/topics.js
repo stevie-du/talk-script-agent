@@ -307,7 +307,9 @@ async function awaitJob(id) {
       return null;
     }
     const live = BUSY_STATES.has(snap.state);
-    if (live) say(`情报抓取中（${STATE_LABEL[snap.state] || "处理中"}）…`);
+    // STATE_LABEL[fetching] 本身就是「情报抓取中」—— 直接用标签，别再包一层
+    // 同义的壳（曾经渲染成「情报抓取中（情报抓取中）…」）。
+    if (live) say(`${STATE_LABEL[snap.state] || "处理中"}…`);
     if (!live) {
       say("");
       if (snap.state === "failed") toast(`抓取失败：${snap.error || "未知原因"}`, 3600);
