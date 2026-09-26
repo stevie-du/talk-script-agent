@@ -84,3 +84,6 @@ _verify/.mutate-full.log
 
 # _verify 下点开头的临时日志（_* 约定不覆盖点开头）
 _verify/.*.log
+
+# 已归档的一次性探针（下划线前缀 = 非活工具，见 _verify/legacy/README.md）
+_verify/legacy/_*
