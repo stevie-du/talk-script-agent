@@ -138,6 +138,23 @@ def test_empty_file_is_not_an_error(tmp_path):
 
 # ── 2. 日志（不可见 → 可见的第一层）──────────────────────────
 
+def test_config_example_has_no_uncommented_real_values():
+    """`config.example.yaml` 里不许有未注释的真实值（P2-42）。
+
+    README 让用户「复制这个文件为 config.yaml」，而原来里面
+    `active_model: zhipu` / `default_pack: elevator` / 模型的 base_url 与
+    model 名都是**未注释的真实值** —— 复制之后会被当成"用户自己配过"，
+    于是「这一项还是内置默认」的标注该出现却不出现（P0-2 那条口径）。
+    `app/config.py` 的 CONFIG_TEMPLATE 已按铁律 2 全部注释掉，这份必须跟它一致。
+    """
+    raw = yaml.safe_load((ROOT / "config.example.yaml").read_text(encoding="utf-8")) or {}
+    for k in ("active_model", "default_pack", "models"):
+        assert not raw.get(k), f"有未注释的真实值：{k}={raw.get(k)!r}"
+    llm = raw.get("llm") or {}
+    for k in ("temperature", "retries", "timeout", "max_tokens"):
+        assert k not in llm, f"llm.{k} 是未注释的真实值"
+
+
 @pytest.mark.parametrize("name", sorted(BROKEN))
 def test_broken_config_logs_a_warning(name, tmp_path, caplog):
     (tmp_path / "config.yaml").write_text(BROKEN[name], encoding="utf-8")

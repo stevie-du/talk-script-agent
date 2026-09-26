@@ -64,14 +64,15 @@ from pydantic import BaseModel
 from .config import (DEFAULT_MODEL, ensure_config_template, load_config,
                      load_raw_models, public_models, save_config, save_models)
 from .fileio import write_atomic
-from .intel import IntelSource as _IntelSourceDC, add_ignored, today as intel_today
+from .intel import (IntelError, IntelSource as _IntelSourceDC, add_ignored,
+                    today as intel_today)
 from .jobs import StateConflict
 
 log = logging.getLogger(__name__)
 from .knowledge import Pack, PackBrokenError, PackError, list_packs
 from .llm import LLMClient
 from .packseed import PRIVATE_DIR_NAME, seed_bundled_packs
-from .packimport import PackImportError, delete_pack, import_pack
+from .packimport import PackImportError, _NAME_RE, delete_pack, import_pack
 from .pipeline import MAX_CONCURRENT_JOBS, Pipeline
 from .schemas import (GenerateRequest, IntelIgnoreRequest, IntelPackRequest,
                       PackCreateRequest, RewriteSegmentRequest)
@@ -104,15 +105,14 @@ def read_version(root: Path | None = None) -> str:
             pass
     return FALLBACK_VERSION
 
-# 路径参数白名单：作业 id 形如 20260910-010929-ddb666；
-# 行业包名为 slug（允许中英文、数字、下划线与连字符），两者都禁止 . / 等穿越字符。
-# ⚠ 这两条**不带** `^`/`$`，一律用 `.fullmatch()`：Python 的 `$` 允许串尾多一个换行，
-# 于是 `"elevator\n"`、`"20260101-000000-abcdef\n"` 在引擎这边算合法，而 JS 的 `$`
-# 不允许 —— 桩判不合法、引擎放行（第 16 轮复核实测，方向正是"桩比引擎严"那侧，
-# 也就是本仓库对账守卫写明不可接受的那一侧）。Windows 上尾部空白还会被文件系统
-# 吃掉，`packs/elevator\n` 实际落到 `packs/elevator`：一条 URL 能指到真的包上。
+# 路径参数白名单：作业 id 形如 20260910-010929-ddb666，禁止 . / 等穿越字符。
+# ⚠ 这条**不带** `^`/`$`，一律用 `.fullmatch()`：Python 的 `$` 允许串尾多一个
+# 换行，于是 `"20260101-000000-abcdef\n"` 在引擎这边算合法，而 JS 的 `$` 不
+# 允许 —— 桩判不合法、引擎放行（第 16 轮复核实测，方向正是"桩比引擎严"那侧，
+# 也就是本仓库对账守卫写明不可接受的那一侧）。Windows 上尾部空白还会被文件
+# 系统吃掉，`jobs/20260101-000000-abcdef\n` 实际落到 `jobs/20260101-000000-
+# abcdef`：一条 URL 能指到真的记录上。
 _JID_RE = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}")
-_NAME_RE = re.compile(r"[\w\u4e00-\u9fff-]+")
 
 
 def _safe_jid(jid: str) -> str:
@@ -127,7 +127,8 @@ def _safe_name(name: str) -> str:
 
     FastAPI 的 `{name}` 匹配单个路径段，但 `%2e%2e` / `%2f` 会在路由匹配**之后**
     被解码成 `..` / `/`，所以「只匹配一段」并不等于安全 —— 必须显式校验。
-    用 `fullmatch` 而不是 `match` + `$`：后者会放行尾部换行（见上面 `_NAME_RE` 的注释）。
+    用 `fullmatch` 而不是 `match` + `$`：后者会放行尾部换行（见 packimport.py
+    里 `_NAME_RE` 的注释，那条正则的单一来源）。
     """
     if not _NAME_RE.fullmatch(name or "") or ".." in name:
         raise HTTPException(400, "行业包名称不合法")
@@ -720,7 +721,18 @@ def create_app(root: Path, token: str | None = None,
     @app.get("/api/health")
     def health():
         # 刻意不鉴权：主进程要在窗口打开前轮询它；返回内容不含任何敏感信息。
-        return {"ok": True, "version": version, "mock": _cfg().mock}
+        out = {"ok": True, "version": version, "mock": _cfg().mock}
+        # ⚠ 回显 `TALKSCRIPT_HEALTH_NONCE`（只有桌面壳会设它）：壳靠这个值确认
+        # **应答者是不是它刚启动的那个引擎**。理由见 `desktop/main.js` 的 waitHealth ——
+        # 端口在「探测到空闲」与「引擎真正绑定」之间有窗口，被别的本机进程抢到并回 200 时，
+        # 壳会把一次性访问令牌带进**那个进程**的请求行（`engine-path.js` 顶部论证的正是
+        # 「令牌不能落到别的本机进程手里」）。
+        # 它只用于身份确认、不授权任何操作 —— 即使被读到也没有用处（不像令牌能调
+        # /api/*），所以在这个免鉴权端点上回显它是安全的。
+        nonce = os.environ.get("TALKSCRIPT_HEALTH_NONCE")
+        if nonce:
+            out["nonce"] = nonce
+        return out
 
     @app.get("/api/meta")
     def meta():
@@ -881,6 +893,10 @@ def create_app(root: Path, token: str | None = None,
     @app.delete("/api/packs/{name}")
     def packs_delete(name: str):
         """卸载**导入的**包。内置播种包拒绝删（删了下周播种又回来）。"""
+        # 与 get_pack / pack_file / generate 同一口径：name 先过 _safe_name，
+        # 别让 delete_pack 内部的校验单独兜（它报的是"包名不合法"，走
+        # PackImportError，和其余端点 400 的"行业包名称不合法"不是一个说法）。
+        name = _safe_name(name)
         try:
             return delete_pack(name, packs_root)
         except PackImportError as e:
@@ -897,7 +913,7 @@ def create_app(root: Path, token: str | None = None,
         而触发点只是界面上一个「标记为已校对」的按钮 —— 一次点击、不可逆、
         还在响应里回 `{"ok": true}`。详见 `undraft_yaml_text`。
         """
-        _safe_name(name)
+        name = _safe_name(name)
         p = packs_root / name / "pack.yaml"
         if not p.exists():
             raise HTTPException(404, "行业包不存在")
@@ -997,6 +1013,11 @@ def create_app(root: Path, token: str | None = None,
                 "duration": p.get("duration"),
                 "chars": None, "passed": None,
                 "state": snap["state"],
+                # ghost = 失败但**不在 store 索引里**的作业（P3-2：job_dir 没建出来
+                # → _persist 直接 return → 磁盘上什么都没有）。曾经它混进列表，
+                # 点开却 404「记录不存在」，用户不知道为什么。现在带上标记，
+                # 界面如实说「未落盘」；详情端点也会回作业快照而不是 404。
+                "ghost": snap["state"] == "failed",
             })
         running.sort(key=lambda x: x["created_at"], reverse=True)
         return (running + items)[:100]
@@ -1015,6 +1036,16 @@ def create_app(root: Path, token: str | None = None,
         snap = pipeline.store.read_job(jid)
         if snap is not None:
             return snap
+        # 幽灵失败条目（P3-2）的兜底：job_dir 没建出来时 store 里什么都没有，
+        # 但作业还在内存注册表里 —— 回作业快照而不是 404。左栏那条至少能回答
+        # 「这条为什么没出稿」，而不是一句「记录不存在」。
+        for s in pipeline.snapshot_jobs():
+            if s["id"] == jid:
+                p = s.get("params") or {}
+                return {"id": s["id"], "created_at": s["created_at"],
+                        "state": s["state"], "error": s.get("error") or "",
+                        "pack": p.get("pack", ""), "topic": p.get("topic", ""),
+                        "ghost": True}
         raise HTTPException(404, "记录不存在")
 
     @app.delete("/api/history/{jid}")
@@ -1025,6 +1056,10 @@ def create_app(root: Path, token: str | None = None,
         # 走 pipeline.discard 而不是直接删目录：正在生成的记录还要顺手停掉后台线程。
         outcome = pipeline.discard(jid)
         if outcome == "missing":
+            # 幽灵失败条目（P3-2）在 store 里没东西，但 discard 已经把注册表里
+            # 那份摘掉了 —— 这就是删成功，报 404 会让用户以为没删掉。
+            if pipeline.registry.find(jid) is None:
+                return {"ok": True, "id": jid}
             raise HTTPException(404, "记录不存在")
         if outcome == "partial":
             # 文件正被占用（常见：刚落盘就被删，杀毒软件还没松手）。
@@ -1053,6 +1088,11 @@ def create_app(root: Path, token: str | None = None,
     #   POST /api/intel/ignore  忽略一条（**只影响今天**）
     def _intel_sources(name: str) -> list:
         """读包的源声明 —— 走 `pack_info` 而不是 `Pack()`。
+
+        ⚠ `name` 是**目录 slug**：`PackInfo.name` 即目录名（见 knowledge.pack_info
+        的 P1-4 注），抓取落点（fetch_pack）、提示词注入（select_for_prompt）、
+        选题页 / 忽略 / 刷新五个消费方都用它寻址，不再依赖「yaml name == 目录名」
+        的约定。
 
         刻意的选择：`Pack()` 对坏包抛 `PackBrokenError`（409），而**情报不该
         因为 pack.yaml 写坏了就看不了** —— 那两件事互不相干，而且
@@ -1088,13 +1128,20 @@ def create_app(root: Path, token: str | None = None,
 
     @app.post("/api/intel/ignore")
     def intel_ignore(req: IntelIgnoreRequest):
-        """忽略一条选题。**只影响今天**：明天同题还会回来，连续 3 天被忽略才沉底。
+        """忽略一条选题。**只影响今天**：明天同题还会回来。
 
-        所以落盘的是 `{key: 最后一次忽略的日期}` —— 界面按"连续几天"决定沉底，
-        而"连续"这件事只能靠日期算，记一个布尔是算不出来的。
+        落盘的是 `{key: 最后一次忽略的日期}`，为「连续 3 天沉底」的设想备着
+        日期 —— 该机制**尚未实现**（与 app/intel.add_ignored 的口径一致），
+        界面如今的行为就是"只影响今天"。
         """
         name = _safe_name(req.pack)
-        rec = add_ignored(data_dir, name, req.key)
+        try:
+            rec = add_ignored(data_dir, name, req.key)
+        except IntelError as e:
+            # 读坏 / 写不进去都必须**说出来**：静默"从空开始"写会把整个忽略历史
+            # 覆盖成一条（"我忽略过的又都回来了"，用户手上没有任何线索）。
+            log.warning("忽略记录没写成：%s", e)
+            return _error_json(str(e), 500, "intel_ignore_failed")
         return {"ok": True, "ignored": len(rec)}
 
     # ── 设置 ────────────────────────────────────────────────
@@ -1304,9 +1351,12 @@ def create_app(root: Path, token: str | None = None,
         left = [x for x in raw if x["id"] != body.id]
         if len(left) == len(raw):
             raise HTTPException(404, f"没有这个模型：{body.id}")
-        if active == body.id or active not in {x["id"] for x in left}:
+        if active == body.id or (active and active not in {x["id"] for x in left}):
             # 删掉的正是当前模型（或 active 已悬空）→ 换成剩下的第一条；
             # 一条不剩时写空串，不留悬空引用。
+            # ⚠ active 为**空串**（用户显式「全部停用」，是合法状态）不是悬空：
+            #   "" 不在任何 id 集合里，不加 `active and` 会恒真地走进本分支，
+            #   把用户明确停用的模型悄悄启用（P1-1，可致意外计费）。
             active = left[0]["id"] if left else ""
         save_models(root, left, active, config_dir=data_dir)
         return {"ok": True, "active_model": active, "models": public_models(_cfg())}

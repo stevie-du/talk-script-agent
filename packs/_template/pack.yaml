@@ -64,7 +64,12 @@ rate_by_style:
 
 # 字数配额表（基准语速 5.0 字/秒；其他语速按 rate/5.0 折算，见 rules/duration.md）
 quota_table:
-  15:  { total: 70,  hook: 15, body: 40,  cta: 15 }
+  # ⚠ 15 秒档的形状是「钩子重、引导轻」：cta 15 字 ≈ 3.2 秒，一条 15 秒的片子
+  #   要花五分之一时间念 CTA，而正文只剩 40 字（8 秒）说不完一件事。
+  #   短档把引导压到 8 字，省下的字数全部还给正文（60 秒及以上不动，
+  #   长片有空间铺陈引导）。与 packs/elevator/pack.yaml 同一口径 ——
+  #   这个模板是 packgen 的骨架，**新包会原样继承这里的形状**。
+  15:  { total: 70,  hook: 15, body: 47,  cta: 8 }
   30:  { total: 145, hook: 25, body: 90,  cta: 30 }
   60:  { total: 290, hook: 45, body: 190, cta: 55 }
   90:  { total: 430, hook: 60, body: 300, cta: 70 }

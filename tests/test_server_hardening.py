@@ -15,6 +15,7 @@
     「标记已校对」不吃注释、base_url 的拒/警分工、行业包住在可写目录。
 """
 import json
+import os
 import re
 import shutil
 import sys
@@ -23,6 +24,8 @@ import threading
 import time
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -220,6 +223,38 @@ def test_access_control(tmp_path=None):
     # 非浏览器客户端（无 Origin）放行
     assert c.get("/api/meta").status_code == 200
     shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ── 2b 健康检查的身份回显（P2-16）────────────────────────────
+def test_health_echoes_nonce_only_when_set(tmp_path=None):
+    """设了 `TALKSCRIPT_HEALTH_NONCE` 时 `/api/health` 回显它。
+
+    桌面壳靠这个值确认**应答者是不是它刚启动的那个引擎** —— 端口在「探测到空闲」
+    与「引擎真正绑定」之间有窗口，被本机别的进程抢到并回 200 时，壳会把一次性访问
+    令牌带进对方的请求行（`desktop/main.js` 的 waitHealth）。
+
+    **不设时不能凭空多一个键**：那会让壳拿 `undefined` 去比，
+    任何一个回 200 的本机进程都能通过 —— 正是「壳以为在验身份、实际没验」的假守卫形态。
+    """
+    if TestClient is None:                                # pragma: no cover
+        pytest.skip("没装 fastapi/httpx")
+    tmp = _tmp_root()
+    app = create_app(tmp, token=TOKEN)
+    c = TestClient(app, base_url=LOOPBACK, raise_server_exceptions=False)
+    try:
+        os.environ.pop("TALKSCRIPT_HEALTH_NONCE", None)
+        body = c.get("/api/health").json()
+        assert body.get("ok") is True, body
+        assert "nonce" not in body, f"没设 nonce 却回显了：{body}"
+
+        os.environ["TALKSCRIPT_HEALTH_NONCE"] = "nz-test-1"
+        body = c.get("/api/health").json()
+        assert body.get("nonce") == "nz-test-1", body
+        # 回显 nonce 不该把它的性质改掉：仍然免鉴权、仍然带 version
+        assert body.get("ok") is True and "version" in body, body
+    finally:
+        os.environ.pop("TALKSCRIPT_HEALTH_NONCE", None)
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 # ── 3 落盘原子性 ────────────────────────────────────────────
@@ -968,7 +1003,13 @@ def test_pack_file_read_is_guarded(tmp_path=None):
     assert ok.status_code == 200, (ok.status_code, ok.text)
     body = ok.json()
     assert body["rel"] == "knowledge/topics.md" and body["text"], body
-    assert body["size"] == len(body["text"].encode("utf-8")) or body["size"] > 0
+    # ⚠ 判据不能是 `or body["size"] > 0`：上一行刚断言过 text 非空，
+    #   于是「size > 0」恒真，整条退化成「文件非空」（这一行等于没有）。
+    # ⚠ 也不能拿 `len(text.encode())` 去比 —— `read_text` 在 Windows 上会把
+    #   CRLF 收成 LF，两者天然不等，前半句会**恒假**、一样是空转。
+    #   `size` 的语义就是**磁盘上的字节数**（与 `stat().st_size` 同一件事）。
+    real = (tmp / "packs" / "elevator" / "knowledge" / "topics.md").stat().st_size
+    assert body["size"] == real, f"size 与磁盘对不上：{body['size']} != {real}"
 
     # 穿越一律拿不到（config.yaml 里有明文 Key）
     for bad in ("../../config.yaml", "../config.yaml", "..\\config.yaml",
@@ -1430,7 +1471,8 @@ def _mock_root():
 def test_broken_pack_409_carries_its_own_code(tmp_path=None):
     """坏包：状态码仍是 409，但 code 说清是谁，detail 仍是引擎那句**原话**。"""
     if TestClient is None:
-        return
+                                # pragma: no cover
+        pytest.skip("没装 fastapi/httpx")
     tmp = _mock_root()
     try:
         (tmp / "packs" / "elevator" / "pack.yaml").write_text(
@@ -1453,7 +1495,8 @@ def test_broken_pack_409_carries_its_own_code(tmp_path=None):
 def test_quota_409_carries_its_own_code(tmp_path=None):
     """额度满：同一道闸，另一个 code；detail 是 pipeline 那句原话。"""
     if TestClient is None:
-        return
+                                # pragma: no cover
+        pytest.skip("没装 fastapi/httpx")
     from unittest.mock import patch
     from app.jobs import StateConflict
     from app.pipeline import Pipeline
@@ -1479,7 +1522,8 @@ def test_the_two_409_replies_are_distinguishable_by_machine(tmp_path=None):
     这里把两份应答摆在一起比：状态码可以相同（都对），code 与 detail 都必须不同。
     """
     if TestClient is None:
-        return
+                                # pragma: no cover
+        pytest.skip("没装 fastapi/httpx")
     from unittest.mock import patch
     from app.jobs import StateConflict
     from app.pipeline import Pipeline
@@ -1507,7 +1551,8 @@ def test_state_conflict_that_is_not_quota_is_not_labelled_quota(tmp_path=None):
     """StateConflict 还挂在「作业状态不允许这个操作」上（app/jobs.py）。
     它同是 409，但既不是额度也不是包坏了 —— 各自一个 code，别互相冒充。"""
     if TestClient is None:
-        return
+                                # pragma: no cover
+        pytest.skip("没装 fastapi/httpx")
     from unittest.mock import patch
     from app.jobs import StateConflict
     from app.pipeline import Pipeline
@@ -1528,7 +1573,8 @@ def test_missing_pack_404_also_gets_a_code(tmp_path=None):
     """包不存在 → 404 照旧，只是也多给一个 code：整套错误都用同一份约定，
     不是「谁想到了才加」。"""
     if TestClient is None:
-        return
+                                # pragma: no cover
+        pytest.skip("没装 fastapi/httpx")
     tmp = _mock_root()
     try:
         c = _client(tmp)
@@ -1723,3 +1769,132 @@ def test_error_codes_are_a_closed_set():
     used = set(_re.findall(r'\b(ERR_\w+)\b', src))
     unused = defined - used
     assert not unused, f"定义了没人用的 code：{sorted(unused)}"
+
+
+# ── 9b 「测试连接」端点（P2-27）──────────────────────────────
+def test_config_test_covers_its_branches(tmp_path=None):
+    """`POST /api/config/test` 是用户可直达的（设置页那颗「测试连接」），
+    但它原来在 tests/ 里**零引用** —— 分支还不少。
+
+    最要紧的是 **`model_id` 覆盖**：编辑一条**非当前**模型时密钥框是空的，
+    不按 id 落到那条上就会拿**当前**模型的 Key 去测 —— 测出来的结果与用户
+    以为的不是一回事，而界面照常显示「连接正常」。
+    """
+    tmp = _tmp_root()
+    c = _client(tmp)
+
+    # ① 没配 Key → 400，且说清要做什么
+    r = c.post("/api/config/test", json={})
+    assert r.status_code == 400, (r.status_code, r.text)
+    assert "Key" in r.json()["detail"], r.json()
+
+    # ② base_url 不合法 → 400（用户在设置页填错地址时走这条）
+    (tmp / "config.yaml").write_text(
+        "llm:\n  api_key: MOCK\n  model: mock-model\n", encoding="utf-8")
+    r = c.post("/api/config/test", json={"base_url": "ftp://x"})
+    assert r.status_code == 400, (r.status_code, r.text)
+    assert r.json()["detail"], "400 但没说原因"
+
+    # ③ 正常：mock Key → 200 + model / base_url / warnings
+    r = c.post("/api/config/test", json={})
+    assert r.status_code == 200, (r.status_code, r.text)
+    body = r.json()
+    assert body["ok"] is True and body["model"] == "mock-model", body
+    assert isinstance(body["warnings"], list), body
+
+    # ④ model_id 覆盖：测的是**指定那条**，不是当前那条（active 是 m1）
+    (tmp / "config.yaml").write_text(
+        "models:\n"
+        "  - {id: m1, name: 甲, base_url: 'https://a.example/v1',"
+        " api_key: MOCK, model: model-a}\n"
+        "  - {id: m2, name: 乙, base_url: 'https://b.example/v1',"
+        " api_key: MOCK, model: model-b}\n"
+        "active_model: m1\n", encoding="utf-8")
+    r = c.post("/api/config/test", json={"model_id": "m2"})
+    assert r.status_code == 200, (r.status_code, r.text)
+    assert r.json()["model"] == "model-b", \
+        f"model_id 没生效 —— 测的是当前那条而不是指定那条：{r.json()}"
+
+
+# ── 9c 「在文件夹里显示」端点（P2-27）────────────────────────
+def test_history_reveal_endpoint(monkeypatch, tmp_path=None):
+    """`POST /api/history/{jid}/reveal` 原来在 tests/ 里**零引用**。
+
+    两个出口都要能走：记录不存在 → 404；打开失败 → 500（带原因，不是裸 500）。
+    真实实现会**真去开系统文件管理器**，所以测试把它换掉 —— 顺带让这两条路径
+    变得可测（否则谁都不敢碰这个端点）。
+    """
+    import app.server as S
+    tmp = _tmp_root_mock()
+    c = _client(tmp)
+
+    # ① 记录标识不合法 → 400（路径穿越 / glob 那类由 _safe_jid 先挡）
+    r = c.post("/api/history/no-such-job/reveal")
+    assert r.status_code == 400, (r.status_code, r.text)
+    assert "不合法" in r.json()["detail"], r.json()
+
+    # ② 合法（引擎的真实格式）但不存在的记录 → 404（不是 500，也不是静默 ok）
+    r = c.post("/api/history/20260924-120000-abcdef/reveal")
+    assert r.status_code == 404, (r.status_code, r.text)
+    assert "不存在" in r.json()["detail"], r.json()
+
+    # 造一条**真的在盘上**的记录目录 —— `find_dirs` 是两级 glob：
+    # `generated/<日期>/<jid>/`（store.py:83）
+    jid = "20260924-120000-abc123"
+    day = tmp / "generated" / "2026-09-24"
+    day.mkdir(parents=True, exist_ok=True)
+    (day / jid).mkdir()
+    (day / jid / "script.md").write_text("正文", encoding="utf-8")
+
+    # ③ 成功：路径回给前端（打开动作被换成记录）
+    opened = []
+    monkeypatch.setattr(S, "_reveal_in_explorer", lambda p: opened.append(p))
+    r = c.post(f"/api/history/{jid}/reveal")
+    assert r.status_code == 200, (r.status_code, r.text)
+    assert opened, "端点没调打开函数"
+    assert r.json()["path"].endswith(jid), r.json()
+
+    # ④ 打开失败 → 500 且带上原因（用户要能看出"是系统没关联程序"）
+    def _boom(_p):
+        raise OSError("没有关联的程序")
+    monkeypatch.setattr(S, "_reveal_in_explorer", _boom)
+    r = c.post(f"/api/history/{jid}/reveal")
+    assert r.status_code == 500, (r.status_code, r.text)
+    assert "没有关联的程序" in r.json()["detail"], r.json()
+
+
+def test_ghost_failed_entry_is_marked_openable_and_deletable(tmp_path=None):
+    """P3-2 幽灵条目：job_dir 没建出来的失败作业，store 里什么都没有。
+
+    曾经：左栏列表里有它、点开 404「记录不存在」、删除也 404 —— 用户
+    三条路都走不通。现在：列表带 `ghost` 标记（前端如实说「未落盘」）、
+    详情回内存里的作业快照（能回答「为什么没出稿」）、删除如实成功。
+    """
+    tmp = _tmp_root_mock()
+    c = _client(tmp)
+    try:
+        from app.jobs import Job, new_job_id
+        pl = c.app.state.pipeline
+        jid = new_job_id()                    # 幽灵条目也得是合法 jid（_safe_jid 有格式闸）
+        j = Job(jid, "generate", {"pack": "elevator", "topic": "幽灵条目"})
+        j.state = "failed"                    # 直接落终态：模拟 job_dir 没建出来的失败
+        j.error = "模拟：job_dir 建不出来"
+        pl.add_job(j)
+
+        items = [x for x in c.get("/api/history").json() if x["id"] == jid]
+        assert items, "幽灵条目从列表里消失了（静默消失比点开 404 更糟）"
+        assert items[0]["ghost"] is True and items[0]["state"] == "failed"
+
+        r = c.get(f"/api/history/{jid}")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["ghost"] is True and body["error"], body
+        assert body["topic"] == "幽灵条目"
+
+        assert c.delete(f"/api/history/{jid}").status_code == 200, \
+            "删除幽灵条目不该报 404（注册表里那份已摘除 = 删成功）"
+        assert pl.registry.find(jid) is None
+        assert c.get(f"/api/history/{jid}").status_code == 404, \
+            "摘除之后才应该是真 404"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)

@@ -287,3 +287,18 @@ def test_script_md_says_nothing_when_tells_were_not_measured():
 
     md = render_script_md(_md_result(None))
     assert "人味分" not in md, md
+
+
+def test_ai_tells_wrong_type_is_announced_not_silent(tmp_path):
+    """pack.yaml 的 `ai_tells:` 键写成映射/列表 → 要出说明，不能无声关闭（P3）。
+
+    `str({...})` 拼出的路径永远不存在 → 返回 None 且 notes 为空 ——
+    本函数唯一完全无声的坏法。键为空（None/缺省）视作"没配"，不算这一条。
+    """
+    from app.knowledge import resolve_ai_tells
+    data, notes = resolve_ai_tells(tmp_path, {"ai_tells": {"strong": ["x"]}})
+    assert data is None
+    assert notes and "不符合约定" in notes[0], f"静默关闭了：{notes}"
+    # 正对照：键为 None（写了但空）= 没配，照旧静默
+    data2, notes2 = resolve_ai_tells(tmp_path, {"ai_tells": None})
+    assert data2 is None and notes2 == []

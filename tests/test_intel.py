@@ -24,6 +24,7 @@ import json
 import shutil
 import sys
 import tempfile
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -40,7 +41,7 @@ from app.config import load_config                               # noqa: E402
 from app.jobs import (BUSY_STATES, INTEL_BUSY_STATES,            # noqa: E402
                       MAX_CONCURRENT_INTEL,
                       TERMINAL_STATES)
-from app.knowledge import Pack, pack_info                        # noqa: E402
+from app.knowledge import Pack, PackBrokenError, pack_info         # noqa: E402
 from app.pipeline import (MAX_CONCURRENT_JOBS, Pipeline,         # noqa: E402
                           wait_job)
 from app.schemas import IntelPackRequest                         # noqa: E402
@@ -83,11 +84,21 @@ def _specs(**over):
     return I.parse_sources(raw)[0]
 
 
-def _fake_http(boom: set[str] | None = None, hot=("电梯困人索赔", "明星八卦")):
-    """离线假 HTTP：按 url 分派。`boom` 里的端点抛错（模拟离线/被墙）。"""
+def _fake_http(boom: set[str] | None = None, hot=("电梯困人索赔", "明星八卦"),
+               gate=None):
+    """离线假 HTTP：按 url 分派。`boom` 里的端点抛错（模拟离线/被墙）。
+
+    `gate`：给了就在每次请求前**等这个 Event**（`threading.Event`）——
+    用来把抓取作业**钉在 fetching 态**，好验"额度被占满"这类与时间有关的事。
+    原来那条 `test_intel_fetch_has_its_own_limit` 靠"真网络慢"来保证作业还没跑完，
+    换成假 HTTP 之后瞬间就 done 了、额度当场释放，测试反而红
+    （P2-28 顺手暴露的一个竞态）。
+    """
     boom = boom or set()
 
     def get(url, params=None, **_kw):
+        if gate is not None:
+            gate.wait(timeout=5)
         for key in boom:
             if key in url:
                 raise RuntimeError(f"连不上 {key}")
@@ -105,6 +116,45 @@ def _fake_http(boom: set[str] | None = None, hot=("电梯困人索赔", "明星�
         raise RuntimeError("没打桩的端点：" + url)
 
     return get
+
+
+_OFFLINE_HTTP_CALLS: list[str] = []
+
+
+@pytest.fixture(autouse=True)
+def _offline_http(monkeypatch, request):
+    """把真实 HTTP 出口换成**离线空响应**（P2-28）。
+
+    `fetch_pack` / `start_intel_fetch` 不传 `http=` 时走 `_http_json`（真网络），
+    而 demand_terms 每给一个 seed 就发一次请求 —— 离线 / 沙箱下会慢或抖动，
+    后台线程还可能跨用例存活（症状是下一条用例莫名看到上一条的作业）。
+
+    两层：
+    1. **隔离**：替身返回 `{}`，任何用例都不真发网络。端点测试（如
+       `/api/intel/refresh`）内部必然走到这条路径 —— 它验的是「端点起了作业」，
+       不是抓取本身，所以放它过。
+    2. **判死**：收尾断言「单元测试一次都不许走到真实出口」。
+       ⚠ 替身**不能直接抛**：`fetch_pack` 对每个源各自 try（一个源挂了不影响
+       别的源），抛出去会被**吞进 `errors`**、测试照样绿 —— 实测踩到过
+       （第一版就是这么写的，变异检验没红）。
+    """
+    import app.intel as _I
+    _OFFLINE_HTTP_CALLS.clear()
+
+    def _offline(url, *a, **kw):
+        _OFFLINE_HTTP_CALLS.append(str(url))
+        return {}
+
+    monkeypatch.setattr(_I, "_http_json", _offline)
+    yield
+    # 端点测试内部必然调 start_intel_fetch（那里没有注入点），放过它 ——
+    # 抓取本身由上面那些单元用例覆盖。
+    if "endpoint" in request.node.name:
+        return
+    assert not _OFFLINE_HTTP_CALLS, (
+        "这条用例没给 fetch_pack / start_intel_fetch 传 http=_fake_http()，"
+        "走到了真实 HTTP 出口（已被离线化，但拿到的不是夹具里那份数据）："
+        + "、".join(_OFFLINE_HTTP_CALLS[:3]))
 
 
 # ── 1. 源声明解析：坏法各归各的，不抛 ────────────────────────
@@ -173,8 +223,12 @@ def test_one_broken_source_does_not_break_the_rest(tmp_path):
     assert by["下拉词"]["count"] > 0, "别的源照跑"
     assert by["B站同类"]["count"] > 0
     assert by["抖音热榜"]["state"] == "error" and by["抖音热榜"]["count"] == 0
-    assert "抖音热榜" in " ".join(out["errors"].values()) or out["errors"], \
-        "失败的源必须在 errors 里留下人话原因"
+    # ⚠ 判据不能是 `or out["errors"]`：上一行刚断言过失败源存在，errors 必然非空 ——
+    #   那等于**恒真**。要钉的是「这条失败**带上了原因**」，且原因落在**这个源**上
+    #   （`errors` 的 key 是源 id，见 app/intel.py 的 `errors[spec.id]`）。
+    assert "hot_board" in out["errors"], \
+        f"失败的源没在 errors 里留下原因：{out['errors']}"
+    assert out["errors"]["hot_board"], "原因是空串 —— 等于没有原因"
     assert by["小红书"]["state"] == "off", "主动关掉的源不是 error"
 
 
@@ -376,6 +430,81 @@ def test_ignore_only_affects_today(tmp_path):
     assert I.load_ignored(tmp_path, "elevator")[key] == "2026-09-23"
 
 
+def test_today_ignore_uses_the_same_key_it_ships(tmp_path):
+    """`today()` 的忽略过滤、忽略写入、下发的 `item.key` 必须是**同一个键**。
+
+    修复前：过滤用 `guid or title`、而渲染层写记录用 `guid || url || title` ——
+    于是**只有 url、没有 guid** 的条目（政策库那类，见 `item_key` 的注释）
+    点「忽略」之后**下一轮原样回来**，用户看到的是"忽略没用"。
+    这条用一个只有 url 的条目把它钉住。
+    """
+    d = I.intel_dir(tmp_path, "elevator")
+    d.mkdir(parents=True, exist_ok=True)
+    only_url = {"title": "政策库的一条", "url": "https://gov.example/p/1",
+                "source_id": "policy_library", "source_label": "政策库"}
+    (d / "latest.json").write_text(json.dumps(
+        {"fetched_at": "2026-09-24T10:00:00+08:00", "items": [only_url], "errors": {}},
+        ensure_ascii=False), encoding="utf-8")
+
+    specs = I.parse_sources([{"id": "policy_library", "label": "政策库"}])[0]
+    got = I.today(tmp_path, "elevator", specs)
+    assert len(got["items"]) == 1, got
+    k = got["items"][0]["key"]
+    assert k == "https://gov.example/p/1", f"只有 url 时键该退到 url，实际：{k}"
+
+    # 用**下发的那个键**写忽略（渲染层就是这么做的）→ 今天它必须消失
+    I.add_ignored(tmp_path, "elevator", k)
+    assert I.today(tmp_path, "elevator", specs)["items"] == [], \
+        "忽略了却还在 —— 过滤用的键与写入用的键不是同一个"
+
+
+def test_broken_ignored_file_does_not_get_overwritten(tmp_path):
+    """`ignored.json` 读坏时 `add_ignored` 必须**中止**，不许拿 `{}` 当基底覆盖。
+
+    旧实现 `load_ignored` 对坏文件返回 `{}`，而 `add_ignored` 是"读出来 → 加一条 →
+    写回去" —— 一次读坏就把**整个忽略历史**覆盖成一条。用户看到的是
+    "我忽略过的又都回来了"，而手上没有任何线索。
+
+    ⚠ 只读路径（`today()` 的过滤）**不**受影响：情报不该因为一个坏文件整个看不了
+    （B3，与本文件开头第 3 条同一条取向）—— 两处语义相反是**刻意的**，别"顺手统一"。
+    """
+    d = I.intel_dir(tmp_path, "elevator")
+    d.mkdir(parents=True, exist_ok=True)
+    broken = "{ 这不是 json"
+    (d / "ignored.json").write_text(broken, encoding="utf-8")
+
+    with pytest.raises(I.IntelError) as ei:
+        I.add_ignored(tmp_path, "elevator", "k-new")
+    assert "没有生效" in str(ei.value), str(ei.value)
+    # 最要紧的一条：坏文件**原样还在**（没被覆盖成 {"k-new": …}）
+    assert (d / "ignored.json").read_text(encoding="utf-8") == broken, \
+        "坏文件被覆盖了 —— 那等于把用户已有的忽略记录全抹掉"
+
+    # 只读路径照常：读坏退成**空过滤**（不抛，也不把条目全滤掉）
+    (d / "latest.json").write_text(json.dumps(
+        {"fetched_at": "2026-09-24T10:00:00+08:00",
+         "items": [{"title": "一条", "url": "https://a/1",
+                    "source_id": "policy_library", "source_label": "政策库"}],
+         "errors": {}}, ensure_ascii=False), encoding="utf-8")
+    specs = I.parse_sources([{"id": "policy_library", "label": "政策库"}])[0]
+    assert len(I.today(tmp_path, "elevator", specs)["items"]) == 1, \
+        "读坏不该把条目全滤掉（那等于把整个列表清空）"
+    assert I.load_ignored(tmp_path, "elevator") == {}
+
+
+def test_ignored_accumulates_and_structure_error_is_reported(tmp_path):
+    """正常路径照常累加；结构不对（不是对象）也要报出来、不许静默当空。"""
+    I.add_ignored(tmp_path, "elevator", "a")
+    I.add_ignored(tmp_path, "elevator", "b")
+    assert set(I.load_ignored(tmp_path, "elevator")) == {"a", "b"}
+
+    d = I.intel_dir(tmp_path, "elevator")
+    (d / "ignored.json").write_text("[1, 2, 3]", encoding="utf-8")
+    with pytest.raises(I.IntelError) as ei:
+        I.add_ignored(tmp_path, "elevator", "c")
+    assert "结构不对" in str(ei.value), str(ei.value)
+
+
 # ── 9. 人工导入（B-4）────────────────────────────────────────
 def test_manual_import_reads_json_and_csv_and_skips_broken(tmp_path):
     """B-4：拿不到的平台用人工导入补上，与自动源**同一 schema**。
@@ -423,6 +552,31 @@ def test_pack_info_exposes_sources_without_pack_error(tmp_path):
     # 主动关掉的源**不该**产生审计 note（那是决定不是 bug）
     assert not info.param_audit.get("intel_sources"), \
         f"关掉的源不该被记成问题：{info.param_audit.get('intel_sources')}"
+
+
+def test_pack_info_reports_a_broken_skill_yaml(tmp_path):
+    """`skill.yaml` 读坏时**列表也必须标出来**（P2-19）。
+
+    修复前 `pack_info` 从不读 `skill.yaml`，而 `Pack.skill()` 读坏会抛
+    `PackBrokenError`（生成期 409）—— **列表说这个包是好的、点生成说它坏了**，
+    两处结论相反；用户只会去查模型 / 网络，真正的原因（包里一个文件坏了）
+    在界面上没有任何落点。
+
+    判据：凡 `Pack()` 会因此抛的东西，`pack_info` 都要能看见 ——
+    "列表宽松"指**不抛**，不是**看不见**。
+    """
+    d = tmp_path / "packs" / "elevator"
+    shutil.copytree(ROOT / "packs" / "elevator", d)
+    (d / "skill.yaml").write_text("{ 这不是 yaml", encoding="utf-8")
+
+    info = pack_info(d)
+    assert info.pack_error, "坏 skill.yaml 没被标出来 —— 列表把坏包显示成健康"
+    assert "skill" in info.pack_error.lower(), info.pack_error
+
+    # 生成期那边本来就是抛的（两处口径现在一致了）
+    with pytest.raises(PackBrokenError) as ei:
+        Pack(tmp_path, "elevator").skill()
+    assert "skill" in str(ei.value).lower(), str(ei.value)
 
 
 def test_meta_payload_carries_intel_sources(tmp_path):
@@ -495,6 +649,29 @@ def test_ignore_endpoint_records_today():
         datetime.now().strftime("%Y-%m-%d")
 
 
+def test_ignore_endpoint_says_so_when_the_record_is_broken():
+    """忽略记录读坏时端点必须**报错**，而不是静默把它覆盖掉（P2-8）。
+
+    静默覆盖的后果：用户点了一次「忽略」，整个忽略历史变成只有这一条 ——
+    「我忽略过的又都回来了」，而界面上没有任何线索（旧实现 `except: return {}`
+    让这条路径一路成功、还弹「已忽略」）。
+    """
+    tmp_path = _root()
+    d = I.intel_dir(tmp_path, "elevator")
+    d.mkdir(parents=True, exist_ok=True)
+    broken = "{ 这不是 json"
+    (d / "ignored.json").write_text(broken, encoding="utf-8")
+    c = _client(tmp_path)
+    r = c.post("/api/intel/ignore", json={"pack": "elevator", "key": "g1"})
+    assert r.status_code == 500, (r.status_code, r.text[:200])
+    body = r.json()
+    assert body.get("code") == "intel_ignore_failed", body
+    assert "没有生效" in body.get("detail", ""), body
+    # 最要紧的一条：坏文件**原样还在**（没被覆盖成 {"g1": …}）
+    assert (d / "ignored.json").read_text(encoding="utf-8") == broken, \
+        "端点把坏文件覆盖了 —— 用户的忽略历史被抹掉了"
+
+
 # ── 12. 两族并发额度（B4）────────────────────────────────────
 def test_intel_fetch_does_not_consume_model_quota():
     """抓取**不占模型额度**：否则「点一次重抓」会让生成报「已达上限」。
@@ -509,7 +686,7 @@ def test_intel_fetch_does_not_consume_model_quota():
     cfg.mock = True
     pl = Pipeline(tmp_path, cfg)
     for _ in range(MAX_CONCURRENT_INTEL):
-        pl.start_intel_fetch("elevator")
+        pl.start_intel_fetch("elevator", http=_fake_http())
     assert pl.registry.running_count(INTEL_BUSY_STATES) == MAX_CONCURRENT_INTEL
     assert pl.registry.running_count() == 0, "情报抓取占了模型额度"
     # 关键断言：抓取占满自己那档额度时，生成**必须仍然开得起来**。
@@ -518,15 +695,55 @@ def test_intel_fetch_does_not_consume_model_quota():
         "情报额度被占满不该影响生成"
 
 
+def test_intel_jobs_do_not_take_the_model_quota_of_a_rewrite():
+    """情报抓取占满时，**重写**照样能开起来（P2-10）。
+
+    `transition_if_room` 原来只数 `BUSY_STATES`，而 intel 作业也是以 `queued`
+    插入的（见 `INTEL_BUSY_STATES` 的注释）—— 抓取于是占掉了模型族的名额。
+    `add_if_room` 一直有 `same_quota_family`，这条闸漏了：同一件事两份口径，
+    漏的那份只在"抓取与重写同时发生"时现形（用户点两次重抓 → 重写被误判
+    「已达上限」，而占着名额的是一个不花模型钱的 HTTP 请求）。
+    """
+    from app.jobs import (BUSY_STATES, INTEL_BUSY_STATES, Job, JobRegistry,
+                          MAX_CONCURRENT_INTEL)
+    reg = JobRegistry()
+    # 情报额度占满（queued 就占额度 —— 见 INTEL_BUSY_STATES 的注释）
+    for i in range(MAX_CONCURRENT_INTEL):
+        assert reg.add_if_room(Job(f"i{i}", "intel", {}), MAX_CONCURRENT_INTEL,
+                               INTEL_BUSY_STATES), f"第 {i} 条抓取没开起来"
+    # 重写载体：一个在跑的生成作业（queued → writing 在 TRANSITIONS 里是允许的）
+    gen = Job("g1", "generate", {})
+    assert gen.transition("writing"), "queued → writing 应当允许"
+    assert reg.add_if_room(gen, 4, BUSY_STATES)
+    assert reg.transition_if_room(gen, "rewriting", 2), \
+        "情报抓取占掉了模型族的名额 —— 重写会被误判「已达上限」"
+
+    # 反向对照：模型族的额度**确实**还在管 —— 否则上面那条可能只是"这道闸永远放行"
+    reg.add(Job("g2", "generate", {}))
+    reg.add(Job("g3", "generate", {}))
+    assert not reg.transition_if_room(gen, "rewriting", 2), \
+        "模型族占满了却还放行 —— 这道闸等于没有"
+
+
 def test_intel_fetch_has_its_own_limit():
+    """情报抓取之间按 `MAX_CONCURRENT_INTEL` 互斥。
+
+    ⚠ 用 `gate` 把两条作业**钉在 fetching**：不钉住的话假 HTTP 瞬间跑完、
+    作业变 done、额度当场释放，第三次调用就不会被拒 —— 这条测试会变成
+    "靠真网络慢"才能过的竞态（P2-28 换成假 HTTP 时实测踩到）。
+    """
     from app.jobs import StateConflict
     tmp_path = _root()
     pl = Pipeline(tmp_path, load_config(tmp_path))
-    for _ in range(MAX_CONCURRENT_INTEL):
-        pl.start_intel_fetch("elevator")
-    with pytest.raises(StateConflict):
-        pl.start_intel_fetch("elevator")
-    assert pl.registry.running_count(INTEL_BUSY_STATES) == MAX_CONCURRENT_INTEL
+    gate = threading.Event()
+    try:
+        for _ in range(MAX_CONCURRENT_INTEL):
+            pl.start_intel_fetch("elevator", http=_fake_http(gate=gate))
+        with pytest.raises(StateConflict):
+            pl.start_intel_fetch("elevator", http=_fake_http(gate=gate))
+        assert pl.registry.running_count(INTEL_BUSY_STATES) == MAX_CONCURRENT_INTEL
+    finally:
+        gate.set()          # 放行，别让 worker 线程挂在测试之后
 
 
 # ── P0-4：情报额度从 queued 就算，不等 worker transition 到 fetching ──
@@ -562,3 +779,190 @@ def test_intel_queued_does_not_consume_model_quota():
         "而占着名额的是不花钱的 HTTP 请求（INTEL_BUSY_STATES 注释承诺过不会）"
     assert reg.running_count(BUSY_STATES, kind="generate") == 1
     assert reg.running_count(INTEL_BUSY_STATES, kind="intel") == MAX_CONCURRENT_JOBS
+
+
+# ── 13. score 里不许有没人消费的字段（P2-21）────────────────
+def test_score_has_no_dead_fields(tmp_path):
+    """`item["score"]` 只写**有消费方**的字段。
+
+    `demand_new` / `supply_n` / `total_n` / `fact_density` / `days_ago`
+    是算 D/S/E 用的**中间量**，曾经随 `latest.json` 一起外发，而全仓库
+    **零消费方**（前端只读 D/S/E/opportunity/is_new）。
+    信号算了没人接 = 白写（铁律②）；更糟的是它会让人误以为这些数字
+    参与过判定。
+
+    ⚠ `CONSUMED` 是**允许清单**：将来要给 score 加字段，必须在这里表态。
+    """
+    CONSUMED = {"D", "S", "E", "opportunity", "is_new"}
+    out = I.fetch_pack("elevator", tmp_path, _specs(), seeds=["电梯困人"],
+                       keywords=["电梯"], http=_fake_http())
+    assert out["items"], "夹具前提：至少要有条目"
+    for it in out["items"]:
+        extra = set(it["score"]) - CONSUMED
+        assert not extra, f"score 里有没人消费的字段：{sorted(extra)}"
+
+
+# ── 14. 落点键 = 目录 slug（P1-4）────────────────────────────
+def test_pack_identity_is_the_directory_slug(tmp_path):
+    """`PackInfo.name` = **目录名**，pack.yaml 的 `name` 键只是标签（P1-4）。
+
+    曾经 name 取 yaml 的 `name` 键，而刷新/详情/删除端点走 `Pack()` 按
+    **目录名**解析 —— 两套身份全靠「name == 目录名」的约定撑着，手写包
+    改名只改一半时：重抓 404、情报读写分家、/api/packs/{name} 找不到包。
+    目录名是文件系统唯一身份（两个目录不可能重名），链路统一按它寻址。
+    """
+    d = tmp_path / "slugpack"
+    d.mkdir()
+    (d / "pack.yaml").write_text("name: 别的名字\ndisplay_name: 展示名\n",
+                                 encoding="utf-8")
+    info = pack_info(d)
+    assert info.name == "slugpack", "身份必须是目录名（yaml 的 name 键不再是身份）"
+    assert info.display_name == "展示名", "display_name 的回退链不该被牵连"
+
+
+def test_intel_read_and_write_share_the_slug_key(tmp_path):
+    """抓取写、today 读必须是**同一个 slug**（P1-4 的对称性）。
+
+    yaml `name` 与目录名不一致的包：数据落在 `intel/<slug>/`，
+    today 按 slug 读得到；按 yaml-name 读不到 —— 落点键只有一份。
+    改回 yaml-name 的话，这条会以「slug 读到 / name 读不到」两种方式红。
+    """
+    I.fetch_pack("slugpack", tmp_path, _specs(), seeds=["x"], keywords=["电梯"],
+                 http=_fake_http())
+    got = I.today(tmp_path, "slugpack", _specs())
+    assert got["items"], "按 slug 读不到刚抓的数据 —— 读写键走散了"
+    assert I.today(tmp_path, "别的名字", _specs())["items"] == [], \
+        "yaml 的 name 键不该还能当落点键用"
+
+
+def test_intel_fetch_job_writes_under_the_slug_not_the_yaml_name():
+    """作业管道那一跳也要按 slug 落盘（pipeline._run_intel_fetch 的调用点）。
+
+    手造一个「目录 slugpack、yaml name 别的名字」的包：重抓必须写进
+    `intel/slugpack/`，而不是 `intel/别的名字/` —— 后者会让选题页
+    （按 slug 读）永远空白，而界面还显示「重抓成功」。
+    """
+    tmp = _root()
+    try:
+        slug_dir = tmp / "packs" / "slugpack"
+        shutil.copytree(tmp / "packs" / "elevator", slug_dir)
+        py = slug_dir / "pack.yaml"
+        py.write_text(py.read_text(encoding="utf-8").replace(
+            "name: elevator", "name: 别的名字"), encoding="utf-8")
+        pl = Pipeline(tmp, load_config(tmp))
+        jid = pl.start_intel_fetch("slugpack", http=_fake_http())
+        snap = wait_job(pl, jid, timeout=60)
+        assert snap["state"] == "done", snap
+        assert (tmp / "intel" / "slugpack" / "latest.json").exists(), \
+            "抓取没落在 slug 名下 —— 选题页会永远空"
+        assert not (tmp / "intel" / "别的名字").exists(), \
+            "yaml 的 name 键还在当落点键"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_prune_history_keeps_the_newest_and_only_json(tmp_path):
+    """`_prune_history` 的删除语义（P2-11：新增的删用户历史行为曾经零覆盖）。
+
+    钉三件事：只留**名字排序最新**的 HISTORY_KEEP 份（抓取快照按时间戳命名，
+    名字序即时间序）；不足保留数时一份不删；非 .json 文件（README 之类）
+    永远不动。
+    """
+    hist = tmp_path / "hist"
+    hist.mkdir()
+    for i in range(I.HISTORY_KEEP + 5):
+        (hist / f"2026092{i:02d}T000000.json").write_text("{}", encoding="utf-8")
+    (hist / "说明.md").write_text("不是快照", encoding="utf-8")
+
+    I._prune_history(hist)
+    left = sorted(p.name for p in hist.glob("*.json"))
+    assert len(left) == I.HISTORY_KEEP, f"该只留 {I.HISTORY_KEEP} 份：{len(left)}"
+    assert left[0] == "202609205T000000.json", \
+        f"删错了方向 —— 最旧的才该被删（剩最旧的是 {left[0]}）"
+    assert (hist / "说明.md").exists(), "非快照文件不许动"
+
+    # 不足保留数：一份都不删
+    hist2 = tmp_path / "hist2"
+    hist2.mkdir()
+    for i in range(3):
+        (hist2 / f"2026092{i:02d}T000000.json").write_text("{}", encoding="utf-8")
+    I._prune_history(hist2)
+    assert len(list(hist2.glob("*.json"))) == 3
+
+
+def test_fetch_history_is_capped_at_the_keep_limit(tmp_path):
+    """端到端：反复抓取后盘上的历史被压在 HISTORY_KEEP 内（真删用户数据的那条路径）。"""
+    import app.intel as _imod
+    for _ in range(4):
+        I.fetch_pack("elevator", tmp_path, _specs(), seeds=["x"], keywords=["电梯"],
+                     http=_fake_http())
+    hist = I.intel_dir(tmp_path, "elevator") / "history"
+    n = len(list(hist.glob("*.json")))
+    assert n <= I.HISTORY_KEEP, f"历史没有封顶：{n}"
+    # 收紧保留数再抓一次：立即生效，不需要重启
+    monkey_old = _imod.HISTORY_KEEP
+    _imod.HISTORY_KEEP = 2
+    try:
+        I.fetch_pack("elevator", tmp_path, _specs(), seeds=["x"], keywords=["电梯"],
+                     http=_fake_http())
+    finally:
+        _imod.HISTORY_KEEP = monkey_old
+    assert len(list(hist.glob("*.json"))) <= 2
+
+
+def test_reserved_device_names_are_rejected_by_name(tmp_path):
+    """zip 条目用 Windows 保留设备名（con.md / aux 目录）→ 白名单层点名拒绝（P3）。
+
+    曾经放行到落盘，`mkdir`/`open` 抛 OSError → 500「导入过程中文件系统出错」，
+    完全指不到是哪个条目的哪一段不行。
+    """
+    import zipfile as _zf
+    from io import BytesIO
+    from app.packimport import PackImportError, _clean_rel, import_pack
+    for bad in ("con.md", "aux/knowledge/x.md", "com1.yaml", "Nul.md"):
+        with pytest.raises(PackImportError) as ei:
+            _clean_rel(bad)
+        assert "保留设备名" in str(ei.value), f"{bad}: {ei.value}"
+    # 端到端：带 con.md 的 zip 在 validate_zip 就被拒，报错里带条目名
+    buf = BytesIO()
+    with _zf.ZipFile(buf, "w") as z:
+        z.writestr("pack.yaml", "name: rt\n")
+        z.writestr("con.md", "x")
+    with pytest.raises(PackImportError) as ei:
+        import_pack(buf.getvalue(), tmp_path)
+    assert "con.md" in str(ei.value), str(ei.value)
+
+
+def test_score_topics_is_new_uses_item_key():
+    """is_new / prev_keys 与去重/忽略必须是**同一个** item_key（P3：一库两键）。
+
+    现有适配器都会给带 url 的条目合成 guid（手工导入 `guid=url`），端到端
+    造不出新旧键式的差异 —— 所以这条直接对 `score_topics` 的**契约**断言：
+    一个只有 url 的条目（政策库类），标题变了也必须是同一条（is_new=False）；
+    旧键式（`guid or title`）会把它误报成「本周新出」。
+    """
+    prev_keys = {I.item_key({"guid": "", "url": "https://x/1", "title": "旧标题"})}
+    items = [{"guid": "", "url": "https://x/1", "title": "新标题",
+              "segment": "s", "published": "", "source_id": "manual_import"}]
+    # score_topics 把评分**就地写回条目**（it["score"] = row）
+    I.score_topics(items, prev_keys)
+    assert items[0]["score"]["is_new"] is False, \
+        "url 相同、标题变了就被当成新出 —— is_new 没用 item_key"
+
+
+def test_load_latest_defends_against_bad_element_shapes(tmp_path):
+    """P3：JSON 合法但元素形状坏（items 非对象 / score 非映射）→ 剔除+留因，不 500。
+
+    B3 承诺「绝不抛」只防了顶层形状；`items: [1,2]` / `score: []` 这类手工改坏
+    的元素形状，会让 today() 的排序 `.get` 冒 AttributeError。
+    """
+    d = I.intel_dir(tmp_path, "p")
+    d.mkdir(parents=True)
+    (d / "latest.json").write_text(
+        json.dumps({"items": [1, 2], "fetched_at": "x"}), encoding="utf-8")
+    got = I.load_latest(tmp_path, "p")
+    assert got["items"] == [] and got["errors"].get("_read"), "非对象条目要剔除并留因"
+    (d / "latest.json").write_text(
+        json.dumps({"items": [{"title": "t", "score": []}]}), encoding="utf-8")
+    got2 = I.today(tmp_path, "p", _specs())
+    assert got2["items"][0]["score"] is None, "score 形状坏要按「算不出」处理"

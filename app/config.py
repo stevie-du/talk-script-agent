@@ -277,7 +277,7 @@ def _truthy(v) -> bool:
     return str(v or "").strip().lower() in ("1", "true", "yes", "on")
 
 
-def _num(data: dict, key: str, default, cast):
+def _num(data: dict, key: str, default, cast, fallbacks: list | None = None):
     """取一个数值配置项：**只有键缺失或为空时才用默认值**。
 
     为什么不能写成 `data.get(key) or default` —— 那会把合法的 0 当成「没填」。
@@ -301,6 +301,11 @@ def _num(data: dict, key: str, default, cast):
     except (TypeError, ValueError):
         log.warning("配置项 %s 的值 %r 不是合法的 %s，已改用默认值 %r",
                     key, v, cast.__name__, default)
+        if fallbacks is not None:
+            # 「写了但非法」与「没写」在下发侧必须同账（P3-4）：曾经只有
+            # 「没写」进 llm_defaulted，非法值回退成默认后被 `/api/config`
+            # 当成「用户配的」—— 兜底值冒充用户输入，只是换了个入口。
+            fallbacks.append(key)
         return default
 
 
@@ -447,14 +452,16 @@ def load_config(root: Path, config_dir: Path | None = None) -> AppConfig:
         for r in raw_models
     }
 
+    invalid_llm: list[str] = []     # 「写了但非法 → 回退默认」的键（P3-4）
     cfg = LLMConfig(
         base_url=cur.base_url,
         api_key=cur.api_key,
         model=cur.model,
-        temperature=_num(llm, "temperature", 0.7, float),
-        retries=_num(llm, "retries", 2, int),
-        timeout=_num(llm, "timeout", 180.0, float),
-        max_tokens=_num(llm, "max_tokens", DEFAULT_CONFIG["llm"]["max_tokens"], int),
+        temperature=_num(llm, "temperature", 0.7, float, fallbacks=invalid_llm),
+        retries=_num(llm, "retries", 2, int, fallbacks=invalid_llm),
+        timeout=_num(llm, "timeout", 180.0, float, fallbacks=invalid_llm),
+        max_tokens=_num(llm, "max_tokens", DEFAULT_CONFIG["llm"]["max_tokens"], int,
+                        fallbacks=invalid_llm),
     )
 
     # 环境变量覆盖（避免密钥落盘）。
@@ -464,6 +471,7 @@ def load_config(root: Path, config_dir: Path | None = None) -> AppConfig:
     # 生成参数住在 `llm` 段：文件里没写就算没配。
     defaulted = [k for k in _LLM_ENV
                  if k not in ("base_url", "model") and llm.get(k) in (None, "")]
+    defaulted += invalid_llm
     # base_url / model 住在**模型条目**里，逐字段看它是不是空的 ——
     # 不能按「有没有 models 段」一刀切：用户只改了模型名、没动请求地址时，
     # 请求地址仍然是内置默认，一刀切会把默认值说成「你配的」。

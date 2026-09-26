@@ -50,6 +50,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from .fileio import write_atomic
+
 log = logging.getLogger(__name__)
 
 #: 抓取节奏 → 多少天算"该补抓了"。`on_demand` / `—` / 没写 = 不参与懒触发。
@@ -58,16 +60,23 @@ CADENCE_DAYS: dict[str, int] = {"daily": 1, "weekly": 7, "monthly": 30, "quarter
 #: 每个话题（源）最多保留多少条 —— 防刷屏（TrendRadar 的做法）。
 PER_SOURCE_CAP = 60
 
+#: history 目录最多留多少份快照。抓一次落一份（文件名是秒级时间戳），没有
+#: 上限时这个目录跟着抓取次数无界增长：每天 4 个源各抓一次 ≈ 每包每年上千个
+#: 文件，而它唯一的读者是"和上周比有没有新题"（is_new 只看 latest 与 prev_keys，
+#: 根本不翻 history）—— 所以留个能回看的小窗口就够，其余删掉。
+#: 删除只动 `*.json` 且按文件名排序：时间戳格式定长，字典序即时间序。
+HISTORY_KEEP = 30
+
 #: 单条标题/描述的长度上限。抓来的文本直接进界面，不截断会撑爆布局，
 #: 也给了上游一个"往标题里塞一篇文章"的机会。
 TITLE_MAX, DESC_MAX = 120, 300
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
-
-#: 判断"这条选题有没有事实可写"的粗糙代理（§2.9 B-5 的占位密度信号）。
-#: 有文号/数字的条目，写出来时 `{{待补}}` 天然少。
-_FACT_RE = re.compile(r"\d|〔\d{4}〕|第[一二三四五六七八九十百\d]+[条号款]")
+# `_FACT_RE`（判断"这条有没有事实可写"的粗糙代理）已随 P2-21 删除：
+# 它算出来的 `fact_density` 全仓库无消费方，却随 latest.json 外发。
+# 若将来真要落地「占位密度」这条信号，**必须先接上消费方**再把它加回来 ——
+# 只算不显示的话，它只会让人误以为这些数字参与过判定。
 
 
 # ── 源声明 ────────────────────────────────────────────────────
@@ -217,7 +226,7 @@ def fetch_demand_terms(spec: IntelSource, ctx: FetchCtx) -> list[dict]:
     §1.2 实测结论：**下拉词才是雷达** —— 10 个种子扩散出 102 条真实问句、噪声 0，
     而且比政策文件**滞后出现**（那才是"正在办、正卡壳"的事）。
     """
-    seeds = list(spec.params.get("seeds") or []) or ctx.seeds
+    seeds = _str_list(spec.params.get("seeds")) or ctx.seeds
     rows: list[dict] = []
     for seed in seeds[:20]:
         data = ctx.get_json("https://www.baidu.com/sugrec",
@@ -239,7 +248,7 @@ def fetch_bilibili_search(spec: IntelSource, ctx: FetchCtx) -> list[dict]:
     记进 `errors` 并把该源的 `supply` 落成 null（**"算不出"而不是 0**，
     见 `score_topics`）。
     """
-    kws = list(spec.params.get("keywords") or []) or ctx.keywords
+    kws = _str_list(spec.params.get("keywords")) or ctx.keywords
     rows: list[dict] = []
     for kw in kws[:10]:
         data = ctx.get_json("https://api.bilibili.com/x/web-interface/search/all/v2",
@@ -291,7 +300,7 @@ def fetch_hot_board(spec: IntelSource, ctx: FetchCtx) -> list[dict]:
                              hot=(tgt.get("metrics") or {}).get("hot"),
                              board=board))
     if str(spec.params.get("match") or "").lower() == "keyword":
-        words = list(spec.params.get("keywords") or []) or ctx.keywords
+        words = _str_list(spec.params.get("keywords")) or ctx.keywords
         rows = [r for r in rows if any(w and w in r["title"] for w in words)]
     return rows
 
@@ -305,7 +314,7 @@ def fetch_policy_library(spec: IntelSource, ctx: FetchCtx) -> list[dict]:
     必须 `gw`（国务院）与 `bm`（部门）分开查；`searchfield=content` 会跨行业污染，
     只有 **title 级命中**可用。
     """
-    kws = list(spec.params.get("keywords") or []) or ctx.keywords
+    kws = _str_list(spec.params.get("keywords")) or ctx.keywords
     rows: list[dict] = []
     for kw in kws[:8]:
         for tab in ("zhengcelibrary_gw", "zhengcelibrary_bm"):
@@ -386,17 +395,42 @@ def _now() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
-def dedup(items: list[dict]) -> list[dict]:
-    """去重：**`guid > url` 优先级**（TrendRadar 的做法），都没有 guid/url 的
-    用标题兜底。
+def _str_list(value) -> list[str]:
+    """把 params 里的 seeds/keywords 归一成**词列表**。
+
+    `list("电梯维保")` 会拆成 4 个单字 —— 曾经拿单字去发联想词请求，
+    静默产生一整页无意义条目。字符串当**一个**词，列表原样，其余空。
+    """
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, (list, tuple)):
+        return [v for v in value if isinstance(v, str) and v.strip()]
+    return []
+
+
+def item_key(it: dict) -> str:
+    """一条情报的**身份键**：池子去重、忽略记录、`today()` 的忽略过滤都用它。
+
+    **只此一份** —— 渲染层从 `/api/intel/today` 的每条 `item.key` 直接取这个值，
+    不再自己拼一份。曾经前端拼 `guid || url || title:…`，而 `today()` 的忽略过滤
+    用的是 `guid || title`（**漏了 url 那一档**）—— 于是「只有 url、没有 guid」的
+    条目（政策库那类）点「忽略」之后**下一轮原样回来**：用户看到的是"忽略没用"，
+    而"两处规则不一致"这件事在界面上找不到任何线索。
 
     为什么 guid 优先：同一个链接在两次抓取里可能带上不同的跟踪参数（`?utm=…`），
     而 guid 是平台自己给的稳定标识。反过来，只有 url 的源（政策库）就退到 url。
     """
+    return str(it.get("guid") or it.get("url") or f"title:{it.get('title')}")
+
+
+def dedup(items: list[dict]) -> list[dict]:
+    """去重：键用 `item_key`（`guid > url > title`）—— 与忽略记录**同一个键**，
+    否则"同一份数据在两处被认成两条"会以"忽略没用"的形式冒出来。
+    """
     out: list[dict] = []
     seen: set[str] = set()
     for it in items:
-        key = it.get("guid") or it.get("url") or f"title:{it.get('title')}"
+        key = item_key(it)
         if not key or key in seen:
             continue
         seen.add(key)
@@ -489,7 +523,7 @@ def score_topics(items: list[dict], prev_keys: set[str], *, now: datetime | None
     segs = {(it.get("segment") or "") for it in items}
     new_n = {s: len([it for it in items
                      if (it.get("segment") or "") == s
-                     and (it.get("guid") or it.get("title")) not in prev_keys])
+                     and item_key(it) not in prev_keys])
              for s in segs}
     sup_n = {s: len([it for it in items
                      if (it.get("segment") or "") == s
@@ -502,16 +536,15 @@ def score_topics(items: list[dict], prev_keys: set[str], *, now: datetime | None
     for s in segs:
         D = round(new_n[s] / max_new, 3) if max_new else None
         S = round(sup_n[s] / max_sup, 3) if max_sup else None
-        # B-5：占位密度是两条线的共用信号 —— 这里用"该领域里有几条带数字/文号"
-        # 当代理（有文号有数字的选题，写出来时 {{待补}} 天然少）。
+        # ⚠ **不写没人消费的字段**（P2-21）：`demand_new` / `supply_n` / `total_n`
+        #   是算 D/S 用的**中间量**，`fact_density`（原注释称它是"两条线的共用
+        #   信号"）与 `days_ago`（算 E 用的中间量）同样 —— 它们**全仓库无消费方**
+        #   （前端只读 D/S/E/opportunity），却随 `latest.json` 一起外发。
+        #   信号算了没人接 = 白写；更糟的是它会让人误以为这些数字参与过判定。
+        #   要显示就接上消费方，不显示就别写。
         out[s] = {
-            "demand_new": new_n[s], "supply_n": sup_n[s], "total_n": tot_n[s],
             "D": D, "S": S,
             "opportunity": round(D * (1 - S) * 100) if (D is not None and S is not None) else None,
-            "fact_density": round(
-                len([it for it in items if (it.get("segment") or "") == s
-                     and _FACT_RE.search(str(it.get("title", "")) + str(it.get("desc", "")))])
-                / max(tot_n[s], 1), 2),
         }
     for it in items:
         seg = it.get("segment") or ""
@@ -519,9 +552,7 @@ def score_topics(items: list[dict], prev_keys: set[str], *, now: datetime | None
         tau = TAU_BY_ROLE.get(str(it.get("role") or ""), TAU_DEFAULT)
         days = _days_ago(it.get("published"), now)
         row["E"] = round(2.718281828 ** (-days / tau), 3) if days is not None else None
-        row["days_ago"] = round(days, 1) if days is not None else None
-        key = it.get("guid") or it.get("title")
-        row["is_new"] = key not in prev_keys
+        row["is_new"] = item_key(it) not in prev_keys
         it["score"] = row
     return out
 
@@ -560,7 +591,11 @@ def fetch_pack(pack: str, data_dir: Path, sources: list[IntelSource], *,
     ctx = FetchCtx(pack=pack, seeds=list(seeds or []), keywords=list(keywords or []),
                    manual_dir=d / "manual", http=http)
     prev = load_latest(data_dir, pack)
-    prev_keys = {(it.get("guid") or it.get("title")) for it in prev.get("items", [])}
+    # is_new 用**同一个** item_key（guid > url > title:…）：曾经这里是
+    # `guid or title`（无 url 档），只有 url 的条目标题一变就误报「本周新出」，
+    # 而去重/忽略认它还是同一条 —— 一库两键。prev_keys 每次从盘上重算，
+    # 换键无迁移问题（旧数据按新键式现算，is_new 最多抖一轮）。
+    prev_keys = {item_key(it) for it in prev.get("items", [])}
 
     items: list[dict] = []
     errors: dict[str, str] = {}
@@ -609,19 +644,37 @@ def fetch_pack(pack: str, data_dir: Path, sources: list[IntelSource], *,
            "items": items, "errors": errors}
     try:
         d.mkdir(parents=True, exist_ok=True)
-        (d / "latest.json").write_text(json.dumps(out, ensure_ascii=False, indent=1),
-                                       encoding="utf-8")
+        # 本模块三处落盘（latest / history 快照 / ignored）都走 write_atomic：
+        # `latest.json` 写一半被强杀，下次打开选题页 load_latest 解析失败 →
+        # 界面显示"情报文件读不出来"，而用户刚从上面看到"抓到了 N 条"。
+        # 先写临时文件再 replace，任何时刻目标要么旧完整版、要么新完整版。
+        write_atomic(d / "latest.json", json.dumps(out, ensure_ascii=False, indent=1))
         hist = d / "history"
         hist.mkdir(exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        (hist / f"{stamp}.json").write_text(
-            json.dumps({"fetched_at": out["fetched_at"], "items": items},
-                       ensure_ascii=False), encoding="utf-8")
+        write_atomic(hist / f"{stamp}.json",
+                     json.dumps({"fetched_at": out["fetched_at"], "items": items},
+                                ensure_ascii=False))
+        _prune_history(hist)
     except OSError as e:
         # 落盘失败要进 errors —— 否则界面显示"抓到了 N 条"而下次打开又是空的。
         errors["_save"] = f"落盘失败：{e}"
         out["errors"] = errors
     return out
+
+
+def _prune_history(hist: Path) -> None:
+    """history 只留最近 HISTORY_KEEP 份，其余删掉（见 HISTORY_KEEP 的注释）。
+
+    清理失败**不抛**：这是收尾动作，为它废掉一次成功的抓取（连同界面上
+    刚显示的 N 条）本末倒置。写个 warning 就够了。
+    """
+    try:
+        # 切片 `[:-HISTORY_KEEP]` 在不足 HISTORY_KEEP 份时天然是空列表，不用判长度。
+        for old in sorted(hist.glob("*.json"))[:-HISTORY_KEEP]:
+            old.unlink(missing_ok=True)
+    except OSError as e:
+        log.warning("情报历史清理失败：%s —— %s", hist, e)
 
 
 def _source_row(spec: IntelSource) -> dict:
@@ -653,36 +706,88 @@ def load_latest(data_dir: Path, pack: str) -> dict:
         return {**empty, "errors": {"_read": f"latest.json 读不出来：{e}"}}
     if not isinstance(data, dict):
         return {**empty, "errors": {"_read": "latest.json 顶层不是映射"}}
-    return {**empty, **{k: data.get(k, empty[k]) for k in empty}}
+    merged = {**empty, **{k: data.get(k, empty[k]) for k in empty}}
+    # 顶层是映射 ≠ 元素形状对。JSON 合法但 `items: [1,2]` / `score: []` 这类
+    # 手工改坏的形状，会让 today() 的排序与评分读取 AttributeError → 500，
+    # 正好违背本函数「绝不抛」的承诺（B3）。形状坏 = 剔除坏元素 + 留下原因。
+    if not isinstance(merged.get("items"), list):
+        merged["items"] = []
+        merged["errors"]["_read"] = "latest.json 的 items 不是列表（文件可能被手工改坏）"
+    else:
+        bad = [it for it in merged["items"] if not isinstance(it, dict)]
+        if bad:
+            merged["items"] = [it for it in merged["items"] if isinstance(it, dict)]
+            merged["errors"]["_read"] = (
+                f"latest.json 里有 {len(bad)} 个非对象条目已剔除（文件可能被手工改坏）")
+        for it in merged["items"]:
+            if not isinstance(it.get("score"), dict):
+                it["score"] = None     # 排序/评分读取都按「算不出」处理
+    return merged
+
+
+class IntelError(Exception):
+    """情报子系统的可读错误。
+
+    ⚠ 只在**写路径**上抛（`add_ignored`）：只读路径（`today()` 的忽略过滤）对坏数据
+    退成空是合理的 —— 情报不该因为一个坏文件就整个看不了（B3）。
+    但**写**不一样：拿坏数据当基底写回去会把已有的东西抹掉。
+    """
+
+
+def _load_ignored_checked(data_dir: Path, pack: str) -> tuple[dict, str]:
+    """读忽略记录，返回 `(数据, 错误说明)`。
+
+    ⚠ **「读坏」与「没有记录」必须分开**：`add_ignored` 是"读出来 → 加一条 → 写回去"，
+    读坏时拿到 `{}` 会把整个忽略历史**覆盖成一条** —— 用户看到的是
+    "我忽略过的又都回来了"，而手上没有任何线索（旧实现就是 `except: return {}`）。
+    """
+    f = intel_dir(data_dir, pack) / "ignored.json"
+    if not f.exists():
+        return {}, ""
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+    except OSError as e:
+        return {}, f"忽略记录读不出来（{f}）：{e}"
+    except ValueError as e:
+        return {}, f"忽略记录不是合法 JSON（{f}）：{e}"
+    if not isinstance(data, dict):
+        return {}, f"忽略记录的结构不对（{f}）：期望对象，实际 {type(data).__name__}"
+    return data, ""
 
 
 def load_ignored(data_dir: Path, pack: str) -> dict:
-    """本地忽略记录：`{条目 key: "YYYY-MM-DD"}`（只影响今天，见 §2.5）。"""
-    f = intel_dir(data_dir, pack) / "ignored.json"
-    if not f.exists():
-        return {}
-    try:
-        data = json.loads(f.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except Exception:                              # noqa: BLE001
-        return {}
+    """本地忽略记录：`{条目 key: "YYYY-MM-DD"}`（只影响今天，见 §2.5）。
+
+    **读不到返回空 dict**（与 `load_latest` 同款：不抛）—— 只读路径用它。
+    ⚠ **写路径必须用 `_load_ignored_checked`**：那边读坏要中止，
+    不能拿 `{}` 当基底去覆盖。
+    """
+    return _load_ignored_checked(data_dir, pack)[0]
 
 
 def add_ignored(data_dir: Path, pack: str, key: str, *, today: str | None = None) -> dict:
-    """记一条忽略。**只影响今天** —— 明天同题还会回来；连续 3 天被忽略才沉底。
+    """记一条忽略。**只影响今天** —— 明天同题还会回来。
 
-    所以记的不是"忽略过"，而是 `{key: 最后一次忽略的日期}` —— 界面按
-    "连续几天"决定要不要沉底，而"连续"这件事只能靠日期算。
+    记的是 `{key: 最后一次忽略的日期}`，为方案 §2.5 设想的「连续 3 天被忽略
+    才沉底」备着日期 —— 但那个沉底机制**尚未实现**（日期当前没有消费方，
+    payload 只下发忽略计数）。曾有多处注释声称"连续 3 天沉底"，与实现不符；
+    实现落地之前，这里如实写"只影响今天"。别照着旧注释去解释界面行为。
     """
     d = intel_dir(data_dir, pack)
-    rec = load_ignored(data_dir, pack)
+    rec, err = _load_ignored_checked(data_dir, pack)
+    if err:
+        # 中止，而不是"从空开始"：读坏时写回会把整个忽略历史覆盖成一条，
+        # 用户看到的是"我忽略过的又都回来了"（`Pack.private_facts` 同一条取向：
+        # 写操作不能建立在坏数据上）。
+        raise IntelError(f"{err} —— 为免覆盖已有的忽略记录，这次忽略没有生效")
     rec[str(key)] = today or datetime.now().strftime("%Y-%m-%d")
     try:
         d.mkdir(parents=True, exist_ok=True)
-        (d / "ignored.json").write_text(json.dumps(rec, ensure_ascii=False, indent=1),
-                                        encoding="utf-8")
+        write_atomic(d / "ignored.json", json.dumps(rec, ensure_ascii=False, indent=1))
     except OSError as e:
-        log.warning("忽略记录写不进去：%s —— %s", d, e)
+        # 写不进去也要**说出来**：以前只 log.warning，而前端照样弹"已忽略" ——
+        # 明天同题回来时用户没有任何线索（"我明明忽略过"）。
+        raise IntelError(f"忽略记录写不进去（{d}）：{e}") from e
     return rec
 
 
@@ -789,10 +894,21 @@ def today(data_dir: Path, pack: str, sources: list[IntelSource]) -> dict:
     而不是"界面上没有它"。
     """
     data = load_latest(data_dir, pack)
-    ignored = load_ignored(data_dir, pack)
+    # 忽略记录走**带错误说明**的读法：读坏时静默当空，用户被忽略的条目
+    # 会无声回来，界面「已忽略 0」与实际不符且无任何解释（与 latest.json
+    # 的 _read 同一透出口径 —— 「别静默」不因这条路径只读而豁免）。
+    ignored, ig_err = _load_ignored_checked(data_dir, pack)
     today_str = datetime.now().strftime("%Y-%m-%d")
-    items = [it for it in data.get("items", [])
-             if ignored.get(str(it.get("guid") or it.get("title")), "") != today_str]
+    # 忽略过滤与**写入**用同一个键（`item_key`），并且把键**下发**给渲染层
+    # （`item.key`）—— 渲染层拿它去 POST /api/intel/ignore，不再自己拼一份。
+    # 曾经这里漏了 url 那一档（只 `guid or title`），于是"只有 url 的条目
+    # 忽略了还在"，而前端拼的是 `guid || url || title` —— 两处不一致。
+    items: list[dict] = []
+    for it in data.get("items", []):
+        k = item_key(it)
+        if ignored.get(k, "") == today_str:
+            continue
+        items.append({**it, "key": k})
     # 池子顺序由后端定：**机会分降序、算不出的排最后**。
     # 「换一批」是纯前端在池子里翻页（零成本），所以池子的顺序就是"翻页顺序" ——
     # 两边各排一次迟早会不一致，只让后端排。
@@ -819,7 +935,10 @@ def today(data_dir: Path, pack: str, sources: list[IntelSource]) -> dict:
                            "role": rows[0].get("role", ""), "cadence": "",
                            "note": "", "enabled": True, "wired": True,
                            "count": len(rows), "items": rows, "state": "orphan"})
+    errors = dict(data.get("errors", {}))
+    if ig_err:
+        errors["_ignored"] = ig_err + " —— 被忽略的条目会照常显示"
     return {"pack": pack, "fetched_at": data.get("fetched_at", ""),
-            "groups": groups, "items": items, "errors": data.get("errors", {}),
+            "groups": groups, "items": items, "errors": errors,
             "stale": is_stale(data, sources), "ignored": len(ignored),
             "unwired": sum(1 for g in groups if g["state"] in ("unwired", "off"))}

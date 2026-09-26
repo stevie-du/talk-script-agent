@@ -617,6 +617,28 @@ def test_deleting_a_non_active_model_keeps_the_current_one(tmp_path):
     assert c.get("/api/config").json()["active_model"] == "m1"
 
 
+def test_deleting_while_all_deactivated_stays_deactivated(tmp_path):
+    """**全部停用**后删任意一条 → 仍是「都不启用」，不能悄悄启用剩下那条。
+
+    「全部停用」（active_model == ""）是合法状态（见 test_can_deactivate_current_model）。
+    删除端点的悬空判据原来写成 `active not in {...}` —— 空串不在任何 id 集合里，
+    恒为真，于是走进「换回第一条」的分支，把用户明确停用的模型悄悄启用
+    （P1-1）：`_require_model` 不再拦，下一次生成直接用这条模型 + Key 花真钱。
+    """
+    c = _client(tmp_path)
+    c.post("/api/models", json={"id": "", "name": "B",
+                                "base_url": "https://b/v1", "model": "b"})
+    assert c.post("/api/models/activate", json={"id": ""}).status_code == 200
+    r = c.post("/api/models/delete", json={"id": DEFAULT_MODEL["id"]})
+    assert r.status_code == 200, r.text
+    body = c.get("/api/config").json()
+    assert [m["id"] for m in body["models"]] == ["m1"]
+    assert body["active_model"] == "", "全部停用后删除，把停用的模型悄悄启用了"
+    # 落盘层面同样要保住：只在内存里空、文件里被写回，是「关了又跳回来」的翻版
+    raw, active = load_raw_models(tmp_path)
+    assert active == ""
+
+
 def test_activate_unknown_id_is_404(tmp_path):
     """切到不存在的 id 要报错，不能静默写进文件。"""
     c = _client(tmp_path)
@@ -717,3 +739,17 @@ def main() -> int:                                        # pragma: no cover
 
 if __name__ == "__main__":                                # pragma: no cover
     sys.exit(main())
+
+
+def test_invalid_numeric_value_counts_as_defaulted(tmp_path):
+    """P3-4：「写了但非法」的数值项回退成默认后，必须仍在 llm_defaulted 里。
+
+    `temperature: 快` → _num 回退 0.7。曾经只有「没写」进 llm_defaulted，
+    于是 `/api/config` 把回退后的内置默认**当作用户配置下发** ——
+    兜底值冒充用户输入，只是换了个入口。
+    """
+    (tmp_path / "config.yaml").write_text("llm:\n  temperature: 快\n",
+                                          encoding="utf-8")
+    cfg = load_config(tmp_path)
+    assert cfg.llm.temperature == 0.7, "非法值应回退默认"
+    assert "temperature" in cfg.llm_defaulted, "非法回退的默认被当成了「用户配的」"

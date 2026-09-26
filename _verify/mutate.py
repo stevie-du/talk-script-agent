@@ -27,6 +27,10 @@ PROMPTS_F = ROOT / "app/prompts.py"
 CSS_F = ROOT / "desktop/renderer/styles.css"
 VERIFY_F = ROOT / "_verify/verify.js"
 SKILL_F = PACK / "skill.yaml"
+TPL_SKILL_F = ROOT / "packs/_template/skill.yaml"
+LLM_F = ROOT / "app/llm.py"
+SEED_F = ROOT / "app/packseed.py"
+IMPORT_F = ROOT / "app/packimport.py"
 
 
 def _find_node() -> str:
@@ -52,6 +56,79 @@ def _find_node() -> str:
 NODE = _find_node()
 
 MUTATIONS = [
+    # ── s9 组（2026-09-26 修复轮）：每条对应 审查报告-20260926 §3/§4 的一个修复 ──
+    (
+        "s9-1 P1-1 删模型的悬空判据去掉 `active and`（空 active 又被当成悬空）",
+        SRV_F,
+        'if active == body.id or (active and active not in {x["id"] for x in left}):',
+        'if active == body.id or active not in {x["id"] for x in left}:',
+        "tests/test_models_list.py -k all_deactivated",
+    ),
+    (
+        "s9-2 P1-3 read_text_cached 把瞬时 OSError 重新钉进缓存",
+        KN_F,
+        'log.warning("知识文件读不出来（%s）：%s —— 本次按空内容处理；瞬时故障，"\n'
+        '                    "下次读取会重试", path, e)\n'
+        '        return ""',
+        'log.warning("知识文件读不出来（%s）：%s —— 本次按空内容处理", path, e)\n'
+        '        text = ""',
+        "tests/test_transient_read_fault.py -k transient_oserror",
+    ),
+    (
+        "s9-3 P1-4 情报落点键退回 pack.name（yaml 的 name 键，不是目录 slug）",
+        PIPE_F,
+        "                pack.dir.name, self.data_dir, sources,",
+        "                pack.name, self.data_dir, sources,",
+        "tests/test_intel.py -k slug_not_the_yaml_name",
+    ),
+    (
+        "s9-4 P1-5 packseed 换入前不再把旧包挪进备份（回到先删后拷的暴露窗口）",
+        SEED_F,
+        "        dst.rename(backup)                    # 此刻起 dst 缺位；失败则 dst 原样",
+        "        pass                                  # MUTATED: 旧包留在正式位",
+        "tests/test_packseed.py -k \"normal_sync or double_failure\"",
+    ),
+    (
+        "s9-5 P2-2 嵌套结构形状校验打掉（pack.yaml 半边）",
+        KN_F,
+        "            shape = pack_shape_error(data)\n"
+        "            if shape:\n"
+        "                raise ValueError(shape)",
+        "            shape = pack_shape_error(data)\n"
+        "            if shape:\n"
+        "                pass",
+        "tests/test_pack_yaml_integrity.py -k \"nested_params or banwords_shape\"",
+    ),
+    (
+        "s9-6 P2-3 _swap_in 跨盘失败后不清半截 dst（回滚被跳过）",
+        IMPORT_F,
+        "        if dst.is_dir():\n"
+        "            shutil.rmtree(dst, ignore_errors=True)",
+        "        if False and dst.is_dir():\n"
+        "            shutil.rmtree(dst, ignore_errors=True)",
+        "tests/test_pack_import.py -k partial_dst",
+    ),
+    (
+        "s9-7 P2-4 模板包丢 $alt_guide（换一版候选在新包里静默消失）",
+        TPL_SKILL_F,
+        "      $alt_guide\n",
+        "\n",
+        "tests/test_pack_yaml_integrity.py -k elevator_contract",
+    ),
+    (
+        "s9-8 is_new / prev_keys 退回 `guid or title` 旧键式",
+        INTEL_F,
+        '        row["is_new"] = item_key(it) not in prev_keys',
+        "        row['is_new'] = (it.get('guid') or it.get('title')) not in prev_keys",
+        "tests/test_intel.py -k is_new_uses_item_key",
+    ),
+    (
+        "s9-9 P2-20 _merge_usage 退化成覆盖（重试的账被最后一次抹掉）——上轮临时验证过但没登记，补上",
+        LLM_F,
+        "        target[k] = v if not isinstance(cur, (int, float)) else cur + v",
+        "        target[k] = v",
+        "tests/test_llm_retry.py -k accumulates",
+    ),
     (
         "A-1 占位豁免去掉上限（退回「只要有一个 {{}} 就豁免」）",
         AI,
@@ -228,12 +305,12 @@ MUTATIONS = [
         "tests/test_rewrite_scope.py -k bad_scope",
     ),
     (
-        "A-2 pack_info 不再校验 rewrite_scope（坏值静默退回默认）",
+        "A-2 pack_info 不再校验 rewrite_scope（坏值静默退回默认）—— 缩进随 2026-09-26 pack_info 重构更新",
         KN_F,
-        """        serr = rewrite_scope_error(data.get("rewrite_scope"))
-        if serr:
-            err = serr""",
-        "        pass",
+        """                serr = rewrite_scope_error(data.get("rewrite_scope"))
+                if serr:
+                    err = serr""",
+        "                pass",
         "tests/test_rewrite_scope.py -k pack_error",
     ),
     (
@@ -254,10 +331,10 @@ MUTATIONS = [
     ),
     # ── B 线：情报 ─────────────────────────────────────────────
     (
-        "B 去重不认 guid 优先级（只按 url）",
+        "B 去重不认 guid 优先级（只按 url）—— 键已收进 item_key()，2026-09-26 跟随更新",
         INTEL_F,
-        'key = it.get("guid") or it.get("url") or f"title:{it.get(\'title\')}"',
-        'key = it.get("url") or it.get("guid") or f"title:{it.get(\'title\')}"',
+        'return str(it.get("guid") or it.get("url") or f"title:{it.get(\'title\')}")',
+        'return str(it.get("url") or it.get("guid") or f"title:{it.get(\'title\')}")',
         "tests/test_intel.py -k dedup",
     ),
     (
@@ -486,10 +563,10 @@ MUTATIONS = [
     ),
     # ── 五路审查 P0 五条（2026-09-23 当轮修，逐条实测复现过）──────────
     (
-        "P0-1 engine-dialogs.js 从 build.files 漏掉（装完启动即 MODULE_NOT_FOUND）",
+        "P0-1 engine-dialogs.js 从 build.files 漏掉（装完启动即 MODULE_NOT_FOUND）—— 2026-09-26 跟随 files 列表追加 updater-core 后更新",
         ROOT / "desktop/package.json",
-        '      "engine-path.js",\n      "engine-dialogs.js"\n',
-        '      "engine-path.js"\n',
+        '      "engine-dialogs.js",\n',
+        '      "__engine-dialogs-removed__.js",\n',
         "node:desktop/packaging.test.js",
     ),
     (
@@ -547,6 +624,47 @@ MUTATIONS = [
                            500, ERR_INTERNAL)""",
         "    # 变异：通用 handler 删掉",
         "tests/test_server_hardening.py -k unexpected_error",
+    ),
+    # ── 自动更新方案 s7：发布脚本与冒烟服务器（2026-09-24）──────────
+    (
+        "s7-1 serve-update parseRange 恒不认 Range（退回 python http.server 的坑：差分被静默跳全量）",
+        ROOT / "desktop/scripts/serve-update.mjs",
+        "  return { start, end };",
+        "  return null;  // 变异：合法 Range 一律不认",
+        "node:desktop/serve-update.test.mjs",
+    ),
+    (
+        "s7-2 joinUrl 去掉 encodeURIComponent（文件名空格不编码，闭环验证漏掉「本地能下、线上 404」）",
+        ROOT / "desktop/scripts/publish-update.mjs",
+        "encodeURIComponent(name)",
+        "name",
+        "node:desktop/publish-update.test.mjs",
+    ),
+    (
+        "s7-3 pickStale 排序退化成字典序（0.2.10 被判成旧版本删掉，线上版本倒退）",
+        ROOT / "desktop/scripts/publish-update.mjs",
+        "const sorted = [...versions].sort((x, y) => cmpVer(y.version, x.version));   // 新 → 旧",
+        "const sorted = [...versions].sort((x, y) => (y.version < x.version ? -1 : 1));   // 变异：字典序",
+        "node:desktop/publish-update.test.mjs",
+    ),
+    # ── 自动更新方案 §10：纯逻辑层 updater-core（2026-09-24 补登记）──────────
+    # 这两条**文档 §10 与 updater-core.test.js 文件头都写明了**（"删掉
+    # resolveFeedUrl 的空值分支 / shouldCheckNow 恒真，必须有断言变红"），
+    # 但 MUTATIONS 里一直没有它们 —— 于是那句"绿"是自述而非实测。
+    # 本项目验收口径就是变异检验，声称了不登记等于没做。
+    (
+        "s8-1 resolveFeedUrl 删掉空值分支（没配地址也当配了 → 「不配就整体关闭」失效）",
+        ROOT / "desktop/updater-core.js",
+        "  if (trimmed === '') return null;\n",
+        "",
+        "node:desktop/updater-core.test.js",
+    ),
+    (
+        "s8-2 shouldCheckNow 恒真（6h 间隔与时钟回拨保护一起失效 → 每次问都放行）",
+        ROOT / "desktop/updater-core.js",
+        "  if (!(now - lastCheckAt >= interval)) return false; // 含时钟回拨（差为负）→ 不查\n",
+        "",
+        "node:desktop/updater-core.test.js",
     ),
 ]
 
@@ -831,7 +949,20 @@ for name, path, old, new, selector in MUTATIONS:
         red, why = _pytest_red(out)
         fails = [ln for ln in out.splitlines() if ln.startswith("FAILED")]
         if red:
-            print(f"[报红 OK] {name}（{len(fails) or why} 条报红）")
+            # 判据升级（2026-09-26）：不只看「红没红」，还核对**红的归属** ——
+            # FAILED 的用例必须落在 selector 指定的文件里。曾经只判「有没有红」：
+            # 改动波及了别的测试、或并发会话恰好提交了红的东西，都会被记成
+            # 「报红 OK」—— 那证明的不是这条断言守住了。
+            # 约定：pytest 型 selector 的第一个 token 是目标文件/目录。
+            target = selector.split()[0]
+            owned = [ln for ln in fails if target in ln]
+            if fails and not owned:
+                print(f"[报错 !! 归属不符] {name} —— 红的不是 selector（{target}）"
+                      f"指定的用例，这条变异证明不了它的断言：\n"
+                      + "\n".join("    " + ln for ln in fails[:5]))
+                bad += 1
+            else:
+                print(f"[报红 OK] {name}（{len(owned or fails) or why} 条报红）")
         elif red is None:
             print(f"[全绿 !! 工具错] {name} —— {why}，看输出：\n{out[-400:]}")
             bad += 1

@@ -216,7 +216,7 @@ def test_everything_in_elsewhere_really_lands_in_the_result(degraded):
     r = degraded["result"]
     for key in PARAMS_ELSEWHERE:
         assert key in r, f"{key} 声明落在 result['{key}']，实际没有"
-        assert r[key] == out[key] or (key == "pack" and r[key] == out[key]), \
+        assert r[key] == out[key], \
             f"{key} 的落盘值与内存值不一致：{r[key]!r} != {out[key]!r}"
 
 

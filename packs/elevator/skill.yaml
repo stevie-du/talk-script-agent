@@ -264,7 +264,7 @@ stages:
       2. 涉及危险或专业操作（扒门、检修、井道）用示意图 / 动画替代实拍，并提示"需专业单位配合"
       3. sfx 填音效 / BGM 建议；subtitle 每屏 ≤ 12 字，不是口播原文照搬
       4. note 写拍摄提示（场地 / 道具 / 安全注意事项）
-      4. bgm / transition / shot_type 是给下游（剪辑、画面生成）用的结构化字段：
+      5. bgm / transition / shot_type 是给下游（剪辑、画面生成）用的结构化字段：
          拿不准就按默认 —— bgm 留空、transition 填 cut、shot_type 与「画面/景别」里写的那个景别一致。
       输出 JSON：{"storyboard": [{"time": "开始-结束秒", "shot": "画面/景别", "subtitle": "字幕关键词", "sfx": "本镜音效", "bgm": "背景音乐建议（整片一条即可，只在第 1 镜填）", "transition": "cut / dissolve / fade 三选一", "shot_type": "closeup / medium / wide / detail", "note": "拍摄提示"}]}
     files: {}

@@ -161,6 +161,7 @@ stages:
           {"type": "cta", "text": "结尾引导文案", "subtitle": "字幕关键词"}
         ]
       }
+      $alt_guide
       # B7：情报块（intel_block 变量）由引擎注入 —— 按 segment 取最相关 3 条、只带标题与
       # 出处（文号 / 来源 / URL），**不带原文**。放在模板**末尾**是前缀缓存的规矩
       # （与回炉反馈块 feedback_block 同一条）：动态内容放最后，前面的静态体才能命中缓存。
@@ -213,6 +214,7 @@ stages:
           {"type": "cta", "text": "结尾引导文案", "subtitle": "字幕关键词"}
         ]
       }
+      $alt_guide
 
       【要求】
       1. sections 恰好 1 个 hook + $points 个 point + 1 个 cta，顺序固定
@@ -265,7 +267,7 @@ stages:
       2. 涉及危险或需资质的操作（拆卸、带电作业、进入受限空间）用示意图 / 动画替代实拍，并提示"需有资质单位配合"
       3. sfx 填音效 / BGM 建议；subtitle 每屏 ≤ 12 字，不是口播原文照搬
       4. note 写拍摄提示（场地 / 道具 / 安全注意事项）
-      输出 JSON：{"storyboard": [{"time": "开始-结束秒", "shot": "画面/景别", "subtitle": "字幕关键词", "sfx": "音效/BGM", "note": "拍摄提示"}]}
+      输出 JSON：{"storyboard": [{"time": "开始-结束秒", "shot": "画面/景别", "subtitle": "字幕关键词", "sfx": "本镜音效", "bgm": "背景音乐建议（整片一条即可，只在第 1 镜填）", "transition": "cut / dissolve / fade 三选一", "shot_type": "closeup / medium / wide / detail", "note": "拍摄提示"}]}
     files: {}
 
   rewrite_segment:

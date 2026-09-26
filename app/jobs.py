@@ -282,8 +282,15 @@ class Job:
 
         先落状态是刻意的：后台线程可能正卡在一段 CPU 密集的校验里，等它自己
         走到检查点要一会儿；界面必须立刻响应按钮，不能让用户以为没点上。
+
+        ⚠ 终态（done/failed/cancelled）**拒绝**再取消（P3-1 的 TOCTOU 收口）：
+        pipeline.cancel() 的终态检查在无锁读上，与这里的置位之间有空窗 ——
+        若 `_finalize` 的 done 迁移恰好插在中间，一份已完整落盘的 done 产物
+        会在内存里被翻成 cancelled。判终态与置位必须在**同一把锁**里。
         """
         with self._lock:
+            if self.state in TERMINAL_STATES:
+                return
             self.cancel_event.set()
             self.state = "cancelled"
 
@@ -415,7 +422,8 @@ class JobRegistry:
             self._jobs[job.id] = job
             return True
 
-    def transition_if_room(self, job: Job, new_state: str, limit: int) -> bool:
+    def transition_if_room(self, job: Job, new_state: str, limit: int,
+                           states: frozenset[str] = BUSY_STATES) -> bool:
         """单段重写在**原作业**上进行（不新增条目），所以额度要在这里补一道闸。
 
         修复前 `rewrite_segment` 只做迁移、从不看额度 —— 实测 12 条并发重写
@@ -423,13 +431,21 @@ class JobRegistry:
         与 `add_if_room` 同款收口：**计数检查与迁移在同一把 registry 锁内**，
         并发重写不同作业时不会双双通过检查。
 
+        ⚠ **必须按 kind 分族**（P2-10，2026-09-24）：原来只数 `BUSY_STATES`，
+        而 intel 抓取作业也是以 `queued` 插入的（见 `INTEL_BUSY_STATES` 的注释）——
+        于是**情报抓取占掉了模型族的名额**：用户点两次「重抓」（上限 2），
+        再点重写就被误判 409「已达上限」，而占名额的是一个不花模型钱的 HTTP 请求。
+        `add_if_room` 一直是对的（有 `same_quota_family`），这条闸漏了 ——
+        同一件事两份口径，漏的那份只在"抓取与重写同时发生"时才现形。
+
         注意锁序：拿 registry 锁 → 调 `Job.transition_or_raise`（作业自身锁）。
         全库没有反向（先作业锁再 registry 锁）的路径，不会死锁。
         """
         self._reap_stranded()      # 与 add_if_room 同一道第二网（取锁之前）
         with self._lock:
             busy = sum(1 for j in self._jobs.values()
-                       if j.state in BUSY_STATES and not j.stranded and j.id != job.id)
+                       if same_quota_family(j.kind, job.kind)
+                       and j.state in states and not j.stranded and j.id != job.id)
             if busy >= limit:
                 return False
             job.transition_or_raise(new_state, error=None)
@@ -480,10 +496,7 @@ class JobRegistry:
 
         **不是**「非终态作业数」：待确认的作业不该算并发 ——
         否则 4 张没人理的确认卡就能把后续所有生成永久挡在 409 之外。
-
-        ⚠ **不是**「非终态作业数」：待确认的作业不该算并发 ——
-        否则 4 张没人理的确认卡就能把后续所有生成永久挡在 409 之外。
-
+        （这段曾连抄两遍 —— 注释即契约，重复段改一处漏一处。）
         ⚠ 更正这份文档原来的一句话（第 11 轮复核）：它自称"供 `/api/meta` 展示"，
         而 grep 全库确认 **生产端没有任何调用者** —— `/api/meta` 只回常量 max_concurrent。
         界面上"几条在跑"是渲染层按历史记录自己数的（`main.js` / `sessions.js`），
@@ -565,6 +578,9 @@ class JobRegistry:
         hit = [j for j in self._jobs.values() if pred(j)]
         if len(hit) <= keep:
             return
-        hit.sort(key=lambda j: j.created_at)
+        # 二级键 j.id：同一毫秒内起的作业 created_at 相等，只按它排序时
+        # 「谁最旧」取决于 dict 的插入序 —— 换一次启动顺序就换一批被丢的作业，
+        # 复现不了也对不上账。id 是唯一且稳定的，排序结果才可复现。
+        hit.sort(key=lambda j: (j.created_at, j.id))
         for j in hit[: len(hit) - keep]:
             self._jobs.pop(j.id, None)

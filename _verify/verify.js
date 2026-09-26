@@ -144,9 +144,18 @@ const META = {
         persona: { label: "人设", default: "维保老师傅", options: ["维保老师傅", "产品经理"] },
         cta: { label: "结尾引导", default: "关注", options: ["关注", "私信", "留资"] },
       },
-      // 后端 param_audit 的桩：桩包里「小红书」没配平台分级词表。
-      // 真值由 app/knowledge.py 的 param_audit() 按包配置算出。
-      param_audit: { platform: { "小红书": "平台分级词表未定义该平台：只按通用词表校验，平台差异化红线不生效" } },
+      // 后端 param_audit 的桩。真值由 app/knowledge.py 的 param_audit() 按包配置算出。
+      // 两个键分别代表**两类落点**，缺一类就有一半断言空转：
+      //   platform —— 参数键（在 pack.params 里），挂在参数下拉上；
+      //   ai_tells —— **非参数键**（不在 params 里，没有下拉可挂），
+      //               只能走包级审计行（#pack-audit）。
+      param_audit: {
+        platform: { "小红书": "平台分级词表未定义该平台：只按通用词表校验，平台差异化红线不生效" },
+        // `style` 是**只在设置页出现**的参数（工具条没有它的胶囊）——
+        // 后端算得出它、工具条却永远不显示，正是「算了没人接」的活样本。
+        style: { "口播科普": "rate_by_style 无该风格：语速按默认 4.5 字/秒，字数配额随之变化" },
+        ai_tells: { "ai_tells.yaml": "ai_tells.yaml 的 weak 段结构写坏：本次不做文风检查（只报不拦）" },
+      },
       // 情报源声明（B 线，§2.2）：选题页的分区 / 筛选行 chip / 计数 /
       // 情报源表**四处都由它渲染**，所以桩也必须带上 —— 少了它，那四条断言
       // 会退化成"渲染了空列表"而照样绿（空转）。
@@ -160,6 +169,12 @@ const META = {
         { id: "xhs_board", label: "小红书", platform: "小红书", role: "破圈触发器",
           cadence: "—", note: "没有公开榜，要 x-s 签名 —— 不做", params: {},
           enabled: false, wired: false },
+        // ⚠ 这一条是**抓取失败**的活样本（见下面 INTEL_TODAY.errors）。
+        //   没有它，「失败的源在表里不冒充『已接入』」那条断言会在"全部成功"
+        //   的桩上永远绿（空转）—— 本项目对空转断言的判定是"等于没有守卫"。
+        { id: "policy_library", label: "政策库", platform: "国务院", role: "口径库",
+          cadence: "quarterly", note: "不是雷达是口径库：给的是可引的文号与条款",
+          params: {}, enabled: true, wired: true },
       ] },
     { name: "fitment", display_name: "全屋定制包", draft: true,
       params: { segment: { label: "细分领域", default: "全屋定制", options: ["全屋定制"] } } },
@@ -176,7 +191,12 @@ const META = {
 // （groups 按声明走，items 带 score/flags/ev）。
 const INTEL_TODAY = {
   pack: "elevator", fetched_at: "2026-09-23T10:12:00+08:00", stale: false,
-  ignored: 2, unwired: 1, errors: {},
+  ignored: 2, unwired: 1,
+  // ⚠ 必须留一个**抓取失败**的活样本：`app/intel.py` 的 `today()` 重建 groups 时
+  //   state 只有 off / unwired / ok 三种 —— 失败的源在那边长得和"今天没货"
+  //   一模一样（count 0），唯一携带该信息的就是 errors。
+  //   桩里不留样本，「失败的源不冒充『已接入』」那条断言会永远绿（空转）。
+  errors: { policy_library: "TimeoutError: 连接超时" },
   items: [
     { guid: "g-new", title: "电梯应急更换程序指引", desc: "本周新出，几乎没人写",
       source_id: "demand_terms", source_label: "下拉词", platform: "百度",
@@ -218,6 +238,11 @@ const INTEL_TODAY = {
     { id: "xhs_board", label: "小红书", platform: "小红书", role: "破圈触发器",
       cadence: "—", note: "没有公开榜，要 x-s 签名 —— 不做", enabled: false,
       wired: false, state: "off", count: 0, items: [] },
+    // 抓取失败的源：`today()` 给它 state "ok"（enabled && wired 都成立）而 count 0
+    // —— 这就是"抓取失败"与"今天没货"在界面上同形的根源，前端要靠 errors 才分得开。
+    { id: "policy_library", label: "政策库", platform: "国务院", role: "口径库",
+      cadence: "quarterly", note: "不是雷达是口径库：给的是可引的文号与条款",
+      enabled: true, wired: true, state: "ok", count: 0, items: [] },
   ],
 };
 // 再补 4 条：一屏 5 条，**只有 4 条时「换一批」是 disabled**，
@@ -238,6 +263,15 @@ const INTEL_TODAY = {
 INTEL_TODAY.groups[0].items = INTEL_TODAY.items.filter(i => i.source_label === "下拉词");
 INTEL_TODAY.groups[1].items = INTEL_TODAY.items.filter(i => i.source_label === "B站同类");
 INTEL_TODAY.groups[2].items = INTEL_TODAY.items.filter(i => i.source_label === "抖音热榜");
+// 每条都带 `key`：后端 `intel.item_key()` 随 today() 下发它，渲染层直接取，
+// 不再自己拼一份（曾经前端拼 `guid||url||title`、后端忽略过滤只 `guid||title`，
+// 于是"只有 url 的条目忽略了还在"）。
+// ⚠ g-new 故意给一个**前端拼不出来**的值：这样"渲染层读的是 it.key，还是自己拼的"
+//   才分得出来 —— 两边规则一致的话，那条断言会永远绿（空转）。
+(function () {
+  for (const it of INTEL_TODAY.items) it.key = it.guid || it.url || `title:${it.title}`;
+  INTEL_TODAY.items[0].key = 'srv:g-new';
+})();
 
 function stubScript() {
   // ⚠ 返回的是**纯 JS**，不带 <script> 包装 —— 它现在由 serve() 作为同源外部
@@ -323,6 +357,16 @@ window.__addCount = 0;
   // 「取消中…」是一句关于后端的承诺：请求本身失败时它必须收回去，
   // 不能永久停在「取消中…」并且 disabled —— 那时用户既停不掉它，也退不回表单。
   var PGCANCELFAIL = /(^|[?&])pgcancelfail=1/.test(location.search);
+  // 会话列表拉取失败的情形：&histfail=1（P2-3）。
+  // 修复前 loadSessions 的 catch 是空的、注释还写着"引擎不可达时保留上一次列表" ——
+  // 但 items 的初值是 []，paint([]) 画出来的是空态「还没有会话记录」，
+  // 用户会以为**记录丢了**。
+  // 挂到 window 上是为了让断言能在**同一页面内**从"成功"切到"失败"：
+  // 只有转移才验得出"保留上一次的列表"这件事（两次独立加载验不到）。
+  var HISTFAIL = /(^|[?&])histfail=1/.test(location.search);
+  window.__histFail = HISTFAIL;
+  // 配置读不到的情形：&cfgfail=1（P2-4）。同样挂 window 供断言中途切换。
+  window.__cfgFail = /(^|[?&])cfgfail=1/.test(location.search);
   // 哪些 LLM 字段还是内置默认（config.yaml 里没写、环境变量也没有）。
   //
   // ⚠ 桩必须**有状态**，且状态要按「文件里存了什么」来算 —— 不能写成
@@ -789,10 +833,17 @@ window.__addCount = 0;
       // 单独的计数器：不许去动 calls.cancel —— 前面那几条「停止会真正通知后端」
       // 的断言读的就是它，混在一起会让一条新测试悄悄改变老断言的量到的东西。
       calls.failcancel = (calls.failcancel || 0) + 1;
+      // 两个变体（P2-5 / P2-6），默认是 12k 节要的 500：
+      //   __stopNoState —— cancel **成功但没有 state**（老服务 / 精简快照形态）
+      //   __stopDone    —— cancel 返回 done（"没停下"：作业其实已经跑完了）
+      if (window.__stopNoState) return mk({});
+      if (window.__stopDone) return mk({ id: 'jobrun', state: 'done', params: {} });
       return err(500, '引擎拒绝取消：作业正在写盘，请稍后重试');
     }
     if (s.indexOf('/api/jobs/jobrun') >= 0) {
       calls.job++;
+      // P2-5：cancel 之后"再问一次状态"也问不到 —— 界面**不许猜**成 cancelled。
+      if (window.__stopAskFail) return err(500, '作业表已被清空');
       return mk({ id: 'jobrun', state: 'writing',
         created_at: bornAt('jobrun', 9000),
         params: { topic: '停不掉的作业', pack: 'elevator', duration: 60 },
@@ -926,9 +977,15 @@ window.__addCount = 0;
       return mk({ ok: true, id: s.split('/').pop() });
     }
     if (s.indexOf('/api/history/') >= 0) {
+      var hid = decodeURIComponent(s.split('/').pop());
+      // 停止时作业**已经跑完**、但产物读不出来的情形（P2-6）：那时屏幕上只有
+      // 版本条、没有正文，绝不能再"产物已保存"（屏幕与承诺相反）。
+      if (hid === 'jobrun' && window.__stopRecFail) {
+        return Promise.resolve(new Response(JSON.stringify({ detail: '读产物失败' }),
+          { status: 503, headers: { 'Content-Type': 'application/json' } }));
+      }
       // P3-42：jobalt 是「换一版出多版」的产物，历史详情要带 alternatives，
       // 与 /api/jobs/jobalt 同一份（不能只在 jobs 桩里有，历史详情点开就没了）。
-      var hid = decodeURIComponent(s.split('/').pop());
       if (hid === 'jobalt') {
         var hr = JSON.parse(JSON.stringify(RESULT));
         hr.id = 'jobalt';
@@ -949,6 +1006,12 @@ window.__addCount = 0;
     }
     // 未配置 Key 的模式要模拟「真·首次运行」：没有 Key **也没有历史记录**，
     // 否则 boot() 会按设计跳过自动打开设置（有历史说明不是第一次用）。
+    if (s.indexOf('/api/history') >= 0 && window.__histFail) {
+      // 引擎不可达：返回一个**真失败**（不是空列表）—— 空列表与"没有记录"
+      // 在界面上同形，正是这条断言要分开的东西。
+      return Promise.resolve(new Response(JSON.stringify({ detail: '引擎暂时不可用' }),
+        { status: 503, headers: { 'Content-Type': 'application/json' } }));
+    }
     if (s.indexOf('/api/history') >= 0 && NOKEY) return mk([]);
     // 会话桩：**跨 4 天**，且日子是相对「今天」实算的。
     // ⚠ 不能写死日期（如 2026-09-13）：分组口径是相对时间（今天 / 昨天 / MM-DD），
@@ -1039,6 +1102,15 @@ window.__addCount = 0;
     // 只在**有 body** 时记录：GET /api/config 会把 __lastConfigBody 覆盖成空，
     // 而 saveSettings 在 POST 之后还会走一次 preloadSettings（内含 GET）。
     if (s.indexOf('/api/config') >= 0) {
+      // 配置读不到的情形：window.__cfgFail（P2-4）。修复前 openSettings 里是
+      // 一个空 catch（preloadSettings 后面跟 catch(() => {})）—— 设置页会停在
+      // HTML 初始值 / 上一次加载的值，一个"看起来正常、实际没接上"的状态。
+      // ⚠ 这段在模板串内部：注释里**不能出现反引号**（会提前截断，症状是
+      //   node 报 SyntaxError: Unexpected identifier）。
+      if (window.__cfgFail) {
+        return Promise.resolve(new Response(JSON.stringify({ detail: '引擎暂时不可用' }),
+          { status: 503, headers: { 'Content-Type': 'application/json' } }));
+      }
       var raw = (o && o.body) || '';
       if (raw) {
         try { window.__lastConfigBody = JSON.parse(raw); } catch (_) {}
@@ -1418,6 +1490,53 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("会话列表渲染 6 条并分组", boot.sessions === 6 && boot.groups >= 4,
     `rows=${boot.sessions} groups=${boot.groups}`);
   check("请求带上了访问令牌", await evalIn("return window.__sawToken === true;"), "");
+
+  // ── 1a-3) 会话列表拉取失败（P2-3）────────────────────────
+  // 判据是**转移**：先成功（上面那条已确认 6 条），再让 /api/history 失败 ——
+  // 只有转移才验得出"保留上一次的列表"。修复前是空 catch + items 初值 []，
+  // paint([]) 会把列表换成空态「还没有会话记录」，用户以为**记录丢了**。
+  await evalIn(`window.__histFail = true;
+    return window.__ts.loadSessions().then(function () { return true; });`);
+  const sessFail = await evalIn(`return (function () {
+    var list = document.getElementById('session-list');
+    var e = list.querySelector('.sess-load-err');
+    return { items: list.querySelectorAll('.sess-item').length,
+             err: !!e, errText: e ? e.textContent : '',
+             empty: list.textContent.indexOf('还没有会话记录') >= 0 };
+  })()`);
+  check("会话列表拉取失败：保留上一次的列表 + 顶部摊出原因（不再谎报「还没有会话记录」）",
+    sessFail.items === 6 && sessFail.err && !sessFail.empty,
+    JSON.stringify(sessFail));
+  // 恢复：切回成功态，告警必须被清掉 —— 否则它会一直挂着变成背景噪音
+  await evalIn(`window.__histFail = false;
+    return window.__ts.loadSessions().then(function () { return true; });`);
+  const sessOk = await evalIn(`return (function () {
+    var list = document.getElementById('session-list');
+    return { items: list.querySelectorAll('.sess-item').length,
+             err: !!list.querySelector('.sess-load-err') };
+  })()`);
+  check("恢复后失败提示被清掉（提示不能变成常驻噪音）",
+    sessOk.items === 6 && !sessOk.err, JSON.stringify(sessOk));
+
+  // ── 1a-4) 打开设置时配置读不到（P2-4）────────────────────
+  // 修复前是空 catch：设置页会停在 HTML 初始值 / 上一次加载的值 ——
+  // 一个"看起来正常、实际没接上"的状态（与「关于与更新」面板那条同一个病灶）。
+  // 现在必须**说出来**（toast）。
+  await evalIn(`window.__cfgFail = true;
+    document.getElementById('btn-open-settings').click(); return true;`);
+  await sleep(500);
+  const cfgFail = await evalIn(`return (function () {
+    var t = document.getElementById('toast');
+    return { shown: !t.classList.contains('hidden'), text: t.textContent,
+             open: !document.getElementById('settings-screen').classList.contains('hidden') };
+  })()`);
+  check("打开设置时配置读不到：必须说出来（不再静默显示默认值）",
+    cfgFail.open && cfgFail.shown && /设置没读到/.test(cfgFail.text),
+    JSON.stringify(cfgFail));
+  // 还原：关失败开关 + 关设置页，免得污染后面的断言
+  await evalIn(`window.__cfgFail = false;
+    document.getElementById('btn-close-settings').click(); return true;`);
+  await sleep(250);
 
   // ── 1a-2) XSS 探针（P0-2，搬进 sections/xss.js 以便单独跑）────
   // 覆盖其中两条 boot 后即可判的（搜索提示 / 参数胶囊 option）；第三条
@@ -1997,9 +2116,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const badgeFam = await evalIn(`return (function(){
     var sels = ['.m-chip', '.acc-badge', '.rt-b', '.kb-group-c', '.badge',
                 '.tag-warn', '.tag-default', '.rh-state'];
-    var seen = {}, who = {};
+    var seen = {}, who = {}, found = [];
     sels.forEach(function(s){
       var el = document.querySelector(s); if (!el) return;
+      found.push(s);
       var c = getComputedStyle(el);
       var k = [c.fontSize, c.fontWeight, c.paddingTop, c.paddingRight,
                c.paddingBottom, c.paddingLeft, c.borderTopLeftRadius].join('/');
@@ -2007,10 +2127,17 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       (who[k] = who[k] || []).push(s);
     });
     var ks = Object.keys(seen);
-    return { n: ks.length, kinds: ks.map(function(k){ return { v: k, 成员: who[k] }; }) };
+    return { n: ks.length, found: found.length,
+             missing: sels.filter(function(s){ return found.indexOf(s) < 0; }),
+             kinds: ks.map(function(k){ return { v: k, 成员: who[k] }; }) };
   })()`);
-  check("有底色小标记一族八个类字号/字重/内边距/圆角完全同档",
-    badgeFam.n === 1, JSON.stringify(badgeFam));
+  check("有底色小标记一族（至少四个类在场）字号/字重/内边距/圆角完全同档",
+    // ⚠ **前提守卫**：没有"找到了几个"这一条时，七个类从页面上消失会让
+    //   `seen` 只剩一个键 → `n === 1` 照样绿 —— 这一族等于**没被量**，
+    //   而它是全站唯一在量"小标记有没有第二种画法"的地方。
+    //   下界取 4（实测此刻在场 5 个：`.kb-group-c` / `.tag-warn` / `.tag-default`
+    //   属于别的面板，不在这个页面状态里）。留一个余量，但"只剩两三个"必须红。
+    badgeFam.found >= 4 && badgeFam.n === 1, JSON.stringify(badgeFam));
 
   // ── 弹层里的「一行」：参数下拉 vs 分组「…」菜单（用户报「删除的弹层不统一」）
   // 改前实测同屏并排：行高 31 vs 28、内边距 8 全边 vs 0 8、字号 11 vs 13、
@@ -2169,19 +2296,24 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     // 但 navs 从 6 改 5 ——「新建行业包」下沉为「行业包」面板 headbar 的动作。
     // 改硬数字会让「导航项数」被无意冻结：以后再加个 nav 就是 6 → 7，
     // 这条断言会挂而报一个跟"实际坏了"无关的错。
-    // 现在断言：①panes=6 ②navs=5 ③数据一致（panes=navs+1）
+    // 现在断言：①panes 与 navs 各数 DOM ③数据一致（panes=navs+1）
+    // 2026-09-24 自动更新方案 §4.2：新增第四节「关于」+「关于与更新」导航项，
+    // panes 4 → 5、navs 3 → 4（沿用上面的规则口径，只改数字与注释）。
     return { open: !s.classList.contains('hidden'),
       covers: Math.round(r.width) === innerWidth && Math.round(r.height) === innerHeight,
       panes: document.querySelectorAll('#settings-screen .stg-pane').length,
       navs: document.querySelectorAll('.stg-nav-item').length,
       packgenNav: !!document.querySelector('.stg-nav-item[data-pane="packgen"]'),
       packgenPane: !!document.getElementById('pane-packgen'),
+      aboutNav: !!document.querySelector('.stg-nav-item[data-pane="about"]'),
+      aboutPane: !!document.getElementById('pane-about'),
       on: document.querySelectorAll('.stg-nav-item.on').length,
       genVisible: !document.getElementById('pane-gen').classList.contains('hidden') };`);
-  check("设置页铺满窗口，panes=4 / navs=3（packgen 不占导航位；kb / skills 已并入行业包）",
-    stg.open && stg.covers && stg.panes === 4 && stg.navs === 3
+  check("设置页铺满窗口，panes=5 / navs=4（packgen 不占导航位；kb / skills 已并入行业包；关于与更新占一位）",
+    stg.open && stg.covers && stg.panes === 5 && stg.navs === 4
       && stg.panes === stg.navs + 1
-      && !stg.packgenNav && stg.packgenPane,
+      && !stg.packgenNav && stg.packgenPane
+      && stg.aboutNav && stg.aboutPane,
     JSON.stringify(stg));
   check("默认分区为生成偏好且高亮唯一",
     stg.genVisible && stg.on === 1, JSON.stringify(stg));
@@ -2945,6 +3077,9 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   //    重组前 kb / skills 缺 .has-cols（面板窄一截）且 .stg-cols 套在
   //    .page-card 里（带 border-top + padding），看起来是两套布局 ——
   //    这条断言守住「现在只有一套」。
+  //    ⚠ 2026-09-24「关于与更新」(#pane-about) **不进**这个 ids 数组，是刻意的：
+  //       它走 packgen 形态（无 has-cols 的单列限宽卡片，自动更新方案 §4.2），
+  //       没有「列表 + 详情」的两栏语义。它的限宽由 #pane-about 的 CSS 守着。
   const layoutMatch = await evalIn(`return (function(){
     var ids = ["pane-gen","pane-packinfo","pane-llm"];
     var out = {};
@@ -3329,11 +3464,82 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   // 2026-09-17 重组后导航只剩三项：生成偏好 / 模型接口（基础设置）、
   // 行业包（行业）。知识库与技能从导航里撤掉 —— 它们本来就是把同一个
   // 行业包的数据切两份看，现在统一由「行业包」面板承载。
-  check("设置导航：返回项 → 列表恒定 16px，三项全在且无隐藏项（搜索框已删；packgen 不占导航）",
+  // 2026-09-24 自动更新方案 §4.2：新增「关于与更新」（关于节）→ 四项。
+  check("设置导航：返回项 → 列表恒定 16px，四项全在且无隐藏项（搜索框已删；packgen 不占导航）",
     Math.abs(stgNavGeo.返回项到列表 - 16) <= 0.6
     && stgNavGeo.列表内上边距 === "0px"
-    && stgNavGeo.导航项数 === 3 && stgNavGeo.被隐藏的项 === 0,
+    && stgNavGeo.导航项数 === 4 && stgNavGeo.被隐藏的项 === 0,
     JSON.stringify(stgNavGeo));
+
+  // 「关于与更新」面板（自动更新方案 §4.2，测试项 §10 界面回归）。断两件事：
+  // ① 结构在：版本行 / 七态状态行 / 检查更新按钮都在，且版本行真的读到了
+  //    /api/meta 的版本号（桩里是 0.2.0）—— 不是 HTML 里写死的空壳，
+  //    写死的表现是「升级后这里还显示旧版本」。状态行断「元素存在」即可：
+  //    HTML 默认文案已按 P3 清空（那句「尚未检查更新」是七态之外被自己
+  //    否定的口径），Chrome 环境没有 IPC、七态也没人推，空串是正确形态。
+  // ② 两颗按钮的高度归 --h-btn-sm 那一档（UI-LAYOUT-RULES 第十一节第 3 条）。
+  //    期望值从 CSS 变量**现取**，不在测试里重抄数字：哪天 28 调成 32 这里跟着走，
+  //    但「两颗一样高、且都落在控件那一档」这个契约不变。
+  // ⚠ 这里跑在 Chrome（非 Electron）里，window.talkscript 不存在，refreshAbout()
+  //   的 IPC 那段会短路 —— 状态行保持空串、#upd-restart 保持 hidden。
+  //   正好让「非 downloaded 态不显形」变成可断言的事实（§4.2 路径 2）。
+  const aboutPane = await evalIn(`window.__ts.setPane('about');
+    var pane = document.getElementById('pane-about');
+    var q = function (id) { return document.getElementById(id); };
+    var shown = function (el) { return !!el && !el.classList.contains('hidden'); };
+    var check = q('upd-check'), restart = q('upd-restart');
+    return {
+      面板在: !!pane && !pane.classList.contains('hidden'),
+      版本行: (q('upd-version') || {}).textContent,
+      状态行: (q('upd-status') || {}).textContent,
+      检查按钮: shown(check),
+      重启按钮显形: shown(restart),
+      检查按钮高: check ? getComputedStyle(check).height : '',
+      重启按钮高: restart ? getComputedStyle(restart).height : '',
+      控件高度档: getComputedStyle(document.documentElement)
+        .getPropertyValue('--h-sm').trim(),
+      面板限宽: pane ? getComputedStyle(pane).maxWidth : '' };`);
+  check("关于与更新：版本行读到 /api/meta、状态行元素与检查按钮在，两颗按钮同高且归 --h-btn-sm 档"
+    + "（非 downloaded 态「立即重启」不显形）",
+    aboutPane.面板在
+      && /TalkScript 0\.2\.0/.test(aboutPane.版本行)
+      && aboutPane.状态行 !== undefined
+      && aboutPane.检查按钮 && !aboutPane.重启按钮显形
+      && aboutPane.检查按钮高 === aboutPane.控件高度档
+      && aboutPane.重启按钮高 === aboutPane.控件高度档,
+    JSON.stringify(aboutPane));
+
+  // ── 自动更新的「打开面板」路径（§4.2 idle 常驻 / §1「两次检查之间零请求」）──
+  // ⚠ 上面那条跑在**没有 window.talkscript** 的 Chrome 里，refreshAbout 的 IPC 段
+  //   整段短路 —— 它验不到这个面板真正的行为。这里补一个带桩的场景，守两件事：
+  //   ① idle 常驻文案可达：渲染层 statusText 的 idle 分支必须真的能被画出来
+  //      （"自动更新已开启 · 每 6 小时检查一次"）。这条分支一旦走不到，
+  //      「本应用有自动更新」在界面上就没有任何常驻痕迹 —— 只在出错时才说话。
+  //   ② 打开面板走的是**只读**的 getStatus，不是 check。
+  //      走 check 会在启用态真发一次请求，并把 6h 自动检查的时钟往后推
+  //      （main.js 的 runCheck 第一件事就是 `updaterLastCheckAt = Date.now()`），
+  //      于是「每 6 小时一次」实际变成"取决于用户点开面板的频率"。
+  // ⚠ 本场景**不覆盖** main.js 那条「启用分支必须推 idle」—— 那需要真起
+  //   Electron 的集成测试（桩里推什么由这里决定）。别把这条读成对它的守卫。
+  await evalIn(`window.__updCalls = { check: 0, getStatus: 0 };
+    window.talkscript = { isElectron: true, platform: 'win32', updater: {
+      check: function () { window.__updCalls.check += 1; return Promise.resolve({ state: 'checking' }); },
+      getStatus: function () { window.__updCalls.getStatus += 1; return Promise.resolve({ state: 'idle' }); },
+      restart: function () { return Promise.resolve({ ok: false, state: 'idle' }); },
+      onStatus: function () { return function () {}; } } };
+    window.__ts.setPane('gen');
+    window.__ts.setPane('about');
+    return true;`);
+  await sleep(250);
+  const updPaneGeo = await evalIn(`return {
+    status: (document.getElementById('upd-status') || {}).textContent,
+    calls: window.__updCalls };`);
+  check("「关于与更新」打开面板：idle 常驻文案可达，且走只读 getStatus（不发检查请求）",
+    /自动更新已开启/.test(updPaneGeo.status)
+      && updPaneGeo.calls.getStatus >= 1 && updPaneGeo.calls.check === 0,
+    JSON.stringify(updPaneGeo));
+  // 清理：不删的话后面所有断言都在"壳里"跑（isElectron 分支会整体换一条路）
+  await evalIn(`delete window.talkscript; window.__ts.setPane('gen'); return true;`);
 
   // 搜索框要连 DOM 一起删干净 —— 留一个隐藏的空壳，下一个人会以为它还在。
   const stgSearchGone = await evalIn(`return {
@@ -3776,6 +3982,44 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       // 还原也要验：不还原的话这条会污染后面所有断言的基线
       && paramReal.backTo === Number(paramReal.durFrom),
     JSON.stringify(paramReal));
+
+  // 「信号算了但没人接」是本项目最容易犯的错（param_audit 那一类）。
+  // 后端 `app/knowledge.py` 的 param_audit() 产出 7 个键，但工具条只遍历 4 个
+  // TOOLBAR_KEYS、设置页的 paramSelect 又不读 `_audit` —— 于是 `style` /
+  // `ai_tells` / `intel_sources` 三键的降级说明**永远显示不出来**：包作者以为
+  // 接上了，实际静默走通用默认。下面两条分别守住两类落点。
+  const auditPts = await evalIn(`window.__ts.setPane('gen');
+    const secBtns = [...document.querySelectorAll('#gen-sec-list .pl-item')];
+    secBtns.find(b => b.dataset.sec === 'param').click();
+    const front = document.getElementById('param-front');
+    const s = front.querySelector('select[data-key="style"]');
+    const warnN = () => front.querySelectorAll('.select-btn.is-warn').length;
+    const from = s.value;
+    const covered = s.options[0].value;
+    s.value = covered; s.dispatchEvent(new Event('change', {bubbles:true}));
+    const nOn = warnN();
+    const wbtn = front.querySelector('.select-btn.is-warn');
+    const titleOn = wbtn ? wbtn.title : '';
+    const uncovered = [...s.options].map(o => o.value).find(v => v !== covered);
+    s.value = uncovered; s.dispatchEvent(new Event('change', {bubbles:true}));
+    const nOff = warnN();
+    s.value = from; s.dispatchEvent(new Event('change', {bubbles:true}));
+    const paud = document.getElementById('pack-audit');
+    return { nOn, nOff, titleOn, covered, uncovered, from, back: s.value,
+             paudHidden: paud.classList.contains('hidden'), paudText: paud.textContent };`);
+  check("设置页参数卡也吃 param_audit（`style` 这类只在设置页出现的参数有落点）",
+    // ⚠ 判据落在**设置页**（#param-front）上：工具条那份本来就有
+    //   （renderQuickParams），查工具条等于什么都没测。
+    // ⚠ 反向对照同笔做（没登记的选项必须不警示）—— 否则"永远变色"也能骗过这条。
+    auditPts.nOn === 1 && auditPts.nOff === 0
+      && auditPts.titleOn.indexOf("rate_by_style") >= 0
+      && auditPts.back === auditPts.from,
+    JSON.stringify(auditPts));
+  check("非参数类审计（`ai_tells`）走包级审计行，不再只写不读",
+    // `ai_tells` / `intel_sources` 不在 pack.params 里，没有下拉可挂 ——
+    // 没有这行，它们就是"算了、也算对了、却到不了消费者手里"。
+    auditPts.paudHidden === false && /ai_tells/.test(auditPts.paudText),
+    JSON.stringify(auditPts));
 
   // 切回默认（行业包），与 UI 一致
   await evalIn(`window.__ts.setPane('gen');
@@ -5408,6 +5652,16 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   await evalIn(`document.getElementById('md-cancel').click(); return true;`);
   await sleep(150);
 
+  // ── 12e·c) 技能包导入 UI（sections/packimport.js）────────────────
+  // ⚠ 这一组**必须在整网里跑**。它早就注册进了 SECTIONS，但整网从来没有
+  // `await SECTIONS.packimport(...)` —— 只有 `node _verify/verify.js packimport`
+  // 单独跑时才执行。于是默认门禁（也是 CI 与复核跑的那条）从头到尾没覆盖过
+  // 导入入口 / 来源徽标 / 内置包不显示卸载这 7 条，而 packimport.js 头部写着
+  // 「verify.js 整网跑的是同一个函数」—— 注释说跑了，实际没跑，正是本项目
+  // 最反对的那种假绿。放在这里是因为它自带导航（开设置 → packinfo），
+  // 且下一节 12f 会自己切到 llm 面板，不依赖它留下的面板状态。
+  await SECTIONS.packimport({ evalIn, sleep, check });
+
   // ── 12f) 模型列表：添加 / 启用 / 编辑 / 删除 ──────────────
   // 全部走**界面路径**（点按钮 → 填弹窗 → 保存），不绕过界面直接调接口 ——
   // 直接调接口测的是后端，而这里要守的是「界面有没有把动作接上」。
@@ -5986,6 +6240,37 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   check("重连后「已用 N 秒」继续走（计时器一起接回来了）",
     /^已用 [0-9]+ 秒$/.test(reconnected2) && reconnected2 !== reconnected.elapsed,
     JSON.stringify({ a: reconnected.elapsed, b: reconnected2 }));
+  // ── 12k-2) 停止的两个边界（P2-5 / P2-6）──────────────────
+  // 都在 jobrun 上做（12k 刚把它接回来，界面正连着它）。
+  // ① cancel 成功但**没有 state**、再问一次也问不到 → 不许猜成 cancelled。
+  //    猜的后果：后端其实还在跑，界面已经宣布"已停止"，随后又冒出一条记录。
+  await evalIn(`window.__stopNoState = true; window.__stopAskFail = true; return true;`);
+  await evalIn(`document.getElementById('btn-generate').click(); return true;`);
+  await sleep(900);
+  const stopAsk = await evalIn(`return (function () {
+    var t = document.getElementById('toast');
+    return { text: t.textContent, shown: !t.classList.contains('hidden'),
+             saidStopped: document.body.innerText.indexOf('已停止本次生成') >= 0 };
+  })()`);
+  check("停止时问不到作业状态：说清「没问到」，不许猜成已停止（P2-5）",
+    stopAsk.shown && /没问到作业状态/.test(stopAsk.text) && !stopAsk.saidStopped,
+    JSON.stringify(stopAsk));
+
+  // ② cancel 返回 done（"没停下"）但**产物读不出来** → 不许说"产物已保存"。
+  //    那时屏幕上只有版本条、没有正文，承诺与屏幕相反。
+  await evalIn(`window.__stopNoState = false; window.__stopAskFail = false;
+    window.__stopDone = true; window.__stopRecFail = true; return true;`);
+  await evalIn(`document.getElementById('btn-generate').click(); return true;`);
+  await sleep(900);
+  const stopRec = await evalIn(`return (function () {
+    var t = document.getElementById('toast');
+    return { text: t.textContent, shown: !t.classList.contains('hidden') };
+  })()`);
+  check("停止时作业已跑完但产物读不出来：不许说「产物已保存」（P2-6）",
+    stopRec.shown && /已经跑完了/.test(stopRec.text) && !/产物已保存/.test(stopRec.text),
+    JSON.stringify(stopRec));
+  await evalIn(`window.__stopDone = false; window.__stopRecFail = false; return true;`);
+
   await evalIn(`window.__ts.newChat(); return true;`);   // 放手这条永远在跑的作业
 
   // ── 12l) 占位符只标一层「待补：」，定位跳到占位符本身（P3-8 / P3-9）

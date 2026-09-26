@@ -163,7 +163,10 @@ class PromptRenderer:
             return
         hard = (self.pack.banwords_data() or {}).get("hard") or []
         banned = tuple(w for w in hard if isinstance(w, str) and len(w) >= 2)
-        block, keys, dropped = select_for_prompt(self.data_dir, self.pack.name,
+        # ⚠ 落点键 = 目录 slug（与 fetch_pack / 选题页同把键，见 pipeline 的 P1-4 注）：
+        #   曾经传 pack.name（yaml 的 name 键），手写包 name ≠ 目录名时，
+        #   抓取写进一份、注入读的是另一份 —— 选题永远空。
+        block, keys, dropped = select_for_prompt(self.data_dir, self.pack.dir.name,
                                                  p.get("segment"), banned=banned)
         ctx["intel_block"] = block
         ctx["intel_key"] = ",".join(keys)

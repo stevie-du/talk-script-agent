@@ -551,10 +551,17 @@ class Pipeline:
                                deadline=job.deadline(),
                                slug_preclaimed=bool(slug))
             # 回调里已经查过一次（就在写盘之前）；这里再查一次是防它写完之后才被子线程
-            # 取消 —— 目录已经建好就不该假装失败，但状态必须是 cancelled，不能报 done。
+            # 取消 —— 两条取消收尾路径（下面的 except 与 transition 被拒）对「已落盘的包」
+            # 必须是同一本账：回收。见 P2-1。
             built = True
             self._stop_check(job)
             if not job.transition("done", result=info):
+                # 取消恰好落在 _stop_check 通过**之后**（request_cancel 已把状态
+                # 落成 cancelled，done 迁移被拒）：与下面 JobCancelled 分支
+                # **同一本账** —— 本次真建出来的包同样回收（P2-1）。曾经这里
+                # 裸 return，包留在盘上，删/留取决于毫秒级竞态，而两个分支的
+                # 注释各执一词。
+                self._discard_created_pack(job, slug)
                 return
             self.registry.prune()
         except JobCancelled:
@@ -594,7 +601,7 @@ class Pipeline:
         """
         pack = Pack(self.root, pack_name)     # 不存在 → PackError(404)；坏 → 409
         jid = new_job_id()
-        job = Job(jid, "intel", {"pack": pack.name})
+        job = Job(jid, "intel", {"pack": pack.dir.name})   # 目录 slug，与落点同把键
         if not self.registry.add_if_room(job, MAX_CONCURRENT_INTEL, INTEL_BUSY_STATES):
             raise StateConflict(
                 f"同时进行的情报抓取已达上限（{MAX_CONCURRENT_INTEL} 个），"
@@ -624,7 +631,10 @@ class Pipeline:
             self._step(job, "intel_plan", f"情报源声明（{len(sources)} 个）",
                        {"sources": [s.as_dict() for s in sources]})
             out = fetch_pack(
-                pack.name, self.data_dir, sources,
+                # ⚠ 落点键 = **目录 slug**（pack.dir.name），不是 pack.name：
+                #   选题页 / 忽略 / 源表全部按 slug 寻址（PackInfo.name 即 slug，
+                #   见 knowledge.pack_info 的 P1-4 注），yaml 的 name 键只是标签。
+                pack.dir.name, self.data_dir, sources,
                 seeds=pack.intel_seeds(), keywords=pack.intel_keywords(),
                 topics_map=pack.data.get("topics_map") or {},
                 segment_options=pack.param_options("segment"), http=http)
@@ -717,7 +727,9 @@ class Pipeline:
                       "body": round(total * 0.65), "cta": round(total * 0.20)}
             degraded = True
         out = {
-            "pack": pack.name, "topic": str(params.get("topic", "")).strip(),
+            # 作业参数里的 pack 也是**目录 slug**（与情报作业、PackInfo.name 同一身份，
+            # 见 knowledge.pack_info 的 P1-4 注）—— yaml 的 name 键从此只活在报错文案里。
+            "pack": pack.dir.name, "topic": str(params.get("topic", "")).strip(),
             "segment": pick("segment"), "audience": pick("audience"),
             "duration": duration, "style": style,
             "platform": pick("platform"), "persona": pick("persona"),
@@ -1235,7 +1247,7 @@ class Pipeline:
 
         raw = {
             "id": job.id, "created_at": job.created_at,
-            "pack": pack.name, "pack_draft": pack.draft,
+            "pack": pack.dir.name, "pack_draft": pack.draft,
             # P1-23：口径取**真正用了哪条通道**，不是取 Pipeline.mock ——
             # 设置里把 api_key 填成 "MOCK"（或模型行 enabled 走 mock）时
             # LLMClient.mock 为真而 Pipeline.mock 仍为假，于是夹具产物

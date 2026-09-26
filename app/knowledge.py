@@ -74,7 +74,25 @@ def read_text_cached(path: Path) -> str:
             return hit[2]
     try:
         text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+    except UnicodeDecodeError as e:
+        # ⚠ 编码错**不能**与"文件不存在"走同一个无声出口：中文 Windows 上把知识
+        #   `.md` 存成 GBK 时，下游看到的是"占位符未填充 / 切片为空"，与文件缺失
+        #   **同形** —— 真正的原因（编码）无处可查。`read_yaml_cached` 早就把
+        #   失败原因留下来了，文本这条一直漏着。
+        #   失败也落进缓存（值 = 空串）：一次生成要读十几遍同一份文件，
+        #   不缓存的话日志会被同一条淹掉、第一条反而看不见（与 yaml 那条同款取向）。
+        log.warning("知识文件不是 UTF-8（%s）：%s —— 本次按空内容处理；"
+                    "下游会报「占位符未填充 / 切片为空」，根因在这里", path, e)
+        text = ""
+    except OSError as e:
+        # ⚠ 瞬时读失败**不进缓存**：缓存键是 (mtime, size)，读失败时两者都没变，
+        #   空串一旦入缓存就把瞬时故障（杀软/索引器按住刚落盘的文件，Windows 常态，
+        #   见 fileio.YamlError 的实测）钉成永久——解除占用也救不回来，只能重启。
+        #   这与下面 read_yaml_cached 的 retryable 口径同源，P1-3 修复时曾把两条
+        #   写成不对称（yaml 不缓存瞬时、文本缓存一切），这里对齐回来。
+        #   UnicodeDecodeError 不同：内容坏是永久缺陷，进缓存是对的（见上）。
+        log.warning("知识文件读不出来（%s）：%s —— 本次按空内容处理；瞬时故障，"
+                    "下次读取会重试", path, e)
         return ""
     with _cache_lock:
         _text_cache[key] = (st.st_mtime, st.st_size, text)
@@ -147,7 +165,10 @@ def list_packs(root: Path) -> list[PackInfo]:
             # 它的 segment/audience 都是 {{占位}}，选它生成只会产出带花括号的稿子。
             # 过滤放在这里（而不是让 Pack 拒绝加载）—— packgen 与导出仍要能直接
             # 用 Pack(root, "_template") 取骨架文件。
-            if d.name.startswith("_"):
+            # 点开头的是引擎的**暂存 / 备份目录**（packseed 的 `.x.seed-new/.seed-old`、
+            # packimport 的 `.import-backup-*`）：里面可能有 pack.yaml，但它们是
+            # 换入过程的中间产物，出现在列表里就是「多了一个打不开的坏包」。
+            if d.name.startswith(("_", ".")):
                 continue
             if d.is_dir() and (d / "pack.yaml").exists():
                 out.append(pack_info(d))
@@ -197,40 +218,76 @@ def pack_info(pack_dir: Path) -> PackInfo:
     用户以为包丢了；而 `/api/generate` 那边 `Pack()` 抛的是裸 `ValueError`
     → **HTTP 500**，既不是 404 也不是 409，前端只能显示「服务器错误」。
 
+    ⚠ **读哪几本账**（2026-09-24 补齐）：`pack.yaml`、`banwords.yaml`、`skill.yaml`。
+    前两本早就在，`skill.yaml` 是**漏的** —— 它读坏时 `Pack.skill()` 抛
+    `PackBrokenError`（生成期 409），而列表这边显示健康，两处结论相反。
+    判据：**凡 `Pack()` 会因此抛的东西，`pack_info` 都要能看见** ——
+    "列表宽松"指的是**不抛**，不是**看不见**。
+
     真正要用它生成时必须用 `Pack` —— 那里会把 `pack_error` 转成
     `PackBrokenError`（409）。列表宽松、生成严格，是这个模块的分工。
     """
     dir_name = pack_dir.name
     data, err = read_yaml_cached(pack_dir / "pack.yaml")
-    # 词表坏掉同样要摊到列表上：它会让合规校验静默全过，是本组问题里最严重的，
-    # 不该只在点进参数条时才被发现。
-    if not err:
-        bw_rel = str(data.get("banwords", "banwords.yaml"))
-        bw, bw_err = read_yaml_cached(pack_dir / bw_rel)
-        err = bw_err
-        if not err:
-            # 「能解析但结构不符合约定」与 YAML 语法错是两类坏法（同 P2-7）。
-            # 标量 hard 会被 Banwords 拆成单字再被 MIN_WORD_LEN 全丢 → 命中归零，
-            # 而横幅还在报「N 个单字被忽略」—— 结构错误必须在这里就以
-            # pack_error 亮出来（含词表文件名与键路径），不进入生成。
-            fatal, _advisory = validate_banwords(bw, bw_rel)
-            if fatal:
-                err = "；".join(fatal)
-    if not err:
-        # 容差写错 = 静默改变「合格」的定义（0 → 永远不合格；字符串 → 校验处 TypeError
-        # 冒成"包配置不完整"）。同一类坏法同一处收口：加载时就摊成 pack_error。
-        terr = tolerance_error(data.get("duration_tolerance_pct"))
-        if terr:
-            err = terr
-    if not err:
-        # A-2：改写范围写错 = 静默退回默认档（包作者以为配了 in-place，拿到的是 bounded）。
-        # 与容差同一处收口 —— 都是「pack.yaml 里一个枚举值写错，行为变了但没人知道」。
-        serr = rewrite_scope_error(data.get("rewrite_scope"))
-        if serr:
-            err = serr
+    _skill, sk_err = read_yaml_cached(pack_dir / "skill.yaml")
     try:
+        if not err:
+            # P2-2：嵌套结构先看清 —— 尤其 banwords 非字符串时，下面那句
+            # `str(data.get("banwords", …))` 会把它拼成不存在的路径、读成
+            # 「文件不存在」放行，而生成期 Pack 拿原始值拼路径 TypeError。
+            # 形状错以 ValueError 走 except 的统一出口：有日志、带 exc_info、
+            # 文案含「不符合约定」，与"第 2 类坏法"同一本账。
+            shape = pack_shape_error(data)
+            if shape:
+                raise ValueError(shape)
+            # 词表坏掉同样要摊到列表上：它会让合规校验静默全过，是本组问题里最严重的，
+            # 不该只在点进参数条时才被发现。
+            bw_rel = str(data.get("banwords", "banwords.yaml"))
+            bw, bw_err = read_yaml_cached(pack_dir / bw_rel)
+            err = bw_err
+            if not err:
+                # 「能解析但结构不符合约定」与 YAML 语法错是两类坏法（同 P2-7）。
+                # 标量 hard 会被 Banwords 拆成单字再被 MIN_WORD_LEN 全丢 → 命中归零，
+                # 而横幅还在报「N 个单字被忽略」—— 结构错误必须在这里就以
+                # pack_error 亮出来（含词表文件名与键路径），不进入生成。
+                fatal, _advisory = validate_banwords(bw, bw_rel)
+                if fatal:
+                    err = "；".join(fatal)
+            if not err:
+                # 容差写错 = 静默改变「合格」的定义（0 → 永远不合格；字符串 → 校验处
+                # TypeError 冒成"包配置不完整"）。同一类坏法同一处收口：加载时就摊成
+                # pack_error。
+                terr = tolerance_error(data.get("duration_tolerance_pct"))
+                if terr:
+                    err = terr
+            if not err:
+                # A-2：改写范围写错 = 静默退回默认档（包作者以为配了 in-place，
+                # 拿到的是 bounded）。与容差同一处收口 —— 都是「pack.yaml 里一个
+                # 枚举值写错，行为变了但没人知道」。
+                serr = rewrite_scope_error(data.get("rewrite_scope"))
+                if serr:
+                    err = serr
+            if not err:
+                # `skill.yaml` 也要在这里看一眼：`Pack.skill()` 读坏会抛
+                # `PackBrokenError`（生成期 409），而 `pack_info` 原来**从不读它**
+                # —— 于是**列表说这个包是好的、点生成说它坏了**，两处结论相反，
+                # 用户只会觉得"生成坏了"，然后去查模型/网络（真正的原因在包里）。
+                # 只看"读不读得出来"+ stages 形状：内容层面的校验归 `Pack` 与
+                # 各自的单测，列表只负责回答"这个包能不能用"。
+                if sk_err:
+                    err = sk_err
+                else:
+                    sk_shape = skill_shape_error(_skill)
+                    if sk_shape:
+                        raise ValueError(sk_shape)
         return PackInfo(
-            name=str(data.get("name", dir_name)),
+            # ⚠ 身份 = **目录名（slug）**，不读 pack.yaml 的 `name` 键（P1-4）。
+            #   曾经 name 取 yaml 的 `name` 键，而刷新/详情/删除端点走 `Pack()`
+            #   按**目录名**解析 —— 两套身份全靠「name == 目录名」的约定撑着，
+            #   手写包改名只改一半时：重抓 404、选题页永远空、/api/packs/{name}
+            #   找不到包。目录名是文件系统唯一身份（两个目录不可能重名），
+            #   yaml 的 `name` 键从此只是个标签（Pack 的报错文案还会引用它）。
+            name=dir_name,
             display_name=str(data.get("display_name", dir_name)),
             draft=bool(data.get("draft", False)),
             description=str(data.get("description", "")),
@@ -288,7 +345,14 @@ def resolve_ai_tells(pack_dir: Path, pack_data: dict) -> tuple[dict | None, list
     所以这里的形状是：**能用的留下、坏掉的丢掉并写进 warnings**；一条都不剩时
     返回 None（= 关闭），让校验报告的 `ai_tells` 落 null，而不是「人味 100 分」。
     """
-    rel = str((pack_data or {}).get("ai_tells", "ai_tells.yaml"))
+    raw_at = (pack_data or {}).get("ai_tells", "ai_tells.yaml")
+    if raw_at is not None and not isinstance(raw_at, str):
+        # 键写成映射/列表 → 曾经 `str(...)` 拼出一个不存在的路径 → 静默关闭，
+        # notes 为空 —— 本函数里唯一完全无声的坏法（P3）。键为空（None/缺省）
+        # 视作"没配"，照旧静默；写错类型的要说出声。
+        return None, [f"pack.yaml 的 ai_tells 不符合约定：应是文件路径字符串，"
+                      f"实际是 {type(raw_at).__name__} —— 人味提示词已关闭"]
+    rel = str(raw_at)
     notes: list[str] = []
     if not (pack_dir / rel).exists():
         return None, []
@@ -485,10 +549,9 @@ def _section_has_body(pack_dir: Path, rel: str, keyword: str, level: int = 2) ->
     以前 `param_audit` 问的是「标题在不在」，于是「有标题、内容删空」被当成健康 ——
     模型收到的是一段光秃秃的标题。对注入来说这两种情况是同一件事。
     """
-    try:
-        text = read_text_cached(pack_dir / rel)
-    except OSError:
-        return False
+    # 不再 try/except OSError：`read_text_cached` 对 stat 与读取各有自己的
+    # OSError 出口（返回空串），这里包一层是**死守卫** —— 让人误以为它会抛。
+    text = read_text_cached(pack_dir / rel)
     return bool(_heading_body_of(text, _pick_heading_line(text, keyword, level), level))
 
 
@@ -555,6 +618,56 @@ def rewrite_scope_error(value) -> str:
         return (f"pack.yaml 的 rewrite_scope={value!r} 不是合法档位"
                 f"（只能是 {'/'.join(REWRITE_SCOPES)}）—— 写错会静默退回默认档 "
                 f"{DEFAULT_REWRITE_SCOPE}，回炉行为与你配的不是一回事")
+    return ""
+
+
+def pack_shape_error(data: dict) -> str:
+    """pack.yaml「能解析但嵌套结构不符合约定」的检查（P2-2）。
+
+    浅层字段（version / duration_tolerance_pct / rewrite_scope）早有判死，
+    但**嵌套层**一直裸奔：`params.segment: 电梯`（标量当映射用）会让
+    `Pack` 的选项去重与 `param_audit` 抛 `AttributeError` → 500 而非 409；
+    `banwords:` 写成映射会让 `pack_info` 把它 `str()` 成「文件不存在」放行、
+    生成期却拿原始值拼路径 `TypeError` —— 同一个键两处两种强转。
+    返回人话错误说明，空串 = 结构没问题。
+    """
+    params = data.get("params")
+    if params is not None and not isinstance(params, dict):
+        return (f"pack.yaml 的 params 不符合约定：应是映射"
+                f"（键 → {{label, options, default}}），实际是 {type(params).__name__}")
+    if isinstance(params, dict):
+        for key, cfg in params.items():
+            if not isinstance(cfg, dict):
+                return (f"pack.yaml 的 params.{key} 不符合约定：应是映射"
+                        f"（含 label / options / default），实际是 {type(cfg).__name__}")
+            opts = cfg.get("options")
+            if opts is not None and not isinstance(opts, list):
+                return (f"pack.yaml 的 params.{key}.options 不符合约定：应是列表，"
+                        f"实际是 {type(opts).__name__}")
+    banwords = data.get("banwords")
+    if banwords is not None and not isinstance(banwords, str):
+        return (f"pack.yaml 的 banwords 不符合约定：应是文件路径字符串"
+                f"（如 banwords.yaml），实际是 {type(banwords).__name__}")
+    return ""
+
+
+def skill_shape_error(data: dict) -> str:
+    """skill.yaml「能解析但 stages 结构不符合约定」的检查（P2-2 的 skill 半边）。
+
+    `stages:` 写成标量/列表、或某个阶段的 cfg 是标量时，`_audit` 的
+    `(skill.get("stages", {}) or {}).values()` 会抛 `AttributeError` ——
+    在 `Pack.__init__` 里炸出来就是 500。这里在 pack_info 层先把形状看清。
+    """
+    stages = data.get("stages")
+    if stages is None:
+        return ""
+    if not isinstance(stages, dict):
+        return (f"skill.yaml 的 stages 不符合约定：应是映射"
+                f"（阶段名 → {{system, user_template, …}}），实际是 {type(stages).__name__}")
+    for name, cfg in stages.items():
+        if not isinstance(cfg, dict):
+            return (f"skill.yaml 的 stages.{name} 不符合约定：应是映射（阶段配置），"
+                    f"实际是 {type(cfg).__name__}")
     return ""
 
 

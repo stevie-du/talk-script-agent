@@ -18,17 +18,23 @@ import httpx  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 from app.config import _ENV_NUM_BOUNDS, load_config  # noqa: E402
+from app.server import NUMERIC_BOUNDS  # noqa: E402
 
-# 与 server.py NUMERIC_BOUNDS（app/server.py，唯一的一份）逐项相等的期望值。
-# 若 server 侧调整了区间，这里必须同步 —— 两端夹逼口径不允许漂移。
-SERVER_BOUNDS = {
-    "TALKSCRIPT_MAX_TOKENS": (256, 200000),
-    "TALKSCRIPT_RETRIES": (0, 10),
-    "TALKSCRIPT_TIMEOUT": (5.0, 1800.0),
-    "TALKSCRIPT_TEMPERATURE": (0.0, 2.0),
-}
+# ⚠ 期望值**从 server 现读**，不抄副本。
+# 这里曾经是一份手写的 SERVER_BOUNDS 副本（注释还写着"若 server 侧调整了区间，
+# 这里必须同步"），于是断言只比「config 的表 ↔ 副本」，**从不读 app/server.py** ——
+# 改 server 的区间不报红，两端夹逼口径可以静默漂移；而漂移的后果是
+# 「环境变量比界面宽 / 严」，用户在界面上看不出任何异常。
+# 抄一份常量当期望值，守卫就只在抄的那一刻有效 —— 而 app/config.py:267 的注释
+# 声称"test_env_bounds.py 把这张表与 server 的 NUMERIC_BOUNDS 比对钉住"，
+# 在改这里之前那句话是不成立的。
+_ENV_KEYS = sorted(_ENV_NUM_BOUNDS)
 
-_ENV_KEYS = list(SERVER_BOUNDS)
+
+def _server_bounds_as_env() -> dict:
+    """server 的 NUMERIC_BOUNDS 用**字段名**（retries / max_tokens …），
+    这里映射成环境变量名（TALKSCRIPT_RETRIES …），好与 config 那张表逐项比。"""
+    return {f"TALKSCRIPT_{k.upper()}": tuple(v) for k, v in NUMERIC_BOUNDS.items()}
 
 
 def _tmp_cfg():
@@ -56,8 +62,13 @@ def _with_env(**vals):
 
 
 def test_bounds_table_matches_server():
-    """夹逼区间必须与 server.py 的 NUMERIC_BOUNDS 逐项一致（以 server 为准）。"""
-    assert _ENV_NUM_BOUNDS == SERVER_BOUNDS, _ENV_NUM_BOUNDS
+    """夹逼区间必须与 server.py 的 NUMERIC_BOUNDS 逐项一致（以 server 为准）。
+
+    ⚠ 判据是「读 server 那份常量来比」。比手抄副本的话，改 server 不报红，
+    这条断言就成了摆设 —— 本项目对「守卫自己不能被红」的判定 = 没有守卫。
+    """
+    expected = _server_bounds_as_env()
+    assert _ENV_NUM_BOUNDS == expected, (_ENV_NUM_BOUNDS, expected)
 
 
 def test_max_tokens_low_clamped():

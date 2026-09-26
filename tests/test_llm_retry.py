@@ -422,5 +422,38 @@ def main() -> int:
     return 1 if failed else 0
 
 
+def test_usage_accumulates_across_retries():
+    """重试**累加**用量，不是覆盖（P2-20）。
+
+    重试循环把**同一个** `usage` 字典传给每次尝试（见 `chat_json` 的
+    `for attempt`）；以前 `usage.update()` 让第二次把第一次**覆盖** ——
+    被丢弃那次真实消耗的 token **静默不计**，用户按界面显示的数字对账会少一笔，
+    而且重试次数越多差得越多。记账只会增加、不会回退。
+    """
+    cfg = _cfg()
+    calls = {"n": 0}
+
+    def handler(req):
+        calls["n"] += 1
+        # 第一次给一个过不了校验的正文 → 走重试；两次都带 usage
+        content = "坏的" if calls["n"] == 1 else '{"ok": true}'
+        body = json.dumps({
+            "choices": [{"message": {"content": content}}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 10,
+                      "completion_tokens_details": {"reasoning_tokens": 4}},
+        })
+        return httpx.Response(200, text=body)
+
+    usage: dict = {}
+    _run(handler, lambda: LLMClient(cfg.llm).chat_json(
+        "t", "s", "u", Out, max_retries=1, usage=usage))
+
+    assert calls["n"] == 2, f"没走到重试（第一次该因校验失败重来）：{calls['n']}"
+    # 两次尝试各消耗 100/10 —— 账上必须是 200/20，不是 100/10
+    assert usage.get("prompt_tokens") == 200, usage
+    assert usage.get("completion_tokens") == 20, usage
+    assert usage.get("completion_tokens_details", {}).get("reasoning_tokens") == 8, usage
+
+
 if __name__ == "__main__":
     sys.exit(main())

@@ -56,6 +56,11 @@ module.exports = async function topics({ evalIn, sleep, check }) {
       var srcHead = srcRows[0] ? [...srcRows[0].children].map(t => t.textContent.trim()) : [];
       var accCol = srcRows.length > 1 ? [...srcRows[1].children].map(t => t.textContent.trim()) : [];
       var inner = on.querySelector('.topics-inner').getBoundingClientRect();
+      // 源表**每一行**的「接入」列与「说明」列 —— 抓取失败的源必须在这里被认出来，
+      // 而不是照 state 显示成"已接入"（后端 today() 给失败源的 state 就是 "ok"）。
+      var srcRowsBody = [...srcRows].slice(1);
+      var srcStates = srcRowsBody.map(function (r) { return r.children[3].textContent.trim(); });
+      var srcNotes = srcRowsBody.map(function (r) { return r.children[6].textContent.trim(); });
       return {
         topicsVisible: !on.classList.contains('hidden'),
         chatHidden: chat.classList.contains('hidden'),
@@ -69,12 +74,29 @@ module.exports = async function topics({ evalIn, sleep, check }) {
         navCount: document.getElementById('topics-count').textContent,
         metaText: document.getElementById('topics-meta').textContent,
         srcHead: srcHead, accCol: accCol, srcRowCount: srcRows.length - 1,
+        srcStates: srcStates, srcNotes: srcNotes, declCount: decl.length,
         // ⚠ 表体列数必须等于表头列数：少一列时**表头看着完全正常**，
         //   只有数据行整体左移（「今日命中」跑到「上次抓取」下面）。
         //   实测就是这样抓到的：表体里那个 last 变量写了却没进模板。
         srcBodyCols: srcRows.length > 1 ? [...srcRows[1].children].length : 0,
         topicsWidth: +inner.width.toFixed(1),
-        dashForUncomputable: /—/.test(on.textContent),
+        // ⚠ 判据要精确到**信号格的值格**：原来只查「整片文本里出现过一次破折号」，
+        //   那可能来自任何地方（某条 desc 里就有一个），而这条断言守的是
+        //   「算不出的那一格显示 —」。信号格每行是三个兄弟
+        //   （标签 / 轨道 / 值），所以取索引 2、5、8… 就是四个值格。
+        // ⚠ 本段在**模板串内部**：注释里不能出现反引号（会把模板串截断，
+        //   而截断后**语法可能仍然合法** —— node --check 抓不到，要跑到这一行才炸）。
+        sigValues: (function () {
+          // ⚠ 要**汇总所有卡**：第一张卡的 D/S/E 恰好都有值，只看它测不到
+          //   「算不出显示 —」这件事（桩里 E 为 null 的是第二张卡）。
+          var out = [];
+          on.querySelectorAll('.sig-grid').forEach(function (g) {
+            for (var i = 2; i < g.children.length; i += 3) {
+              out.push(g.children[i].textContent.trim());
+            }
+          });
+          return out;
+        })(),
         // 信号条拿到 --w 了没有：宽度是**数据驱动**的，必须走 CSSOM 写入。
         // ⚠ 这里量的是"写进去了"，不是"有没有 style 属性" —— CSSOM 的 setProperty
         //   本身就会生成 style 属性，那是规范允许的做法（§2.4 明写"数据驱动的宽度
@@ -110,7 +132,10 @@ module.exports = async function topics({ evalIn, sleep, check }) {
       topicsGeo.navCount === "8" && /共 8 条/.test(topicsGeo.metaText),
       JSON.stringify({ nav: topicsGeo.navCount, meta: topicsGeo.metaText }));
     check("算不出的 D/S/E 显示「—」而不是 0（0 与「没数据」结论相反）",
-      topicsGeo.dashForUncomputable, String(topicsGeo.dashForUncomputable));
+      Array.isArray(topicsGeo.sigValues) && topicsGeo.sigValues.length >= 4
+        && topicsGeo.sigValues.some(v => v === "—")
+        && !topicsGeo.sigValues.some(v => /^0(\.00)?$/.test(v)),
+      JSON.stringify({ vals: topicsGeo.sigValues }));
     check("选题阅读面与正文同档宽（--w-stream，§2.8 的列宽统一口径）",
       Math.abs(topicsGeo.topicsWidth - streamW) <= 1,
       JSON.stringify({ topics: topicsGeo.topicsWidth, stream: streamW }));
@@ -119,10 +144,24 @@ module.exports = async function topics({ evalIn, sleep, check }) {
       JSON.stringify({ bars: topicsGeo.barCount, withW: topicsGeo.barsWithW }));
     check("情报源表：`接入` 与 `上次抓取` 是两根正交列，且表体列数与表头一致",
       topicsGeo.srcHead.indexOf("接入") >= 0 && topicsGeo.srcHead.indexOf("上次抓取") >= 0
-        && topicsGeo.srcRowCount === 4
+        && topicsGeo.srcRowCount === topicsGeo.declCount
         && topicsGeo.srcBodyCols === topicsGeo.srcHead.length,
       JSON.stringify({ head: topicsGeo.srcHead, rows: topicsGeo.srcRowCount,
-                       bodyCols: topicsGeo.srcBodyCols }));
+                       decl: topicsGeo.declCount, bodyCols: topicsGeo.srcBodyCols }));
+    // ⚠ 行数判据从写死的 4 改成**声明里的源数**（declCount）：声明加一个源就要改一次
+    //   断言，属"实现细节抄成断言"，抄的那份迟早与声明漂移 —— 本次加 policy_library
+    //   活样本时，正是这条先红。语义没变：声明了几个源，表里就该有几行。
+    check("抓取失败的源在表里标成「抓取失败」并给出原因（不冒充「已接入」）",
+      // 桩里 policy_library 的 `errors` 有值、而 `state` 是 "ok"（后端 today() 就是
+      // 这么给的）—— 照 state 渲染就会显示"已接入"。这条守的正是"我们没抓到"
+      // 不能长得像"平台今天没货"：两者下一步动作相反（重抓 vs 换题）。
+      topicsGeo.srcStates.filter(s => s === "抓取失败").length === 1
+        && topicsGeo.srcStates.filter(s => s === "已接入").length === 3
+        && topicsGeo.srcNotes.some(n => n.indexOf("连接超时") >= 0),
+      JSON.stringify({ states: topicsGeo.srcStates, notes: topicsGeo.srcNotes }));
+    check("抓取失败的源不计入「N 源已接」（计数行不能把失败说成已接入）",
+      /3 源已接/.test(topicsGeo.metaText) && /1 源抓取失败/.test(topicsGeo.metaText),
+      JSON.stringify({ meta: topicsGeo.metaText }));
 
     // 「换一批」是在池子里翻页，**不是重新抓** —— 判据是刷新请求数没涨。
     await evalIn(`document.getElementById('btn-more').click(); return true;`);
@@ -148,6 +187,14 @@ module.exports = async function topics({ evalIn, sleep, check }) {
       navCount: document.getElementById('topics-count').textContent };`);
     check("「忽略」落一条记录并本地摘掉该卡（只影响今天，明天同题还会回来）",
       ignored.keys.length === 1 && ignored.gone && ignored.navCount === "7",
+      JSON.stringify(ignored));
+    // 忽略键必须**来自后端下发的 `item.key`**，不是前端自己拼的。
+    // 桩里 g-new 的 key 是 `srv:g-new`（前端按 guid 拼会得到 `g-new`）——
+    // 两边规则一致的话这条永远绿（空转），所以桩里特意让它俩不同。
+    // 守的是一个真实缺陷：前端拼 `guid||url||title`、后端忽略过滤只 `guid||title`，
+    // 于是**只有 url 的条目**（政策库那类）点「忽略」之后原样回来。
+    check("忽略用的是后端下发的 item.key（前端不再自己拼一份）",
+      ignored.keys.length === 1 && ignored.keys[0] === "srv:g-new",
       JSON.stringify(ignored));
 
     // 「去生成」= 切回会话 + 写主题 + 填参数，**不自动发送**（一次生成几十秒真金白银）。

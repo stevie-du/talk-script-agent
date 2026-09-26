@@ -124,5 +124,11 @@ def test_human_only_docs_may_still_reference_files():
     """
     pk = Pack(ROOT, "elevator")
     human = pk.file_text("knowledge/standards.md")
+    # ⚠ 这里的 `or` **两个条件各有含义**，不是"哪个成立都算过"（P3）：
+    #   `MD_REF` = 引用了另一个知识文件（`xxx.md` / `xxx.yaml`）；
+    #   `"TSG"`  = 引了标准编号（本包标准库的写法）。
+    #   任一成立 = 这份文档带了依据，反向守卫才有意义。
+    #   实测 `knowledge/standards.md` 走的是**第二条**（它不引别的文件，只引标准号）——
+    #   所以两个条件都不能删，删了这条守卫就红（2026-09-25 试过一次）。
     assert MD_REF.search(human) or "TSG" in human, \
-        "人读文件也该带引用/依据，否则这条反向守卫失去意义"
+        "人读文件也该带依据（引用别的 .md/.yaml，或引标准编号如 TSG），否则这条反向守卫失去意义"

@@ -90,21 +90,65 @@ def _is_pack_dir(d: Path) -> bool:
         return False
 
 
-def _copy_pack(src: Path, dst: Path) -> None:
-    """出厂包 → 用户目录，**保住用户已有的 private/**。
+def _rmtree_if_exists(p: Path) -> None:
+    if p.exists():
+        shutil.rmtree(p, ignore_errors=True)
 
-    先删非 private 的旧内容再拷，是为了让"出厂删掉了某个 md"这件事也传过去
-    （`copytree(dirs_exist_ok=True)` 只增不删，删掉的模板会一直赖着）。
+
+def _copy_pack(src: Path, dst: Path) -> None:
+    """出厂包 → 用户目录，**保住用户已有的 private/**，且失败不撕包（P1-5）。
+
+    为什么先拷到临时目录、再整体 rename 换入，而不是"先删旧内容再拷"：
+    `copytree(dirs_exist_ok=True)` 只增不删，为了让"出厂删掉了某个 md"这件事
+    也传过去，删除不可避免 —— 但**先删后拷**的窗口里任何一步失败（磁盘满 /
+    杀软按住源文件 / 权限，Windows 常态），用户那份就被撕成半残：台账里
+    `stored.local` 还是旧指纹，半残内容对不上它，从此每次启动都判成
+    「用户改过」（conflict 分支不修复、不重播），应用内又删不掉内置包 ——
+    只能手工救。先拷后换：**换入之前用户那份一个字节都没动过**。
+
+    换入用 rename（同盘原子）：旧包整个挪进 `.seed-old` 备份，新包就位后才
+    删备份；中途失败先把旧包还原回来再抛。暂存/备份目录点开头，
+    `list_packs` 不把它们当包（见 knowledge.list_packs 的点前缀过滤）。
     """
-    dst.mkdir(parents=True, exist_ok=True)
-    for child in dst.iterdir():
-        if child.name == PRIVATE_DIR_NAME:
-            continue
-        if child.is_dir():
-            shutil.rmtree(child)
-        else:
-            child.unlink()
-    shutil.copytree(src, dst, dirs_exist_ok=True)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.parent / f".{dst.name}.seed-new"
+    _rmtree_if_exists(tmp)                    # 上次失败可能留下残骸
+    try:
+        shutil.copytree(src, tmp)
+        # bundled 的 private/ 是**空模板**：换入时以用户的 private 为准（老语义：
+        # 播种永不覆盖用户私有资料）—— 先把出厂那份整体清掉，再把用户的拷进来。
+        # 直接 copytree(user → tmp) 会与出厂模板撞目录（WinError 183）。
+        shutil.rmtree(tmp / PRIVATE_DIR_NAME, ignore_errors=True)
+        if dst.exists() and (dst / PRIVATE_DIR_NAME).exists():
+            shutil.copytree(dst / PRIVATE_DIR_NAME, tmp / PRIVATE_DIR_NAME,
+                            dirs_exist_ok=True)
+    except OSError:
+        _rmtree_if_exists(tmp)
+        raise
+    if not dst.exists():                      # 首次播种：没有旧包可备份
+        try:
+            tmp.rename(dst)
+        except OSError:
+            _rmtree_if_exists(tmp)
+            raise
+        return
+    backup = dst.parent / f".{dst.name}.seed-old"
+    _rmtree_if_exists(backup)
+    try:
+        dst.rename(backup)                    # 此刻起 dst 缺位；失败则 dst 原样
+        try:
+            tmp.rename(dst)
+        except OSError:
+            backup.rename(dst)                # 先还原旧包；还原再失败交给外层留话
+            raise
+    except OSError:
+        _rmtree_if_exists(tmp)
+        if not dst.exists() and backup.exists():
+            # 还原也失败了：旧包完整躺在备份里 —— 宁可留一个隐藏目录也不丢数据
+            log.warning("行业包 %s 换入失败且自动还原也没成功："
+                        "你的原包完整保留在 %s，请手工把它挪回原位", dst, backup)
+        raise
+    _rmtree_if_exists(backup)
 
 
 def seed_bundled_packs(bundled: Path, packs_dir: Path, app_version: str = "") -> dict:
@@ -200,7 +244,9 @@ def seed_bundled_packs(bundled: Path, packs_dir: Path, app_version: str = "") ->
                 # bundled 指纹**不更新**：这条冲突下次启动还会再说一遍。
                 # 一次就消失的提醒等于没有提醒 —— 用户不一定在看着日志。
         except OSError as e:
-            log.warning("行业包 %s 播种失败：%s —— 继续处理其余的", name, e)
+            # 失败的用户包**原样还在**（_copy_pack 先拷后换），只影响本次同步
+            log.warning("行业包 %s 播种失败：%s —— 用户目录里那份没有被动过，"
+                        "继续处理其余的", name, e)
 
     if changed or not manifest_path.exists():
         try:

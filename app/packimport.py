@@ -12,7 +12,7 @@
 | 解压炸弹 | 三重限：zip 总大小 / 条目数 / 单文件大小 |
 | manifest 不兼容 | `pack_api` 版本闸（缺省当 1），超过引擎支持的直接拒 |
 | 引用不存在的文件 | 结构校验：banwords 等 yaml 里声明的相对路径必须真实存在 |
-| 静默覆盖用户改过的包 | 复用 packseed 的 `.packseed.json` + `tree_hash` 判"改过没"，改过就拒 |
+| 静默覆盖用户改过的包 | 复用 packseed 的 `.packseed.json` + `tree_hash` 判"改过没"，改过就拒；**台账损坏**同样拒（"无法判断"≠"没记录"） |
 | 落盘落一半 | 全校验在临时目录完成 → 同名先备份（同盘 rename）→ 失败整体回滚 |
 
 与导出的对称性：同一个包格式（`pack.yaml` manifest）、同一条 private/ 约定
@@ -44,6 +44,16 @@ MAX_ENTRIES = 500                     # 条目数（含目录条目）
 #: 引擎认识的技能包格式版本。老包不写 pack_api 字段 → 当 1。
 PACK_API_SUPPORTED = 1
 
+#: 行业包名的白名单。**单一来源**：server.py 的 `_safe_name`（web 层 400 语义）
+#: 与本模块的 `import_pack` / `delete_pack`（导入层 PackImportError 语义）用的是
+#: 同一条正则 —— 三处各写一份必然漂移，而"导入侧放行、API 侧拦截"（或反过来）
+#: 都是同一份 zip 走两条路两个结果。错误文案可以分层，判定标准不行。
+#: slug 允许中英文、数字、下划线与连字符，禁止 . / \ 等穿越字符。
+#: ⚠ 用 `.fullmatch()`，**不**给正则加 `^`/`$`：Python 的 `$` 允许串尾多一个
+#: 换行，于是 `"elevator\n"` 在引擎这边算合法，而 JS 的 `$` 不允许 —— 桩判不
+#: 合法、引擎放行（第 16 轮复核实测，方向正是"桩比引擎严"那侧，也就是本仓库
+#: 对账守卫写明不可接受的那一侧）。Windows 上尾部空白还会被文件系统吃掉，
+#: `packs/elevator\n` 实际落到 `packs/elevator`：一条 URL 能指到真的包上。
 _NAME_RE = re.compile(r"[\w\u4e00-\u9fff-]+")
 
 #: 来源标记文件（导入时写进包里）。自包含：跟着包走，删包即消失，
@@ -68,6 +78,16 @@ class ImportResult:
     note: str = ""
 
 
+# Windows 保留设备名（不分区大小写、带不带扩展名都算）：以它为文件/目录名时
+# `mkdir` / `open` 直接 OSError，而落盘在解压循环里发生 → 用户看到的是
+# 500「导入过程中文件系统出错」，完全指不到是**哪个条目**的哪一段不行（P3）。
+# 在白名单层就拒，报错点名条目。扩展名不算数：con.md 与 con 同罪。
+_RESERVED_NAMES = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{i}" for i in range(1, 10)}
+    | {f"lpt{i}" for i in range(1, 10)})
+
+
 def _clean_rel(name: str) -> str:
     """zip 条目名 → 干净的 posix 相对路径。任何逃逸企图直接拒。"""
     s = name.replace("\\", "/")          # Windows 造的 zip 用反斜杠
@@ -81,6 +101,11 @@ def _clean_rel(name: str) -> str:
             continue
         if seg == "..":
             raise PackImportError(f"zip 里有穿越路径的条目：{name!r}")
+        stem = seg.split(".")[0].lower()
+        if stem in _RESERVED_NAMES:
+            raise PackImportError(
+                f"zip 条目 {name!r} 用了 Windows 保留设备名「{stem}」——"
+                "这种名字在落盘时必然失败，请改名后再打包")
         parts.append(seg)
     if not parts:
         raise PackImportError(f"zip 里有空路径条目：{name!r}")
@@ -162,22 +187,51 @@ def _check_structure(pack_root: Path, banwords_rel: str) -> None:
             raise PackImportError(f"包缺少 {rel} —— 引擎加载时要读它")
 
 
-def _user_modified(packs_dir: Path, name: str) -> bool | None:
-    """用户改过这个（播种来的）包吗？None = 没有台账记录（不是播种来的）。
+def _ledger_broken(name: str, why: str) -> PackImportError:
+    """台账坏了的**唯一出口**：说清"无法判断"，并给出可操作的下一步。
 
-    判据复用 packseed：台账里的 local 指纹 vs 现在的 tree_hash（skip_private）。
-    台账读不出时返回 None（当作"没记录"）—— packseed 同款兜底：不动用户的东西，
-    且调用方要把"覆盖"说清楚。
+    三种坏法（读不出 / 不是 JSON / 结构不对）共用一句文案 —— 分成三份必然漂移，
+    而用户要的信息是同一件：这次导入为什么被中止、接下来该动哪个文件。
+    """
+    return PackImportError(
+        f"行业包台账（{MANIFEST_NAME}）{why} —— 无法判断 {name} 是不是你改过的"
+        f"内置包。为免覆盖掉你的改动，本次导入已中止；"
+        f"请修复或删除该文件（{MANIFEST_NAME}）后重试")
+
+
+def _user_modified(packs_dir: Path, name: str) -> bool | None:
+    """用户改过这个（播种来的）包吗？
+
+    - `True`  = 改过（调用方必须拒）
+    - `False` = 没改过（可覆盖）
+    - `None`  = **台账里本来就没有这个包**（用户自己导入的，覆盖是他的选择）
+
+    ⚠ 「台账**读不出来**」**不**返回 `None`，而是抛 `PackImportError`。
+    它与「台账里没这条」是两件事：前者我们**不知道**用户改没改，后者我们
+    **知道**这不是播种来的包。拿"不确定"冒充"没记录"，两者的正确动作恰好相反
+    （拒 vs 放行），代价是覆盖 + 删备份、用户改动**不可逆丢失**。
+    packseed 对台账损坏是「不动任何已有包」（`seed_bundled_packs` 的
+    `except (OSError, ValueError)` 分支），这里必须同向。
     """
     dst = packs_dir / name
     if not dst.exists():
         return None
+    ledger = packs_dir / MANIFEST_NAME
     try:
-        rec_all = json.loads((packs_dir / MANIFEST_NAME).read_text(encoding="utf-8"))
-        rec = rec_all.get("packs") if isinstance(rec_all, dict) else {}
-        stored = rec.get(name) if isinstance(rec, dict) else None
-    except (OSError, ValueError):
+        raw = ledger.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        # 从来没有过台账 = 这个目录没被播种过 → 里面的包都是用户自己的
         return None
+    except OSError as e:
+        raise _ledger_broken(name, f"读不出来：{e}")
+    try:
+        rec_all = json.loads(raw)
+    except ValueError as e:
+        raise _ledger_broken(name, f"不是合法 JSON：{e}")
+    rec = rec_all.get("packs") if isinstance(rec_all, dict) else None
+    if not isinstance(rec, dict):
+        raise _ledger_broken(name, '结构不对（顶层应为 {"app_version": …, "packs": {…}}）')
+    stored = rec.get(name)
     if not isinstance(stored, dict):
         return None
     return stored.get("local") != tree_hash(dst, skip_private=True)
@@ -199,9 +253,23 @@ def _swap_in(tmp_pack: Path, dst: Path) -> bool:
     try:
         shutil.move(str(tmp_pack), str(dst))
     except Exception:
-        dst_exists = dst.exists()
-        if not dst_exists:
+        # ⚠ tmp 在 %TEMP%（通常 C:），packs_dir 在另一块盘时 `shutil.move`
+        #   退化为 copytree+删除，中途失败会留下**半截新包**在 dst ——
+        #   此时不能跳过回滚（P2-3：曾经 `if not dst.exists()` 把这种情况
+        #   放过去，旧包躺在备份里、dst 是半成品，报错却断言「已还原原样」）。
+        #   dst 上的东西必然是这次失败搬入的残骸（旧包已整体挪进 backup），
+        #   清掉它才算把现场还原干净。
+        if dst.is_dir():
+            shutil.rmtree(dst, ignore_errors=True)
+        elif dst.exists():
+            dst.unlink()
+        if not dst.exists() and backup.exists():
             backup.rename(dst)             # 回滚
+        if not dst.exists():
+            # 连回滚都失败：旧包完整躺在备份里 —— 留下它并说实话
+            raise PackImportError(
+                f"新包搬进用户目录失败，且自动还原也没成功："
+                f"你的原包完整保留在 {backup}，请手工把它挪回 {dst}")
         raise PackImportError("新包搬进用户目录失败，已还原原样")
     shutil.rmtree(backup, ignore_errors=True)
     return True
@@ -315,7 +383,6 @@ def delete_pack(name: str, packs_dir: Path) -> dict:
     """卸载导入的包。**播种来的内置包不给删** —— 删了下周播种又回来，
     用户看到的是"卸载没用"。给的路子是「恢复默认」（packseed 重播）。
     """
-    import re as _re
     if not _NAME_RE.fullmatch(name or "") or ".." in name:
         raise PackImportError("包名不合法")
     dst = packs_dir / name

@@ -225,7 +225,7 @@ def test_banwords_structure_errors_stay_fatal(tmp_path):
         Banwords({"hard": "政府补贴"})       # 标量会被拆成单字 → 命中归零
     _errs, advisory = validate_banwords({"hard": ["绝对安全"], "soft": ["最安全"],
                                         "platform": {"抖音": {"promote": ["最安全"]}}})
-    assert advisory == [] or all("extra_soft" in a for a in advisory)
+    assert advisory == [], f"不该有 advisory：{advisory}"
 
 
 # ── P2-6：promote/demote 落空要有声音（与 extra_soft 同口径）──

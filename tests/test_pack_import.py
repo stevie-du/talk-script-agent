@@ -163,6 +163,21 @@ def test_oversized_file_rejected(tmp_path, monkeypatch):
         import_pack(_zip(z), tmp_path)
 
 
+def test_oversized_zip_rejected(tmp_path, monkeypatch):
+    """zip **总大小**这一重限制也要守住（P2-26）。
+
+    `MAX_ENTRIES`（上面那条）与 `MAX_FILE_BYTES`（再上面那条）都有测试，
+    唯独 `MAX_ZIP_BYTES` 在 tests/ 里**零引用** —— 三重限制少守一重。
+    它挡的是"条目不多、单文件也不大、但总量很大"的包：前两重都拦不住，
+    而它撑的是磁盘与内存（解压前先整份读进内存）。
+    """
+    import app.packimport as pi
+    monkeypatch.setattr(pi, "MAX_ZIP_BYTES", 10)
+    z = _min_pack()
+    with pytest.raises(PackImportError, match="上限"):
+        import_pack(_zip(z), tmp_path)
+
+
 # ── manifest 与结构防线 ─────────────────────────────────────
 
 def test_missing_pack_yaml_rejected(tmp_path):
@@ -263,6 +278,57 @@ def test_replace_imported_pack_ok(tmp_path):
     assert r.ok and r.replaced
 
 
+def _corrupt_ledger(packs_dir: Path, text: str) -> None:
+    (packs_dir / ".packseed.json").write_text(text, encoding="utf-8")
+
+
+def test_replace_with_corrupt_ledger_rejected(tmp_path):
+    """台账**存在但读不出来** → 拒绝覆盖，且说清是台账的问题。
+
+    台账读失败曾被当成"没有台账记录"（= 用户自己导入的包）放行，于是导入会
+    覆盖 + 删备份，用户改动不可逆丢失；而 packseed 对同一状态是「不动任何
+    已有包」。同一个兜底口径两处给出相反动作 —— 前者还配了一句
+    「packseed 同款兜底：不动用户的东西」的 docstring，与代码相反。
+    """
+    existing = tmp_path / "testpack"
+    existing.mkdir()
+    (existing / "pack.yaml").write_text(MIN_PACK_YAML + "# 我改的\n", encoding="utf-8")
+    (existing / "skill.yaml").write_text(MIN_SKILL_YAML, encoding="utf-8")
+    (existing / "banwords.yaml").write_text("hard: []\n", encoding="utf-8")
+    _corrupt_ledger(tmp_path, "{ 这不是合法 json")
+
+    with pytest.raises(PackImportError, match="台账"):
+        import_pack(_zip(_min_pack()), tmp_path)
+    # 被拒后原包必须原样还在（一个字节都没动）
+    assert "# 我改的" in (existing / "pack.yaml").read_text(encoding="utf-8")
+
+
+def test_replace_with_structurally_broken_ledger_rejected(tmp_path):
+    """台账 JSON 合法但结构不对（顶层不是映射）→ 同样拒绝，不静默放行。
+
+    判据与上一条同源：「台账坏了」意味着**我们不知道**用户改没改，
+    不能拿"不确定"冒充"没记录"。
+    """
+    existing = tmp_path / "testpack"
+    existing.mkdir()
+    (existing / "pack.yaml").write_text(MIN_PACK_YAML, encoding="utf-8")
+    (existing / "skill.yaml").write_text(MIN_SKILL_YAML, encoding="utf-8")
+    (existing / "banwords.yaml").write_text("hard: []\n", encoding="utf-8")
+    _corrupt_ledger(tmp_path, '["not", "a", "map"]')
+
+    with pytest.raises(PackImportError, match="台账"):
+        import_pack(_zip(_min_pack()), tmp_path)
+
+
+def test_missing_ledger_still_allows_replace(tmp_path):
+    """**台账文件不存在** ≠ 台账损坏：从来没播种过 → 目录里的包都是用户自己的，
+    覆盖仍是允许的。这条守住上面两条修复不要误伤 FileNotFoundError 分支。"""
+    import_pack(_zip(_min_pack()), tmp_path)
+    assert not (tmp_path / ".packseed.json").exists()
+    r = import_pack(_zip(_min_pack()), tmp_path)
+    assert r.ok and r.replaced
+
+
 def test_failed_import_leaves_no_half_pack(tmp_path):
     """导入失败时 packs_dir 里不该留下任何痕迹。"""
     z = _min_pack()
@@ -293,3 +359,80 @@ def test_delete_seeded_pack_rejected(tmp_path):
 def test_delete_missing_pack_rejected(tmp_path):
     with pytest.raises(PackImportError, match="不存在"):
         delete_pack("nope", tmp_path)
+
+
+def test_swap_in_recovers_when_cross_drive_move_leaves_partial_dst(tmp_path,
+                                                                   monkeypatch):
+    """跨盘 move（= copytree+删）中途失败留下半截 dst → 也必须回滚（P2-3）。
+
+    曾经 `if not dst.exists()` 把这种情况放过去：旧包躺在 `.import-backup-*`
+    里、正式位上是半截新包，报错却断言「已还原原样」—— 文案与事实相反，
+    用户要手工改隐藏目录名才能找回旧包。
+    """
+    import shutil as _shutil
+    from app.packimport import _swap_in
+
+    dst = tmp_path / "p"
+    dst.mkdir()
+    (dst / "pack.yaml").write_text("name: 旧的\n", encoding="utf-8")
+    tmp_pack = tmp_path / ".tmp-p"
+    tmp_pack.mkdir()
+    (tmp_pack / "pack.yaml").write_text("name: 新的\n", encoding="utf-8")
+
+    def half_move(src, dst2, *a, **kw):
+        # 模拟跨盘 move 的退化形态（copytree 建好目录、拷了一部分才炸）：
+        # 半截内容已落到正式位。⚠ dst2 是 **str**（_swap_in 传的是
+        # `str(tmp_pack) / str(dst)`），必须先转 Path —— 否则 `/` 运算直接
+        # TypeError、半截文件根本没落地，回滚照常发生，对应的变异检验假绿
+        # （实测踩过：s9-6 第一版就是这么漏检的）。
+        d = Path(dst2)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "pack.yaml").write_text("name: 半截\n", encoding="utf-8")
+        raise OSError("模拟跨盘拷贝中途失败")
+
+    monkeypatch.setattr(_shutil, "move", half_move)
+    with pytest.raises(PackImportError, match="已还原原样"):
+        _swap_in(tmp_pack, dst)
+    monkeypatch.undo()
+
+    assert (dst / "pack.yaml").read_text(encoding="utf-8") == "name: 旧的\n", \
+        "半截新包占着正式位 —— 回滚被跳过了"
+    assert not (tmp_path / ".import-backup-p").exists(), "旧包还原后备份才该消失"
+
+
+def test_delete_route_wiring(tmp_path):
+    """`DELETE /api/packs/{name}` 路由层的接线（P2-10：曾经零覆盖）。
+
+    卸载是用户可直达的**破坏性操作**：`_safe_name` 校验、PackImportError→400
+    映射、内置包拒绝——这四条都挂在路由这一层，底层 `delete_pack` 的单测
+    盖不住「路由漏挂 / 异常映射丢了」这种回归。
+    """
+    from fastapi.testclient import TestClient
+    from app.server import create_app
+
+    packs = tmp_path / "packs"
+    packs.mkdir()
+    # 造一份已导入的包（带来源标记）与一份内置包
+    import_pack(_zip(_min_pack()), packs)
+    (packs / "elevator").mkdir()
+    (packs / "elevator" / "pack.yaml").write_text("name: elevator\n", encoding="utf-8")
+
+    c = TestClient(create_app(tmp_path, token="pi-token"),
+                   base_url="http://127.0.0.1:8765",
+                   raise_server_exceptions=False)
+    c.headers.update({"X-TalkScript-Token": "pi-token"})
+
+    r = c.delete("/api/packs/testpack")
+    assert r.status_code == 200, r.text
+    assert not (packs / "testpack").exists(), "卸载没删掉包"
+
+    r = c.delete("/api/packs/elevator")
+    assert r.status_code == 400, r.text
+    assert "内置" in r.json()["detail"], r.text
+
+    r = c.delete("/api/packs/nope")
+    assert r.status_code == 400, r.text
+
+    r = c.delete("/api/packs/%2e%2e")
+    assert r.status_code == 400, r.text
+    assert not (tmp_path / "pack.yaml").exists(), "穿越名没被拦住"

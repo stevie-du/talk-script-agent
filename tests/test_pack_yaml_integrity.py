@@ -499,6 +499,10 @@ SHAPE_BROKEN = {
     "params 整个写成列表": {"params": ["segment"]},
     "audience_map 写成列表": {"audience_map": ["业主乘客"]},
     "quota_table 写成整数": {"quota_table": 3},
+    # P2-2：嵌套结构的形状（曾经 pack_info 说健康、Pack 抛裸 AttributeError → 500）
+    "banwords 写成映射": {"banwords": {"hard": ["自留词"]}},
+    "params.segment.options 写成字符串": {
+        "params": {"segment": {"label": "细分", "options": "AB", "default": "A"}}},
 }
 
 
@@ -594,3 +598,73 @@ def test_packs_dir_unreadable_is_logged(tmp_path, caplog):
     assert out == []
     assert any("行业包目录读取失败" in r.getMessage() for r in caplog.records), \
         f"应有一条目录读取失败的 WARNING，实际 {[r.getMessage() for r in caplog.records]}"
+
+
+def test_template_pack_matches_elevator_contract():
+    """新包的骨架（`packs/_template`）必须与 elevator 同一口径（P2-36 / P2-37）。
+
+    新建行业包的骨架来自 `_template`，**新包会原样继承它**：
+    - 15 秒档配额曾被判成错形状（cta 15 字 ≈ 3.2 秒：一条 15 秒的片子花
+      五分之一时间念 CTA，正文只剩 40 字）→ elevator 已修成 `{body:47, cta:8}`；
+    - 分镜 JSON 缺 `bgm` / `transition` / `shot_type`，而 `app/schemas.py`
+      与 `docs/场景序列契约.md` 都要求这四个字段。
+    不一致的表现是**新包一建出来就带着老毛病**，而且很难往回追到模板上。
+    """
+    tpl = yaml.safe_load(
+        (ROOT / "packs" / "_template" / "pack.yaml").read_text(encoding="utf-8"))
+    el = yaml.safe_load(
+        (ROOT / "packs" / "elevator" / "pack.yaml").read_text(encoding="utf-8"))
+    assert tpl["quota_table"] == el["quota_table"], \
+        f"模板与 elevator 的配额表不一致：{tpl['quota_table']} vs {el['quota_table']}"
+
+    tpl_skill = (ROOT / "packs" / "_template" / "skill.yaml").read_text(encoding="utf-8")
+    for f in ("bgm", "transition", "shot_type"):
+        assert f'"{f}"' in tpl_skill, f"模板的分镜 JSON 缺字段：{f}"
+
+    # P2-4：`$alt_guide` 是「换一版」候选的注入口（prompts._alt_guide 只在
+    # reroll 时给内容）。模板缺了它，engine 侧照常注入、safe_substitute 静默
+    # 落空 —— 换一版在 elevator 里有候选、在**每个生成的新包**里永远没有，
+    # 且无任何日志。draft 与 write 两个模板都要有（elevator 两处都有）。
+    import re as _re
+    for stage in ("draft", "write"):
+        pat = "^  " + stage + r":\n(.*?)(?=^  \w+:$|^\w+:$|\Z)"
+        m = _re.search(pat, tpl_skill, _re.S | _re.M)
+        assert m and "$alt_guide" in m.group(1), f"模板的 {stage} 模板缺 $alt_guide"
+
+
+
+def test_nested_params_shape_error_gives_409_not_500(tmp_path):
+    """P2-2：`params.segment` 写成标量 → Pack 必须 409 且点名键，不能 AttributeError → 500。
+
+    曾经 `pack_info` 看不见这层（或吞进宽 except 只给一句泛话），
+    `Pack.__init__` 的选项去重在 `(params.get(key) or {}).get(...)` 上
+    直接 AttributeError —— 生成端 500，用户只看到「服务器错误」。
+    """
+    root = _with_pack_yaml(tmp_path, SHAPE_BROKEN["params.segment 写成字符串"])
+    with pytest.raises(PackBrokenError) as ei:
+        Pack(root, "elevator")
+    assert "params.segment" in str(ei.value), str(ei.value)
+    assert isinstance(ei.value, PackError)
+
+
+def test_banwords_shape_error_does_not_pretend_file_missing(tmp_path):
+    """P2-2：`banwords:` 写成映射 → 要点名为形状错，不能被 str() 拼成「文件不存在」。"""
+    root = _with_pack_yaml(tmp_path, SHAPE_BROKEN["banwords 写成映射"])
+    info = pack_info(root / "packs" / "elevator")
+    assert info.pack_error, "形状错没被看见"
+    assert "banwords 不符合约定" in info.pack_error, info.pack_error
+    assert "读取失败" not in info.pack_error, "被 str() 拼成路径后读不到，误报成文件问题"
+
+
+def test_skill_stages_shape_error_is_seen_by_pack_info(tmp_path):
+    """P2-2 的 skill 半边：`stages:` 写成列表 → 列表说坏、Pack 409，两处同一句话。"""
+    root = _root(tmp_path)
+    p = root / "packs" / "elevator" / "skill.yaml"
+    data = yaml.safe_load(p.read_text(encoding="utf-8"))
+    data["stages"] = ["draft", "write"]
+    p.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+                 encoding="utf-8")
+    info = pack_info(root / "packs" / "elevator")
+    assert info.pack_error and "stages" in info.pack_error, info.pack_error
+    with pytest.raises(PackBrokenError):
+        Pack(root, "elevator")

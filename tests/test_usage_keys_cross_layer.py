@@ -11,15 +11,14 @@
 这里不靠"记得改两处"，而是读三个源文件对账：
 
   1. 界面读的**步骤字段名**必须是引擎真的写进 `_step` data 里的那一个（`usage`）；
-  2. 界面读的 **details 字典名**必须在 `app/llm.py` 的白名单里 —— `usage` 的数值
-     键是 `isinstance(v, (int, float))` 全量拷的，但嵌套的 details 是**按名字点名**
-     才拷的（`llm.py:479` / `:584`），漏点名就等于界面永远读到空；
+  2. 界面读的 **details 字典**必须能活着走过 `app/llm.py` 的 usage 合并 ——
+     P2-20 之前是「按名字点名才拷」的白名单（`llm.py:479` / `:584`），
+     现在是 `_merge_usage` 对 dict 值**递归累加**（不点名、全量保）。
+     点名时代漏一个名字、递归时代丢了 dict 分支，症状一模一样：
+     界面永远显示「正文 = 全部 completion」，把思考开销完全藏起来
+     —— 而"思考吃掉多少预算"正是这条功能存在的全部理由（主报告 R1）；
   3. `reasoning_tokens` 这个名字界面在用，而它由上游原样带回来（引擎不重命名），
      所以它**不许**出现在 `app/` 里被我们自己改写 —— 出现即说明有人加了第二本账。
-
-第 2 条是真会坏的那种：改一行白名单，界面不会报错，只会永远显示「正文 = 全部
-completion」，把思考开销完全藏起来 —— 而"思考吃掉多少预算"正是这条功能存在的全部
-理由（主报告 R1）。
 """
 from __future__ import annotations
 
@@ -77,27 +76,34 @@ def test_ui_reads_a_step_field_the_engine_writes():
             f"界面读 data.{field}，而引擎没有一个 _step 的 data 写这个键")
 
 
-def test_details_dict_the_ui_reads_is_on_the_llm_copy_list():
-    """界面点的嵌套字典名，必须在 llm.py 点名拷贝的白名单里。"""
+def test_details_dict_the_ui_reads_survive_the_merge():
+    """界面点的嵌套字典，必须能活着走过 llm.py 的 usage 合并。
+
+    旧守卫盯的是「点名白名单」（`for det in (...)`）；P2-20 把两处内联白名单
+    重构成共享的 `_merge_usage`（dict 值递归累加、不再需要点名）后，那份正则
+    永远零命中 —— 守卫自己先假红了。这里改成钉新机制的三个不变式：
+    dict 分支还在（details 靠它全量通过）、是累加不是覆盖（重试的账不被抹）、
+    两条 chat 路径都接了合并（漏一条就是"只有某条链路有账"）。
+    """
     js = PROGRESS_JS.read_text(encoding="utf-8")
     llm = LLM.read_text(encoding="utf-8")
     # UI 里所有 `xxx_details` 形态的读取
     ui_details = set(re.findall(r"\b([a-z_]+_details)\b", js))
     assert ui_details, "progress.js 没读任何 details 字典 —— 思考 token 从哪来？"
-    # ⚠ 这里必须是 **list** 而不是 set：两条 chat 路径的白名单写的是同一串字面量，
-    #   收成 set 就永远只剩一个，"两条路径都要点名"这条断言会退化成恒真。
-    listed = re.findall(r"for det in \(([^)]*)\)", llm)
-    copied: set[str] = set()
-    for group in listed:
-        copied |= set(re.findall(r"[\"']([a-z_]+)[\"']", group))
-    assert copied, "llm.py 里找不到 details 的点名拷贝 —— 白名单被改掉了？"
-    missing = ui_details - copied
-    assert not missing, (
-        f"界面读 {sorted(missing)}，但 llm.py 只点名拷 {sorted(copied)}："
-        "漏点名的键上游回了也不会进作业，界面会永远读到空（不报错，只是账是假的）")
-    # 两条 chat 路径（非流式 / 流式）都要点名，漏一条就是"只有某条链路有账"
-    assert len(listed) >= 2, (
-        f"llm.py 里 details 白名单只出现 {len(listed)} 处，非流式与流式应当各有一处")
+    m = re.search(r"def _merge_usage\(target: dict, u: dict\).*?(?=\ndef |\Z)", llm, re.S)
+    assert m, "llm.py 找不到 _merge_usage —— usage 合并被改没了？"
+    body = m.group(0)
+    # dict 值递归拷贝：details 键走的就是这条路（不点名、全量保）。
+    # 删掉这个分支，界面的 details 会无声变空（不报错，只是账是假的）。
+    assert re.search(r"isinstance\(v, dict\)", body) and "setdefault" in body, (
+        "_merge_usage 不再递归拷贝 dict 值：界面读的 "
+        f"{sorted(ui_details)} 会无声变空（不报错，只是账是假的）")
+    # 累加而不是覆盖（P2-20 的本意）：覆盖会让重试后的账只剩最后一次。
+    assert "cur + v" in body, "_merge_usage 退化成覆盖：重试后显示的是最后一次的用量"
+    # 两条 chat 路径（非流式 / 流式）都要接上合并，漏一条就是"只有某条链路有账"。
+    sites = re.findall(r"_merge_usage\(usage, u\)", llm)
+    assert len(sites) >= 2, (
+        f"llm.py 里 _merge_usage(usage, u) 只出现 {len(sites)} 处，非流式与流式应当各有一处")
 
 
 def test_reasoning_token_name_is_not_recounted_in_engine():

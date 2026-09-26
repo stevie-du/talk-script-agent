@@ -207,6 +207,29 @@ def _retry_after_seconds(headers) -> float | None:
         return None
 
 
+def _merge_usage(target: dict, u: dict) -> None:
+    """把上游回的用量**累加**进 `target`。
+
+    ⚠ 以前是 `target.update(...)`（P2-20）：重试循环把**同一个** `usage` 字典
+    传给每一次尝试（见 `chat_json` / `chat_stream` 里的 `for attempt`），
+    于是第二次把第一次**覆盖**掉 —— 被丢弃那次真实消耗的 token **静默不计**，
+    用户按界面显示的数字对账会少一笔，而且重试次数越多差得越多。
+
+    记账只会增加、不会回退，所以这里必须累加。
+
+    `*_tokens_details` 是**构成明细**（reasoning / audio 各多少）而不是总量 ——
+    但总量累加了，明细就该跟着累加，否则两处对不上账。所以 dict 也递归累加。
+    """
+    for k, v in u.items():
+        if isinstance(v, dict):
+            _merge_usage(target.setdefault(k, {}), v)
+            continue
+        if not isinstance(v, (int, float)):
+            continue                     # 非数值不进账（与原来同一口径）
+        cur = target.get(k)
+        target[k] = v if not isinstance(cur, (int, float)) else cur + v
+
+
 def _brief(text: str) -> str:
     """压缩上游响应体：去换行、对敏感信息掩码、截断。
 
@@ -494,11 +517,7 @@ class LLMClient:
             if usage is not None and isinstance(data, dict):
                 u = data.get("usage")
                 if isinstance(u, dict):
-                    usage.update({k: v for k, v in u.items()
-                                  if isinstance(v, (int, float))})
-                    for det in ("completion_tokens_details", "prompt_tokens_details"):
-                        if isinstance(u.get(det), dict):
-                            usage[det] = u[det]
+                    _merge_usage(usage, u)
             finish = ((data.get("choices") or [{}])[0] or {}).get("finish_reason")
             return self._ensure_content(content, finish, budget=payload["max_tokens"],
                                         stage=stage), finish
@@ -600,10 +619,7 @@ class LLMClient:
                     raise LLMError(f"模型接口返回错误: {_brief(msg)}")
                 u = obj.get("usage")
                 if isinstance(u, dict) and usage is not None:
-                    usage.update({k: v for k, v in u.items() if isinstance(v, (int, float))})
-                    for det in ("completion_tokens_details", "prompt_tokens_details"):
-                        if isinstance(u.get(det), dict):
-                            usage[det] = u[det]
+                    _merge_usage(usage, u)
                 choices = obj.get("choices") or []
                 if not choices:
                     continue

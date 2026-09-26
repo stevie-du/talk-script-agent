@@ -21,6 +21,7 @@
 """
 from __future__ import annotations
 
+import logging
 import msvcrt
 import os
 import shutil
@@ -219,6 +220,65 @@ def test_a_permanent_load_failure_is_still_failed_and_says_so(tmp_path, monkeypa
     assert "语法有误" in msg, f"原因里没点名是哪个文件、怎么坏的：{msg}"
     assert f"重读 {len(packgen._RELOAD_WAITS)} 次" in msg, \
         f"失败文案里的次数与常量不是一本账（改了常量忘了改文案）：{msg}"
+
+
+# ── 编码错不能与「文件不存在」同形（P2-7）────────────────────
+def test_non_utf8_knowledge_file_is_reported_not_silently_empty(tmp_path, caplog):
+    """GBK 存的知识 `.md` → 返回空串，但**必须留下一条带路径的 warning**。
+
+    中文 Windows 上很容易出现这种文件。修复前 `read_text_cached` 把
+    `UnicodeDecodeError` 和 `OSError` 一起吞掉、返回 ""，于是下游报的是
+    「占位符未填充 / 切片为空」—— 与**文件不存在**同形，真正的原因（编码）
+    无处可查。
+    """
+    p = tmp_path / "topics.md"
+    p.write_bytes("## 核心术语\n家用电梯\n".encode("gbk"))
+    with caplog.at_level(logging.WARNING, logger="app.knowledge"):
+        got = knowledge.read_text_cached(p)
+    assert got == "", f"读不出来应当返回空串，实际：{got!r}"
+    warns = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warns, "编码错被静默吞掉了 —— 下游只会说「占位符未填充」，根因查不到"
+    assert any(str(p) in r.getMessage() for r in warns), \
+        f"warning 里没带路径，定位不到是哪个文件：{[r.getMessage() for r in warns]}"
+
+    # 反向对照：同一次生成里重复读**只该说一次**（失败也进缓存）——
+    # 不缓存的话一次生成读十几遍同一份文件，同一条 warning 会把日志淹掉，
+    # 真正的第一条反而看不见（与 read_yaml_cached 缓存 err 同款取向）。
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="app.knowledge"):
+        knowledge.read_text_cached(p)
+    assert not caplog.records, "失败没进缓存 —— 每读一次刷一条，日志会被淹掉"
+
+
+@win_only
+def test_transient_oserror_is_not_pinned_into_the_text_cache(tmp_path):
+    """P1-3：瞬时占用返回空串，但**不进缓存** —— 解除后同进程必须能读回来。
+
+    P2-7 修复时把 OSError 与 UnicodeDecodeError 一起落进了缓存：缓存键是
+    (mtime, size)，读失败时两者都没变，空串一旦入缓存就把瞬时故障
+    （杀软/索引器按住刚落盘的文件，Windows 常态）钉成永久 —— 解除占用也救
+    不回来，只能重启。yaml 那条（`read_yaml_cached` 的 retryable 口径）早就
+    修过同款问题，两条必须是同一个口径。
+    """
+    p = tmp_path / "hooks.md"
+    p.write_text("## 钩子库\n家用电梯\n", encoding="utf-8")
+    fd = _lock(p)
+    try:
+        _assert_locked(p)
+        assert knowledge.read_text_cached(p) == "", "占用中应按空内容处理"
+    finally:
+        _unlock(fd)
+    assert knowledge.read_text_cached(p).startswith("## 钩子库"), \
+        "占用已解除却仍返回空串：OSError 被钉进了文本缓存，与 yaml 口径相反"
+
+
+def test_utf8_knowledge_file_logs_nothing(tmp_path, caplog):
+    """正对照：正常 UTF-8 文件不许刷 warning（否则日志里全是噪音）。"""
+    p = tmp_path / "ok.md"
+    p.write_text("## 核心术语\n家用电梯\n", encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger="app.knowledge"):
+        assert knowledge.read_text_cached(p).startswith("## 核心术语")
+    assert not caplog.records, f"正常文件不该有 warning：{caplog.records}"
 
 
 if __name__ == "__main__":

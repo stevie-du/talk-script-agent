@@ -292,12 +292,16 @@ def test_readme_worst_case_request_count_is_the_real_one():
     claimed = [int(n) for n in re.findall(r"逻辑调用数 × (\d+) ×", readme)]
     assert claimed == [default + 1], \
         f"README 报价的倍数 {claimed} 与真实默认尝试数 {default + 1} 不同源"
-    for retries, expected in ((2, 30), (3, 40)):
-        computed = 5 * (default + 1) * (retries + 1)
+    # 默认包（elevator/_template 都声明 draft 段）走合并路径，最坏 4 次调用
+    # （选题+撰写 1 + 回炉 2 + 分镜 1）；老包两段路径是 5 次。README 逐档标了
+    # retries=2 的两本账与 retries=3 的默认档账（老包 retries=3 的 40 可由
+    # 公式推出，不单独列出）—— 测试对齐文档实际声明的那三格。
+    for calls, retries, expected in ((4, 2, 24), (4, 3, 32), (5, 2, 30)):
+        computed = calls * (default + 1) * (retries + 1)
         assert computed == expected, \
-            f"retries={retries} 时最坏应是 {computed} 次请求，README 还写着 {expected}"
+            f"{calls} 次调用 × retries={retries} 最坏应是 {computed} 次请求，账面写着 {expected}"
         assert f"**{expected}**" in readme, \
-            f"README 里 retries={retries} 的那句没标 {expected}，或数字还没同步"
+            f"README 里 {calls} 次调用 × retries={retries} 的那句没标 {expected}，或数字还没同步"
 
 
 def test_readme_lists_as_many_certification_checks_as_the_script_makes():

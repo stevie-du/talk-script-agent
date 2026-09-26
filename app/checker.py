@@ -536,8 +536,8 @@ def check_script(
         "points": n_points,
         "ai_tells": ai_report,
         "passed": ok_hard and ok_time,
-        "blockers": ([] + (["硬禁用词 %d 处" % sum(h["count"] for h in hits["hard"])] if not ok_hard else [])
-                     + (["时长偏差 %.1f%% 超 ±%.0f%%" % (dev, limit)] if not ok_time else [])),
+        "blockers": ([] + ([f"硬禁用词 {sum(h['count'] for h in hits['hard'])} 处"] if not ok_hard else [])
+                     + ([f"时长偏差 {dev:.1f}% 超 ±{limit:.0f}%"] if not ok_time else [])),
     }
     return report
 

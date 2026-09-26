@@ -891,3 +891,61 @@ def test_stub_slug_agrees_with_the_engine_over_a_unicode_sweep(tmp_path):
     assert key["全屋定制/装修"] == key["全屋定制 装修"] == "全屋定制-装修"
     assert key["？？？"] == "" and key["!!!"] == ""
     assert key["한국어"] == "한국어" and key["𝕬宠物"] == "𝕬宠物"
+
+
+def test_cancel_landing_after_the_last_check_also_reclaims(monkeypatch):
+    """取消落在最后一次 `_stop_check` 通过**之后**（transition("done") 被拒的
+    微秒窗口）：与 `except JobCancelled` 分支**同一本账** —— 本次建出来的包
+    同样回收（P2-1）。
+
+    曾经这条路径裸 `return`：包留在盘上、作业记 cancelled，删/留取决于
+    毫秒级竞态，而两个收尾分支的注释各执一词。
+    """
+    import app.pipeline as plmod
+    from app.jobs import Job
+
+    pl, tmp, client = _pipeline()
+    slug = "探针寅"
+    try:
+        job = Job("pg-cancel-4", "packgen",
+                  {"industry": "探针寅", "description": "探针用的行业说明"})
+        pl.add_job(job)
+        real_transition = job.transition
+
+        def cancel_then_refuse(to_state, **kw):
+            if to_state == "done":
+                # 模拟取消恰好落进「_stop_check 通过之后、done 迁移之前」的窗口：
+                # request_cancel 把状态落成 cancelled，real_transition 返回 False
+                job.request_cancel()
+            return real_transition(to_state, **kw)
+
+        monkeypatch.setattr(job, "transition", cancel_then_refuse)
+
+        def fake_create_pack(root, _client, industry, _desc, **_kw):
+            (root / "packs" / slug).mkdir(parents=True)
+            (root / "packs" / slug / "skill.yaml").write_text("name: x\n", encoding="utf-8")
+            return {"name": slug, "display_name": industry}
+
+        monkeypatch.setattr(plmod, "create_pack", fake_create_pack)
+        pl._run_packgen(job, client, slug)
+        assert job.state == "cancelled", job.state
+        assert not (tmp / "packs" / slug).exists(), \
+            "这条收尾路径把包留在了盘上：与 JobCancelled 分支两本账（P2-1）"
+    finally:
+        monkeypatch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_request_cancel_refuses_terminal_states():
+    """P3-1 的 TOCTOU 收口：终态作业不许再被翻成 cancelled。
+
+    pipeline.cancel() 的终态检查是无锁读，与 request_cancel 的置位之间有空窗
+    —— 若 done 迁移恰好插在中间，一份已完整落盘的产物会在内存里被翻成
+    cancelled。判终态与置位必须在同一把锁里（现在锁内拒绝）。
+    """
+    from app.jobs import Job
+    j = Job("t-cancel-terminal", "generate", {})
+    j.state = "done"                       # 直接落终态（绕过 TRANSITIONS）
+    j.request_cancel()
+    assert j.state == "done", "终态作业被 request_cancel 翻成了 cancelled"
+    assert not j.is_cancelled(), "终态作业不该被置取消标志"
