@@ -971,6 +971,33 @@ MUTATIONS = [
         "data-jump=\"placeholder\"",
         "verify:",
     ),
+    # ── s23 组（2026-09-27 契约线 P2-4：窄窗门禁有没有牙）──
+    # 跑这一组：PYTHONUTF8=1 .venv/Scripts/python.exe _verify/mutate.py -k s23
+    (
+        "s23-1 查看器退回 flex:1（basis 0）—— 窄窗下被挤到 0 宽、整块消失",
+        CSS_F,
+        ".kb-view { flex: 1 1 240px; min-width: 0; display: flex; flex-direction: column; align-self: stretch; }",
+        ".kb-view { flex: 1; min-width: 0; display: flex; flex-direction: column; align-self: stretch; }",
+        "verify:",
+    ),
+    (
+        "s23-2 分组列退回不可缩 320（窄窗下把查看器挤出可视区）",
+        CSS_F,
+        "  flex: 0 1 320px; min-width: 200px;",
+        "  flex: 0 0 320px; min-width: 320px;",
+        "verify:",
+    ),
+    (
+        "s23-3 首页那条列不跟窄窗降内边距（两列左边界错开 8px）",
+        # 先前的伪证是删 `.topics-inner` 那行：查过 CSS 才知道它的基准 padding-inline
+        # 本来就是 --s4(16)，且列是 max-width + margin-inline:auto 居中 ——
+        # 那行媒体查询只改**底部**留白，删掉对左边界零影响，所以"漏检"是伪证无效，
+        # 不是判据无效。真正会移动左边界的是 #chat-stream 这一行（24 → 16）。
+        CSS_F,
+        "  #chat-stream { padding: var(--s4) var(--s4) var(--s3); }",
+        "  #chat-stream { padding: var(--s6) var(--s6) var(--s3); }",
+        "verify:",
+    ),
     (
         "A-3 对账解析全文扫（把文档后面别的表也当成 §2.1 的 tell 表）",
         ROOT / "tests/test_aitells_alignment.py",

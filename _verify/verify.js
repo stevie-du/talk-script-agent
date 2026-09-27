@@ -7485,6 +7485,60 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   await cdp.send("Page.navigate", { url: `http://127.0.0.1:${PORT}/?token=stubtoken` });
   await sleep(1500);
 
+  // ── 窄窗一轮（契约线 P2-4：整网以前只在 1320 量，窄窗回归零门禁）──────
+  // 两处真实缺陷当初只能手工量出来：① 行业包面板在 1000 窗下把文件查看器挤到
+  // **0 宽**（不是溢出，是整列消失，旁边还留一道缝）；② 新视图没跟 §2.8 那条媒体
+  // 查询一起降内边距，1440 窗对齐、1000 窗差 8px。**布局的窄窗分支必须在门禁里跑**，
+  // 否则每次改 padding/宽度都是在赌 1320 之外没坏。
+  await cdp.send("Emulation.setDeviceMetricsOverride",
+    { width: 1000, height: 800, deviceScaleFactor: 1, mobile: false });
+  await sleep(700);
+  const narrow = await evalIn(`var cs = getComputedStyle(document.getElementById('chat-stream'));
+    var cmp = getComputedStyle(document.getElementById('composer'));
+    return { w: window.innerWidth, chatPad: cs.paddingLeft, composerPad: cmp.paddingLeft,
+             chatLeft: document.getElementById('topic').getBoundingClientRect().left,
+             docOverflow: document.documentElement.scrollWidth
+               - document.documentElement.clientWidth };`);
+  // ⚠ 以前这里还量 `.topics-inner` 的 padding 当对照，实测**虚的**：它的基准值
+  //   与窄窗值都是 16（变异 s23-3 把媒体查询里那一行删掉，444/444 照样全绿 = 漏检）。
+  //   对照必须"只在窄窗成立"，所以换成两列左边界：宽窗对齐、窄窗不跟着降档就会错开。
+  check("窄窗覆盖确实生效（innerWidth 1000 + 两处内边距按窄窗降档）",
+    narrow.w <= 1000 && narrow.chatPad === "16px" && narrow.composerPad === "16px",
+    JSON.stringify(narrow));
+  check("窄窗下整页不横向溢出（多出几像素就是错位的前兆）",
+    narrow.docOverflow <= 1, JSON.stringify(narrow));
+
+  // 两列左边界在窄窗也必须重合（§9：新视图不跟媒体查询一起降内边距 = 差 8px）。
+  await evalIn(`document.getElementById('btn-topics').click(); return 1;`);
+  await sleep(700);
+  const narrowAlign = await evalIn(`return {
+      topicsLeft: document.getElementById('topics-root').getBoundingClientRect().left,
+      chatLeft: ${narrow.chatLeft} };`);
+  check("窄窗下首页列与选题列左边界重合（内边距没跟着降档就会错开）",
+    Math.abs(narrowAlign.topicsLeft - narrowAlign.chatLeft) <= 1,
+    JSON.stringify(narrowAlign));
+  await evalIn(`window.__ts.gotoView('chat'); return 1;`);
+  await sleep(400);
+
+  await evalIn(`document.getElementById('btn-open-settings').click(); return 1;`);
+  await sleep(600);
+  await evalIn(`window.__ts.setPane('packinfo'); return 1;`);
+  await sleep(700);
+  const narrowPack = await evalIn(`var v = document.querySelector('.kb-view');
+    var cols = document.querySelector('.pi-cols');
+    var g = document.querySelector('.pi-groups-col');
+    return { viewW: v ? +v.getBoundingClientRect().width.toFixed(1) : -1,
+             colsOverflow: cols ? cols.scrollWidth - cols.clientWidth : -1,
+             groupsW: g ? +g.getBoundingClientRect().width.toFixed(1) : -1 };`);
+  // 这一条钉的就是那个"查看器消失"：flex 收缩必须留给它宽度，0 宽在界面上等于没这个功能。
+  check("窄窗下行业包查看器仍有宽度（曾被分组列 + 间距挤到 0 宽而整块消失）",
+    narrowPack.viewW > 0 && narrowPack.groupsW > 0, JSON.stringify(narrowPack));
+  check("窄窗下包详情两列不横向溢出（溢出=右侧内容读不到）",
+    narrowPack.colsOverflow <= 1, JSON.stringify(narrowPack));
+
+  await cdp.send("Emulation.clearDeviceMetricsOverride");
+  await sleep(300);
+
 
   // ── 输出 ─────────────────────────────────────────────────
   report("");
