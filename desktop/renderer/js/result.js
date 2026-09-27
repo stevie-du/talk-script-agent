@@ -24,6 +24,11 @@ import { setHead } from "./head.js";
 // 那五处以前各说一套，为什么统一成三态见 words.js 顶部。
 import { VERDICT, verdictKey, severityLabel } from "./words.js";
 
+// 「超配额」的判定线只这一处：以前段卡与节奏条各写一个 `* 1.3`，
+// 改一处另一处不动 → 一边说"都合规"、另一边画红。
+// 1.3 = 超出配额 30% 才算超（段卡上的 title 说的就是这句话，两者必须同源）。
+const QUOTA_OVER_RATIO = 1.3;
+
 export const TYPE_LABEL = { hook: "开场钩子", point: "要点", cta: "结尾引导" };
 
 const ICONS = {
@@ -291,7 +296,7 @@ function renderTempo(r) {
     const dur = Math.max(0, tms[i].end - tms[i].start);
     const info = segChars(r, i);
     return { type: s.type, dur: dur, pct: Math.round(dur / span * 100),
-             over: !!(info && info.quota && info.chars > info.quota * 1.3) };
+             over: !!(info && info.quota && info.chars > info.quota * QUOTA_OVER_RATIO) };
   });
   const byType = (t) => rows.filter(x => x.type === t);
   const sum = (xs) => xs.reduce((a, x) => a + x.dur, 0);
@@ -300,11 +305,16 @@ function renderTempo(r) {
   const bar = rows.map(x =>
     `<i class="${esc(x.type)}${x.over ? " over" : ""}" data-w="${Math.round(x.dur / span * 100)}"></i>`).join("");
   const over = rows.filter(x => x.over).length;
+  // 这句话以前是「各段都不超配额」，而判据其实是"超出配额 30% 以上"——
+  // 100/85 字这种**真的超了**的段也会被说成"不超配额"。现在把那条线写进句子里，
+  // title 里的数字与 QUOTA_OVER_RATIO 同源，不另写一遍。
   return `<div class="page-card">
     <div class="res-top"><b class="card-title">节奏</b>
       <span class="hint">目标 ${r.params?.duration ?? "-"}s · 预计 ${r.check?.estimated_seconds ?? "-"}s</span>
       <span class="topics-grow"></span>
-      <span class="m-chip ${over ? "bad" : "good"}">${over ? `${over} 段超配额` : "各段都不超配额"}</span></div>
+      <span class="m-chip ${over ? "bad" : "good"}"
+            title="判定线：段字数超过该段配额的 ${Math.round((QUOTA_OVER_RATIO - 1) * 100)}% 以上才算超">
+        ${over ? `${over} 段超配额三成以上` : "各段超配额都不到三成"}</span></div>
     <div class="tempo">${bar}</div>
     <div class="tempo-legend">
       <span>开场钩子 ${hook.length} 段 ${sum(hook).toFixed(1)}s（${pct(sum(hook))}%）</span>
@@ -392,12 +402,12 @@ function renderSections(r, opts) {
     const label = s.type === "point" ? `要点${++pi}` : TYPE_LABEL[s.type];
     const tm = (r.timings || [])[i];
     const info = segChars(r, i);
-    const over = !!(info && info.quota && info.chars > info.quota * 1.3);
+    const over = !!(info && info.quota && info.chars > info.quota * QUOTA_OVER_RATIO);
     const card = el("div", `script-card ${s.type}${over ? " over-quota" : ""}`);
     card.style.setProperty("--i", i);
     const quota = info
       ? `<span class="quota ${over ? "over" : ""}"
-             title="${over ? "超过配额 30% 以上，建议压缩" : "后端统计字数 / 该段配额"}">${info.chars}${info.quota ? "/" + info.quota : ""} 字</span>`
+             title="${over ? `超过配额 ${Math.round((QUOTA_OVER_RATIO - 1) * 100)}% 以上，建议压缩` : "后端统计字数 / 该段配额"}">${info.chars}${info.quota ? "/" + info.quota : ""} 字</span>`
       : "";
     // 每段语速 vs 目标（§2.7 ②）：`rate_by_style` 的目标语速一直配着、
     // checker 也算得出实际值，但界面上从来没露过。超目标 10% 走现成的 `.over` 红。

@@ -106,7 +106,10 @@ function restartNow() {
   // 静默失败就是「点了没反应」，正是本方案要消掉的那类缺陷（§3.3）。
   Promise.resolve(u.restart()).then((r) => {
     if (r && r.ok === false) {
-      toast(`现在不能安装更新（当前状态：${r.state || "未知"}）`, 3500);
+      // 拒绝原因要说人话：`idle` / `downloaded` 这些是主进程的状态码，
+      // 直接印出来等于让用户去查工程术语（同一个仓库里 STATE_LABEL、cadence
+      // 都是这么改掉的）。这一行本来就由 statusText 渲染，复用它、不另编一套词。
+      toast(`现在不能安装更新（此刻：${statusText({ state: r.state })}）`, 3500);
     }
   }).catch((e) => {
     toast("立即重启失败：" + (e && e.message ? e.message : e), 4000);

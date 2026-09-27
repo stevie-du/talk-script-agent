@@ -28,6 +28,7 @@ RESULT_F = ROOT / "desktop/renderer/js/result.js"
 SETTINGS_F = ROOT / "desktop/renderer/js/settings.js"
 JOBSJS_F = ROOT / "desktop/renderer/js/jobs.js"
 STORE_F = ROOT / "app/store.py"
+ABOUT_F = ROOT / "desktop/renderer/js/about.js"
 WORDS_F = ROOT / "desktop/renderer/js/words.js"
 HTML_F = ROOT / "desktop/renderer/index.html"
 UI_F = ROOT / "desktop/renderer/js/ui.js"
@@ -885,6 +886,29 @@ MUTATIONS = [
         "  manual: \"手动\",",
         "",
         "tests/test_intel_contract.py -k cadence_tables",
+    ),
+    # ── s20 组（2026-09-27 第 8 轮审查 界面 P2：句子与判据同源 / 状态码不上屏）──
+    # 跑这一组：PYTHONUTF8=1 .venv/Scripts/python.exe _verify/mutate.py -k s20
+    (
+        "s20-1 「超配额」的线又写回两处字面量（改一处另一处就不一致）",
+        RESULT_F,
+        "    const over = !!(info && info.quota && info.chars > info.quota * QUOTA_OVER_RATIO);",
+        "    const over = !!(info && info.quota && info.chars > info.quota * 1.3);",
+        "verify:",
+    ),
+    (
+        "s20-2 节奏条又宣布「各段都不超配额」（超了 20% 的段也被说成合规）",
+        RESULT_F,
+        "        ${over ? `${over} 段超配额三成以上` : \"各段超配额都不到三成\"}",
+        "        ${over ? `${over} 段超配额` : \"各段都不超配额\"}",
+        "verify:",
+    ),
+    (
+        "s20-3 更新被拒的提示又把主进程状态码印给人看（idle / downloaded）",
+        ABOUT_F,
+        "      toast(`现在不能安装更新（此刻：${statusText({ state: r.state })}）`, 3500);",
+        "      toast(`现在不能安装更新（当前状态：${r.state}）`, 3500);",
+        "verify:",
     ),
     (
         "A-3 对账解析全文扫（把文档后面别的表也当成 §2.1 的 tell 表）",

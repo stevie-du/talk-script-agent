@@ -5001,6 +5001,20 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       && jobsSrc.includes("packLabel(failParams.pack)") && !resSrc.includes("（${r.pack}）"), "");
   check("局部重写的悬停说明说界面规则，不替后端宣布「作业已释放」",
     !resSrc.includes("后台作业已释放") && resSrc.includes("只在刚生成的那条上可用"), "");
+  // ── 「超配额」这句话与那条线同源（第 8 轮审查 界面 P2）───────────
+  // 判据是"超出配额 30% 以上"，可句子以前写「各段都不超配额」—— 100/85 字这种
+  // 真的超了的段也被宣布合规；而 1.3 这个数在段卡与节奏条各写一遍。
+  const ratioUses = (resSrc.match(/QUOTA_OVER_RATIO/g) || []).length;
+  check("「超配额」的线只有一处常量，句子里把这条线说给人听",
+    !/quota \* 1\.3/.test(resSrc) && ratioUses >= 3 && /三成/.test(resSrc),
+    `常量出现 ${ratioUses} 次`);
+  const tempo = await evalIn(`var c = Array.from(document.querySelectorAll('.res-top .m-chip'))
+      .find(function (x) { return /超配额/.test(x.textContent); });
+    return c ? { text: c.textContent.replace(/\\s+/g, ' ').trim(), title: c.title } : null;`);
+  check("节奏条那句结论上屏就带着判定线（不写「都不超配额」这种过头话）",
+    !!tempo && /三成/.test(tempo.text) && /30%/.test(tempo.title), JSON.stringify(tempo));
+  check("更新被拒的提示不说状态码（idle / downloaded 是主进程的枚举，不是人话）",
+    !fs.readFileSync(path.join(JS_DIR, "about.js"), "utf8").includes("${r.state"), "");
 
   // 演示模式与「搜不到 ≠ 没有」那两条判据住在文件末尾，走**真启动**渲染：
   // 那里解释了为什么不能用 dynamic import 改 state（量到的是另一个模块实例）。
