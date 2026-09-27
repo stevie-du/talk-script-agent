@@ -96,6 +96,18 @@ def _scan_words(text: str, words) -> dict[str, int]:
     return out
 
 
+#: 严重度的中文读法。**这一处是源头**：界面 `words.js: SEVERITY_LABEL` 与
+#: 导出的 `脚本.md` 都从这一族词走 —— 交付物里印 `strong` / `[strong] bookish_connective`
+#: 是把内部标识放进给人拿走的那份文件（第 28 轮导出线 P1）。
+#: tell 的 `id` 只在 `result.json` 里留（它是机器可读的键，不是给人读的话）。
+SEVERITY_WORD = {"strong": "明显", "weak": "轻微"}
+
+
+def severity_word(sev: str) -> str:
+    """认不出的严重度原样返回，不猜、也不留空。"""
+    return SEVERITY_WORD.get(sev or "", sev or "")
+
+
 @dataclass
 class TellHit:
     id: str

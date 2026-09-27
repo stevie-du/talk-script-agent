@@ -601,7 +601,7 @@ MUTATIONS = [
     (
         "s11-5 被筛源清零后不回落「全部」（一颗选中的都没有 + 空池假象）",
         TOPICS_F,
-        '    curSrc = "all"; page = 0; renderChips();',
+        '    curSrc = "all"; page = 0; syncChips();',
         "",
         "verify:topics",
     ),
@@ -1343,6 +1343,28 @@ MUTATIONS = [
         '                                   "topic": p.get("topic", "")},',
         '                        "pack": p.get("pack", ""), "topic": p.get("topic", ""),',
         "tests/test_server_hardening.py -k ghost_failed_entry",
+    ),
+    # ── s31 组（第 23 批：胶囊 pressed 状态同步、交付物不带机器码）────
+    (
+        "s31-1 点胶囊只 render、不同步 pressed（卡区换了、读屏还念上一颗）",
+        TOPICS_F,
+        "    b.onclick = () => { curSrc = b.dataset.src; page = 0; syncChips(); render(); };",
+        "    b.onclick = () => { curSrc = b.dataset.src; page = 0; render(); };",
+        "verify:topics",
+    ),
+    (
+        "s31-2 交付的 脚本.md 又印出 tell 的机器键与 strong/weak",
+        STORE_F,
+        "            lines.append(f\"> - {severity_word(h.get('severity', ''))}\"",
+        "            lines.append(f\"> - [{h.get('severity', '')}] {h.get('id', '')}\"",
+        "tests/test_ai_tells.py -k internal_identifiers",
+    ),
+    (
+        "s31-3 引擎侧严重度词表改口（界面仍叫「明显/轻微」，两侧分叉）",
+        ROOT / "app/ai_tells.py",
+        'SEVERITY_WORD = {"strong": "明显", "weak": "轻微"}',
+        'SEVERITY_WORD = {"strong": "严重", "weak": "轻微"}',
+        "tests/test_job_state_vocabulary_consistency.py -k severity_words",
     ),
 ]
 

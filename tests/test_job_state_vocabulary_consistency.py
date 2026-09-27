@@ -208,6 +208,27 @@ def test_frontend_no_longer_copies_a_terminal_list():
     assert "function updateRow" in src, "源码被剥空了 —— 断言会空转，先修 _strip_comments"
 
 
+def test_severity_words_are_one_pair_across_layers():
+    """严重度只有两个词：界面 `words.js: SEVERITY_LABEL` ⇄ 引擎 `ai_tells.SEVERITY_WORD`。
+
+    导出的 `脚本.md` 以前印 `[strong] bookish_connective` —— 机器码与内部标识
+    一起进了给人拿走的交付物（第 28 轮导出线 P1）。两侧词表必须一模一样，
+    否则同一个命中在屏幕上叫「明显」、在文档里叫 `strong`。
+    """
+    import ast as _ast
+
+    from app import ai_tells as AT
+
+    js = (ROOT / "desktop" / "renderer" / "js" / "words.js").read_text(encoding="utf-8")
+    m = re.search(r"export const SEVERITY_LABEL = \{([^}]*)\}", js)
+    assert m, "words.js 里的 SEVERITY_LABEL 不见了 —— 上一条判据会空转"
+    ui = dict(re.findall(r"(\w+):\s*\"([^\"]+)\"", m.group(1)))
+    assert ui == AT.SEVERITY_WORD, f"两侧词表分叉：界面 {ui} / 引擎 {AT.SEVERITY_WORD}"
+    assert AT.severity_word("strong") == "明显" and AT.severity_word("weak") == "轻微"
+    # 认不出的值原样返回，不猜、也不留空（空串会被读成"没有严重度"）
+    assert AT.severity_word("bogus") == "bogus" and AT.severity_word("") == ""
+
+
 def test_settings_page_only_renders_params_the_request_can_carry():
     """包多声明一个参数键，界面上就不许多出一个能选、永不发出的下拉。
 

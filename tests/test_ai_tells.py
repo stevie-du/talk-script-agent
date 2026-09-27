@@ -273,8 +273,35 @@ def test_script_md_carries_the_human_score():
         "tells_enabled": ["bookish_connective"], "config_warnings": [],
         "placeholders": {"count": 0, "per_100": None, "cap": 1}}))
     assert "人味分 88/100" in md, md
-    assert "bookish_connective" in md, "命中明细要跟着导出，否则只有分数没线索"
+    # 命中明细要跟着导出，但靠的是**给人读的那串**（`detail` + `where`），
+    # 不是机器键。旧断言在这里查 `bookish_connective` —— 它把"交付物里出现
+    # 内部标识"当成了正确行为（第 28 轮导出线 P1）。
+    assert "首先×1、其次×1" in md and "第2段" in md, md
     assert "不参与校验结论" in md, "必须明说它不拦发布，否则 88 分会被读成未通过校验"
+
+
+def test_script_md_has_no_internal_identifiers():
+    """交付物里不许出现机器码：tell 的 `id`、严重度的 `strong` / `weak` 字面。
+
+    现场（第 28 轮导出线 P1）：`generated/*/脚本.md` 尾部实读
+    `（strong 0 条 · weak 0 条）` 与 `- [strong] bookish_connective（…）` ——
+    这份文件会被用户拷进笔记、发给同事，读到的人不知道那是什么。
+    中文读法的源头在 `app/ai_tells.py: SEVERITY_WORD`（与 `words.js` 成对，
+    由 test_job_state_vocabulary_consistency 钉住），`id` 只留在 `result.json`。
+    """
+    from app.store import render_script_md
+
+    md = render_script_md(_md_result({
+        "score": 40, "strong": 1, "weak": 2, "hits": [
+            {"id": "bookish_connective", "severity": "strong", "count": 1,
+             "where": "第1段", "detail": "品质保证×1", "words": ["品质保证"]}],
+        "tells_enabled": ["bookish_connective"], "config_warnings": [],
+        "placeholders": {"count": 0, "per_100": None, "cap": 1}}))
+    assert "明显 1 处 · 轻微 2 处" in md, md
+    assert "明显（第1段，1 处）：品质保证×1" in md, md
+    assert "bookish_connective" not in md, "内部标识又回到交付物了"
+    assert "[strong]" not in md and "[weak]" not in md, md
+    assert "strong " not in md and "weak " not in md, md
 
 
 def test_script_md_writes_hit_lists_for_humans_not_python_repr():

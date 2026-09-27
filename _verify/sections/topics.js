@@ -653,4 +653,36 @@ module.exports = async function topics({ evalIn, sleep, check }) {
     check("真拿到数据之后读数才亮出来（冷启动那个 0 是假陈述）",
       cntKbd.hidden === false && /^[0-9]+$/.test(cntKbd.text) && Number(cntKbd.text) > 0,
       JSON.stringify(cntKbd));
+    // ── 按下胶囊之后，pressed 状态必须跟着走（无障碍线 P1）──────────
+    // 修前 `aria-pressed` 与 `.on` 烘焙在 renderChips() 的字符串里，而点击只调
+    // render()：卡区换了来源、胶囊行还停在上一颗 —— 读屏念的是假状态。
+    const pressed = await evalIn(`return (async () => {
+      var pills = [...document.querySelectorAll('#src-chips [data-src]')];
+      var target = pills.find(function (p) { return p.dataset.src !== 'all'; });
+      if (!target) return { noPill: true };
+      target.focus();
+      target.click();
+      await new Promise(function (r) { setTimeout(r, 250); });
+      var now = [...document.querySelectorAll('#src-chips [data-src]')];
+      var all = now.find(function (p) { return p.dataset.src === 'all'; });
+      return { name: target.dataset.src,
+               selfPressed: target.getAttribute('aria-pressed'),
+               selfOn: target.classList.contains('on'),
+               allPressed: all ? all.getAttribute('aria-pressed') : null,
+               focusStillHere: document.activeElement === target,
+               otherOn: now.filter(function (p) { return p !== target
+                 && p.classList.contains('on'); }).length };
+    })();`);
+    check("点（或键盘按下）一颗胶囊后，aria-pressed 与高亮跟着换到这颗",
+      !pressed.noPill && pressed.selfPressed === "true" && pressed.selfOn === true
+        && pressed.allPressed === "false" && pressed.otherOn === 0,
+      JSON.stringify(pressed));
+    // 原地改属性而不是整行重建：重建会把焦点从刚按下的那颗摘走（键盘用户每次
+    // 筛选都要从头 Tab 一遍），这条判据把"焦点还在"一起钉住。
+    check("切换筛选不抢走键盘焦点（不整行重建胶囊）",
+      pressed.noPill !== true && pressed.focusStillHere === true,
+      JSON.stringify(pressed));
+    await evalIn(`var all = document.querySelector('#src-chips [data-src="all"]');
+      if (all) all.click(); return 1;`);
+    await sleep(250);
 };

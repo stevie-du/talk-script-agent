@@ -197,8 +197,27 @@ function renderChips() {
     chips.push(`<span class="m-chip" title="${esc(why.join("；"))}">未接入 ${off.length}</span>`);
   }
   box.innerHTML = chips.join("");
+  syncChips();
   box.querySelectorAll("[data-src]").forEach(b => {
-    b.onclick = () => { curSrc = b.dataset.src; page = 0; render(); };
+    b.onclick = () => { curSrc = b.dataset.src; page = 0; syncChips(); render(); };
+  });
+}
+
+/** 只改"哪一颗是选中的"，**不重建**那些按钮。
+ *
+ *  为什么单独拆出来（第 28 轮无障碍线 P1）：`aria-pressed` 与 `.on` 是烘焙在
+ *  `renderChips()` 的字符串里的，而点一颗胶囊只调 `render()` —— 于是卡区换了、
+ *  胶囊行还停在上一颗：视觉上高亮错位，读屏念出来的是假状态（pressed=true 的
+ *  是「全部」，实际筛的是「抖音热榜」）。走整行重建则会把键盘焦点从刚按下的那颗
+ *  摘掉，所以这里是**原地改属性**。
+ */
+function syncChips() {
+  const box = $("src-chips");
+  if (!box) return;
+  box.querySelectorAll("[data-src]").forEach(b => {
+    const on = b.dataset.src === curSrc;
+    b.setAttribute("aria-pressed", on ? "true" : "false");
+    b.classList.toggle("on", on);
   });
 }
 
@@ -219,7 +238,7 @@ function render() {
   // 用户唯一的自救是猜"要点全部"，所以这里直接回落，并让他看见回落。
   if (curSrc !== "all" && !(data.groups || [])
         .some(g => g.label === curSrc && g.state === "ok" && g.count > 0)) {
-    curSrc = "all"; page = 0; renderChips();
+    curSrc = "all"; page = 0; syncChips();
   }
   const fe = frameErrors();          // 框架级失败：空态 / 计数行 / 说明行三处共用
   const shown = visibleItems();

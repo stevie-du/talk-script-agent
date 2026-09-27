@@ -466,6 +466,7 @@ def render_script_md(result: dict) -> str:
     「缺省由组装器按段落填充」，但组装器从没填过。现在按段落补齐。
     """
     from .checker import count_chars          # 局部导入避免循环依赖
+    from .ai_tells import severity_word       # 严重度的中文读法只有一个源头
 
     p = result["params"]
     lines = [f"# 口播脚本：{p['topic']}",
@@ -519,10 +520,12 @@ def render_script_md(result: dict) -> str:
     ai = ch.get("ai_tells") or {}
     if ai:
         lines += [f"> 人味分 {ai.get('score', '-')}/100"
-                  f"（strong {ai.get('strong', 0)} 条 · weak {ai.get('weak', 0)} 条）"
+                  f"（明显 {ai.get('strong', 0)} 处 · 轻微 {ai.get('weak', 0)} 处）"
                   " —— 不参与校验结论，只是「念出来像不像人」的提示。", ""]
         for h in (ai.get("hits") or [])[:8]:
-            lines.append(f"> - [{h.get('severity', '')}] {h.get('id', '')}"
+            # 不印 `h["id"]`（`bookish_connective` 这类机器键）：交付物是给人看的，
+            # 依据留在 result.json 里。严重度走 ai_tells.SEVERITY_WORD 那一族词。
+            lines.append(f"> - {severity_word(h.get('severity', ''))}"
                          f"（{h.get('where', '')}，{h.get('count', 0)} 处）：{h.get('detail', '')}")
         if ai.get("hits"):
             lines.append("")
