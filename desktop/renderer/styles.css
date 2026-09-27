@@ -2049,6 +2049,8 @@ button.ghost.danger:hover { background: var(--bad-soft); color: var(--bad); }
    没有"在横幅里直接填值"这条路 —— 全项目没有代码产出 `.ph-fill-*`。 */
 .banner.jumpable { cursor: pointer; transition: filter var(--dur); }
 .banner.jumpable:hover { filter: brightness(.97); }
+/* 可跳的横幅是 role=button（键盘用户也要能定位占位事实），焦点环吃全站那一档。 */
+.banner.jumpable:focus-visible { outline: none; box-shadow: var(--shadow-focus); }
 
 /* 占位事实跳转后的闪烁高亮 */
 .card-text .over.flash { animation: flashHit 1.1s var(--ease) 2; }

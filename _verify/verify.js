@@ -6626,7 +6626,17 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     if (!jump || !banner) return { missing: true, jump: !!jump, banner: !!banner };
     banner.click();
     var flashed = document.querySelectorAll('.over.flash');
-    return { screen: jump.textContent,
+    // 同一条路键盘也必须走得通（流程线 P2-6）：先把上一次的 flash 擦掉，
+    // 再只按 Enter 一次，看占位符是不是又亮了。
+    jump.classList.remove('flash');
+    banner.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    var kbdFlash = jump.classList.contains('flash');
+    jump.classList.remove('flash');
+    banner.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }));
+    var spaceFlash = jump.classList.contains('flash');
+    return { role: banner.getAttribute('role'), tab: banner.getAttribute('tabindex'),
+      kbdFlash: kbdFlash, spaceFlash: spaceFlash,
+      screen: jump.textContent,
       chipText: chip ? chip.textContent : '',
       chipBeforeJump: !!chip && !!(jump.compareDocumentPosition
         && (chip.compareDocumentPosition(jump) & Node.DOCUMENT_POSITION_FOLLOWING)),
@@ -6636,6 +6646,11 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       mdHasDouble: /待补：待补：/.test(md), mdHasIt: md.indexOf('待补：主力机型载重') >= 0,
       engineLabel: (r.placeholders || [])[0] };
   })()`);
+  check("占位横幅是键盘可操作的（role=button + tabindex + Enter/Space 与点击同一条路）",
+    phCase.role === "button" && phCase.tab === "0"
+      && phCase.kbdFlash === true && phCase.spaceFlash === true,
+    JSON.stringify({ role: phCase.role, tab: phCase.tab,
+                     enter: phCase.kbdFlash, space: phCase.spaceFlash }));
   check("卡片上的占位符只有一层「待补：」，与引擎给的那份一字不差",
     !phCase.missing && phCase.screen === '{{待补：主力机型载重}}'
       && phCase.engineLabel === '{{待补：主力机型载重}}', JSON.stringify(phCase));
@@ -6819,14 +6834,29 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     await new Promise(function (r) { setTimeout(r, 350); });
     var open = !!document.querySelector('.overlay:not(.hidden), #confirm-overlay:not(.hidden)');
     var asked = document.body.innerText.indexOf('确认停止这 2 条') >= 0;
+    // 焦点圈（流程线 P2-7）：合成事件的 Tab 不会自己移动焦点 —— 焦点会变，
+    // 只能是弹层自己的 trap 在搬。所以钉的是"按一次 Tab 落到另一颗键、
+    // 再 Shift+Tab 绕回来"，trap 拿掉就三处都停在同一颗键上，判据立刻红。
+    var f0 = document.activeElement ? document.activeElement.id : '';
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+    var f1 = document.activeElement ? document.activeElement.id : '';
+    document.dispatchEvent(new KeyboardEvent('keydown',
+      { key: 'Tab', shiftKey: true, bubbles: true }));
+    var f2 = document.activeElement ? document.activeElement.id : '';
     document.dispatchEvent(new KeyboardEvent('keydown', { key:'Escape', bubbles:true }));
     await new Promise(function (r) { setTimeout(r, 300); });
     var afterEsc = cancels;
     var closed = !document.querySelector('.overlay:not(.hidden), #confirm-overlay:not(.hidden)');
     window.fetch = orig;
     await window.__ts.loadSessions();
-    return { open: open, asked: asked, cancels: cancels, afterEsc: afterEsc, closed: closed };
+    return { open: open, asked: asked, cancels: cancels, afterEsc: afterEsc, closed: closed,
+             f0: f0, f1: f1, f2: f2 };
   })();`);
+  check("确认弹层有焦点圈：Tab 换键、Shift+Tab 绕回，焦点不会溜到背景",
+    stopConfirm.f0 === "cd-no" && stopConfirm.f1 === "cd-yes"
+      && stopConfirm.f2 === "cd-no",
+    JSON.stringify({ 起点: stopConfirm.f0, Tab: stopConfirm.f1,
+                     ShiftTab: stopConfirm.f2 }));
   check("点「停止全部」先出确认层、一条都不停（破坏性动作不许一键生效）",
     stopConfirm.open === true && stopConfirm.asked === true && stopConfirm.cancels === 0,
     JSON.stringify(stopConfirm));

@@ -157,7 +157,7 @@ function renderBanners(r, ch, opts) {
     items.push(`<div class="banner info">${VERDICT.none.word}（产物里没有校验记录）—— 下面的字数与禁用词只是统计数字，不代表任何结论。</div>`);
   }
   if ((r.placeholders || []).length) {
-    items.push(`<div class="banner warn jumpable" data-jump="placeholder">⚠ 含 ${r.placeholders.length} 处占位事实：${r.placeholders.map(esc).join("、")}——点击定位首处，补充后再发布</div>`);
+    items.push(`<div class="banner warn jumpable" data-jump="placeholder" role="button" tabindex="0">⚠ 含 ${r.placeholders.length} 处占位事实：${r.placeholders.map(esc).join("、")}——可定位首处（Enter 或点击），补充后再发布</div>`);
   }
   if ((ch.soft_hits || []).length) {
     items.push(`<div class="banner info">待确认 ${ch.soft_hits.length} 词：${ch.soft_hits.map(h => esc(h.word) + "×" + h.count).join("、")}（语境正常即可放行）</div>`);
@@ -184,7 +184,18 @@ function renderBanners(r, ch, opts) {
   const wrap = el("div", "res-banners");
   wrap.innerHTML = items.join("");
   const jp = wrap.querySelector('[data-jump="placeholder"]');
-  if (jp) jp.onclick = () => opts.jumpToPlaceholder?.();
+  if (jp) {
+    // 这是一条**可操作**的横幅（"定位首处"），不能只认鼠标：div 上加了
+    // role=button + tabindex=0，Enter/Space 与点击同一条路（流程线 P2-6）。
+    const go = () => opts.jumpToPlaceholder?.();
+    jp.onclick = go;
+    jp.onkeydown = e => {
+      if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
+        e.preventDefault();          // 空格不滚页
+        go();
+      }
+    };
+  }
   return wrap;
 }
 

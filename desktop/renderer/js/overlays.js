@@ -40,6 +40,15 @@ export function appConfirm(title, msg) {
       // 吞干净（实测连带打死「Esc 关设置」那条快捷键）。
       if ($("confirm-dialog").classList.contains("hidden")) return;
       if (e.key === "Escape") { e.stopPropagation(); done(false); }
+      if (e.key === "Tab") {
+        // 焦点圈：弹层开着就不许 Tab 到背景里 —— 原来只把焦点送进去、没有圈，
+        // 键盘用户 Tab 两下就"看不见焦点在哪"，再按 Enter 会打到背后的按钮上。
+        const f = [$("cd-yes"), $("cd-no")].filter(Boolean);
+        if (!f.length) return;
+        e.preventDefault();
+        const i = f.indexOf(document.activeElement);
+        f[(i + (e.shiftKey ? -1 : 1) + f.length) % f.length].focus();
+      }
     };
     document.addEventListener("keydown", onKey, true);
     $("cd-yes").onclick = () => done(true);

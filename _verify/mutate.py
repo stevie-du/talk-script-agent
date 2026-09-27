@@ -29,6 +29,7 @@ SETTINGS_F = ROOT / "desktop/renderer/js/settings.js"
 JOBSJS_F = ROOT / "desktop/renderer/js/jobs.js"
 STORE_F = ROOT / "app/store.py"
 ABOUT_F = ROOT / "desktop/renderer/js/about.js"
+OVER_F = ROOT / "desktop/renderer/js/overlays.js"
 WORDS_F = ROOT / "desktop/renderer/js/words.js"
 HTML_F = ROOT / "desktop/renderer/index.html"
 UI_F = ROOT / "desktop/renderer/js/ui.js"
@@ -945,6 +946,29 @@ MUTATIONS = [
         CSS_F,
         "  scrollbar-gutter: stable;\n  padding: var(--s6) var(--s6) var(--s4);",
         "  padding: var(--s6) var(--s6) var(--s4);",
+        "verify:",
+    ),
+    # ── s22 组（2026-09-27 第 8 轮审查 流程线 P2-6 / P2-7：键盘可达）──
+    # 跑这一组：PYTHONUTF8=1 .venv/Scripts/python.exe _verify/mutate.py -k s22
+    (
+        "s22-1 确认弹层没有焦点圈（Tab 两下焦点就溜回背景，Enter 打到后面的按钮）",
+        OVER_F,
+        "        const f = [$(\"cd-yes\"), $(\"cd-no\")].filter(Boolean);",
+        "        const f = [];",
+        "verify:",
+    ),
+    (
+        "s22-2 占位横幅只认鼠标（Enter/Space 不接，键盘用户到不了那一处占位）",
+        RESULT_F,
+        "      if (e.key === \"Enter\" || e.key === \" \" || e.key === \"Spacebar\") {",
+        "      if (false) {",
+        "verify:",
+    ),
+    (
+        "s22-3 可操作横幅没被声明成按钮（role/tabindex 缺失 = 键盘上根本到不了）",
+        RESULT_F,
+        "data-jump=\"placeholder\" role=\"button\" tabindex=\"0\"",
+        "data-jump=\"placeholder\"",
         "verify:",
     ),
     (
