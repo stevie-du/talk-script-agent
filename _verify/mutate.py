@@ -1326,6 +1326,15 @@ MUTATIONS = [
         "        if self._count_on_disk() != len(out):",
         "tests/test_history_corruption.py -k does_not_rebuild",
     ),
+    # ── s29 组（第 21 批：抓取落盘失败要看得见）────────────────────
+    # 跑这一组：PYTHONUTF8=1 .venv/Scripts/python.exe _verify/mutate.py -k s29
+    (
+        "s29-1 重抓之后把作业结果里的框架级错误丢掉（落盘失败又变成静默）",
+        TOPICS_F,
+        "      const snap = await awaitJob(job_id);\n      jobErrors = (snap && snap.result && snap.result.errors) || {};",
+        "      await awaitJob(job_id);   // 变异：不接返回值",
+        "verify:topics",
+    ),
 ]
 
 # 子集运行：`python _verify/mutate.py -k UI` 只跑名字里含 UI 的那几条。

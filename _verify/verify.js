@@ -750,7 +750,12 @@ window.__addCount = 0;
       }
       return mk({ id:'inteljob1', kind:'intel', state:'done', params:{ pack:'elevator' },
                   steps:[], error:null, created_at:'2026-09-23T10:00:00',
-                  result:{ pack:'elevator', items:4, sources:[], errors:{} } });
+                  // window.__saveFail：模拟"抓到了但落盘失败"。这个错**只在作业结果里**
+                  // （那份 latest.json 没写成，/api/intel/today 读的就是它），
+                  // 所以它是"UI 会不会把作业结果丢掉"这条判据唯一的现场。
+                  result:{ pack:'elevator', items:4, sources:[],
+                           errors: window.__saveFail
+                             ? { _save: "磁盘里那份写不下去（桩）" } : {} } });
     }
     if (s.indexOf('/api/meta') >= 0) {
       // 页面 URL 上的开关决定这两档（桩与页面同一上下文，location.search 读得到）：
@@ -866,7 +871,11 @@ window.__addCount = 0;
         return err(409, '行业包 elevator 的结构不符合约定（version 必须是数字）');
       }
       // 主题里带「失败」就返回一个必然失败的作业，用来覆盖失败态渲染
-      window.__lastJobId = /失败/.test(gtopic) ? 'jobfail'
+      // ⚠ __failRetry 是 P0-1 那条守卫的开关：失败之后点「用同样的参数重试」
+      //   必须拿到**成功**的作业（job1），于是同一个气泡里出现
+      //   「版本 1 = 失败、版本 2 = 成功」。没有这个分支的话重试又是失败，
+      //   断言量到的就不是那条路径。
+      window.__lastJobId = /失败/.test(gtopic) && !window.__failRetry ? 'jobfail'
         : /停不掉/.test(gtopic) ? 'jobrun'
         : /占位/.test(gtopic) ? 'jobph'
         : /换一版/.test(gtopic) ? 'jobalt' : 'job1';
@@ -958,6 +967,14 @@ window.__addCount = 0;
         steps: [{ key: 'draft', title: '选题与撰写（一次调用）', ts: '2026-09-13T10:00:01', data:{} },
                 { key: 'check_r1', title: '校验·第 1 轮', ts: '2026-09-13T10:00:09', data:{} }],
         result: altResult });
+    }
+    if (s.indexOf('/api/jobs/jobfail/cancel') >= 0) {
+      // 「失败后用同样的参数重试」那条路：重试会拿到 job1（成功），
+      // 于是同一个气泡里出现「版本 1 = 失败、版本 2 = 成功」，
+      // 翻回第 1 版必须看到**它自己没有产物**，而不是第 2 版的稿子（P0）。
+      if (window.__failRetry) return mk({ id:'jobfail', state:'failed',
+        error:'模型返回的结构不对（这次是真的失败）', params:{} });
+      return mk({ id:'jobfail', state:'cancelled', params:{} });
     }
     if (s.indexOf('/api/jobs/job1/cancel') >= 0) {
       calls.cancel++;
@@ -2319,6 +2336,46 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const back = await evalIn(`return { label: document.querySelector('.ver-label').textContent,
     cards: document.querySelectorAll('.script-card').length };`);
   check("可翻回上一个版本", /1 \/ 2/.test(back.label) && back.cards === 4, JSON.stringify(back));
+
+  // ── 5b) 翻到**没有产物**的那一版（P0）────────────────────
+  // 触发链：失败 → 点「用同样的参数重试」成功 → 翻回第 1 版。
+  // 修前这一格里仍然是第 2 版的完整稿子（只重画了版本条），于是用户以为在
+  // 对照两版、实际看的是同一份，并据此做发布决定。现在必须是「这一版没有产物」。
+  await evalIn(`window.__failRetry = true; return true;`);
+  await evalIn(`const t = document.getElementById('topic');
+    t.value = '失败后重试'; t.dispatchEvent(new Event('input', {bubbles:true}));
+    document.getElementById('btn-generate').click(); return true;`);
+  await sleep(1500);
+  await evalIn(`const b = document.querySelector('[data-act="retry"]');
+    if (b) b.click(); return !!b;`);
+  await sleep(3200);
+  const failedRetry = await evalIn(`return {
+    bar: document.querySelectorAll('.ver-bar').length,
+    label: document.querySelector('.ver-label')?.textContent || '',
+    cards: document.querySelectorAll('.script-card').length };`);
+  check("失败后重试成功 → 版本条记成 2 / 2（第一版是无产物的那版）",
+    failedRetry.bar === 1 && /2 \/ 2/.test(failedRetry.label) && failedRetry.cards > 0,
+    JSON.stringify(failedRetry));
+  await evalIn(`document.querySelector('.ver-btn[data-d="-1"]').click(); return true;`);
+  await sleep(250);
+  const noRes = await evalIn(`return {
+    label: document.querySelector('.ver-label')?.textContent || '',
+    cards: document.querySelectorAll('.script-card').length,
+    banner: document.querySelector('.msg:last-of-type .banner')?.textContent || '',
+    goto: document.querySelector('.msg:last-of-type [data-act="goto"]')?.textContent || '' };`);
+  // 关键两条：稿子必须**不在**屏幕上（0 张卡片），且要说清「这一版没有产物」
+  check("★ 翻回没有产物的那一版 → 不再显示别的版本的稿子（P0）",
+    noRes.cards === 0, JSON.stringify(noRes));
+  check("★ 那一版说清「没有产物」，并给一个通往有产物版本的出口",
+    /没有产物/.test(noRes.banner) && /去看版本/.test(noRes.goto), JSON.stringify(noRes));
+  await evalIn(`const g = document.querySelector('[data-act="goto"]');
+    if (g) g.click(); return !!g;`);
+  await sleep(250);
+  const jumped = await evalIn(`return { label: document.querySelector('.ver-label')?.textContent || '',
+    cards: document.querySelectorAll('.script-card').length };`);
+  check("「去看版本 N」能跳到有产物的那一版",
+    /2 \/ 2/.test(jumped.label) && jumped.cards === 4, JSON.stringify(jumped));
+  await evalIn(`window.__failRetry = false; return true;`);
 
   // ── 6) 编辑用户消息 ──────────────────────────────────────
   const edit = await evalIn(`const m = document.querySelector('.msg.msg-user');

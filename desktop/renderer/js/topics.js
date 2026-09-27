@@ -59,8 +59,18 @@ function sourceError(label) {
  *  后端 `intel.load_latest()` 的 docstring 写明了 `errors` 存在的唯一目的：
  *  「界面才能把"没抓过"与"抓了但文件坏了"分开显示 —— 这两种"没有"在界面上
  *  必须是两种样子」。源级失败由源表承担，这两条由顶部/说明行承担。 */
+/** 刚跑完的那次抓取的框架级错误（`_save` 这类）。
+ *
+ *  它们**只存在于作业结果里**：`_save` 的意思恰恰是"那份 `latest.json` 没写成"，
+ *  而 `/api/intel/today` 读的就是那份文件 —— 只从 payload 找，说明行那句
+ *  「抓取结果没能存下来」从来没有渲染的可能（第 27 轮契约线 P1：
+ *  `awaitJob` 的返回值过去被整条丢弃）。
+ *  下一次抓取的作业结果整体覆盖它：存成功的那一刻，这句话就该消失。
+ */
+let jobErrors = {};
+
 function frameErrors() {
-  const e = (data && data.errors) || {};
+  const e = { ...((data && data.errors) || {}), ...jobErrors };
   return Object.keys(e).filter(k => k.indexOf("_") === 0).map(k => [k, e[k]]);
 }
 /** 当前筛选的来源（`all` 或某个源的 label）。筛选轴**只有来源这一根**，不混别的维度。 */
@@ -402,7 +412,8 @@ async function kickoffIfStale() {
   try {
     const { job_id } = await api.intelRefresh(packName());
     toast("正在后台抓取情报…", 2400);
-    await awaitJob(job_id);
+    const snap = await awaitJob(job_id);
+    jobErrors = (snap && snap.result && snap.result.errors) || {};
     await load();
   } catch (e) {
     // 重抓失败**不影响已经显示的内容** —— 抓取器在生成主链路之外，
@@ -488,7 +499,8 @@ export const bindTopics = bindOnce(function bindTopics() {
     try {
       const { job_id } = await api.intelRefresh(packName());
       toast("已开始重抓…", 2200);
-      await awaitJob(job_id);
+      const snap = await awaitJob(job_id);
+      jobErrors = (snap && snap.result && snap.result.errors) || {};
       await load();
     } catch (e) {
       toast(`重抓失败：${e.message}`, 3200);

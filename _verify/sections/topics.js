@@ -628,6 +628,26 @@ module.exports = async function topics({ evalIn, sleep, check }) {
       restored.disabled === false && restored.busy === false && restored.aria === ""
         && !/正在重抓/.test(restored.title) && /立即重抓/.test(restored.title),
       JSON.stringify(restored));
+    // ── 抓取「落盘失败」必须说得出那句话（第 27 轮契约线 P1）──────────
+    // `_save` 只存在于**作业结果**里：它的意思恰恰是"那份 latest.json 没写成"，
+    // 而选题页读的 `/api/intel/today` 就是那份文件。修前两处 `await awaitJob(...)`
+    // 把返回值整个丢弃 → 说明行那句「抓取结果没能存下来」从来没有渲染的可能（死分支）。
+    await evalIn(`window.__saveFail = true; return 1;`);
+    await evalIn(`document.getElementById('btn-refetch').click(); return 1;`);
+    await sleep(1800);
+    const saveFail = await evalIn(`var n = document.getElementById('topics-note');
+      return { note: n ? n.textContent : '', cls: n ? n.className : '' };`);
+    check("抓取落盘失败在选题页说得出那句话（作业结果不再被丢弃）",
+      /抓取结果没能存下来/.test(saveFail.note) && /cfg-err/.test(saveFail.cls),
+      JSON.stringify(saveFail));
+    // 正对照：下一次存成功了，这句话必须跟着消失 —— 它不是钉死的警告条。
+    await evalIn(`window.__saveFail = false; return 1;`);
+    await evalIn(`document.getElementById('btn-refetch').click(); return 1;`);
+    await sleep(1800);
+    const savedAgain = await evalIn(`var n = document.getElementById('topics-note');
+      return n ? n.textContent : '';`);
+    check("存成功之后那句落盘警告要消失（不是一条永远挂着的红字）",
+      !/没能存下来/.test(savedAgain), savedAgain);
     const cntKbd = await evalIn(`var k = document.getElementById('topics-count');
       return { hidden: k.hidden, text: (k.textContent || '').trim() };`);
     check("真拿到数据之后读数才亮出来（冷启动那个 0 是假陈述）",
