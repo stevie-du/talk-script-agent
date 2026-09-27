@@ -1278,7 +1278,7 @@ MUTATIONS = [
         CSS_F,
         ".banner.why > summary::after {\n  content: \"\"; flex: 0 0 auto; width: 0; height: 0; align-self: center;",
         ".banner.why > summary::after { content: \" ▾\"; font-size: var(--f-min); opacity: .6;",
-        "tests/test_css_tokens.py -k glyph_scan",
+        "tests/test_css_tokens.py -k does_not_inject",
     ),
 ]
 
