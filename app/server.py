@@ -1056,9 +1056,14 @@ def create_app(root: Path, token: str | None = None,
         for s in pipeline.snapshot_jobs():
             if s["id"] == jid:
                 p = s.get("params") or {}
+                # ⚠ 参数放进 `params`，不平铺成 `pack`/`topic`：`openRecord` 读的是
+                # `r.params.topic`，而「用同样的参数重来」是 `{...r.params}` ——
+                # 平铺会让这条记录头部空着、重试时主题丢失（第 27 轮契约线 P2）。
+                # 同一份产物里"参数"只能有一种表示，兜底支也不例外。
                 return {"id": s["id"], "created_at": s["created_at"],
                         "state": s["state"], "error": s.get("error") or "",
-                        "pack": p.get("pack", ""), "topic": p.get("topic", ""),
+                        "params": {"pack": p.get("pack", ""),
+                                   "topic": p.get("topic", "")},
                         "ghost": True}
         raise HTTPException(404, "记录不存在")
 

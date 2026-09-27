@@ -1889,7 +1889,12 @@ def test_ghost_failed_entry_is_marked_openable_and_deletable(tmp_path=None):
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["ghost"] is True and body["error"], body
-        assert body["topic"] == "幽灵条目"
+        # 参数只许有一种表示：`params`。这里以前断言的是平铺的 `body["topic"]`，
+        # 而 `openRecord` 读 `r.params.topic`、「用同样的参数重来」展开 `{...r.params}`
+        # —— 平铺那一份界面根本不看，于是头部空标题 + 重试丢主题（第 27 轮契约线 P2）。
+        assert body["params"]["topic"] == "幽灵条目", body
+        assert "topic" not in body and "pack" not in body, \
+            f"平铺与 params 两份表示会各自漂移：{body}"
 
         assert c.delete(f"/api/history/{jid}").status_code == 200, \
             "删除幽灵条目不该报 404（注册表里那份已摘除 = 删成功）"

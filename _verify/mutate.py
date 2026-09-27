@@ -1335,6 +1335,15 @@ MUTATIONS = [
         "      await awaitJob(job_id);   // 变异：不接返回值",
         "verify:topics",
     ),
+    # ── s30 组（第 22 批甲：幽灵记录的参数表示只留一份）──────────────
+    (
+        "s30-1 幽灵失败记录把参数平铺回去（界面读 params，头部空标题 + 重试丢主题）",
+        SRV_F,
+        '                        "params": {"pack": p.get("pack", ""),\n'
+        '                                   "topic": p.get("topic", "")},',
+        '                        "pack": p.get("pack", ""), "topic": p.get("topic", ""),',
+        "tests/test_server_hardening.py -k ghost_failed_entry",
+    ),
 ]
 
 # 子集运行：`python _verify/mutate.py -k UI` 只跑名字里含 UI 的那几条。
