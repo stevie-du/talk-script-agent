@@ -37,7 +37,7 @@ INDEX_NAME = "index.json"
 # 不重建的话列表永远显示不出平台，而这与「用户当时真没选平台」在界面上
 # 长得一模一样（参见审查基线里的「静默降级」）。_read_index_file 见到
 # 版本不符会走 _rebuild()，从 result.json/job.json 重新摘一次。
-INDEX_VERSION = 3   # v3：摘要加 `segment`（左栏搜索按细分领域筛要用它）
+INDEX_VERSION = 4   # v4：摘要带 `segment`；索引里记 disk_count 当"磁盘变了没"的判据
 
 # 墓碑只用于拦住「删除后仍在跑的作业」，不需要长期留存。
 # ⚠ 但它**有上限就等于有一个洞**：被挤掉的 id 若还有一趟在飞的作业，
@@ -277,8 +277,16 @@ class ArtifactStore:
             out = {it["id"]: it for it in data.get("items", []) if it.get("id")}
         except Exception:                       # noqa: BLE001
             return self._rebuild()
-        # 条数与磁盘上的作业目录数不符（崩溃、手工拷入、旧版本数据）→ 重建
-        if self._count_on_disk() != len(out):
+        # 判据是"磁盘上又多了一条**文件**"，不是"索引条数与磁盘条数不等"。
+        # 后者在这两种情况下会**永远**不等，于是每次读索引都重建一次
+        # （全量 glob + 解析每一份 JSON + 写盘，而前端在生成期间每 900ms 就拉一次
+        #  /api/history —— 索引这个优化变成负收益，且是静默的）：
+        #   · 某条 job.json / result.json 读不出来 → `_rebuild` 记 WARNING 后跳过它；
+        #   · 同一个 id 落在两个日期目录里（`job_dir()` 修跨零点之前留下的桶，
+        #     `generated/` 里确有 `20260101/` 这种）。
+        # 两者都是"索引少收一条"，用条数比就永远对不上。改成记下**上次看到几条文件**，
+        # 只在磁盘真的变了时重建一次。
+        if self._count_on_disk() != data.get("disk_count"):
             return self._rebuild()
         return out
 
@@ -356,6 +364,10 @@ class ArtifactStore:
         try:
             payload = json.dumps(
                 {"version": INDEX_VERSION,
+                 # 「这次写盘时磁盘上有几条记录文件」——读侧拿它判断磁盘变没变，
+                 # 而不是拿索引条数与磁盘条数比（坏文件、同 id 两个桶会让两者
+                 # **永远**差着一截，于是每次读都白重建一次）。见 `_read_index_file`。
+                 "disk_count": self._count_on_disk(),
                  "items": sorted(items.values(), key=lambda x: x.get("created_at", ""))},
                 ensure_ascii=False)
             with self._lock:

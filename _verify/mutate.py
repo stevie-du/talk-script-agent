@@ -1303,6 +1303,29 @@ MUTATIONS = [
         "    const wasLive = !!state.job && state.job.id === it.id;\n    if (wasLive) detachJob();\n    const viewed = false;",
         "tests/test_job_state_vocabulary_consistency.py -k abandoning",
     ),
+    # ── s28 组（第 20 批：索引不再每读必重建、幽灵下拉）────────────
+    # 跑这一组：PYTHONUTF8=1 .venv/Scripts/python.exe _verify/mutate.py -k s28
+    (
+        "s28-1 设置页退回按 Object.keys(pack.params) 全量画控件（幽灵下拉回来）",
+        UI_F,
+        "    if (!SENDABLE_PARAMS.includes(key)) { unsendable.push(key); continue; }",
+        "    // 变异：不筛了，包声明什么就画什么",
+        "tests/test_job_state_vocabulary_consistency.py -k only_renders",
+    ),
+    (
+        "s28-2 跳过的参数键不写进审计行（少掉的下拉变成静默丢失）",
+        UI_F,
+        "    notes.push(...unsendable.map(k => `参数 ${k}：不显示（请求体带不走，引擎也不读）`));",
+        "    // 变异：不报这一句",
+        "verify:",
+    ),
+    (
+        "s28-3 索引判据退回「磁盘条数 != 索引条数就重建」（一条坏文件就每读必重建）",
+        STORE_F,
+        '        if self._count_on_disk() != data.get("disk_count"):',
+        "        if self._count_on_disk() != len(out):",
+        "tests/test_history_corruption.py -k does_not_rebuild",
+    ),
 ]
 
 # 子集运行：`python _verify/mutate.py -k UI` 只跑名字里含 UI 的那几条。

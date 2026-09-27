@@ -9,7 +9,7 @@
 import { $, $$, el, esc, toast, bindOnce, sec } from "./util.js";
 import { state, setBusy, on, emit, setGenParam, resetGenParams } from "./store.js";
 import { api } from "./api.js";
-import { updateStale, autoGrowTopic, getParam, stopAllBackgroundJobs } from "./jobs.js";
+import { updateStale, autoGrowTopic, getParam, stopAllBackgroundJobs, SENDABLE_PARAMS } from "./jobs.js";
 import { stopTicker } from "./progress.js";
 import { focusSessionSearch, busyRecords } from "./sessions.js";
 import { closeSettings, openSettings, setPane, settingsOpen } from "./settings.js";
@@ -284,9 +284,14 @@ export function renderPackParams() {
   // 用户在两处任一处改都会同步（两处各自一个 select，靠 `data-key` 认字段、
   // **不共用 id** —— 同 id 会让 getElementById 只认得第一个，另一处改了不生效；
   // 真值统一收在 state.genParams，updateStale 也听得到）。
+  const unsendable = [];
   for (const key of Object.keys(params)) {
     if (placed.has(key)) continue;
     if (!params[key]?.options?.length) continue;
+    // 包声明了请求体带不走的键 → **不画控件**。画了就是一个能选、能显示、
+    // 永不发出去的下拉（引擎只读固定几个键，没有通用透传）。下面把它并进
+    // 「这个包有配置没生效」那一行，包作者看得见，用户也不会以为设置丢了。
+    if (!SENDABLE_PARAMS.includes(key)) { unsendable.push(key); continue; }
     front.appendChild(paramSelect(key, params[key], audit));
     placed.add(key);
   }
@@ -302,6 +307,9 @@ export function renderPackParams() {
     const notes = Object.keys(audit)
       .filter(k => !paramKeys.has(k))
       .flatMap(k => Object.values(audit[k] || {}).map(v => `${k}：${v}`));
+    // 包声明了、但请求体带不走的参数键：同一个落点、同一句话。
+    // 不写进这里它们就只是"界面上少了一个下拉"，谁也不会知道为什么少。
+    notes.push(...unsendable.map(k => `参数 ${k}：不显示（请求体带不走，引擎也不读）`));
     paud.textContent = notes.length ? "⚠ 这个包有配置没生效：" + notes.join("；") : "";
     paud.classList.toggle("hidden", !notes.length);
   }

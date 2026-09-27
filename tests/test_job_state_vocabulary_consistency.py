@@ -208,6 +208,32 @@ def test_frontend_no_longer_copies_a_terminal_list():
     assert "function updateRow" in src, "源码被剥空了 —— 断言会空转，先修 _strip_comments"
 
 
+def test_settings_page_only_renders_params_the_request_can_carry():
+    """包多声明一个参数键，界面上就不许多出一个能选、永不发出的下拉。
+
+    `collectParams()` 是显式白名单，`app/pipeline.py` 也只读固定几个键（没有通用
+    透传）—— 第 27 轮流程线 P1 的现场是：第三方包写一个 `params.tone`，设置页就
+    多出一个下拉，选完请求体里根本没有它，`#pack-audit` 也不报。
+    现在渲染侧必须过 `SENDABLE_PARAMS`，而那张表必须与发送侧同源。
+    """
+    jobs = _strip_comments(
+        (ROOT / "desktop" / "renderer" / "js" / "jobs.js").read_text(encoding="utf-8"))
+    ui = _strip_comments(
+        (ROOT / "desktop" / "renderer" / "js" / "ui.js").read_text(encoding="utf-8"))
+    m = re.search(r"export const SENDABLE_PARAMS = \[([^\]]*)\]", jobs)
+    assert m, "jobs.js 里那张 SENDABLE_PARAMS 不见了（渲染侧就没有唯一的真值可查）"
+    keys = [k.strip().strip('"\'') for k in m.group(1).replace("\n", " ").split(",") if k.strip()]
+    assert len(keys) >= 4, f"表被清空时下面的判据会空转：{keys}"
+    i = jobs.index("export function collectParams()")
+    body = jobs[i:jobs.index("\n}", i)]
+    missing = [k for k in keys
+               if f'getParam("{k}")' not in body and f"{k}:" not in body]
+    assert not missing, f"SENDABLE_PARAMS 声称带得走、collectParams 其实没发：{missing}"
+    assert "SENDABLE_PARAMS.includes(key)" in ui, \
+        "设置页又在按 Object.keys(pack.params) 全量画控件（幽灵下拉回来了）"
+    assert "unsendable" in ui, "被跳过的参数键必须并进「这个包有配置没生效」那一行"
+
+
 def test_abandoning_a_live_record_lands_a_terminal_view():
     """左栏「放弃这次生成」删掉在跑的那条时，必须落实态卡，不能只 detach。
 

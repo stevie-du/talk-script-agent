@@ -52,6 +52,17 @@ export function getParam(key) {
   return s ? (s.value || null) : null;
 }
 
+/** 请求体**带得走**的生成参数（唯一一份；界面上"能不能选"以这里为准）。
+ *
+ * 为什么要有这张表：`collectParams()` 是显式白名单，而设置页那张卡过去按
+ * `Object.keys(pack.params)` 全量画控件 —— 第三方包多声明一个 `params.tone`，
+ * 界面上就多一个能选、能显示、**永不发出去**的下拉（引擎侧也只读固定几个键，
+ * `app/pipeline.py` 没有通用透传）。第 27 轮流程线 P1。
+ * 现在不认识的键不画控件，改在 `#pack-audit` 那行如实说"这个参数不会生效"。
+ */
+export const SENDABLE_PARAMS = ["segment", "audience", "duration", "style",
+  "platform", "persona", "cta", "rewrite_scope"];
+
 export function collectParams() {
   return {
     pack: $("pack").value,

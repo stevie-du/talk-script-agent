@@ -150,6 +150,9 @@ const META = {
           // 变成真 DOM 元素。默认值不含它，其余断言不受影响。
           "<img src=x onerror=window.__xssPill=1>"] },
         style: { label: "风格", default: "口播科普", options: ["口播科普", "带货"] },
+        // 幽灵下拉的靶子（第 27 轮流程线 P1）：包声明了一个**请求体带不走**的参数键
+        // —— 第三方包真会这么写。判据见下面「不许多出一个能选、永不发出的控件」。
+        tone: { label: "语气", default: "亲和", options: ["亲和", "克制"] },
         persona: { label: "人设", default: "维保老师傅", options: ["维保老师傅", "产品经理"] },
         cta: { label: "结尾引导", default: "关注", options: ["关注", "私信", "留资"] },
       },
@@ -4018,7 +4021,12 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     const meta = window.__tsMeta;
     const active = meta.packs.find(x => x.name === document.getElementById('pack').value) || meta.packs[0];
     const p = (active || {}).params || {};
-    const keys = Object.keys(p).filter(k => p[k]?.options?.length);
+    // 「请求体带得走的参数」的规格副本（与下面 SENDABLE_SPEC 同一张表；
+    // evalIn 是另一个上下文，读不到 Node 侧常量，只能就地写一份并注明）。
+    const SENDABLE_INLINE = ["segment", "audience", "duration", "style",
+      "platform", "persona", "cta", "rewrite_scope"];
+    const keys = Object.keys(p).filter(k => p[k]?.options?.length
+      && SENDABLE_INLINE.includes(k));   // 带不走的键不画控件（见「未知参数键不画控件」那条）
     const frontKeys = [...document.getElementById('param-front').querySelectorAll('select')]
                        .map(s => s.dataset.key || s.id.replace(/^p-/, ''));
     // P1-1 唯一性契约：param-front 的 select **不得**带 p- 前缀 id ——
@@ -4042,7 +4050,12 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   // 提到 main() 顶部作用域（原本在下面的 expectFor 块里）—— 否则
   // 「生成参数卡片展示全量参数」断言会触发 const 的 TDZ。
   const TOOLBAR_KEYS = ["segment", "audience", "duration", "platform"];
-  check("「生成参数」卡片展示全量参数（含工具条的 segment/audience/duration/platform）",
+  // 「请求体带得走的参数」的**规格副本**（同上，有意不复用 jobs.js 的 SENDABLE_PARAMS：
+  // 复用就成了实现改错、断言跟着一起错）。包声明了这张表之外的键时，设置页不画控件、
+  // 只在 #pack-audit 报一句 —— 判据见下面「包声明的未知参数键不画控件」。
+  const SENDABLE_SPEC = ["segment", "audience", "duration", "style",
+    "platform", "persona", "cta", "rewrite_scope"];
+  check("「生成参数」卡片展示全部**带得走的**参数（含工具条的 segment/audience/duration/platform）",
     JSON.stringify(fullParams.expectedKeys) === JSON.stringify(fullParams.frontKeys)
       && fullParams.toolbarInFront.length === TOOLBAR_KEYS.length,
     JSON.stringify(fullParams));
@@ -4153,7 +4166,11 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     const p = (META.packs.find(x => x.name === name) || {}).params || {};
     const keys = Object.keys(p).filter(k => p[k] && p[k].options && p[k].options.length);
     return { 胶囊: keys.filter(k => TOOLBAR_KEYS.includes(k)).length,
-             参数组: keys.length };   // 2026-09-17（任务 2）：不排除 TOOLBAR_KEYS
+             // 参数组数的是"带得走的那些"（SENDABLE_SPEC）：包多声明一个不认识
+             // 的键时设置页**不画**它（第 27 轮流程线 P1 的修法），所以规格侧
+             // 也必须按同一张表数 —— 2026-09-17（任务 2）那条「不排除 TOOLBAR_KEYS」
+             // 的口径不变，工具条参数仍在参数组里。
+             参数组: keys.filter(k => SENDABLE_SPEC.includes(k)).length };
   };
   // 下拉菜单挂在 body 下、与 .select-wrap 一一对应 —— 这条不变量顺手守住
   // 「重渲染时把旧菜单摘掉」：renderPackParams 曾经只清 innerHTML，不摘菜单。
@@ -4200,6 +4217,22 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   check("模型下拉来自配置里的模型列表（不是本地攒的历史）",
     picker && picker.texts.length === 2 && picker.texts.some(t => /添加模型/.test(t)),
     JSON.stringify(picker && picker.texts));
+
+  // ── 幽灵下拉（第 27 轮流程线 P1）────────────────────────────
+  // 桩里的 elevator 包多声明了一个 `params.tone`（请求体带不走、引擎也不读）。
+  // 修前设置页照 Object.keys(pack.params) 全量画控件 —— 于是多出一个能选、能显示、
+  // 永不发出去的下拉，而且 #pack-audit 一声不吭。
+  await evalIn(`window.__ts.openSettings(); window.__ts.setPane("gen"); return true;`);
+  await sleep(350);
+  const ghost = await evalIn(`return {
+    toneCtl: document.querySelectorAll('#param-front [data-key="tone"], #param-front #p-tone').length,
+    audit: document.getElementById('pack-audit').textContent };`);
+  check("包声明的未知参数键不画控件（不许多出一个能选、永不发出的下拉）",
+    ghost.toneCtl === 0, JSON.stringify(ghost));
+  check("少掉的那个下拉要在「这个包有配置没生效」那行说清楚（不是静默丢的）",
+    /tone/.test(ghost.audit), ghost.audit);
+  await evalIn(`window.__ts.closeSettings(); return true;`);
+  await sleep(250);
 
   // 会话搜索（成熟 agent 的标配；历史一多就找不到）
   await evalIn(`const b = document.getElementById('sess-search');

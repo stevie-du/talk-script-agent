@@ -203,3 +203,40 @@ def test_history_ids_cover_every_record_not_just_the_cap(tmp_path):
     assert len(st.history()) == st.HISTORY_LIMIT, "列表本身该是截断的"
     assert len(st.history_ids()) == 105, "已知集不该跟着截断"
     assert "rec-000" in st.history_ids()
+
+
+def test_the_index_does_not_rebuild_on_every_read(tmp_path, monkeypatch):
+    """一条读不出的记录 / 同 id 落在两个日期目录，都不该让索引**每次读都重建**。
+
+    旧判据是「磁盘条数 != 索引条数就重建」，而这两种情况下两者永远差着一截：
+    `_rebuild` 会跳过坏文件（第 27 轮契约线 P1）。前端在生成期间每 900ms 拉一次
+    `/api/history`（间隔见 `js/api.js` 的 POLL_MS），于是"索引"这个优化变成
+    每不到一秒一次全量 glob + 解析每一份 JSON + 写盘 —— 而且是静默的。
+    """
+    calls = []
+    real = Store._rebuild
+
+    def counting(self):
+        calls.append(1)
+        return real(self)
+
+    monkeypatch.setattr(Store, "_rebuild", counting)
+    st = Store(ROOT, data_dir=tmp_path)
+    _put(tmp_path, "ok-1", "job.json",
+         json.dumps({"id": "ok-1", "state": "failed",
+                     "created_at": "2026-09-16T09:00:00",
+                     "params": {"topic": "电梯", "segment": "维保"}}))
+    _put(tmp_path, "dup-1", "job.json",
+         json.dumps({"id": "same-1", "state": "failed",
+                     "created_at": "2026-09-15T09:00:00", "params": {}}))
+    d2 = tmp_path / "generated" / "2026-09-17" / "dup-2"
+    d2.mkdir(parents=True)
+    (d2 / "job.json").write_text(json.dumps(
+        {"id": "same-1", "state": "failed",
+         "created_at": "2026-09-17T09:00:00", "params": {}}), encoding="utf-8")
+    _put(tmp_path, "bad-1", "job.json", "{ 这不是 json")
+
+    for _ in range(4):
+        ids = {i["id"] for i in st.history()}
+    assert ids == {"ok-1", "same-1"}, ids       # 读得出的记录一条都不能少
+    assert len(calls) == 1, f"读了 4 次、重建 {len(calls)} 次 —— 判据又变成条数比对了"
