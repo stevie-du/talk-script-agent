@@ -1257,6 +1257,29 @@ MUTATIONS = [
         "      toast(\"抓取状态未知（已等待 30 分钟），请手动刷新或重试\", 5000);",
         "tests/test_unit_vocabulary.py -k job_timing_numbers",
     ),
+    # ── s26 组（第 18 批：幽灵 token、缺档的 warn、CSS 注入的字形）────────
+    # 跑这一组：PYTHONUTF8=1 .venv/Scripts/python.exe _verify/mutate.py -k s26
+    (
+        "s26-1 导入徽标退回引用未定义的 --accent（声明在、色从来不上屏）",
+        CSS_F,
+        ".pl-item .pl-s.imported { color: var(--ink); }",
+        ".pl-item .pl-s.imported { color: var(--accent); }",
+        "tests/test_css_tokens.py -k no_phantom",
+    ),
+    (
+        "s26-2 删掉 .m-chip.warn 这一档（引擎真发 warn，标记落回中性灰）",
+        CSS_F,
+        ".m-chip.warn, .acc-badge.warn { background: var(--warn-soft); color: var(--warn); }",
+        ".m-chip.warn, .acc-badge.warn { }",
+        "verify:topics",
+    ),
+    (
+        "s26-3 折叠箭头退回 CSS 注入字形 ▾（§4 禁、且换字体就换长相）",
+        CSS_F,
+        ".banner.why > summary::after {\n  content: \"\"; flex: 0 0 auto; width: 0; height: 0; align-self: center;",
+        ".banner.why > summary::after { content: \" ▾\"; font-size: var(--f-min); opacity: .6;",
+        "tests/test_css_tokens.py -k glyph_scan",
+    ),
 ]
 
 # 子集运行：`python _verify/mutate.py -k UI` 只跑名字里含 UI 的那几条。

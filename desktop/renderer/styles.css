@@ -1756,9 +1756,11 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 /* 导入包的来源徽标（2026-09-23，方案 §6）：副标题里"导入 · 作者 · license"
-   那一段用主题色区分 —— 让用户一眼看出"这个包不是出厂带的"。
-   不用新颜色：--accent 是界面既有的强调色，徽标只是既有色的一次复用。 */
-.pl-item .pl-s.imported { color: var(--accent); }
+   那一段用强调色区分 —— 让用户一眼看出"这个包不是出厂带的"。
+   ⚠ 原来这里写的是 `var(--accent)`，而**全站没有定义过 --accent**：
+   未定义又没写 fallback 的自定义属性在计算期失效，于是"这个包不是出厂带的"
+   从来没上过色（第 27 轮布局线抓到）。强调色在 v6 里叫 --ink。 */
+.pl-item .pl-s.imported { color: var(--ink); }
 /* 卸载按钮（ghost.danger）：删除类动作用警示色。primary.danger 早已有，
    这是 ghost 变体 —— 行业包面板的 page-actions 里都是 ghost，统一语汇。 */
 button.ghost.danger { color: var(--bad); }
@@ -2017,6 +2019,10 @@ button.ghost.danger:hover { background: var(--bad-soft); color: var(--bad); }
   display: inline-flex; align-items: center; gap: var(--s1); white-space: nowrap;
 }
 .m-chip.bad, .acc-badge.bad { background: var(--bad-soft); color: var(--bad); }
+/* 引擎真的会发 warn 这一档（app/intel.py 的 `_item_flags`：「数据不足 · 算不出机会分」），
+   而这里以前只有 bad/good 两档 —— warn 落回 `.m-chip` 的中性灰，与同屏图例里那颗橙点
+   对不上号：同一件事在一张卡上有两种颜色，其中一种还不存在。 */
+.m-chip.warn, .acc-badge.warn { background: var(--warn-soft); color: var(--warn); }
 .m-chip.good, .acc-badge.ok { color: var(--ok); }
 .acc-badge.info { color: var(--ink); background: var(--sel-bg); }
 
@@ -2548,8 +2554,15 @@ td.warn { color: var(--warn); font-weight: 500; }
 .banner.why { cursor: default; }
 .banner.why > summary { cursor: pointer; list-style: none; }
 .banner.why > summary::-webkit-details-marker { display: none; }
-.banner.why > summary::after { content: " ▾"; font-size: var(--f-min); opacity: .6; }
-.banner.why[open] > summary::after { content: " ▴"; }
+/* 折叠箭头用既有的「边框拼出来的三角」（同 .st-adv / .pg-more），不再由 CSS 注入字形：
+   规范 §4 禁把 ▾ / ▴ 这类字符当图标 —— 换字体就换一副长相，读屏还会把它念出来。 */
+.banner.why > summary::after {
+  content: ""; flex: 0 0 auto; width: 0; height: 0; align-self: center;
+  border-left: 5px solid var(--text-3);
+  border-top: 4px solid transparent; border-bottom: 4px solid transparent;
+  transition: transform var(--dur) var(--ease);
+}
+.banner.why[open] > summary::after { transform: rotate(90deg); }
 .why-body {
   margin: var(--s2) 0 0; padding: var(--s2); border-radius: var(--r-sm);
   background: var(--surface); color: var(--text-2);

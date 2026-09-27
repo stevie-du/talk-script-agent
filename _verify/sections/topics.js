@@ -210,6 +210,22 @@ module.exports = async function topics({ evalIn, sleep, check }) {
       // 结论的唯一真通道是 flags 那排标记（app/intel.py 的 _item_flags）。
       // 条目级 it.warn 那条渲染支已删 —— 引擎从不发这个键，桩也不许再喂它。
       warnChips: document.querySelectorAll('.page-card .m-chip.warn').length,
+      // warn 这一档**真的落警示色**吗：只数 class 量不到（styles.css 里以前根本没有
+      // .m-chip.warn 这条规则，class 挂着、屏幕上还是中性灰 —— 与同屏图例的橙点对不上）。
+      // 拿一个现写 var(--warn)/var(--warn-soft) 的探针比计算值，亮暗两主题都成立。
+      warnStyle: (function () {
+        var n = document.querySelector('.page-card .m-chip.warn');
+        if (!n) return null;
+        var probe = document.createElement('span');
+        probe.style.color = 'var(--warn)';
+        probe.style.background = 'var(--warn-soft)';
+        document.body.appendChild(probe);
+        var pc = getComputedStyle(probe), nc = getComputedStyle(n);
+        var out = { color: nc.color, bg: nc.backgroundColor,
+                    refColor: pc.color, refBg: pc.backgroundColor };
+        probe.remove();
+        return out;
+      })(),
       cardTailText: Array.prototype.slice.call(document.querySelectorAll('.page-card .topic-quote'))
         .map(function (n) { return n.textContent; }).join(' | '),
       cadCells: (function () {
@@ -367,6 +383,10 @@ module.exports = async function topics({ evalIn, sleep, check }) {
       JSON.stringify(topicsGeo.oppCells));
     check("「算不出机会分」这类结论走 flags 那一排标记（引擎真发的通道）",
       topicsGeo.warnChips >= 1, JSON.stringify({ warnChips: topicsGeo.warnChips }));
+    check("warn 那一档标记真的落警示色（CSS 里以前没有这一档，只数 class 量不到）",
+      !!topicsGeo.warnStyle && topicsGeo.warnStyle.color === topicsGeo.warnStyle.refColor
+      && topicsGeo.warnStyle.bg === topicsGeo.warnStyle.refBg,
+      JSON.stringify(topicsGeo.warnStyle));
     check("卡片不演引擎发不出的能力（桩里那条假 banwords 警告不许回来）",
       topicsGeo.cardTailText.indexOf('包赔') < 0, topicsGeo.cardTailText.slice(0, 90));
     check("情报源表：`接入` 与 `上次抓取` 是两根正交列，且表体列数与表头一致",
