@@ -453,10 +453,16 @@ def _shot_time(raw, tm: dict) -> str:
     return s
 
 
-def _num(s: str) -> str:
+def _num(s) -> str:
     """`0.0` → `0`、`3.5` → `3.5`：模型给的小数尾零不该出现在交付物里。"""
     f = float(s)
     return str(int(f)) if f == int(f) else f"{f:g}"
+
+
+def _txt(v) -> str:
+    """参数没填就是空串。`p.get(k, '')` 挡不住"键在、值是 None"，
+    而 f-string 会把 None 印成字符串 —— 交付物里就会出现「细分：None」。"""
+    return "" if v is None else str(v)
 
 
 def render_script_md(result: dict) -> str:
@@ -469,11 +475,14 @@ def render_script_md(result: dict) -> str:
     from .ai_tells import severity_word       # 严重度的中文读法只有一个源头
 
     p = result["params"]
+    # `p.get(k, '')` 在这里不够：params 里这些键**存在但值是 None**（`schemas.py`
+    # 允许 platform/style/persona 留空），于是 `.get(k,'')` 返回 None、f-string
+    # 把它印成字符串 "None" —— 交付物里出现「细分：None」（第 28 轮导出线 P3）。
     lines = [f"# 口播脚本：{p['topic']}",
              f"- 行业包：{result['pack']}{'（草稿）' if result.get('pack_draft') else ''}"
-             f"　细分：{p.get('segment', '')}　受众：{p.get('audience', '')}",
-             f"- {_secs(p['duration'])} / {p.get('platform', '')} / {p.get('style', '')}"
-             f" / {p.get('persona', '')}",
+             f"　细分：{_txt(p.get('segment'))}　受众：{_txt(p.get('audience'))}",
+             f"- {_secs(p['duration'])} / {_txt(p.get('platform'))} / {_txt(p.get('style'))}"
+             f" / {_txt(p.get('persona'))}",
              "", "## 口播文案", ""]
     names = {"hook": "开场钩子", "cta": "结尾引导"}
     idx = 0
@@ -483,7 +492,11 @@ def render_script_md(result: dict) -> str:
             label = f"要点{idx}"
         else:
             label = names[s["type"]]
-        lines.append(f"**【{label}】** {tm['start']}-{tm['end']} 秒 · {count_chars(s['text'])} 字")
+        # 时间轴两侧同一写法：引擎算出来的 `timings` 是 float（0.0 / 8.5），
+        # 直接插值会交付「0.0-8.5 秒」而界面写「0–8.5 秒」—— 尾零是机器的，
+        # 不是给人读的（第 28 轮导出线 P2：同一事实两种写法）。
+        lines.append(f"**【{label}】** {_num(tm['start'])}-{_num(tm['end'])} 秒"
+                     f" · {count_chars(s['text'])} 字")
         lines.append(s["text"])
         lines.append("")
     ch = result["check"]

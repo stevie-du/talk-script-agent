@@ -304,6 +304,36 @@ def test_script_md_has_no_internal_identifiers():
     assert "strong " not in md and "weak " not in md, md
 
 
+def test_script_md_never_prints_the_word_none():
+    """参数"键存在但值是 None"时，交付物里不许出现 `None`。
+
+    `p.get(k, '')` 挡不住这种形状 —— 默认值只在**键不存在**时生效，而
+    `schemas.py` 允许 platform/style/persona 留空（值就是 None），
+    f-string 于是把 None 印成字符串（第 28 轮导出线 P3）。
+    """
+    from app.store import render_script_md
+
+    r = _md_result(None)
+    for k in ("segment", "audience", "platform", "style", "persona"):
+        r["params"][k] = None
+    md = render_script_md(r)
+    assert "None" not in md, md
+    assert "细分：　受众：" in md, md      # 空就是空：两格还在同一行，不印假值
+
+
+def test_script_md_timeline_has_no_trailing_zeros():
+    """时间轴的尾零是机器的：引擎给 `0.0 / 8.5`，交付物与界面都该写 `0-8.5 秒`。"""
+    from app.store import render_script_md
+
+    r = _md_result(None)
+    r["sections"] = r["sections"] + [{"type": "point", "text": "第二段。", "subtitle": "x"}]
+    r["timings"] = [{"start": 0.0, "end": 8.5}, {"start": 8.5, "end": 12.0}]
+    md = render_script_md(r)
+    assert "**【开场钩子】** 0-8.5 秒" in md, md
+    assert "**【要点1】** 8.5-12 秒" in md, md
+    assert "0.0" not in md and "12.0" not in md, md
+
+
 def test_script_md_writes_hit_lists_for_humans_not_python_repr():
     """交付物里的命中明细要排成「词×次数」，不许是 Python 的 repr。
 

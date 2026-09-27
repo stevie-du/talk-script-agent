@@ -1366,6 +1366,21 @@ MUTATIONS = [
         'SEVERITY_WORD = {"strong": "严重", "weak": "轻微"}',
         "tests/test_job_state_vocabulary_consistency.py -k severity_words",
     ),
+    # ── s32 组（第 24 批：交付物里的 None 与尾零）──────────────────
+    (
+        "s32-1 参数行退回 p.get(k, '')（键在而值为 None 时印出字符串 None）",
+        STORE_F,
+        "             f\"　细分：{_txt(p.get('segment'))}　受众：{_txt(p.get('audience'))}\",",
+        "             f\"　细分：{p.get('segment', '')}　受众：{p.get('audience', '')}\",",
+        "tests/test_ai_tells.py -k never_prints_the_word_none",
+    ),
+    (
+        "s32-2 时间轴退回直插 float（交付物写「0.0-8.5 秒」，界面写「0–8.5 秒」）",
+        STORE_F,
+        "        lines.append(f\"**【{label}】** {_num(tm['start'])}-{_num(tm['end'])} 秒\"",
+        "        lines.append(f\"**【{label}】** {tm['start']}-{tm['end']} 秒\"",
+        "tests/test_ai_tells.py -k trailing_zeros",
+    ),
 ]
 
 # 子集运行：`python _verify/mutate.py -k UI` 只跑名字里含 UI 的那几条。
