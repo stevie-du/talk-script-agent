@@ -575,4 +575,42 @@ module.exports = async function topics({ evalIn, sleep, check }) {
     await evalIn(`var s = document.getElementById('pack');
       s.value = 'elevator'; window.__ts.applyPackSwitch(); return 1;`);
     await sleep(400);
+    // ── 按下「重抓」之后，那颗键自己得报 in-flight（流程线 P1-2）─────
+    // 状态行 #topics-note 会被页签/视图藏起来，抓取又没有进度条与步骤树 ——
+    // 于是"点了没反应"，用户连点就堆出第二个作业。桩用 __intelPending 把这次
+    // 抓取停在 fetching，否则这一支在整网永远量不到。
+    await evalIn(`window.__intelPending = true; window.__refreshCalls = 0; return 1;`);
+    await evalIn(`document.getElementById('btn-refetch').click(); return 1;`);
+    await sleep(450);
+    const inflight = await evalIn(`var b = document.getElementById('btn-refetch');
+      b.click();                       // 再点一次：禁用了就不该多出第二个作业
+      return { disabled: b.disabled, busy: b.classList.contains('busy'),
+               aria: b.getAttribute('aria-busy') || '', title: b.title,
+               svg: b.querySelectorAll('svg').length,
+               calls: window.__refreshCalls || 0 };`);
+    await sleep(250);
+    await evalIn(`window.__intelPending = false; return 1;`);
+    await sleep(1600);
+    const restored = await evalIn(`var b = document.getElementById('btn-refetch');
+      return { disabled: b.disabled, busy: b.classList.contains('busy'),
+               aria: b.getAttribute('aria-busy') || '', title: b.title,
+               svg: b.querySelectorAll('svg').length,
+               calls: window.__refreshCalls || 0 };`);
+    check("抓取进行中：键被禁用 + aria-busy + 呼吸 class，title 说「正在重抓」",
+      inflight.disabled === true && inflight.busy === true && inflight.aria === "true"
+        && /正在重抓/.test(inflight.title), JSON.stringify(inflight));
+    check("图标按钮的画形不许被文字顶掉（进行中/落地后 SVG 都还在）",
+      inflight.svg === 1 && restored.svg === 1,
+      JSON.stringify({ 抓取中: inflight.svg, 落地后: restored.svg }));
+    check("抓取中再点一次不多堆一个作业（二启被禁掉）",
+      inflight.calls <= 1, JSON.stringify({ 抓取中: inflight.calls, 落地后: restored.calls }));
+    check("落地后把键还给用户：解禁、去 aria-busy、title 回到原文案",
+      restored.disabled === false && restored.busy === false && restored.aria === ""
+        && !/正在重抓/.test(restored.title) && /立即重抓/.test(restored.title),
+      JSON.stringify(restored));
+    const cntKbd = await evalIn(`var k = document.getElementById('topics-count');
+      return { hidden: k.hidden, text: (k.textContent || '').trim() };`);
+    check("真拿到数据之后读数才亮出来（冷启动那个 0 是假陈述）",
+      cntKbd.hidden === false && /^[0-9]+$/.test(cntKbd.text) && Number(cntKbd.text) > 0,
+      JSON.stringify(cntKbd));
 };

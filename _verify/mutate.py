@@ -910,6 +910,43 @@ MUTATIONS = [
         "      toast(`现在不能安装更新（当前状态：${r.state}）`, 3500);",
         "verify:",
     ),
+    # ── s21 组（2026-09-27 第 8 轮审查 流程线 P1-2 / P2-9 + 样式线 P2-5）──
+    # 跑这一组：PYTHONUTF8=1 .venv/Scripts/python.exe _verify/mutate.py -k s21
+    (
+        "s21-1 重抓去掉 aria-busy 与呼吸 class（只剩禁用，读屏与视觉都不知道在跑）",
+        TOPICS_F,
+        "    btn.setAttribute(\"aria-busy\", \"true\");\n    btn.classList.add(\"busy\");",
+        "    // 只留 disabled",
+        "verify:topics",
+    ),
+    (
+        "s21-2 用 textContent 写进行中文字（图标按钮的 SVG 被整颗抹掉，落地后剩空按钮）",
+        TOPICS_F,
+        "    btn.classList.add(\"busy\");",
+        "    btn.textContent = \"抓取中…\";",
+        "verify:topics",
+    ),
+    (
+        "s21-3 冷启动的选题读数又写死一个 0（还没去过选题就宣布\"今天有 0 条\"）",
+        HTML_F,
+        "          <kbd id=\"topics-count\" hidden></kbd>",
+        "          <kbd id=\"topics-count\">0</kbd>",
+        "verify:",
+    ),
+    (
+        "s21-4 拿到数据后也不揭开读数（hidden 恒真 = 那个 kbd 是装饰品）",
+        TOPICS_F,
+        "  if (cnt) { cnt.textContent = String(data.items.length); cnt.hidden = false; }",
+        "  if (cnt) { cnt.textContent = String(data.items.length); }",
+        "verify:topics",
+    ),
+    (
+        "s21-5 首页那条滚动列不退让滚动条槽位（切进选题整列横移半个滚动条）",
+        CSS_F,
+        "  scrollbar-gutter: stable;\n  padding: var(--s6) var(--s6) var(--s4);",
+        "  padding: var(--s6) var(--s6) var(--s4);",
+        "verify:",
+    ),
     (
         "A-3 对账解析全文扫（把文档后面别的表也当成 §2.1 的 tell 表）",
         ROOT / "tests/test_aitells_alignment.py",

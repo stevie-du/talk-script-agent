@@ -278,7 +278,9 @@ function render() {
     ign.disabled = !today;
   }
   const cnt = $("topics-count");
-  if (cnt) cnt.textContent = String(data.items.length);
+  // 只有真的拿到数据才把这颗读数亮出来（默认 hidden）：导航上的 0 会被读成
+  // "今天没货"，而冷启动时界面根本不知道有几条（流程线 P2-9）。
+  if (cnt) { cnt.textContent = String(data.items.length); cnt.hidden = false; }
 
   // 框架级失败写进 `#topics-note`：它不是"某个源没抓到"（那是源表的事），
   // 而是"整份抓取记录坏了 / 存不下" —— 前者去情报源看，后者只能重抓。
@@ -472,6 +474,17 @@ export const bindTopics = bindOnce(function bindTopics() {
             : "今天还没有忽略过任何条目", 3600);
   };
   $("btn-refetch").onclick = async () => {
+    const btn = $("btn-refetch");
+    const title = btn.title;
+    // 点下去必须有 in-flight 形态（流程线 P1-2）：状态行 #topics-note 会被页签/视图
+    // 藏起来，抓取又没有进度条与步骤树 —— 于是"点了没反应"，用户连点就堆出第二个作业。
+    // ⚠ 这是颗**图标按钮**（里面只有 SVG），所以绝不能用 textContent 写"抓取中…"：
+    //   那会把图标整颗抹掉，落地后还回去的是一个空按钮（门禁当场抓到过一次）。
+    //   进行中写在三个不会破坏画形的地方：禁用 + aria-busy + 图标转起来，title 说人话。
+    btn.disabled = true;
+    btn.setAttribute("aria-busy", "true");
+    btn.classList.add("busy");
+    btn.title = "正在重抓…（后台作业，可切去别处）";
     try {
       const { job_id } = await api.intelRefresh(packName());
       toast("已开始重抓…", 2200);
@@ -479,6 +492,11 @@ export const bindTopics = bindOnce(function bindTopics() {
       await load();
     } catch (e) {
       toast(`重抓失败：${e.message}`, 3200);
+    } finally {
+      btn.disabled = false;
+      btn.removeAttribute("aria-busy");
+      btn.classList.remove("busy");
+      btn.title = title;
     }
   };
   // 「选题 / 情报源」两颗页签：aria、roving tabindex 与 ←/→ Home End

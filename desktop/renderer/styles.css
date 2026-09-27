@@ -677,6 +677,11 @@ main { display: flex; flex: 1; min-height: 0; }
 .icon-btn svg { flex: 0 0 auto; }
 .icon-btn:hover { background: var(--fill); color: var(--text-1); }
 .icon-btn.on { color: var(--ink); background: var(--sel-bg); }
+/* 「重抓」进行中的那颗图标按钮（JS 只加 class，不动 textContent —— 它是图标按钮，
+   写文字会把 SVG 整颗抹掉）。呼吸用现成的 dotPulse：本仓库的 in-progress 记号就是
+   这一档（见 .dot.run），**不新造 spinner** —— `.spinner` 与 `@keyframes spin`
+   是当死代码删掉的（文件里有那条注释），别再请回来。 */
+.icon-btn.busy { animation: dotPulse 1.1s ease-in-out infinite; color: var(--text-1); }
 
 /* ══════════════ 按钮 ══════════════ */
 /* 按钮文字与输入控件同档（13，规范 §2 字阶）。原来 `font: inherit` 让没写
@@ -1818,6 +1823,9 @@ button.ghost.danger:hover { background: var(--bad-soft); color: var(--bad); }
 /* ══════════════ 消息流 ══════════════ */
 #chat-stream {
   flex: 1; min-height: 0; overflow-y: auto;
+  /* 与 `#view-topics` 同一档：两边都是滚动列，只有一侧留槽位时，
+     从首页切进「今日选题」整列内容会横移半个滚动条（实测 6px，样式线 P2-5）。 */
+  scrollbar-gutter: stable;
   padding: var(--s6) var(--s6) var(--s4);
   display: flex; flex-direction: column; gap: var(--s6);
 }

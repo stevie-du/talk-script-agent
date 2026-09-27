@@ -739,6 +739,12 @@ window.__addCount = 0;
                   ignored_today: window.__ignoredKeys.length + 1 });
     }
     if (s.indexOf('/api/jobs/inteljob1') >= 0) {
+      // window.__intelPending 为真时把这条抓取作业停在「进行中」——
+      // 否则桩瞬间 done，"按下重抓之后键上有没有 in-flight 形态"这条路永远量不到。
+      if (window.__intelPending) {
+        return mk({ id:'inteljob1', kind:'intel', state:'fetching', params:{ pack:'elevator' },
+                    steps:[], error:null, created_at:'2026-09-23T10:00:00', result:null });
+      }
       return mk({ id:'inteljob1', kind:'intel', state:'done', params:{ pack:'elevator' },
                   steps:[], error:null, created_at:'2026-09-23T10:00:00',
                   result:{ pack:'elevator', items:4, sources:[], errors:{} } });
@@ -5015,6 +5021,14 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     !!tempo && /三成/.test(tempo.text) && /30%/.test(tempo.title), JSON.stringify(tempo));
   check("更新被拒的提示不说状态码（idle / downloaded 是主进程的枚举，不是人话）",
     !fs.readFileSync(path.join(JS_DIR, "about.js"), "utf8").includes("${r.state"), "");
+  // 冷启动那颗「今日 N 条」读数：还没去过选题视图就写 0，等于替用户宣布"今天没货"。
+  check("冷启动的选题读数是「未知」而不是写死的 0（index.html 里那颗 kbd 默认 hidden）",
+    /<kbd id="topics-count" hidden>/.test(htmlSrc), "");
+  const gutters = await evalIn(`return {
+      chat: getComputedStyle(document.getElementById('chat-stream')).scrollbarGutter,
+      topics: getComputedStyle(document.getElementById('view-topics')).scrollbarGutter };`);
+  check("两条滚动列都留滚动条槽位（只有一侧留 = 切视图整列横移半个滚动条）",
+    gutters.chat === gutters.topics && /stable/.test(gutters.chat), JSON.stringify(gutters));
 
   // 演示模式与「搜不到 ≠ 没有」那两条判据住在文件末尾，走**真启动**渲染：
   // 那里解释了为什么不能用 dynamic import 改 state（量到的是另一个模块实例）。
