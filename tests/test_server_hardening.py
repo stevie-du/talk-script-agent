@@ -1926,3 +1926,34 @@ def test_history_truncation_is_visible_to_the_ui(tmp_path, monkeypatch):
     # 端点那一头：/api/meta 带上这份统计，界面才不用自己猜上限。
     body = _client(tmp_path).get("/api/meta").json()
     assert body["history"] == {"total": 0, "limit": 100, "truncated": False}, body["history"]
+
+
+def test_corrupt_job_json_detail_says_corrupted_not_missing(tmp_path):
+    """失败记录的文件坏了要说「已损坏」，不是「记录不存在」（第 27 轮契约线 P1）。
+
+    `result.json` 坏了一直是 500「记录已损坏，无法读取」；`job.json` 那一半被
+    store 吞成 None，于是同一件"文件在、读不出来"的事有两种回答，而 404 那个
+    是假的 —— 记录明明在盘上，点开也曾经读得出摘要。
+    """
+    c = _client(tmp_path)
+    d = tmp_path / "generated" / "2026-09-16" / "20260916-090000-abc123"
+    d.mkdir(parents=True)
+    (d / "job.json").write_text("{ 这不是 json", encoding="utf-8")
+    r = c.get("/api/history/20260916-090000-abc123")
+    assert r.status_code == 500, (r.status_code, r.text)
+    assert "已损坏" in r.text, r.text
+    assert "不存在" not in r.text, "把坏文件说成没有这条记录"
+
+
+def test_missing_record_still_says_not_exists(tmp_path):
+    """反面（正向对照的另一半）：真的没有这条，仍然要是 404「记录不存在」。
+
+    只测"坏了要报损坏"而不测"没有还是要说没有"，修法就可能变成"任何读不到的
+    情况都抛损坏" —— 那是把一条真话换成另一条假话。
+    （id 形状要过 `server._JID_RE` 那道闸：日期时间加六位十六进制，
+    否则量到的是 400「记录标识不合法」，跟要找的分支没关系。）
+    """
+    c = _client(tmp_path)
+    r = c.get("/api/history/20260101-000000-def456")
+    assert r.status_code == 404, (r.status_code, r.text)
+    assert "不存在" in r.text, r.text

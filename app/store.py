@@ -37,7 +37,7 @@ INDEX_NAME = "index.json"
 # 不重建的话列表永远显示不出平台，而这与「用户当时真没选平台」在界面上
 # 长得一模一样（参见审查基线里的「静默降级」）。_read_index_file 见到
 # 版本不符会走 _rebuild()，从 result.json/job.json 重新摘一次。
-INDEX_VERSION = 2
+INDEX_VERSION = 3   # v3：摘要加 `segment`（左栏搜索按细分领域筛要用它）
 
 # 墓碑只用于拦住「删除后仍在跑的作业」，不需要长期留存。
 # ⚠ 但它**有上限就等于有一个洞**：被挤掉的 id 若还有一趟在飞的作业，
@@ -168,14 +168,17 @@ class ArtifactStore:
 
         修复前 job.json 写了却**从未被读取** —— 失败作业在重启后从历史里
         彻底消失，用户既看不到这条记录也不知道它失败过。
+
+        ⚠ 文件**坏了要抛**，不许吞成 None：读不出来与"这条从来没有"是两件事。
+        以前这里 `except Exception: return None`，于是 job.json 损坏的记录走
+        `/api/history/{id}` 一路落到内存注册表兜底、兜不到就 404「记录不存在」——
+        而同一份产物的 result.json 坏了说的是「记录已损坏，无法读取」（`read_result`
+        就是不吞的）。同一种坏两种出口，界面就在替文件系统撒一个更省事的谎。
         """
         for d in self.find_dirs(jid):
             f = d / "job.json"
             if f.exists():
-                try:
-                    return json.loads(f.read_text(encoding="utf-8"))
-                except Exception:               # noqa: BLE001
-                    return None
+                return json.loads(f.read_text(encoding="utf-8"))
         return None
 
     #: 左栏一次最多取多少条已结束作业。**这个数只有这里一份**：
@@ -188,6 +191,16 @@ class ArtifactStore:
         idx = self._read_index_file()
         items = sorted(idx.values(), key=lambda x: x.get("created_at", ""), reverse=True)
         return items[:self.HISTORY_LIMIT if limit is None else limit]
+
+    def history_ids(self) -> set[str]:
+        """索引里**全部**记录 id（不受 `HISTORY_LIMIT` 截断）。
+
+        谁需要它：`/api/history` 判"这条是不是已经在盘上了"。用截断后的 100 条
+        当已知集，第 101~200 条已落盘的失败记录就会被当成"还在内存里跑的幽灵"
+        重发一份 `ghost: true` 摘要，界面据此写「失败 · 未落盘（重启后消失）」——
+        而它的 job.json 明明就在盘上（点开还读得出来）。
+        """
+        return set(self._read_index_file())
 
     def history_stats(self) -> dict:
         """界面上的「共 N 条 / 只翻了最近 M 条」要的是这一份，不是 `len(items)`。
@@ -364,6 +377,9 @@ class ArtifactStore:
             # 只补一条的话，已完成与未完成记录的副标题会差一格，而缺的这一格
             # 与「用户当时真没选平台」在界面上长得一模一样（静默降级）。
             "platform": p.get("platform"),
+            # 左栏的搜索读 `it.segment`（sessions.js），摘要不给这个键时"按细分领域搜"
+            # 永远搜不出东西 —— 搜索框旁边的说明还写着能搜（第 27 轮契约线 P3）。
+            "segment": p.get("segment"),
             "duration": p.get("duration"), "chars": c.get("chars_total"),
             "passed": c.get("passed"), "state": "done",
         }
@@ -375,6 +391,7 @@ class ArtifactStore:
             "id": snap.get("id"), "created_at": snap.get("created_at", ""),
             "pack": p.get("pack", ""), "topic": p.get("topic", ""),
             "platform": p.get("platform"),
+            "segment": p.get("segment"),
             "duration": p.get("duration"), "chars": None, "passed": None,
             "state": snap.get("state", "failed"), "error": snap.get("error"),
         }

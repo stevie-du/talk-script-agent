@@ -1280,6 +1280,29 @@ MUTATIONS = [
         ".banner.why > summary::after { content: \" ▾\"; font-size: var(--f-min); opacity: .6;",
         "tests/test_css_tokens.py -k does_not_inject",
     ),
+    # ── s27 组（第 19 批：坏文件要说坏了、摘要带上搜索读的键）──────
+    # 跑这一组：PYTHONUTF8=1 .venv/Scripts/python.exe _verify/mutate.py -k s27
+    (
+        "s27-1 read_job 把坏掉的 job.json 吞回 None（端点就说「记录不存在」）",
+        STORE_F,
+        "            f = d / \"job.json\"\n            if f.exists():\n                return json.loads(f.read_text(encoding=\"utf-8\"))",
+        "            f = d / \"job.json\"\n            if f.exists():\n                try:\n                    return json.loads(f.read_text(encoding=\"utf-8\"))\n                except Exception:\n                    return None",
+        "tests/test_server_hardening.py -k corrupt_job_json",
+    ),
+    (
+        "s27-2 已完成的摘要不给 segment（按细分领域搜永远是空态）",
+        STORE_F,
+        "            \"segment\": p.get(\"segment\"),\n            \"duration\": p.get(\"duration\"), \"chars\": c.get(\"chars_total\"),",
+        "            \"duration\": p.get(\"duration\"), \"chars\": c.get(\"chars_total\"),",
+        "tests/test_history_corruption.py -k segment",
+    ),
+    (
+        "s27-3 左栏放弃在跑的记录时只 detach，不落实态卡（气泡继续假装在写）",
+        SESS_F,
+        "    const wasLive = !!state.job && state.job.id === it.id;\n    const viewed = wasLive && dropLiveJobView();",
+        "    const wasLive = !!state.job && state.job.id === it.id;\n    if (wasLive) detachJob();\n    const viewed = false;",
+        "tests/test_job_state_vocabulary_consistency.py -k abandoning",
+    ),
 ]
 
 # 子集运行：`python _verify/mutate.py -k UI` 只跑名字里含 UI 的那几条。

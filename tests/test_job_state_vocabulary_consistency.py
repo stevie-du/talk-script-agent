@@ -208,6 +208,27 @@ def test_frontend_no_longer_copies_a_terminal_list():
     assert "function updateRow" in src, "源码被剥空了 —— 断言会空转，先修 _strip_comments"
 
 
+def test_abandoning_a_live_record_lands_a_terminal_view():
+    """左栏「放弃这次生成」删掉在跑的那条时，必须落实态卡，不能只 detach。
+
+    修前 `deleteSession` 只 `detachJob()`：轮询停了、左栏那行没了，右栏这颗气泡
+    还写着「文案撰写中 · 已用 N 秒」并且继续呼吸 —— 一个没有出口的假进行中态
+    （用户只能刷新）。终态那句话与点「停止」共用同一条收尾（jobs.js 的
+    onCancelled），所以这里盯"这条路被走过"，不再抄第二套文案。
+    """
+    src = _strip_comments(
+        (ROOT / "desktop" / "renderer" / "js" / "sessions.js").read_text(encoding="utf-8"))
+    i = src.index("async function deleteSession")     # 找不到就抛，判据不会静默变空
+    body = src[i:src.index("function closeGroupMenus", i)]
+    assert "dropLiveJobView(" in body, \
+        "放弃在跑的记录时没有落实态卡（只会 detach —— 气泡停在「撰写中」并继续呼吸）"
+    assert "detachJob()" not in body, \
+        "deleteSession 里不该再有裸 detachJob()：那正是停在呼吸骨架的那条路"
+    # 批量删组那条路同理（它过去也只 detach）
+    j = src.index("if (state.job && ids.includes(state.job.id))")
+    assert "dropLiveJobView(" in src[j:j + 120], "删整组时把在跑的那条又只 detach 了一遍"
+
+
 def test_quota_messages_still_carry_the_bucketing_marker():
     """409 分桶靠子串匹配，抛出方的文案必须仍然带着那个标记。
 

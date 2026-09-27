@@ -685,7 +685,7 @@ window.__addCount = 0;
         topic:'扶梯突然停了怎么办', platform:'抖音',
         duration:null, chars:null, passed:null, state:'writing' },
       { id:'s1', created_at: at(0, 10, 0), pack:'elevator',
-        topic:'家用电梯怎么挑？', platform:'小红书',
+        topic:'家用电梯怎么挑？', platform:'小红书', segment:'旧楼加装',
         duration:60, chars:42, passed:true, state:'done' },
       { id:'s3', created_at: at(1, 9, 15), pack:'elevator',
         topic:'电梯困人如何自救', platform:'抖音',
@@ -4210,6 +4210,20 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     text: document.getElementById('session-list').textContent };`);
   check("会话搜索能过滤出匹配项",
     searched.rows === 1 && /扶梯/.test(searched.text), JSON.stringify(searched));
+  // 按「细分领域」搜：`sessions.js` 的 matches() 读 `it.segment`，而摘要以前根本
+  // 不发这个键（app/store.py 两条 _summary_* 都没有它）—— 于是这一搜永远是空态，
+  // 界面上"能搜主题/行业/细分"的说明在骗人（第 27 轮契约线 P3）。
+  await evalIn(`const b = document.getElementById('sess-search');
+    b.value = '旧楼加装'; b.dispatchEvent(new Event('input', {bubbles:true})); return true;`);
+  await sleep(200);
+  const segSearched = await evalIn(`return {
+    rows: document.querySelectorAll('#session-list .sess-item').length,
+    ids: Array.prototype.slice.call(document.querySelectorAll('#session-list .sess-item'))
+           .map(function (r) { return r.dataset.id; }).join(',') };`);
+  // 行的可见文字里没有「旧楼加装」（它只在 segment 这一个字段里），所以"这一行还在"
+  // 本身就证明匹配走的是 segment：不发/不读这个键时结果是 0 行空态。
+  check("按细分领域搜能命中记录（摘要真的带 segment，不是搜索框在读一个不发的键）",
+    segSearched.rows === 1 && segSearched.ids === "s1", JSON.stringify(segSearched));
   await evalIn(`const b = document.getElementById('sess-search');
     b.value = '不存在的词'; b.dispatchEvent(new Event('input', {bubbles:true})); return true;`);
   await sleep(200);

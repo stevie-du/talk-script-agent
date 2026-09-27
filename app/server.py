@@ -995,7 +995,10 @@ def create_app(root: Path, token: str | None = None,
         失败记录也在里面。
         """
         items = pipeline.store.history()
-        known = {x["id"] for x in items}
+        # 「已经落盘」的判据必须是**全量索引**，不是截断后的那 100 条：
+        # 用截断集时第 101~200 条已落盘的失败记录会被当"内存里的幽灵"重发，
+        # 界面据此写「失败 · 未落盘（重启后消失）」，而它的 job.json 就在盘上。
+        known = pipeline.store.history_ids()
         skip = {"done", "cancelled"}
         running = []
         for snap in pipeline.snapshot_jobs(include_result=False):
@@ -1034,13 +1037,17 @@ def create_app(root: Path, token: str | None = None,
         """单条记录：优先返回产物；没有产物但有过作业（失败/取消）时返回作业摘要，
         这样界面能显示「这条为什么没出稿」而不是一句 404。"""
         jid = _safe_jid(jid)
+        # 读不出来（JSON 坏了）与"从来没有这条"必须是两种回答：以前只有
+        # result.json 走这条路（抛 → 500「记录已损坏」），job.json 那一半被
+        # store 吞成 None，于是失败记录的文件坏了界面会说「记录不存在」，
+        # 而它其实就在盘上（第 27 轮契约线 P1）。
         try:
             result = pipeline.store.read_result(jid)
+            snap = None if result is not None else pipeline.store.read_job(jid)
         except Exception as e:  # noqa: BLE001
             raise HTTPException(500, f"记录已损坏，无法读取：{e}")
         if result is not None:
             return result
-        snap = pipeline.store.read_job(jid)
         if snap is not None:
             return snap
         # 幽灵失败条目（P3-2）的兜底：job_dir 没建出来时 store 里什么都没有，

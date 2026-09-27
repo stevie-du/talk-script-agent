@@ -148,3 +148,58 @@ def test_old_index_without_platform_is_rebuilt(tmp_path):
         f"旧索引没被重建，platform 永远补不上：{items['p-3']}"
     # 重建后落盘的索引也必须是当前版本号，否则每次 history() 都白重建一次
     assert json.loads(idx.read_text(encoding="utf-8"))["version"] == INDEX_VERSION
+
+
+# ── 第 27 轮契约线：坏文件要说"坏了"，摘要要带搜索读的那个键 ──────────
+def test_read_job_propagates_corruption(tmp_path):
+    """`read_job` 不许把坏文件吞成 None —— 那样端点会说「记录不存在」。
+
+    `read_result` 从来不吞（端点回 500「记录已损坏」），两条路同一份坏两种出口，
+    界面就在替文件系统撒一个更省事的谎：文件明明在，只是读不出来。
+    """
+    import pytest
+
+    _put(tmp_path, "jobcorrupt", "job.json", "{ 这不是 json")
+    with pytest.raises(Exception):
+        Store(ROOT, data_dir=tmp_path).read_job("jobcorrupt")
+
+
+def test_read_job_still_returns_none_for_a_record_that_never_existed(tmp_path):
+    """反面：真的没有这条，还是回 None（端点据此才走内存兜底与 404）。"""
+    assert Store(ROOT, data_dir=tmp_path).read_job("nope-1") is None
+
+
+def test_both_summary_paths_carry_the_segment_the_search_reads():
+    """左栏搜索读 `it.segment`（sessions.js 的 `matches`），两条摘要路径都得给。
+
+    只补一条的话，"已完成"的记录能按细分搜到、"失败/在跑"的搜不到，
+    而缺的那一格与"用户当时真没选细分"在界面上长得一模一样。
+    """
+    params = {"topic": "家用电梯怎么挑", "platform": "抖音", "segment": "维保",
+              "duration": 60}
+    by_result = Store._summary_from_result(
+        {"id": "r1", "created_at": "2026-09-16T09:00:00", "pack": "elevator",
+         "params": params, "check": {"chars_total": 42}})
+    by_job = Store._summary_from_job(
+        {"id": "j1", "created_at": "2026-09-16T09:00:00",
+         "params": dict(params, pack="elevator"), "state": "failed"})
+    assert by_result["segment"] == "维保"
+    assert by_job["segment"] == "维保"
+
+
+def test_history_ids_cover_every_record_not_just_the_cap(tmp_path):
+    """`/api/history` 判"这条已在盘上"要用**全量** id，不能用截断后的 100 条。
+
+    用截断集时第 101~200 条已落盘的失败记录会被当"内存里的幽灵"重发一份
+    `ghost: true` 摘要，界面据此写「失败 · 未落盘（重启后消失）」—— 而它的
+    job.json 明明就在盘上（点开还读得出来）。
+    """
+    st = Store(ROOT, data_dir=tmp_path)
+    for i in range(105):
+        _put(tmp_path, f"rec-{i:03d}", "job.json",
+             json.dumps({"id": f"rec-{i:03d}", "state": "failed",
+                         "created_at": f"2026-09-16T09:{i % 60:02d}:00",
+                         "params": {"topic": f"第{i}条", "segment": "维保"}}))
+    assert len(st.history()) == st.HISTORY_LIMIT, "列表本身该是截断的"
+    assert len(st.history_ids()) == 105, "已知集不该跟着截断"
+    assert "rec-000" in st.history_ids()

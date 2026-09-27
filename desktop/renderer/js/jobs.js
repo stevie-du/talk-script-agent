@@ -375,7 +375,7 @@ function onFailed(snap, body, jobId) {
  *  措辞必须与 `why` 一致：产物到底落没落盘是**后端告诉我们的**，不是猜的。
  *  原先这里只有一条路 —— 不管三七二十一写「产物未落盘」，于是与同一秒里
  *  已经跑完、产物已经存好的那次停止正好说反。见 abort()。 */
-function onCancelled(body, why = "cancelled") {
+function onCancelled(body, why = "cancelled", opts = {}) {
   setBusy(false);
   stopTicker();
   setJob(null);
@@ -393,9 +393,24 @@ function onCancelled(body, why = "cancelled") {
     });
   }
   state.activeBody = null;
-  toast(why === "cancelled" ? "已停止本次生成" : "这次生成已中断");
+  if (!opts.silent) toast(why === "cancelled" ? "已停止本次生成" : "这次生成已中断");
   loadSessions();
   syncBusyAffordance();
+}
+
+/** 从别处（左栏「放弃这次生成」）收掉正在跑的生成气泡。
+ *
+ * 修前 `deleteSession` 只 `detachJob()`：轮询停了、左栏那行没了，右栏这颗气泡
+ * 还写着「文案撰写中 · 已用 N 秒」并且继续呼吸 —— 一个没有任何出口的假进行中态
+ * （用户只能刷新）。走 onCancelled 与点「停止」那条路同一份收尾（「已停止」标题 +
+ * 两个再试出口 + 头部状态），不另编第二套话。
+ * @return {boolean} 屏幕上有没有真的落了一张终态卡（在别的视图里删的就没有）。
+ */
+export function dropLiveJobView(opts = {}) {
+  const had = !!state.activeBody;
+  if (had) onCancelled(state.activeBody, "cancelled", opts);
+  detachJob();
+  return had;
 }
 
 // ── 停止 ────────────────────────────────────────────────────

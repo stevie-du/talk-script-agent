@@ -22,7 +22,7 @@ import { $, el, esc, fmtClock, fmtStamp, dayGroupKey, toast, bindOnce, sec } fro
 import { api } from "./api.js";
 import { state, setResult, detachJob } from "./store.js";
 import { setLeftFolded, syncBusyAffordance, gotoView } from "./ui.js";
-import { attach, openRecord } from "./jobs.js";
+import { attach, openRecord, dropLiveJobView } from "./jobs.js";
 import { BUSY_STATES } from "./progress.js";
 import { STATE_LABEL, VERDICT, verdictKey } from "./words.js";
 import { appConfirm } from "./overlays.js";
@@ -572,9 +572,13 @@ async function deleteSession(it) {
   if (!ok) return;
   try {
     await api.removeRecord(it.id);
-    if (state.job && state.job.id === it.id) detachJob();
+    // 正在跑的那条：右栏的气泡要有终态一句话（dropLiveJobView 走的是与点「停止」
+    // 同一条收尾），修前只 detachJob() —— 行消失了，气泡还停在「撰写中 · 已用 N 秒」
+    // 并且继续呼吸。它已经 toast 过「已停止本次生成」，这里就不重复报一句。
+    const wasLive = !!state.job && state.job.id === it.id;
+    const viewed = wasLive && dropLiveJobView();
     if (state.result && state.result.id === it.id) setResult(null);
-    toast(done ? "已删除" : "已放弃");
+    if (!viewed) toast(done ? "已删除" : "已放弃");
     loadSessions();
   } catch (e) {
     toast("删除失败：" + e.message, 3500);
@@ -609,7 +613,7 @@ async function deleteGroup(gid) {
   }
   // 当前开着的那条 / 正在跑的那条如果被抹掉了，界面要跟着松手，
   // 否则会留着一块指向已删记录的正文（与 deleteSession 同一套）。
-  if (state.job && ids.includes(state.job.id)) detachJob();
+  if (state.job && ids.includes(state.job.id)) dropLiveJobView({ silent: true });
   if (state.result && ids.includes(state.result.id)) setResult(null);
   const n = ids.length - failed.length;
   toast(failed.length
