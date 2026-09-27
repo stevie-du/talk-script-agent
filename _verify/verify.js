@@ -2451,8 +2451,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     closeDisabled: document.getElementById('pg-close').disabled,
     working: !document.getElementById('pg-working').classList.contains('hidden'),
     resultHidden: document.getElementById('pg-result').classList.contains('hidden') };`);
-  check("建包生成中：按钮报「已用 N 秒」、结果页在作业结束前不出现",
-    /生成中 · [0-9]+s/.test(pgRun.btn) && pgRun.disabled && pgRun.resultHidden,
+  check("建包生成中：按钮报「生成中 · 已用时长按中文单位」、结果页在作业结束前不出现",
+    /^生成中 · [0-9.]+ (秒|分|毫秒)…$/.test(pgRun.btn) && pgRun.disabled && pgRun.resultHidden,
     JSON.stringify(pgRun));
   check("建包生成中「取消」可用（同步长请求时代它被禁用以躲 P3-48 的竞态，作业化后理由消失）",
     pgRun.closeDisabled === false && pgRun.working, JSON.stringify(pgRun));
@@ -4752,7 +4752,8 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
              topic: r.querySelector('.sess-topic').textContent,
              dotCls: d.className, dotVis: getComputedStyle(d).visibility,
              dotW: +db.width.toFixed(1), dotL: +db.left.toFixed(1),
-             tip: r.title.split(String.fromCharCode(10)).join(' | ') };`);
+             tip: r.title.split(String.fromCharCode(10)).join(' | '),
+             tipParts: r.title.split(String.fromCharCode(10)) };`);
   check("会话行单行制：副标题与状态字整块没了，时刻只剩 HH:MM（不重复分组给的日期）",
     rowStruct.sub === null && rowStruct.state === null
       && rowStruct.anyState === 0
@@ -4771,8 +4772,27 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       && /小红书/.test(rowStruct.tip)
       && /[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}/.test(rowStruct.tip)
       && /已通过校验/.test(rowStruct.tip), rowStruct.tip);
-  check("悬浮提示补回了被挪走的时长与字数",
-    /60s/.test(rowStruct.tip) && /42 字/.test(rowStruct.tip), rowStruct.tip);
+  check("悬浮提示补回了被挪走的时长与字数（时长是中文单位，不是 60s）",
+    rowStruct.tipParts.some((p) => /^[0-9.]+ (秒|分|毫秒)$/.test(p))
+      && /42 字/.test(rowStruct.tip), JSON.stringify(rowStruct.tipParts));
+
+  // 单位只有一种读法（第 16 批：同一个钟以前在同一张卡里同时印成 ASCII 与中文）。
+  // 这三条在**纯函数**层量：DOM 上「几分」与「几十秒」只差在档位那一侧，档位规则
+  // 本身要在两侧（界面 fmtDur / 导出 _secs）各自钉住，否则改一档就静默漂移。
+  // ⚠ import() 在页面里拿到的是第二个模块实例 —— util.js 是无状态叶子模块，
+  //   只测纯函数是安全的；往这上面加"读 state"的判据就是错的用法。
+  const units = await evalIn(`return import("/js/util.js").then(u => ({
+      dur: [u.fmtDur(500), u.fmtDur(45000), u.fmtDur(59999), u.fmtDur(60000), u.fmtDur(90000)],
+      sec: [u.sec(2.5), u.sec(60), u.sec(90.4), u.sec(null)],
+      shot: [u.shotTime("0-4s", null), u.shotTime("3-8 s", null), u.shotTime("开场", null),
+             u.shotTime("", { start: 0, end: 5 }), u.shotTime("0.5-2s", null)],
+    }))`);
+  check("时长读法三档：毫秒 / 秒 / 分，整分不补「0 秒」",
+    units.dur.join("|") === "500 毫秒|45 秒|1 分|1 分|1 分 30 秒", JSON.stringify(units.dur));
+  check("秒数入参走同一档位（60 → 「1 分」，不是 60s 也不是「1 分 0 秒」）",
+    units.sec.join("|") === "2.5 秒|1 分|1 分 30 秒|", JSON.stringify(units.sec));
+  check("分镜「时间」列只换单位不改数，认不出形状原样留、没有才兜底",
+    units.shot.join("|") === "0–4 秒|3–8 秒|开场|0–5 秒|0.5–2 秒", JSON.stringify(units.shot));
 
   // 记号三档：ok 无记号 / no 红点 / run 灰点呼吸。
   // 色弱可用性靠「有没有记号」而不是「红还是绿」—— 这一栏只有异常才落东西。
@@ -4930,7 +4950,7 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .split("\n").filter(l => !/^\s*\/\//.test(l)).join("\n")
     .replace(/ \/\/ [^\n]*/g, "");
-  const ALIAS = ["合格", "已取消", "需人工确认"];
+  const ALIAS = ["合格", "已取消", "需人工确认", "重掷", "整体重生成", "整篇回炉"];
   const aliasHits = fs.readdirSync(JS_DIR).filter(f => f.endsWith(".js")).flatMap(f => {
     const src = stripJsComments(fs.readFileSync(path.join(JS_DIR, f), "utf8"));
     return ALIAS.filter(a => src.includes(a)).map(a => `${f} 里还有「${a}」`);
@@ -4941,6 +4961,11 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   const wordsSrc = fs.readFileSync(path.join(JS_DIR, "words.js"), "utf8");
   check("话术表本身带着这四个终态词（缺一条就是上一条空转）",
     ["已通过校验", "未通过校验", "没有校验结论", "已停止"].every(w => wordsSrc.includes(w)), "");
+  // 同一个动作也只有一个名字：「换一版」= 同主题同参数再生成一次。上面那三个别名
+  // （重掷 / 整体重生成 / 整篇回炉）与它同义，一个动作三个叫法会让人找第三个按钮。
+  const actionSrc = stripJsComments(fs.readFileSync(path.join(JS_DIR, "result.js"), "utf8"));
+  check("「换一版」是那个动作在屏幕上的唯一名字（别名一条都不许在）",
+    actionSrc.includes("换一版"), "结果页里已经搜不到「换一版」了");
   // 节奏列的机器码对账：包新加一个 cadence 而表里没词 → 源表原样印 `biweekly`（P1-6）。
   const cadCodes = [...new Set(fs.readdirSync(path.join(REPO_ROOT, "packs"))
     .flatMap(d => {

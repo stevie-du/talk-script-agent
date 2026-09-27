@@ -13,7 +13,7 @@
 //     于是卡片上的「N/配额 字」和顶部「字数」永远对不上，卡片会莫名标红。
 //  2. 导出 SRT / MD 从不 revokeObjectURL，每导出一次泄漏一个 Blob。
 
-import { $, el, esc, fmtText, sec, copyText, download, toast, wireTablist } from "./util.js";
+import { $, el, esc, fmtText, sec, shotTime, copyText, download, toast, wireTablist } from "./util.js";
 import { api } from "./api.js";
 import { state } from "./store.js";
 import { packLabel } from "./sessions.js";
@@ -77,7 +77,7 @@ export function renderResult(r, body, opts = {}) {
     r.params?.topic || "生成结果",
     // 用显示名而不是 slug：左栏早就显示「电梯」，这里却吐 `elevator` ——
     // 同一个包在同一个窗口的两处叫法不一致，用户会以为是两个东西。
-    `${packLabel(r.pack)} · ${r.params?.duration ?? "-"}s · ${r.params?.platform || ""}`,
+    `${packLabel(r.pack)} · ${sec(r.params?.duration) || "-"} · ${r.params?.platform || ""}`,
     verdict,
     VERDICT[vk].cls
   );
@@ -110,12 +110,12 @@ function renderHeader(r, ch, dev, hardN, opts) {
         <button class="ghost" data-act="reveal" title="在文件管理器中打开产物目录">打开文件夹</button>
         <button class="ghost" data-act="copy-json" title="复制结构化 JSON">JSON</button>
         <button class="ghost" data-act="rerun" title="用当前参数重新生成（结果基本一致）">重跑</button>
-        <button class="ghost" data-act="revary" title="同主题同参数重掷一次，换一种表达，保留本次为上一个版本">换一版</button>
+        <button class="ghost" data-act="revary" title="换一版：同主题同参数再生成一次，换一种表达，保留本次为上一个版本">换一版</button>
       </div>
     </div>
     <div class="res-metric-list">
       <span class="m-chip">${ch.chars_total ?? "-"}/${ch.target_total ?? "-"} 字</span>
-      <span class="m-chip">预计 ${ch.estimated_seconds ?? "-"}s / 目标 ${ch.duration_target ?? "-"}s</span>
+      <span class="m-chip">预计 ${ch.estimated_seconds ?? "-"} 秒 / 目标 ${ch.duration_target ?? "-"} 秒</span>
       <span class="m-chip ${devCls}">偏差 ${dev > 0 ? "+" : ""}${dev}%</span>
       <span class="m-chip ${hardN === 0 ? "good" : "bad"}">禁用词 ${hardN} 硬 · ${(ch.soft_hits || []).length} 待确认</span>
     </div>`;
@@ -321,16 +321,16 @@ function renderTempo(r) {
   // title 里的数字与 QUOTA_OVER_RATIO 同源，不另写一遍。
   return `<div class="page-card">
     <div class="res-top"><b class="card-title">节奏</b>
-      <span class="hint">目标 ${r.params?.duration ?? "-"}s · 预计 ${r.check?.estimated_seconds ?? "-"}s</span>
+      <span class="hint">目标 ${r.params?.duration ?? "-"} 秒 · 预计 ${r.check?.estimated_seconds ?? "-"} 秒</span>
       <span class="topics-grow"></span>
       <span class="m-chip ${over ? "bad" : "good"}"
             title="判定线：段字数超过该段配额的 ${Math.round((QUOTA_OVER_RATIO - 1) * 100)}% 以上才算超">
         ${over ? `${over} 段超配额三成以上` : "各段超配额都不到三成"}</span></div>
     <div class="tempo">${bar}</div>
     <div class="tempo-legend">
-      <span>开场钩子 ${hook.length} 段 ${sum(hook).toFixed(1)}s（${pct(sum(hook))}%）</span>
-      <span>要点 ${point.length} 段 ${sum(point).toFixed(1)}s（${pct(sum(point))}%）</span>
-      <span>结尾引导 ${cta.length} 段 ${sum(cta).toFixed(1)}s（${pct(sum(cta))}%）</span>
+      <span>开场钩子 ${hook.length} 段 ${sec(sum(hook))}（${pct(sum(hook))}%）</span>
+      <span>要点 ${point.length} 段 ${sec(sum(point))}（${pct(sum(point))}%）</span>
+      <span>结尾引导 ${cta.length} 段 ${sec(sum(cta))}（${pct(sum(cta))}%）</span>
     </div>
   </div>`;
 }
@@ -427,7 +427,7 @@ function renderSections(r, opts) {
     const fast = rate !== null && target > 0 && rate > target * 1.1;
     const rateChip = rate === null || !target ? ""
       : `<span class="rate${fast ? " over" : ""}"
-             title="这段念出来的语速（字数 ÷ 净口播秒数，已扣掉段间 0.5s 停顿）vs 本风格目标">`
+             title="这段念出来的语速（字数 ÷ 净口播秒数，已扣掉段间 0.5 秒停顿）vs 本风格目标">`
         + `${rate.toFixed(1)} 字/秒 · 目标 ${target}</span>`;
     const marks = tellWords(r, i);
     const markTip = marks.length
@@ -444,8 +444,8 @@ function renderSections(r, opts) {
       <div class="card-foot">
         ${markTip}
         <button class="ghost rw"${opts.rwOk ? "" : " disabled"} title="${opts.rwOk
-          ? "单段重写：只改这一段并重跑校验，不整篇回炉"
-          : "单段重写只在刚生成的那条上可用；历史记录请用「换一版」整体重生成"}">✎ 重写本段</button>
+          ? "单段重写：只改这一段并重新校验，不动其他段"
+          : "单段重写只在刚生成的那条上可用；历史记录请用「换一版」"}">✎ 重写本段</button>
         <input class="rw-feedback" placeholder="给这段的修改意见（可选），回车提交">
       </div>`;
     const input = card.querySelector(".rw-feedback");
@@ -617,8 +617,8 @@ function renderDataPane(r) {
 function renderFollowups(r, opts) {
   const chips = [];
   const dur = Number(r.params?.duration) || 60;
-  if (dur > 30) chips.push({ label: `压缩到 30s`, act: "duration", value: 30 });
-  if (dur < 90) chips.push({ label: `扩到 90s`, act: "duration", value: 90 });
+  if (dur > 30) chips.push({ label: `压缩到 ${sec(30)}`, act: "duration", value: 30 });
+  if (dur < 90) chips.push({ label: `扩到 ${sec(90)}`, act: "duration", value: 90 });
   const platforms = opts.platforms || [];
   const other = platforms.find(p => p !== r.params?.platform);
   if (other) chips.push({ label: `换平台：${other}`, act: "platform", value: other });
@@ -662,7 +662,7 @@ export function renderStoryboard(r) {
     const tm = (r.timings || [])[i];
     const vo = sh.voiceover || r.sections?.[i]?.text || "";
     return `<tr>
-      <td>${esc(sh.time || (tm ? `${tm.start}-${tm.end}s` : ""))}</td>
+      <td>${esc(shotTime(sh.time, tm))}</td>
       <td>${esc(sh.shot || "")}</td><td>${esc(vo)}</td>
       <td>${esc(sh.subtitle || "")}</td><td>${esc(sh.sfx || "")}</td>
       <td>${esc(sh.note || "")}</td></tr>`;
@@ -740,7 +740,7 @@ export function renderStopped(body, opts = {}) {
     <div class="banner info">${esc(title)}。已产生的 token 不会退回，产物未落盘。</div>
     <div class="fail-actions">
       <button class="ghost" data-act="retry">用同样的参数再来一次</button>
-      <button class="ghost" data-act="revary">换个表达重掷</button>
+      <button class="ghost" data-act="revary">换个表达（换一版）</button>
     </div>`;
   body.querySelector('[data-act="retry"]').onclick = () => opts.onRetry?.();
   body.querySelector('[data-act="revary"]').onclick = () => opts.onRevary?.();
@@ -779,7 +779,7 @@ function bindActions(body, r, opts) {
 export function resultMarkdown(r) {
   const p = r.params || {};
   // 字段可能缺失（旧产物 / 不同包），不能让文档里出现 "undefined"
-  const meta = [p.duration && `${p.duration}s`, p.platform, p.style, p.persona]
+  const meta = [p.duration && sec(p.duration), p.platform, p.style, p.persona]
     .filter(Boolean).join(" / ");
   // 交付物上写**显示名**，不写目录 slug：这一行会跟着 md 走到用户的笔记/协作工具里，
   // 「elevator」对读的人没有意义（界面上早就叫「电梯行业包」，两处不一致＝两个东西）。
@@ -790,7 +790,7 @@ export function resultMarkdown(r) {
   (r.sections || []).forEach((s, i) => {
     const tm = r.timings?.[i];
     const label = s.type === "point" ? `要点${++pi}` : TYPE_LABEL[s.type];
-    lines.push(`**【${label}】** ${tm ? `${tm.start}-${tm.end}秒` : ""}`);
+    lines.push(`**【${label}】** ${tm ? `${tm.start}-${tm.end} 秒` : ""}`);
     // ／ 是停顿符：导出成一行会让整段挤成一坨，读的人找不到断句
     lines.push(String(s.text || "").replace(/／/g, "\n"), "");
   });
@@ -799,7 +799,7 @@ export function resultMarkdown(r) {
   const stats = [
     ch.chars_total != null
       ? `字数 ${ch.chars_total}${ch.target_total != null ? "/" + ch.target_total : ""} 字` : "",
-    ch.estimated_seconds != null ? `预估 ${ch.estimated_seconds}s` : "",
+    ch.estimated_seconds != null ? `预估 ${sec(ch.estimated_seconds)}` : "",
     ch.deviation_pct != null ? `偏差 ${ch.deviation_pct}%` : "",
     // 「没有结论」也要写进文档：改前 `passed` 缺失时这一项被整条省掉，
     // 屏幕上明写着「没有校验结论」，拿走的那份却像没有这回事（P3-8 同一类）。

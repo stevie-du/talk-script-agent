@@ -468,7 +468,7 @@ class LLMClient:
                     # 通知与真正要睡的秒数同源：夹逼与下限都算在内，两边共用同一个值
                     wf = 0.0 if should_abort else 0.2
                     wait = self._clamped_wait(wait, deadline, wf)
-                    note = (f"上游限流(429)，{self._fmt_wait(wait)}s 后重试" if e.code == 429
+                    note = (self._rate_limit_note(wait) if e.code == 429
                             else f"接口返回 {e.code}")
                     self._notify(on_retry, note, attempt + 1, attempts)
                     self._interruptible_sleep(wait, should_abort, deadline, floor=wf)
@@ -498,7 +498,7 @@ class LLMClient:
                                                   if rate_limited else None))
                 wf = 0.0 if should_abort else 0.2      # 通知与实睡同一个口径
                 wait = self._clamped_wait(wait, deadline, wf)
-                note = (f"上游限流(429)，{self._fmt_wait(wait)}s 后重试" if rate_limited
+                note = (self._rate_limit_note(wait) if rate_limited
                         else f"接口返回 {resp.status_code}")
                 self._notify(on_retry, note, attempt + 1, attempts)
                 self._interruptible_sleep(wait, should_abort, deadline, floor=wf)
@@ -655,13 +655,23 @@ class LLMClient:
         return httpx.Timeout(float(read), connect=CONNECT_TIMEOUT)
 
     @staticmethod
+    def _rate_limit_note(wait: float) -> str:
+        """限流重试通知的唯一出处： wording 与秒数都只在这一处拼。
+
+        流式与非流式两条重试分支各写一遍同样的句子，改字面时必漏一处 ——
+        而这条线守的是「界面说的秒数 = 线程真要睡的秒数」，两处口径不同
+        就是界面在说谎（同 `_fmt_wait` / `_clamped_wait` 的存在理由）。
+        """
+        return f"上游限流(429)，{LLMClient._fmt_wait(wait)} 秒后重试"
+
+    @staticmethod
     def _clamped_wait(seconds: float, deadline: float | None = None,
                       floor: float = 0.0) -> float:
         """把一次等待夹到"剩余作业预算"里 —— 只此一处，别在调用点各算各的。
 
-        界面上那句「60s 后重试」与线程真正睡的秒数必须是同一个数：批次 10 把
+        界面上那句「60 秒后重试」与线程真正睡的秒数必须是同一个数：批次 10 把
         退避夹进预算之后，通知仍按**未夹**的 `wait` 生成（第 6 轮复核抓到），
-        于是用户看到"60s 后重试"而实际 2 秒就继续了。
+        于是用户看到"60 秒后重试"而实际 2 秒就继续了。
 
         `floor` 管另一半：预算已到点时夹出来是 0 —— 有作业闸门可问时这正是对的
         （下一次尝试前的闸门会以「预算用尽」收工）；但**没有闸门可问**的调用点，
@@ -682,9 +692,10 @@ class LLMClient:
 
     @staticmethod
     def _fmt_wait(seconds: float) -> str:
-        """退避秒数的展示：不到 1 秒也要说真数，不许印成「0s」。
+        """退避秒数的展示：不到 1 秒也要说真数，不许印成 0。
 
-        第 9 轮实测：`:.0f` 遇上 floor 的 0.2 就印「0s 后重试」，界面写着 0 秒、
+        只管数字，单位（「秒」）由 `_rate_limit_note` 那一处加 —— 句子只有一本账。
+        第 9 轮实测：`:.0f` 遇上 floor 的 0.2 就印成 0，界面写着 0 秒、
         实际睡了 0.2 秒 —— 与这组函数存在的理由（通知与实睡同源）正好相反。
         """
         w = max(0.0, float(seconds))
@@ -692,7 +703,7 @@ class LLMClient:
         # 银行家舍入，3.5 反而印 4）—— 通知与实睡同源是这组函数存在的理由，
         # 差 0.5 秒也是差。所以整数才去掉小数点，带小数的一律原样说。
         # 只能**向上**取整（第 12 轮实测）：`round(90.06,1)` 给 90.0，而等待随后还会被
-        # `_clamped_wait` 抬到下限 0.2 → 通知说 90s、实睡 90.2s。少说一次等待时长正是
+        # `_clamped_wait` 抬到下限 0.2 → 通知说 90 秒、实睡 90.2 秒。少说一次等待时长正是
         # 这组函数存在的理由的反面；429 的 Retry-After 语义是"至少等这么久"。
         s = f"{math.ceil(w * 10) / 10:.1f}"
         # ceil 之后任何 0<w<0.05 都会得到 "0.1"（宁可多说，也绝不说 0），

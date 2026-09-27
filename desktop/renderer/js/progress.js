@@ -9,7 +9,7 @@
 // 修复前这里只有一个扁平的 pstep 列表：没有耗时、没有总时长，失败时也只把
 // 错误塞进同一行，用户看不出「哪一步失败、花了多久」。
 
-import { esc } from "./util.js";
+import { esc, fmtDur } from "./util.js";
 import { state } from "./store.js";
 import { STATE_LABEL } from "./words.js";
 
@@ -34,13 +34,7 @@ export const BUSY_STATES = new Set([
 ]);
 
 
-function fmtDur(ms) {
-  if (ms === null || ms === undefined || ms < 0) return "";
-  const s = ms / 1000;
-  if (s < 1) return `${Math.round(ms)}ms`;
-  if (s < 60) return `${s.toFixed(1)}s`;
-  return `${Math.floor(s / 60)}m${Math.round(s % 60)}s`;
-}
+// 步骤耗时与状态行的「已用」共用 util.fmtDur —— 同一张卡里两处读法必须同档同单位。
 
 /** 一次模型调用的 token 账（P3-15）。
  *
@@ -176,9 +170,7 @@ export function stopTicker() {
 function fmtElapsed(snap) {
   const started = snap?.created_at ? new Date(snap.created_at).getTime() : null;
   if (!started || isNaN(started)) return "";
-  const s = Math.max(0, (Date.now() - started) / 1000);
-  if (s < 60) return `已用 ${s.toFixed(0)} 秒`;
-  return `已用 ${Math.floor(s / 60)} 分 ${Math.round(s % 60)} 秒`;
+  return `已用 ${fmtDur(Math.max(0, Date.now() - started))}`;
 }
 
 /** 流式思考：只显示尾部（后端已截取），并自动滚到底。

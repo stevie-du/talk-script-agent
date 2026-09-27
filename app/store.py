@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import re
 import threading
 from pathlib import Path
 
@@ -380,6 +382,54 @@ class ArtifactStore:
 
 # ── 人类可读产物 ────────────────────────────────────────────
 
+def _secs(v) -> str:
+    """秒数的中文读法：<10 留一位小数，其余先取整再换档（≥60 走「分」）。
+
+    与前端 `desktop/renderer/js/util.js` 的 `sec()` 是同一口径的两份实现
+    （一边是界面、一边是导出物）。导出 md 是交付物：同一条时长界面写「60 秒」、
+    导出写「60s」，读的人要先做一次心算才敢确定是同一个数。
+    `Math.round` 是四舍五入，Python 的 `round` 是银行家舍入（2.5→2），
+    所以这里显式 `floor(x+0.5)` 对齐两边 —— 否则同一个数两边能差 1。
+    """
+    n = float(v)
+    if n != n or n < 0:                       # NaN / 缺省值：宁可空着也不说假数
+        return ""
+    if n < 10:
+        return f"{math.floor(n * 10 + 0.5) / 10:g} 秒"
+    # 先取整再判档：59.6 秒两边都该读「1 分」（先判档会留成「60 秒」，
+    # 与前端 fmtDur 的 round-then-tier 差一格 —— 同一份产物两侧不同数）。
+    total = math.floor(n + 0.5)
+    if total < 60:
+        return f"{total} 秒"
+    # 整分不补「0 秒」：与前端同一口径，60 秒读作「1 分」。
+    return f"{total // 60} 分 {total % 60} 秒" if total % 60 else f"{total // 60} 分"
+
+
+def _shot_time(raw, tm: dict) -> str:
+    """分镜表「时间」列：只换单位、不改数。
+
+    `time` 由模型自己排（分镜可以比段落更细，引擎不校验它），而 `rules/
+    output-template.md` 教的写法是 `0-3s` —— 原样上屏就是同一份交付物里两种
+    读法：段落标题写「0-5 秒」、分镜表写「0-3s」，第三方包还照着模板一直交 ASCII。
+    认不出这个形状就**原样保留**，不猜内容；完全没有 `time` 才退回引擎算好的段落轴。
+    """
+    s = str(raw or "").strip()
+    if not s:
+        if tm.get("start") is None or tm.get("end") is None:
+            return ""
+        return f"{tm['start']}-{tm['end']} 秒"
+    m = re.match(r"^(\d+(?:\.\d+)?)[-–~](\d+(?:\.\d+)?)\s*s$", s)
+    if m:
+        return f"{_num(m.group(1))}-{_num(m.group(2))} 秒"
+    return s
+
+
+def _num(s: str) -> str:
+    """`0.0` → `0`、`3.5` → `3.5`：模型给的小数尾零不该出现在交付物里。"""
+    f = float(s)
+    return str(int(f)) if f == int(f) else f"{f:g}"
+
+
 def render_script_md(result: dict) -> str:
     """把结果渲染成可读的 Markdown（脚本.md）。
 
@@ -392,7 +442,7 @@ def render_script_md(result: dict) -> str:
     lines = [f"# 口播脚本：{p['topic']}",
              f"- 行业包：{result['pack']}{'（草稿）' if result.get('pack_draft') else ''}"
              f"　细分：{p.get('segment', '')}　受众：{p.get('audience', '')}",
-             f"- {int(p['duration'])}s / {p.get('platform', '')} / {p.get('style', '')}"
+             f"- {_secs(p['duration'])} / {p.get('platform', '')} / {p.get('style', '')}"
              f" / {p.get('persona', '')}",
              "", "## 口播文案", ""]
     names = {"hook": "开场钩子", "cta": "结尾引导"}
@@ -423,7 +473,7 @@ def render_script_md(result: dict) -> str:
         verdict = "没有校验结论"
     lines += ["---",
               f"字数 {ch['chars_total']}/{ch.get('target_total') or '-'} 字 · "
-              f"预估 {ch['estimated_seconds']}s · 偏差 {ch['deviation_pct']:+.1f}% · {verdict}", ""]
+              f"预估 {_secs(ch['estimated_seconds'])} · 偏差 {ch['deviation_pct']:+.1f}% · {verdict}", ""]
     if result.get("placeholders"):
         lines += ["> 含占位事实：" + "、".join(result["placeholders"]) + "，请补充后再发布。", ""]
     if result.get("quota_degraded"):
@@ -452,7 +502,7 @@ def render_script_md(result: dict) -> str:
                   "|---|---|---|---|---|---|"]
         for i, shot in enumerate(result["storyboard"]):
             tm = result["timings"][i] if i < len(result["timings"]) else {}
-            t = shot.get("time") or (f"{tm.get('start')}-{tm.get('end')}s" if tm else "")
+            t = _shot_time(shot.get("time"), tm)
             # 口播列：分镜没给 voiceover 时按对应段落补齐，不再留空
             vo = shot.get("voiceover") or (
                 result["sections"][i]["text"] if i < len(result["sections"]) else "")

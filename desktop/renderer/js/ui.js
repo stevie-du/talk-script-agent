@@ -6,7 +6,7 @@
 //  · 全局 change / keydown 监听只注册一次（修复前「新建行业包完成」会二次
 //    boot()，导致 Ctrl+\ 连翻两次等于没翻）。
 
-import { $, $$, el, esc, toast, bindOnce } from "./util.js";
+import { $, $$, el, esc, toast, bindOnce, sec } from "./util.js";
 import { state, setBusy, on, emit, setGenParam, resetGenParams } from "./store.js";
 import { api } from "./api.js";
 import { updateStale, autoGrowTopic, getParam, stopAllBackgroundJobs } from "./jobs.js";
@@ -379,7 +379,7 @@ function renderQuickParams() {
     for (const opt of def.options) {
       // ⚠ opt 来自 pack.yaml（可导入第三方包）：el() 第三参数是 innerHTML，
       //   不 esc 就是 XSS。同函数上面模型下拉（260 行）就是这么写的。
-      const o = el("option", "", key === "duration" ? `${esc(String(opt))}s` : esc(String(opt)));
+      const o = el("option", "", key === "duration" ? esc(sec(opt)) : esc(String(opt)));
       o.value = String(opt);
       s.appendChild(o);
     }
@@ -743,7 +743,7 @@ export function setCfgHint() {
   const parts = [];
   if (pack) parts.push(pack.display_name || pack.name);
   if (getParam("segment")) parts.push(getParam("segment"));
-  if (getParam("duration")) parts.push(getParam("duration") + "s");
+  if (getParam("duration")) parts.push(sec(getParam("duration")));
   if (getParam("style")) parts.push(getParam("style"));
   const nav = $("btn-open-settings");
   if (nav) nav.title = `打开设置：${parts.join(" · ") || "生成偏好"}`;

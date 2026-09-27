@@ -18,7 +18,7 @@
 // 每条都落的记号等于没有记号（对照 Claude / Linear 的侧栏）。
 // 失败记录能点开看原因 —— 后端会把 job.json 摘要返回给 /api/history/{id}。
 
-import { $, el, esc, fmtClock, fmtStamp, dayGroupKey, toast, bindOnce } from "./util.js";
+import { $, el, esc, fmtClock, fmtStamp, dayGroupKey, toast, bindOnce, sec } from "./util.js";
 import { api } from "./api.js";
 import { state, setResult, detachJob } from "./store.js";
 import { setLeftFolded, syncBusyAffordance, gotoView } from "./ui.js";
@@ -373,7 +373,7 @@ function updateRow(row, it) {
   // 硬拼会印出 undefined；filter(Boolean) 把空项整段丢掉，不留空行。
   const tip = [it.topic || "", meta];
   if (done) {
-    if (it.duration != null) tip.push(`${it.duration}s`);
+    if (it.duration != null) tip.push(sec(it.duration));
     if (it.chars != null) tip.push(`${it.chars} 字`);
   }
   row.title = tip.filter(Boolean).join("\n");

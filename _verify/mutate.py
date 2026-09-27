@@ -25,6 +25,7 @@ TOPICS_F = ROOT / "desktop/renderer/js/topics.js"
 HEAD_F = ROOT / "desktop/renderer/js/head.js"
 SESS_F = ROOT / "desktop/renderer/js/sessions.js"
 RESULT_F = ROOT / "desktop/renderer/js/result.js"
+UTIL_F = ROOT / "desktop/renderer/js/util.js"
 SETTINGS_F = ROOT / "desktop/renderer/js/settings.js"
 JOBSJS_F = ROOT / "desktop/renderer/js/jobs.js"
 STORE_F = ROOT / "app/store.py"
@@ -854,8 +855,9 @@ MUTATIONS = [
     (
         "s18-4 悬停说明又替后端宣布「作业已释放」（从没核过的事实）",
         RESULT_F,
-        "          : \"单段重写只在刚生成的那条上可用；历史记录请用「换一版」整体重生成\"}",
-        "          : \"历史记录不可局部重写（后台作业已释放），可用「换一版」整体重生成\"}",
+        # 锚点跟的是第 15 批改后的那句话（原文案尾巴上的「整体重生成」被收成「换一版」）
+        '          : "单段重写只在刚生成的那条上可用；历史记录请用「换一版」"}',
+        '          : "历史记录不可局部重写（后台作业已释放），可用「换一版」"}',
         "verify:",
     ),
     (
@@ -1157,6 +1159,66 @@ MUTATIONS = [
         "  if (!(now - lastCheckAt >= interval)) return false; // 含时钟回拨（差为负）→ 不查\n",
         "",
         "node:desktop/updater-core.test.js",
+    ),
+    # ── s24 组（第 16 批：单位只有一种读法）─────────────────────
+    # 跑这一组：PYTHONUTF8=1 .venv/Scripts/python.exe _verify/mutate.py -k s24
+    # 六条里只有 s24-2 要走整网（它量的是页面里的纯函数），其余四条走 pytest
+    # 的静态扫描与真值表 —— 秒级，不必为一条单位漂移等四分钟。
+    (
+        "s24-1 sec() 换回 ASCII 秒（静态扫描 + 界面档位同时失守的那个写法）",
+        UTIL_F,
+        "  return `${Math.round(v * 10) / 10} 秒`;",
+        "  return `${Math.round(v * 10) / 10}s`;",
+        "tests/test_unit_vocabulary.py -k no_site_renders",
+    ),
+    (
+        "s24-2 fmtDur 整分补回「0 秒」（60 秒的脚本读成「1 分 0 秒」）",
+        UTIL_F,
+        "  return s % 60 ? `${m} 分 ${s % 60} 秒` : `${m} 分`;",
+        "  return `${m} 分 ${s % 60} 秒`;",
+        "verify:",
+    ),
+    (
+        "s24-3 _secs 先判档再取整（两侧同一份时长能差 1 秒：59.6 走「60 秒」）",
+        STORE_F,
+        "    if total < 60:",
+        "    if n < 60:",
+        "tests/test_unit_vocabulary.py -k secs_matches",
+    ),
+    (
+        "s24-4 分镜「时间」列原样吐模型的 0-4s（交付物里两种读法并存）",
+        STORE_F,
+        '        return f"{_num(m.group(1))}-{_num(m.group(2))} 秒"',
+        "        return s",
+        "tests/test_unit_vocabulary.py -k shot_time",
+    ),
+    (
+        "s24-5 「N 秒后重试」在流式分支又抄一份（改字面必漏另一条）",
+        LLM_F,
+        "                    note = (self._rate_limit_note(wait) if e.code == 429",
+        '                    note = (f"上游限流(429)，{self._fmt_wait(wait)} 秒后重试" if e.code == 429',
+        "tests/test_unit_vocabulary.py -k rate_limit_note",
+    ),
+    (
+        "s24-6 建议胶囊把档位写死成 ASCII（30s / 90s 与下拉里的「30 秒」不是一个读法）",
+        RESULT_F,
+        "  if (dur > 30) chips.push({ label: `压缩到 ${sec(30)}`, act: \"duration\", value: 30 });",
+        "  if (dur > 30) chips.push({ label: `压缩到 30s`, act: \"duration\", value: 30 });",
+        "tests/test_unit_vocabulary.py -k no_site_renders",
+    ),
+    (
+        "s24-7 建包按钮报「生成中…」而不报已经走了多久（重新指回中文单位那条判据的正对照）",
+        SETTINGS_F,
+        "      : `生成中 · ${fmtDur(Date.now() - t0)}…`;",
+        "      : \"生成中…\";",
+        "verify:",
+    ),
+    (
+        "s24-8 设置导航提示用 + \"s\" 拼秒（扫描的第三种形状，第 27 轮抓到的真漏网）",
+        UI_F,
+        '  if (getParam("duration")) parts.push(sec(getParam("duration")));',
+        '  if (getParam("duration")) parts.push(getParam("duration") + "s");',
+        "tests/test_unit_vocabulary.py -k no_site_renders",
     ),
 ]
 

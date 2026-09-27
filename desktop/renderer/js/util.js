@@ -109,6 +109,20 @@ export function download(filename, text, mime = "text/plain;charset=utf-8") {
  *  于是「屏幕上看到的」与「拿走的」是两份文本，读屏与截图都跟着错（P3-8）。
  *  现在只在**没有**这个前缀时才补（模型偶尔只写 `{{主力机型载重}}`，
  *  那一种要标出来，否则用户不知道那对花括号是"这里缺事实"而不是排版符号）。 */
+/** 时长只有一种读法（第 8 轮审查：同一个钟以前在同一张卡里印成 `45.0s`、
+ *  `已用 45 秒`、`12s` 三种，两档单位的切换规则还各写一遍）。
+ *  入参是**毫秒**（与 Date 打交道的地方都是 ms，省掉调用点各自 ×1000）；
+ *  单位一律中文：<1s 走「毫秒」，<60s 走「秒」，以上走「M 分 S 秒」。 */
+export function fmtDur(ms) {
+  if (ms === null || ms === undefined || ms < 0 || isNaN(ms)) return "";
+  if (ms < 1000) return `${Math.round(ms)} 毫秒`;
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s} 秒`;
+  // 整分不补「0 秒」：60 秒的脚本读作「1 分」，「1 分 0 秒」是表格不是话。
+  const m = Math.floor(s / 60);
+  return s % 60 ? `${m} 分 ${s % 60} 秒` : `${m} 分`;
+}
+
 export function fmtText(s) {
   let h = esc(s);
   h = h.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
@@ -120,12 +134,30 @@ export function fmtText(s) {
   return h;
 }
 
+/** 秒数 → 界面上唯一的那一种读法（第 8 轮审查：同一个钟以前同时印成 `45.0s`、
+ *  `已用 45 秒`、`12s` 三种，两档单位的切换规则还在三处各写一遍）。
+ *  <10 秒保留一位小数（段时长「1.5 秒」有意义），其余都交给 fmtDur 的档位。 */
 export function sec(v) {
-  return (v === undefined || v === null) ? "" : `${Math.round(v * 10) / 10}s`;
+  if (v === undefined || v === null || isNaN(v) || v < 0) return "";
+  if (v >= 10) return fmtDur(v * 1000);
+  return `${Math.round(v * 10) / 10} 秒`;
+}
+
+/** 分镜表「时间」列：只换单位、不改数（与 app/store.py 的 `_shot_time` 同口径）。
+ *  模型自己排的 `time` 形如 `0-3s`（`rules/output-template.md` 就是这么教的），
+ *  原样上屏就与段落标题的「0-5 秒」分成两种读法；认不出这个形状就原样保留，不猜。 */
+export function shotTime(raw, tm) {
+  const s = String(raw == null ? "" : raw).trim();
+  if (!s) return tm ? `${tm.start}–${tm.end} 秒` : "";
+  const m = s.match(/^(\d+(?:\.\d+)?)[-–~](\d+(?:\.\d+)?)\s*s$/);
+  if (m) {
+    const num = (x) => String(Number(x));
+    return `${num(m[1])}–${num(m[2])} 秒`;
+  }
+  return s;
 }
 
 export function pad2(n) { return String(n).padStart(2, "0"); }
-
 /** 时刻 HH:MM。
  *
  *  会话行只到「时分」为止，不带日期前缀 —— 行已经被分组标签按天归好类了，

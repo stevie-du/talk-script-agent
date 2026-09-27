@@ -819,7 +819,7 @@ def test_retry_note_quotes_the_wait_it_will_actually_sleep(monkeypatch):
     """被预算夹过的等待，通知里必须报夹过之后的秒数。
 
     批次 10 把退避夹进作业预算之后，通知仍按未夹的 `wait` 生成：
-    上游 `Retry-After: 60` 而预算只剩几秒时，界面写「60s 后重试」、实际几秒就继续，
+    上游 `Retry-After: 60` 而预算只剩几秒时，界面写「60 秒后重试」、实际几秒就继续，
     等于界面在说谎（第 6 轮复核抓到）。
     """
     import re
@@ -847,10 +847,10 @@ def test_retry_note_quotes_the_wait_it_will_actually_sleep(monkeypatch):
                      deadline=started + 3.0,
                      on_retry=lambda note, i, n: notes.append(note))
     waited = _t.time() - started
-    # ⚠ 这一族正则需要**整份一致**：`_fmt_wait` 现在会印小数（2.5s），这里若还写
+    # ⚠ 这一族正则需要**整份一致**：`_fmt_wait` 现在会印小数（2.5 秒），这里若还写
     #   (\d+) 就会把 2.4 读成 4 —— 通知是对的、判据把它读错了（第 11 轮复核 P2；
     #   同文件 :1022 那处已经是 [\d.]+，两处各写一份就是两本账）。
-    quoted = [float(m) for n in notes for m in re.findall(r"([\d.]+)s 后重试", n)]
+    quoted = [float(m) for n in notes for m in re.findall(r"([\d.]+) 秒后重试", n)]
     assert quoted, notes
     assert max(quoted) <= 3, f"通知说等 {quoted} 秒，而预算只剩 3 秒：{notes}"
     assert waited < 8, f"实际睡了 {waited:.1f}s，通知与预算都对不上"
@@ -1004,7 +1004,7 @@ def test_floor_applies_without_a_deadline_and_the_note_never_says_zero(tmp_path,
         而 `ping()` 恰是**唯一**不带 deadline 也不带闸门的重试入口：
         `Retry-After: 0` + retries=10 → 11 个请求 0.001s 发完、一次都没睡。
         也就是说第 8 轮那条下限在它唯一为之而写的调用点上贡献为 0（同族第二次安慰剂）。
-      - 修完之后 `:.0f` 又把 0.2 印成「0s 后重试」：界面写着 0 秒、实际睡了 0.2 秒。
+      - 修完之后 `:.0f` 又把 0.2 印成「0 秒后重试」：界面写着 0 秒、实际睡了 0.2 秒。
     """
     import re
     import httpx
@@ -1029,8 +1029,8 @@ def test_floor_applies_without_a_deadline_and_the_note_never_says_zero(tmp_path,
     gaps = [b - a for a, b in zip(stamps, stamps[1:])]
     assert len(stamps) == 3, stamps
     assert min(gaps) >= 0.15, f"重试之间没有下限（安慰剂形态）：{gaps}"
-    quoted = [float(m) for n in notes for m in re.findall(r"([\d.]+)s 后重试", n)]
-    assert quoted and min(quoted) > 0, f"通知里印着 0s：{notes}"
+    quoted = [float(m) for n in notes for m in re.findall(r"([\d.]+) 秒后重试", n)]
+    assert quoted and min(quoted) > 0, f"通知里印着 0 秒：{notes}"
     for q, g in zip(quoted, gaps):
         assert abs(q - g) <= 0.35, f"通知说 {q}s、实际隔了 {g:.3f}s：{notes}"
 
@@ -1320,7 +1320,7 @@ def test_a_structurally_bad_model_output_never_quotes_internal_class_names(monke
 
 
 def test_the_wait_note_never_prints_zero_for_a_nonzero_wait():
-    """0.03 秒印成「0s 后重试」是 `_fmt_wait` 存在的理由反过来的样子（第 11 轮复核 P2）。
+    """0.03 秒印成「0 秒后重试」是 `_fmt_wait` 存在的理由反过来的样子（第 11 轮复核 P2）。
 
     向上取整成 0.1 也是一种谎，所以这里只要求两件事：非零进 → 非零出，且能原样读回。
     """
@@ -1441,9 +1441,9 @@ def _whole_second_regex_offenders(sources):
 
     所以这一版换成**行为判据**，与调用形状彻底解耦：
     1. 候选 = 任意字符串常量（文档串除外），**以及**整条都是字面量的 `+` 拼接
-       （`r"(\d+)" + "s 后重试"` 这种任何一片单独看都不完整）；f-string 的字面片段
+       （`r"(\d+)" + " 秒后重试"` 这种任何一片单独看都不完整）；f-string 的字面片段
        本身就是常量，天然在候选里；
-    2. 拿它去搜真实通知原文「上游限流(429)，4.7s 后重试」，取第一个捕获组（没有组就用整段）；
+    2. 拿它去搜真实通知原文「上游限流(429)，4.7 秒后重试」，取第一个捕获组（没有组就用整段）；
     3. 读出来的值必须含 `4.7`。只认整数的写法在这里必然读到 `7` —— 不管它写成
        `(\d+)`、`([0-9]+)`、`(\d{1,2})`、`[0-9][0-9]*` 还是 `\d+`。
     编译不过的（不是正则）跳过；压根搜不中的（不是读这句通知的）跳过。
@@ -1453,7 +1453,7 @@ def _whole_second_regex_offenders(sources):
     import ast
     import re as _re
     import warnings
-    sample = "上游限流(429)，4.7s 后重试"
+    sample = "上游限流(429)，4.7 秒后重试"
     out = []
     for name, src in sources:
         # 样例里有故意写坏的正则（`"\d"` 没加 r 前缀），那份 SyntaxWarning 是**样例**的
@@ -1470,7 +1470,7 @@ def _whole_second_regex_offenders(sources):
                     and isinstance(body[0].value.value, str):
                 docs.add(id(body[0].value))               # 文档串是散文，不是代码
         # 候选 = 每个字符串常量，**加上**用 `+` 把字面量拼起来的模式（第 19 轮自查：
-        # `"(\d+)" + "s 后重试"` 这种写法任何一片单独看都不含完整判据，只看常量会漏）。
+        # `"(\d+)" + " 秒后重试"` 这种写法任何一片单独看都不含完整判据，只看常量会漏）。
         # f-string 的字面片段本身就是 ast.Constant，走的是同一条路。
         cands = [(n.lineno, n.value) for n in ast.walk(tree)
                  if isinstance(n, ast.Constant) and isinstance(n.value, str)
@@ -1483,7 +1483,7 @@ def _whole_second_regex_offenders(sources):
                 # 只有"跨片才拼得出完整判据"的那种才需要额外报一次；某一片自己就
                 # 同时含「后重试」与数字类的情况，常量那一轮已经报过了（去重的判据
                 # 必须与常量那一轮的过滤一致 —— 写成"这片含 后重试 就算"会漏：
-                # 单独一片 `s 后重试` 不算候选，拼出来的 `(\d+)s 后重试` 才是）
+                # 单独一片 ` 秒后重试` 不算候选，拼出来的 `(\d+) 秒后重试` 才是）
                 leaves = _literal_leaves(n)
                 if all(not ("后重试" in (p or "")
                             and ("\\d" in p or "[0-9]" in p)) for p in leaves):
@@ -1516,8 +1516,8 @@ def test_no_test_reads_the_retry_note_with_a_whole_second_regex():
     # 守卫自证（本项目对"只能变绿的守卫"过敏）：坏例必须被抓、好例必须放过，
     # 而且**换成 indirect 写法照样抓**（第 16 轮的靶子就是这里只认一种调用形状）。
     bs = chr(92)
-    bad = "(" + bs + "d+)s 后重试"
-    demo = ('"""文档串里写 (' + bs + 'd+)s 后重试 不算代码"""\n'
+    bad = "(" + bs + "d+) 秒后重试"
+    demo = ('"""文档串里写 (' + bs + 'd+) 秒后重试 不算代码"""\n'
             + "import re\n"
             + 're.findall(r"' + bad + '", t)\n'
             + 'pat = r"' + bad + '"\n'
@@ -1525,10 +1525,10 @@ def test_no_test_reads_the_retry_note_with_a_whole_second_regex():
             + 'R = re.compile(r"' + bad + '")\n'
             + 'R.fullmatch(t)\n'
             + 're.match(pattern=r"' + bad + '", string=t)\n'
-            + 're.finditer(r"([0-9][0-9]*)s 后重试", t)\n'
-            + 're.search(r"(' + bs + 'd+)" + "s 后重试", t)\n'
-            + 're.findall(r"([' + bs + 'd.]+)s 后重试", t)\n'
-            + 'note = "60s 后重试"\n')
+            + 're.finditer(r"([0-9][0-9]*) 秒后重试", t)\n'
+            + 're.search(r"(' + bs + 'd+)" + " 秒后重试", t)\n'
+            + 're.findall(r"([' + bs + 'd.]+) 秒后重试", t)\n'
+            + 'note = "60 秒后重试"\n')
     caught = _whole_second_regex_offenders([("demo.py", demo)])
     assert len(caught) == 6, (
         f"应抓到 6 条（4 种 indirect 形状 + [0-9][0-9]* + 用 + 拼出来的模式），实抓 {caught}")

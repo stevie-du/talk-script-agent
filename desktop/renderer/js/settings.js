@@ -5,7 +5,7 @@
 // 顺序是「打开设置 → 改 URL → Ctrl+, 关掉 → Ctrl+, 再开 → 输入没了」。
 // 现在按字段记 dirty，只有没被改过的输入框才回填。
 
-import { $, $$, el, esc, toast, bindOnce } from "./util.js";
+import { $, $$, el, esc, toast, bindOnce, fmtDur } from "./util.js";
 import { api } from "./api.js";
 import { state, emit } from "./store.js";
 import { closeOverlays, appConfirm } from "./overlays.js";
@@ -39,7 +39,7 @@ let packgenJob = null;
 // 不能只靠一次性 textContent 赋值 —— 秒表每 1s 会重写一次按钮（实测覆盖）。
 let packgenCanceling = false;
 // 正在跑的那趟建包的**界面刷新函数**（runPackgen 的 tick）。
-// 「取消」失败时要靠它把按钮从「取消中…」改回「生成中 · Ns…」：那行字归 tick 所有
+// 「取消」失败时要靠它把按钮从「取消中…」改回「生成中 · N 秒…」：那行字归 tick 所有
 // （秒表每秒重写一次），在别处赋 textContent 只会被下一拍盖掉 —— 修复前正是这样，
 // 于是取消失败后按钮永远停在「取消中…」并且 disabled，用户既停不掉它也回不去（P3-10）。
 let packgenTick = null;
@@ -314,7 +314,7 @@ function renderStatus(c) {
       : !c.active_model ? `有 ${n} 个模型，但都没有启用${env}`
         : c.api_key_set
           ? `已配置 Key · 当前启用 ${c.model}（共 ${n} 个模型）· 重试 ${c.retries} 次`
-            + ` / 超时 ${c.timeout}s${env}`
+            + ` / 超时 ${c.timeout} 秒${env}`
           : `当前启用的模型还没配 API Key${env}`;
 }
 
@@ -854,7 +854,7 @@ export const bindSettings = bindOnce(function bindSettings() {
   function cancelPackgen() {
     if (!packgenJob) return false;
     // 乐观反馈：作业要到下一拍轮询（≤0.9s）才落到 cancelled，
-    // 按钮一直写着「生成中 · Ns…」会让人以为没点上而再点一次。
+    // 按钮一直写着「生成中 · N 秒…」会让人以为没点上而再点一次。
     packgenCanceling = true;
     $("pg-run").textContent = "取消中…";
     api.cancel(packgenJob).catch(e => {
@@ -1145,7 +1145,7 @@ async function runPackgen() {
     // note 必须留着：秒表每秒重写一次这一行，不带 note 就会把上一拍的进度冲掉。
     if (n !== undefined) note = n;
     btn.textContent = packgenCanceling ? "取消中…"
-      : `生成中 · ${Math.round((Date.now() - t0) / 1000)}s…`;
+      : `生成中 · ${fmtDur(Date.now() - t0)}…`;
     if (working) working.textContent = note || PACKGEN_HINT;
   };
   packgenTick = tick;                       // 交出去：取消失败时要靠它收回「取消中…」（P3-10）
