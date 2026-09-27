@@ -6,7 +6,7 @@
 // 现在按字段记 dirty，只有没被改过的输入框才回填。
 
 import { $, $$, el, esc, toast, bindOnce, fmtDur } from "./util.js";
-import { api } from "./api.js";
+import { api, POLL_MS, POLL_GRACE_MS } from "./api.js";
 import { state, emit } from "./store.js";
 import { closeOverlays, appConfirm } from "./overlays.js";
 // ui.js 与 settings.js 互相引用，但引用的都是**函数声明**（会被提升），
@@ -571,6 +571,11 @@ function fillDraftIntoForm() {
  *   会出现「启用的那条永远高亮、切到别的条目看不出选中了谁」。
  */
 function selectModel(id) {
+  // 动这四个框之前，先把**当前新增态**里的内容收进草稿。
+  // 修前 captureDraft() 全文件零调用点：220 行那道「停在添加态」的守卫手里永远
+  // 没有草稿可回填，于是填好的请求地址与 Key 在切回来那一刻被 selectModel 的
+  // else 分支原地清空，而 addModeSub() 那句「切走再回来还在」从来没机会出现过。
+  captureDraft();
   editingId = id || "";
   const models = (lastCfg || {}).models || [];
   const m = models.find(x => x.id === id) || null;
@@ -621,6 +626,7 @@ function selectModel(id) {
 /** 取消编辑：回到「选中当前启用那条」的状态（不再有弹窗可关）。 */
 function closeModelDialog() {
   addingNew = false;
+  clearDraft();     // 点了「取消」就是不要这份内容，下次进「添加」要是一张干净的新表单
   const act = ((lastCfg || {}).models || []).find(x => x.active);
   selectModel(act ? act.id : "");
   // 空列表下取消「添加」→ 回到空态（否则表单空着、也没有模型）
@@ -660,6 +666,7 @@ async function saveModelDialog() {
     // 编辑一条非启用模型时跳走，用户会以为没保存上。
     const savedId = (out && out.id) || editingId;
     addingNew = false;       // 保存成功 → 离开「添加」态（列表已有模型了）
+    clearDraft();            // 草稿已经落成配置，再留着就是一份"看起来还没存"的幽灵内容
     await refreshAll();
     selectModel(savedId);
     toast(`已保存模型「${model}」`);
@@ -902,8 +909,11 @@ export const bindSettings = bindOnce(function bindSettings() {
   // 现在空态只负责说明，入口统一在这里 —— 但 `addingNew` 仍需要：
   // 空列表时右列显示的是空态，点了这颗要能把表单换出来。
   $("st-add-model").onclick = () => {
-    addingNew = true;
+    // ⚠ 顺序有讲究：先换表单、后置 addingNew。反过来会让 selectModel 开头的
+    //   captureDraft 把「正在编辑的那条模型」当成新增草稿收走 —— 那正是修前
+    //   「我填的东西没了，而且标题说我在编辑」的镜像版本。
     selectModel("");
+    addingNew = true;
     renderLlmEmpty(lastCfg || {});
   };
   $("md-cancel").onclick = closeModelDialog;
@@ -1106,15 +1116,16 @@ const PACKGEN_HINT = "模型正在生成行业结构：细分领域、受众、�
 /** 轮询建包作业直到终态；每轮把作业上的过程信息搬到界面（思考字数 / 接口重试）。
  *  `api.job` 抛错就往外抛：404 = 引擎重启、作业随内存释放，由调用方落到错误横幅。 */
 async function pollPackgen(jid, onTick) {
-  // 客户端截止：与后端 JOB_BUDGET_SECONDS=1200（20 分钟）对齐取 30 分钟宽限。
+  // 客户端截止：宽于后端作业预算一档（两个数都在 api.js，见 POLL_GRACE_MS）。
   // 作业"丢了但没报错"（引擎重启、作业表清空）时这个循环没有别的出口。
   // 超时抛错，由 runPackgen 的 catch 落 `finish()` 恢复按钮态 + 常驻错误横幅。
   const t0 = Date.now();
   for (;;) {
-    if (Date.now() - t0 > 1800000) {
-      throw new Error("等待超时（30 分钟）——作业状态未知，可能仍在后台运行，请刷新页面确认结果");
+    if (Date.now() - t0 > POLL_GRACE_MS) {
+      throw new Error(`等待超时（${Math.round(POLL_GRACE_MS / 60000)} 分钟）`
+        + "——作业状态未知，可能仍在后台运行，请刷新页面确认结果");
     }
-    await new Promise(r => setTimeout(r, 900));
+    await new Promise(r => setTimeout(r, POLL_MS));
     const s = await api.job(jid);
     if (s.state === "packing" || s.state === "queued") {
       const retry = (s.steps || []).filter(x => x.key === "retry").pop();

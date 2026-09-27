@@ -8,7 +8,7 @@
 //  · 每次生成都清空输入框且不留版本，点「换一版」看起来像结果被覆盖。
 
 import { $, toast } from "./util.js";
-import { api, ApiError, modelSetupGap, MODEL_SETUP_REPLY } from "./api.js";
+import { api, ApiError, modelSetupGap, MODEL_SETUP_REPLY, JOB_BUDGET_MS, POLL_MS } from "./api.js";
 import { state, setJob, setResult, setBusy, detachJob, stopPolling } from "./store.js";
 import * as T from "./thread.js";
 import { placeholderBody, renderProgress, startTicker, stopTicker, BUSY_STATES } from "./progress.js";
@@ -20,7 +20,6 @@ import { openSettings } from "./settings.js";
 import { closeOverlays } from "./overlays.js";
 import { setLanding, syncBusyAffordance, refreshGate } from "./ui.js";
 
-const POLL_MS = 900;
 const POLL_MAX_MISSES = 3;
 // 重写的等待上限。**必须不短于后端对同一个操作给出的上限**，否则两边说的是相反的话：
 //   · 单次模型请求 timeout = 180s（app/config.py DEFAULT），retries = 2
@@ -31,8 +30,8 @@ const POLL_MAX_MISSES = 3;
 //   · 作业级总闸是 app/jobs.py 的 `JOB_BUDGET_SECONDS = 1200`，超了后端自己判 failed。
 // 修复前这里是 240000（4 分钟）—— 比**一个阶段**的最坏值还短，于是前端先报
 // 「重写失败」，而后端在那之后把改写结果写进了 result.json。
-// 取 1200000 与后端的作业预算对齐：真正的超时语义由后端作业状态给出。
-const REWRITE_TIMEOUT_MS = 1200000;
+// 与后端作业预算同一本账（api.js 的 JOB_BUDGET_MS）：真正的超时语义由后端作业状态给出。
+const REWRITE_TIMEOUT_MS = JOB_BUDGET_MS;
 
 
 // ── 参数 ────────────────────────────────────────────────────

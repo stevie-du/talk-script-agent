@@ -4950,7 +4950,7 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .split("\n").filter(l => !/^\s*\/\//.test(l)).join("\n")
     .replace(/ \/\/ [^\n]*/g, "");
-  const ALIAS = ["合格", "已取消", "需人工确认", "重掷", "整体重生成", "整篇回炉"];
+  const ALIAS = ["合格", "已取消", "需人工确认", "重掷", "整体重生成", "整篇回炉", "精修包"];
   const aliasHits = fs.readdirSync(JS_DIR).filter(f => f.endsWith(".js")).flatMap(f => {
     const src = stripJsComments(fs.readFileSync(path.join(JS_DIR, f), "utf8"));
     return ALIAS.filter(a => src.includes(a)).map(a => `${f} 里还有「${a}」`);
@@ -6072,6 +6072,49 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   // 硬套一个名字会把「这家」说成「那家」。
   check("服务商按请求地址推断（未命中已知表就显示主机名，写在条目的小字里）",
     /DeepSeek/.test(added.sub2 || ""), added.sub2);
+
+  // ── 添加模型的未保存草稿：切走再回来必须还在（P0，第 27 轮抓到 captureDraft 零调用点）──
+  // 走的是真路径：点「添加模型」→ 填四格 → 点左导航去「行业包」→ 点回「模型接口」。
+  // 修前 setPane 里那道「停在添加态」的守卫手里永远没有草稿（captureDraft 没人调），
+  // 于是切回来的那一刻四格被 selectModel 的 else 分支原地清空、标题翻成「编辑模型」。
+  await evalIn(`document.getElementById('st-add-model').click(); return true;`);
+  await sleep(200);
+  await evalIn(`document.getElementById('md-model').value = 'glm-4.7';
+    document.getElementById('md-name').value = '草稿不存';
+    document.getElementById('md-baseurl').value = 'https://draft.example/v1';
+    document.getElementById('md-apikey').value = 'sk-draft'; return true;`);
+  await evalIn(`document.querySelector('.stg-nav-item[data-pane="packinfo"]').click(); return true;`);
+  await sleep(300);
+  await evalIn(`document.querySelector('.stg-nav-item[data-pane="llm"]').click(); return true;`);
+  await sleep(300);
+  const draft = await evalIn(`return {
+    model: document.getElementById('md-model').value,
+    url: document.getElementById('md-baseurl').value,
+    key: document.getElementById('md-apikey').value,
+    title: document.getElementById('md-title').textContent,
+    sub: document.getElementById('md-sub').textContent };`);
+  check("填一半的「添加模型」草稿切走再回来还在，标题也仍说「添加模型」",
+    draft.model === "glm-4.7" && draft.url === "https://draft.example/v1"
+      && draft.key === "sk-draft" && draft.title === "添加模型", JSON.stringify(draft));
+  // 说明行那句「切走再回来还在」以前是**永远渲染不出来**的死话。
+  check("草稿在的时候，说明行真的告诉用户这是未保存的",
+    /未保存/.test(draft.sub), draft.sub);
+  // 取消 = 不要这份内容：清空草稿并落回当前启用那条（否则下次进「添加」会看到幽灵草稿）
+  await evalIn(`document.getElementById('md-cancel').click(); return true;`);
+  await sleep(300);
+  const cancelForm = await evalIn(`return {
+    url: document.getElementById('md-baseurl').value,
+    title: document.getElementById('md-title').textContent };`);
+  check("点「取消」之后草稿作废，不再在下次进「添加模型」时冒出来",
+    cancelForm.title === "编辑模型"
+      && !/draft\.example/.test(cancelForm.url), JSON.stringify(cancelForm));
+  await evalIn(`document.getElementById('st-add-model').click(); return true;`);
+  await sleep(250);
+  const noGhost = await evalIn(`return document.getElementById('md-baseurl').value;`);
+  check("再点一次「添加模型」是干净的新表单（取消过的草稿没有复活、也没把别条模型的值当草稿）",
+    noGhost === "", JSON.stringify(noGhost));
+  await evalIn(`document.getElementById('md-cancel').click(); return true;`);
+  await sleep(200);
 
   // 启用：必须真的调切换接口，而不是只把开关点亮
   await evalIn(`document.querySelectorAll('#llm-list .pl-item')[1]

@@ -695,7 +695,7 @@ export function renderCompliance(r) {
     ["回炉/重写记录", (r.revisions || []).length
       ? r.revisions.map((v, i) => `第${i + 1}次：${esc(v.action || v.feedback || "单段重写")}`).join("；")
       : "无"],
-    ["行业包状态", r.pack_draft ? `⚠ 草稿包，内容需人工校对` : `<span class="ok">✅ 精修包</span>`],
+    ["行业包状态", r.pack_draft ? `⚠ 草稿包，内容需人工校对` : `<span class="ok">✅ 已校对</span>`],
   ];
   return `<div class="tbl-wrap"><table>
     <thead><tr><th class="col-item">检查项</th><th>结果</th></tr></thead>

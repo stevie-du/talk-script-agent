@@ -40,6 +40,11 @@ def _ascii_sec_hit(line: str) -> bool:
     return bool(_ASCII_SEC.search(line) or _ASCII_SEC_CONCAT.search(line))
 
 
+# 写死的分钟数：`分钟` 前面紧跟数字。从常量算出来的写法尾巴是 `} 分钟` / `) 分钟`，
+# 不会命中 —— 这条判据管的是"后端预算一改，界面还在报一个不存在的时限"。
+_HARD_MINUTES = re.compile(r"[0-9]+\s*分钟")
+
+
 # ── 1. 纯函数真值表 ──────────────────────────────────────────
 def test_secs_matches_the_ui_tiers():
     """档位与前端 `fmtDur` 完全一致：<10 一位小数，其余先取整再换档。
@@ -168,3 +173,41 @@ def test_engine_and_renderer_agree_on_the_unit_word():
     assert " 秒" in util and " 分" in util and " 毫秒" in util
     body = (ROOT / "app" / "store.py").read_text(encoding="utf-8")
     assert "_secs" in body and "_shot_time" in body
+
+
+# ── 等待时长这类"同一个数写两遍"的账（第 27 轮契约线抓到的那一族）────────
+def _renderer_code() -> str:
+    return "\n".join(_strip_js_comments(p.read_text(encoding="utf-8"))
+                     for p in sorted(JS_DIR.glob("*.js")))
+
+
+def _count(src: str, literal: str) -> int:
+    return src.count(literal)
+
+
+def test_job_timing_numbers_are_written_once():
+    """后端作业预算、轮询间隔、客户端兜底截止在渲染层各只许出现一次（都在 api.js）。
+
+    改前是 `1200000` ×1 + `1800000` ×2 + `900` ×3，而界面上「20 分钟 / 30 分钟」
+    两种说法分散在三处 prose —— 后端把预算一改，界面就在报一个不存在的时限。
+    现在 `POLL_GRACE_MS` 是 `JOB_BUDGET_MS × 1.5` 算出来的，分钟数也从它推。
+    """
+    code = _renderer_code()
+    api_js = _strip_js_comments((JS_DIR / "api.js").read_text(encoding="utf-8"))
+    assert _count(code, "1200000") == 1, "作业预算的字面毫秒数只能有一份（在 api.js）"
+    assert _count(code, "1800000") == 0, "兜底截止必须由 JOB_BUDGET_MS × 倍率算出来，不许写死"
+    assert _count(code, "POLL_MS = 900") == 1, "轮询间隔只能定义一次"
+    assert _count(api_js, "* 1.5") == 1, "宽限倍率改了要在这里改，别回到调用点各写一个数"
+    # 分钟数一律从常量算：`Math.round(POLL_GRACE_MS / 60000)} 分钟` 里 `分钟` 前面
+    # 是插值收尾的 `}`，而写死的说法（「等待超时（30 分钟）」）前面是数字。
+    hard = [ln.strip()[:70] for ln in code.split("\n") if _HARD_MINUTES.search(ln)]
+    assert not hard, f"这些字符串把分钟数写死了，后端预算一改就在报不存在的时限：{hard}"
+
+
+def test_timing_scan_has_a_positive_control():
+    """上面那条的计数器必须真的会数（把两种写法塞进假源码，都要被抓出来）。"""
+    fake = ("const P = 900;\nif (t > 1800000) throw new Error(\"等待超时（30 分钟）\");\n"
+            + "const R = 1200000;\ntest(`已等待 ${Math.round(G / 60000)} 分钟`);\n")
+    assert _count(fake, "1800000") == 1 and _count(fake, "1200000") == 1
+    hits = [ln for ln in fake.split("\n") if _HARD_MINUTES.search(ln)]
+    assert len(hits) == 1 and "30 分钟" in hits[0], hits   # 算出来的那一条不许被抓

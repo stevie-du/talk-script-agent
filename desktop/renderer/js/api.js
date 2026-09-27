@@ -9,6 +9,17 @@
 const qs = new URLSearchParams(location.search);
 export const TOKEN = qs.get("token") || "";
 
+// ── 与引擎打交道的三个时间常量（第 27 轮：同一个数原来写在这三处各一遍）──────
+/** 后端一笔作业的总闸 = `app/jobs.py` 的 `JOB_BUDGET_SECONDS`。
+ *  界面上任何「已等待 N 分钟」的话都从这里算 —— 以前 20 分钟与 30 分钟两种说法
+ *  分散在两个字面量加三处 prose，改后端那个数时没有人会想起来同步。 */
+export const JOB_BUDGET_MS = 1200000;
+/** 客户端轮询的兜底截止：宽一档（1.5×）。后端到点自己判 failed，这一档只兜
+ *  「作业丢了但没报错」（引擎重启、作业表被清）那一种没有出口的循环。 */
+export const POLL_GRACE_MS = Math.round(JOB_BUDGET_MS * 1.5);
+/** 作业状态轮询间隔。 */
+export const POLL_MS = 900;
+
 export class ApiError extends Error {
   /** @param message 服务端 `detail` 里那句**人话**，原样保留（界面直接显示它）
    *  @param status  HTTP 状态码 —— 只够分「哪一类」，不够分「哪一件事」

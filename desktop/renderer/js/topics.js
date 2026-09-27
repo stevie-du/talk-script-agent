@@ -14,7 +14,7 @@
 //  3. **「去生成」不自动发送**：一次生成几十秒真金白银，要留改参数的机会。
 //     它只做三件事：切回会话视图、写 `#topic`、把参数填进 `state.genParams`。
 import { $, esc, sleep, toast, bindOnce, wireTablist } from "./util.js";
-import { api } from "./api.js";
+import { api, POLL_MS, POLL_GRACE_MS } from "./api.js";
 import { state, on } from "./store.js";
 import { gotoView, refreshGate, setParam } from "./ui.js";
 import { setViewHead } from "./head.js";
@@ -349,14 +349,14 @@ async function awaitJob(id) {
     st.textContent = text;
     st.className = "hint" + (err ? " cfg-err" : "");
   };
-  // 客户端截止：后端有 JOB_BUDGET_SECONDS=1200（20 分钟作业预算），这里取 30
-  // 分钟宽于它。没有上限时，引擎"作业丢了但没报错"（进程被杀后重启、作业表被
+  // 客户端截止：宽于后端作业预算一档（两个数都在 api.js，见 POLL_GRACE_MS）。
+  // 没有上限时，引擎"作业丢了但没报错"（进程被杀后重启、作业表被
   // 清）会让这个循环永远转下去，用户看到「抓取中」常驻到天荒地老。
   const t0 = Date.now();
   for (;;) {
-    if (Date.now() - t0 > 1800000) {
+    if (Date.now() - t0 > POLL_GRACE_MS) {
       say("");
-      toast("抓取状态未知（已等待 30 分钟），请手动刷新或重试", 5000);
+      toast(`抓取状态未知（已等待 ${Math.round(POLL_GRACE_MS / 60000)} 分钟），请手动刷新或重试`, 5000);
       return null;
     }
     let snap;
@@ -375,7 +375,7 @@ async function awaitJob(id) {
       if (snap.state === "failed") toast(`抓取失败：${snap.error || "未知原因"}`, 3600);
       return snap;
     }
-    await sleep(900);
+    await sleep(POLL_MS);
   }
 }
 

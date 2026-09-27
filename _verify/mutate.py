@@ -1220,6 +1220,43 @@ MUTATIONS = [
         '  if (getParam("duration")) parts.push(getParam("duration") + "s");',
         "tests/test_unit_vocabulary.py -k no_site_renders",
     ),
+    # ── s25 组（第 17 批：草稿接线、动作名、等待时长一份账）──────────
+    # 跑这一组：PYTHONUTF8=1 .venv/Scripts/python.exe _verify/mutate.py -k s25
+    (
+        "s25-1 换表单前不收草稿（captureDraft 回到零调用点那条死代码）——填一半切走就没了",
+        SETTINGS_F,
+        "  captureDraft();\n  editingId = id || \"\";",
+        "  editingId = id || \"\";",
+        "verify:",
+    ),
+    (
+        "s25-2 「添加模型」先翻标记再换表单（把正在编辑那条的值当成新增草稿收走）",
+        SETTINGS_F,
+        "    selectModel(\"\");\n    addingNew = true;",
+        "    addingNew = true;\n    selectModel(\"\");",
+        "verify:",
+    ),
+    (
+        "s25-3 草稿的反面又改口叫「精修包」（同一件事第二个名字）",
+        RESULT_F,
+        "<span class=\"ok\">✅ 已校对</span>",
+        "<span class=\"ok\">✅ 精修包</span>",
+        "verify:",
+    ),
+    (
+        "s25-4 建包轮询的兜底截止写回裸毫秒数（后端预算一改就在等一个不存在的时限）",
+        SETTINGS_F,
+        "    if (Date.now() - t0 > POLL_GRACE_MS) {",
+        "    if (Date.now() - t0 > 1800000) {",
+        "tests/test_unit_vocabulary.py -k job_timing_numbers",
+    ),
+    (
+        "s25-5 抓取超时的话把分钟数写死（「30 分钟」与算出来的那份分叉）",
+        TOPICS_F,
+        "      toast(`抓取状态未知（已等待 ${Math.round(POLL_GRACE_MS / 60000)} 分钟），请手动刷新或重试`, 5000);",
+        "      toast(\"抓取状态未知（已等待 30 分钟），请手动刷新或重试\", 5000);",
+        "tests/test_unit_vocabulary.py -k job_timing_numbers",
+    ),
 ]
 
 # 子集运行：`python _verify/mutate.py -k UI` 只跑名字里含 UI 的那几条。
