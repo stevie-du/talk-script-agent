@@ -51,11 +51,18 @@ function assertPrivateExcluded() {
   }
 }
 
-async function beforePack() {
+// ⚠ 执行那半边（`execFileSync`）过去零测试覆盖：它一坏就是「构建照常成功、
+//   安装包里没有解释器」，而那句话要等用户装完启动才炸（正是本文件开头
+//   写的那件事）。所以把执行器做成**可注入**的参数：生产传真的、
+//   测试传一个记录调用的假货 —— 于是「有没有真的去构建运行时」
+//   与「命令行长什么样」都能在单测里断言，不必真跑一次构建。
+async function beforePack(run = defaultRunner) {
   assertPrivateExcluded();
-  execFileSync(process.execPath,
-               [path.join(__dirname, 'build-python-runtime.mjs')],
-               { stdio: 'inherit' });
+  run(path.join(__dirname, 'build-python-runtime.mjs'));
+}
+
+function defaultRunner(script) {
+  execFileSync(process.execPath, [script], { stdio: 'inherit' });
 }
 
 module.exports = beforePack;

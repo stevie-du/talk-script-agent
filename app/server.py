@@ -61,22 +61,26 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from . import config as _config
 from .config import (DEFAULT_MODEL, ensure_config_template, load_config,
                      load_raw_models, public_models, save_config, save_models)
 from .fileio import write_atomic
 from .intel import (IntelError, IntelSource as _IntelSourceDC, add_ignored,
-                    count_ignored_today, today as intel_today)
+                    count_ignored_today, load_brief, remove_ignored,
+                    today as intel_today)
 from .jobs import StateConflict
 
 log = logging.getLogger(__name__)
 from .knowledge import Pack, PackBrokenError, PackError, list_packs
 from .llm import LLMClient
 from .packseed import PRIVATE_DIR_NAME, seed_bundled_packs
-from .packimport import PackImportError, _NAME_RE, delete_pack, import_pack
+from .packimport import (MAX_ZIP_BYTES, PackImportError, _NAME_RE,
+                         delete_pack, import_pack)
 from .pipeline import MAX_CONCURRENT_JOBS, Pipeline
-from .schemas import (GenerateRequest, IntelIgnoreRequest, IntelPackRequest,
+from .schemas import (GenerateRequest, IntelBriefRequest, IntelIgnoreRequest,
+                      IntelPackRequest,
                       PackCreateRequest, RewriteSegmentRequest)
-from .security import (LOOPBACK_HOSTS, TOKEN_HEADER, allowed_hostnames,
+from .security import (TOKEN_HEADER, allowed_hostnames,
                        new_token, origin_allowed, token_ok)
 
 FALLBACK_VERSION = "0.0.0-dev"
@@ -282,12 +286,15 @@ class BaseUrlError(ValueError):
     """地址**非法**（必须拒掉，不能只是警告）。"""
 
 
-def check_base_url(raw: str) -> list[str]:
-    """校验一条模型请求地址，返回**警告**列表（可能为空）。
+def check_base_url(raw: str) -> None:
+    """校验一条模型请求地址；不合法就抛 `BaseUrlError`，合法就什么都不返回。
 
     这台机器是用户自己的，本地 LLM 走 `http://192.168.x.x:9200/v1` 是正常用法，
-    所以这里刻意做两件事的分工：**危险/写进去必然出错的** reject，
-    **只是不体面的** warn。硬拦明文 http 会把用户已经在跑的配置改坏。
+    所以这里**只做一件事**：拦掉「写进去必然出错」的地址。
+    明文 http 打到远端是**合法但不体面**的，过去这里会回一句警告、界面把它常驻
+    挂在地址下面 —— 2026-09-28 用户否掉了那个形态（每天开机就看到满屏黄字，
+    而它说的是一件他自己早就知道、且改不改都能用的事）。现在不再警告，只拦非法：
+    硬拦明文 http 会把用户已经在跑的配置改坏。
 
     拒绝（`BaseUrlError`）：
       · 前缀不是 http:// / https:// —— 少协议头会一路存到请求层才炸（原有闸，保留）；
@@ -296,13 +303,10 @@ def check_base_url(raw: str) -> list[str]:
       · 内嵌凭据（`http://user:pass@host`）—— httpx 会把它自动变成 Basic 头，
         等于把另一份凭据塞进每个请求里，而设置页上看不见；
       · 含空白 / 控制字符（粘贴带空格、`\\n` 尾巴，会让所有请求静默失败）。
-
-    警告：明文 http 且主机不是回环 —— 每一次生成都会把 `Bearer <api_key>`
-    和整段私有资料以明文发出去，同网段可直接读。
     """
     url = (raw or "").strip()
     if not url:
-        return []
+        return                      # 空 = 「这一项没填」，编辑时保持原值，不判
     # 内部控制字符 / 换行：先单独判，否则后面的报错会指不到根因
     if re.search(r"[\x00-\x1f\x7f]", raw):
         raise BaseUrlError("请求地址含控制字符或换行，请检查是否粘贴错了内容")
@@ -341,13 +345,6 @@ def check_base_url(raw: str) -> list[str]:
         u.port                      # 端口非数字要在这里就报错，而不是等到发请求
     except ValueError:
         raise BaseUrlError("请求地址的端口不合法")
-    warnings: list[str] = []
-    if u.scheme == "http" and host.lower() not in LOOPBACK_HOSTS:
-        warnings.append(
-            f"请求地址走的是明文 HTTP，而目标不是本机（{host}）："
-            "每次生成都会把 API Key（Bearer 头）与整段私有资料以明文发出去，"
-            "同一网络里任何一台机器都能读到。建议改用 https，或让本地网关做 TLS。")
-    return warnings
 
 
 # ── pack.yaml 的原地改写 ───────────────────────────────────
@@ -453,22 +450,20 @@ _MAX_FILE_BYTES = 256 * 1024
 RESETTABLE_FIELDS = frozenset(
     {"base_url", "model", "temperature", "retries", "timeout", "max_tokens"})
 
-# 数值项的合法区间。**这是唯一的一份** —— 前端 `settings.js` 的
-# `NUMERIC_BOUNDS` 必须与它逐项相等，`tests/test_numeric_bounds_consistency.py`
-# 会同时读这两个文件比对（前后端没法共享代码，只能靠断言钉住）。
+# 数值项的合法区间：**从 app/config.py import 同一份**（P0-6）。
 #
-# 为什么要专门钉：这两处曾经不一致 —— 前端卡 0 ~ 1.5、后端卡 0.0 ~ 2.0，
-# 于是用户填 1.8 会被**前端**拒掉，而后端完全接受。前端比后端更严，
-# 用户看到的是「界面说不行」，没有任何办法绕过，也不会想到是界面在凭想象设限。
+# 以前这张表定义在本文件里，于是只有 `POST /api/config` 这一个**写入口**查它，
+# 而另两条入口是裸的：环境变量另抄了一份（靠测试比对维持），
+# **手改 config.yaml 什么都不查** —— 而 README 恰恰教用户改那个文件
+# （temperature / max_tokens 已从设置页移除）。现在读取侧（config._num 夹逼）
+# 与写入侧（这里的 400）共用同一份常量，「两份表」这个结构本身消掉了。
+#
+# 保留本名是为了不改动下面若干处引用（`set_config` / `reset_config` /
+# 那个跨层一致性测试都按 `server.NUMERIC_BOUNDS` 取）。
 #
 # temperature 的下界含 0.0：0 是合法采样温度（求确定性输出），
 # 而 `load_config` 曾经用 `or 默认值` 把它当成「没填」—— 见 P0-2。
-NUMERIC_BOUNDS: dict[str, tuple[float, float]] = {
-    "retries": (0, 10),
-    "timeout": (5, 1800),
-    "max_tokens": (256, 200000),
-    "temperature": (0.0, 2.0),
-}
+NUMERIC_BOUNDS = _config.NUMERIC_BOUNDS
 
 # ── 纵深防御：渲染层的 CSP（P2-5）────────────────────────────
 #
@@ -576,33 +571,30 @@ def create_app(root: Path, token: str | None = None,
             raise HTTPException(400, "当前模型还没配 API Key，请在「设置 → 模型接口」里填写")
 
     def _link_warnings(cfg) -> list[str]:
-        """把每条模型地址里「合法但不体面」的问题汇总成一句句能照着做的话（缺陷 5）。
+        """把**已经写在配置里的非法地址**逐条说成人话（缺陷 5 的另一半）。
 
         为什么常驻 GET /api/config 也要下发，而不是只在「保存」那次返回：
-        明文 HTTP 这件事是**每一次生成**都在发生的（Key 与私有资料以明文出网），
-        而保存后的提示条几秒就消失、刷新界面就什么都看不到了。
-        只警告不拦截：本机跑 Ollama / LM Studio 的用户用的就是 `http://<ip>:9200/v1`，
-        硬拦等于把人家在用的配置改坏 —— 这是本地优先工具，不是公网服务。
+        写闸只拦新写的值，而 config.yaml 手工改过、老版本存过、
+        环境变量 TALKSCRIPT_BASE_URL 覆盖出来的地址都不经过它。
+        这些地址不会让引擎跑不起来，只会在每一次生成时失败 ——
+        界面上没有这一行，用户就只剩「不知道为什么连不上」。
+
+        明文 http 打到远端**不再算这里的一条**（2026-09-28 用户否掉了常驻黄字）：
+        本机 / 内网 LLM 用的就是它，那是合法且用户自己选定的路子。
         """
         out: list[str] = []
         seen = set()
         for m in cfg.models:
             seen.add(m.base_url)
             try:
-                ws = check_base_url(m.base_url)
+                check_base_url(m.base_url)
             except BaseUrlError as e:
-                # 已经写在文件里的坏地址也要说 —— 这道闸只管新写的，
-                # 老配置不会因此跑不起来，但用户得知道它为什么连不上。
                 out.append(f"模型「{m.label}」的请求地址不合法：{e}")
-                continue
-            out.extend(f"模型「{m.label}」：{w}" for w in ws)
         if cfg.llm.base_url and cfg.llm.base_url not in seen:
-            # 环境变量 TALKSCRIPT_BASE_URL 覆盖出来的地址不在任何条目里。
-            # 不单独判一次的话，「界面上看着一切正常、实际在往明文远端发 Key」
-            # 这个组合就完全隐身了。
+            # 环境变量覆盖出来的地址不在任何条目里。不单独判一次的话，
+            # 「列表上每一条都正常、实际用的却不是它们」这个组合就完全隐身。
             try:
-                out.extend(f"（来自环境变量 TALKSCRIPT_BASE_URL）{w}"
-                           for w in check_base_url(cfg.llm.base_url))
+                check_base_url(cfg.llm.base_url)
             except BaseUrlError as e:
                 out.append(f"环境变量 TALKSCRIPT_BASE_URL 的地址不合法：{e}")
         return out
@@ -877,16 +869,38 @@ def create_app(root: Path, token: str | None = None,
         数据目录的入口**，所以校验全在 `app/packimport.py`（zip 层/结构层/
         冲突层/落盘层四道），这里只做「读文件 → 调导入 → 翻译错误」。
 
-        ⚠ 上传的文件先整个读进内存再校验：导入前拦不住流式攻击，而
-        MAX_ZIP_BYTES 上限（20MB）让内存代价有界。文件超大在 read 时就该
-        拒（UploadFile 有 .size 属性但不总可靠，读完用 len 兜底判一次）。
+        ⚠ 边读边判上限，**不是**整个 `read()` 进内存再判 20MB：
+        分块读 + 累计计数一旦越界立刻停，越界那一刻最多只多读了一个 CHUNK，
+        而这一条是「唯一接受不可信内容」的入口。
+
+        ⚠ 别把这里的动机说成"防内存攻击"（复审核对过，那是**错的**）：
+        Starlette 的 `MultiPartParser` 在**调用端点之前**就把整个 part 读完并
+        `SpooledTemporaryFile(max_size=1MB)` 落地 —— 8MB 的上传进到本函数体时
+        `file.file` 已经是 `_TemporaryFileWrapper`、spooled_size 就是 8MB。
+        也就是说 body 早就被解析器读进内存/临时文件了，**整请求体的上限不在
+        这里**（那在 `spool_max_size` 或更上层的请求体限制上）。
+        分块读真正省掉的是「引擎自己那份拷贝」：整读会把 20MB 再攒一份才判。
+        改动本身无害（少一次全量拷贝 + 越界早停），但因果写错会误导下一次改动。
+        （import_pack 收 bytes 的签名不动：它还要服务 `python -m app.packcheck`
+        那个 CLI，两条路必须是同一份校验代码，见 packimport.validate_zip。）
         """
+        CHUNK = 256 * 1024
+        buf = bytearray()
         try:
-            data = await file.read()
+            while True:
+                chunk = await file.read(CHUNK)
+                if not chunk:
+                    break
+                buf += chunk
+                if len(buf) > MAX_ZIP_BYTES:
+                    raise HTTPException(400,
+                        f"zip 太大（上限 {MAX_ZIP_BYTES // 1024 // 1024}MB）")
+        except HTTPException:
+            raise
         except Exception as e:                       # noqa: BLE001
             raise HTTPException(400, f"上传读不出来：{e}")
         try:
-            r = import_pack(data, packs_root)
+            r = import_pack(bytes(buf), packs_root)
         except PackImportError as e:
             # 全部是人话原因（zip 坏/类型不符/逃逸/改过的包…），原样给用户。
             raise HTTPException(400, str(e))
@@ -1149,9 +1163,10 @@ def create_app(root: Path, token: str | None = None,
     def intel_ignore(req: IntelIgnoreRequest):
         """忽略一条选题。**只影响今天**：明天同题还会回来。
 
-        落盘的是 `{key: 最后一次忽略的日期}`，为「连续 3 天沉底」的设想备着
-        日期 —— 该机制**尚未实现**（与 app/intel.add_ignored 的口径一致），
-        界面如今的行为就是"只影响今天"。
+        落盘的是 `{key: {"days": [忽略过的日期…]}}`；连续满 3 天 → 这条**沉底**
+        （留在池子里排到最后，「换一批」还能翻出来，§2.5 / §3.5）。
+        以前两处注释都写着"连续 3 天沉底"而那个日期没有消费方 —— 现在有了，
+        判定收在 `intel.is_buried`，与 `today()` 的过滤、忽略清单同一个函数。
         """
         name = _safe_name(req.pack)
         try:
@@ -1167,6 +1182,55 @@ def create_app(root: Path, token: str | None = None,
         # 在这里再写一遍 strftime 就是第二份真值。
         return {"ok": True, "ignored": len(rec),
                 "ignored_today": count_ignored_today(rec)}
+
+    @app.post("/api/intel/unignore")
+    def intel_unignore(req: IntelIgnoreRequest):
+        """撤销一条忽略（§3.5「已忽略 N 点开是列表，可恢复」）。**恢复即回池**。
+
+        为什么单独一个端点而不是让前端改那份 `ignored.json`：忽略记录只有
+        引擎这一处写路径（`add_ignored` 的同一条 `write_atomic` + 读坏中止），
+        开第二条写入路径 = 两份口径，而这份数据的"今天"与"连续几天"是算出来的。
+        """
+        name = _safe_name(req.pack)
+        try:
+            rec = remove_ignored(data_dir, name, req.key)
+        except IntelError as e:
+            log.warning("忽略记录恢复没写成：%s", e)
+            return _error_json(str(e), 500, "intel_unignore_failed")
+        return {"ok": True, "ignored": len(rec),
+                "ignored_today": count_ignored_today(rec)}
+
+    @app.post("/api/intel/brief")
+    def intel_brief(req: IntelBriefRequest):
+        """生成选题卡（§3.4 建议层）。**当日重复点击直接回缓存，不再花一次钱**。
+
+        三条出口，形状不同、话术必须不同：
+          · `cached`  —— 今天已经生成过：不发作业，直接把那份返回（零成本的事
+            不该演成"起一条作业、进度条转一圈、然后说没花钱"）；
+          · `job`     —— 开始生成：走 Job 管道，占**模型族**额度（一次 chat_json）。
+            同一 (pack, key) 已经有作业在飞时**搭上那一条**（`reused: true`）：
+            缓存只挡得住"已经生成完"，在飞的这几十秒里再点一次会是第二次模型调用；
+          · 400/404   —— 没配模型 / 事件不在今天的榜上：界面上据此显示
+            「配置模型后可生成选题卡」或提示重抓，事件详情本身永不因此空掉。
+        """
+        name = _safe_name(req.pack)
+        hit = load_brief(data_dir, name, req.key)
+        if hit["state"] == "fresh":
+            return {"state": "cached", "job_id": "", "brief": hit["payload"],
+                    "note": hit["note"]}
+        _require_model(_cfg())
+        try:
+            jid, reused = pipeline.start_intel_brief(name, req.key)
+        except StateConflict as e:
+            # 「今天没这件事」与「并发达上限」是两种下一步动作（重抓 vs 等一下），
+            # 都演成 500 会让用户去点第二次重抓。
+            return _error_json(str(e), 409, "intel_brief_conflict")
+        # `stale`（3 天内有过、但不是今天）照样开新作业 —— 但把上一版带回去，
+        # 界面能说"这是三天前那版，正在重做"，而不是让旧卡片凭空消失。
+        # `reused`：这一条**没花第二次钱**（搭上了同键在飞的那条作业）。界面必须说得出
+        # 这句，否则用户以为两次点击各扣了一次 —— 而 §5 #2 的验收就是"不重扣费"。
+        return {"state": "job", "job_id": jid, "brief": hit["payload"],
+                "note": hit["note"], "reused": reused}
 
     # ── 设置 ────────────────────────────────────────────────
     @app.get("/api/config")
@@ -1193,7 +1257,7 @@ def create_app(root: Path, token: str | None = None,
                 # 于是改后端默认值时界面还按老值填（同一信息两份表示的经典后果）。
                 "defaults": {"base_url": DEFAULT_MODEL["base_url"],
                              "model": DEFAULT_MODEL["model"]},
-                # 地址的「合法但不体面」问题（明文 http 打到远端等）。
+                # 配置里**存着的非法地址**（手工改过 / 老版本写过 / 环境变量覆盖出来的）。
                 # 常驻下发而不是只在保存那次回一句：见 `_link_warnings`。
                 "base_url_warnings": _link_warnings(cfg),
                 "env_override": bool(os.environ.get("TALKSCRIPT_API_KEY"))}
@@ -1204,11 +1268,9 @@ def create_app(root: Path, token: str | None = None,
         # 这一次保存就成了「一半生效」，而界面只会显示一句 400。
         if body.base_url not in ("", None):
             try:
-                link_warnings = check_base_url(str(body.base_url))
+                check_base_url(str(body.base_url))
             except BaseUrlError as e:
                 raise HTTPException(400, str(e))
-        else:
-            link_warnings = []
         # 数值项必须在这里卡边界：越界的 0 / 负数一旦写进 config.yaml，
         # `load_config` 是**照单全收**的（P0-2 之后 `_num` 只在键缺失或值为空时
         # 才取默认，不再把 0 当「没填」），于是界面显示保存成功、实际值就是那个
@@ -1259,9 +1321,7 @@ def create_app(root: Path, token: str | None = None,
             if "api_key" in link:
                 it["api_key"] = str(link["api_key"])
             save_models(root, raw, active, config_dir=data_dir)
-        # warnings：界面据此在地址那一行挂一条黄字。回 200 是诚实的 ——
-        # 值存下了、能用，只是不安全；不安全到必须让用户每次看得见。
-        return {"ok": True, "warnings": link_warnings}
+        return {"ok": True}
 
     @app.post("/api/config/reset")
     def reset_config(body: ConfigResetIn):
@@ -1312,13 +1372,12 @@ def create_app(root: Path, token: str | None = None,
         # 地址校验（缺陷 5）。原来这里只看 `startswith(("http://","https://"))`，
         # 于是 `file:///C:/x`、`http://user:pass@host`（httpx 会替你把凭据变成
         # Basic 头，设置页上看不见）、带空格/换行的粘贴内容都能存进去。
-        # 分工：**存了必然出错**的拒；**存了能用但不体面**的（明文 http 打到
-        # 远端）只警告并随响应回显 —— 本机 Ollama / 内网网关的用户正在用 http，
-        # 硬拦等于把已经在工作的配置改坏。
-        url_warnings: list[str] = []
+        # 这里只拦**存了必然出错**的；明文 http 打到远端是合法用法
+        # （本机 Ollama / 内网网关），存下就存下，不再随响应回一句警告 ——
+        # 那个常驻黄字 2026-09-28 被用户否掉了，见 `check_base_url`。
         if base_url:
             try:
-                url_warnings = check_base_url(base_url)
+                check_base_url(base_url)
             except BaseUrlError as e:
                 raise HTTPException(400, str(e))
 
@@ -1357,8 +1416,7 @@ def create_app(root: Path, token: str | None = None,
         if body.api_key.strip():
             it["api_key"] = body.api_key.strip()
         save_models(root, raw, active, config_dir=data_dir)
-        return {"ok": True, "id": mid, "models": public_models(_cfg()),
-                "warnings": url_warnings}
+        return {"ok": True, "id": mid, "models": public_models(_cfg())}
 
     @app.post("/api/models/delete")
     def delete_model(body: ModelIdIn):
@@ -1413,7 +1471,6 @@ def create_app(root: Path, token: str | None = None,
         这样用户填完就能测，不必先点保存。
         """
         fresh = _cfg()
-        test_warnings: list[str] = []
         if body:
             # 先落到「要测的那条模型」上：编辑一条**非当前**模型时，密钥框是空的，
             # 不指明 id 就会错拿当前模型的 Key 去测 —— 测出来的结果与用户以为的
@@ -1426,7 +1483,7 @@ def create_app(root: Path, token: str | None = None,
                     fresh.llm.model = m.model
             if body.base_url:
                 try:
-                    test_warnings = check_base_url(str(body.base_url))
+                    check_base_url(str(body.base_url))
                 except BaseUrlError as e:
                     raise HTTPException(400, str(e))
                 fresh.llm.base_url = str(body.base_url).rstrip("/")
@@ -1436,13 +1493,9 @@ def create_app(root: Path, token: str | None = None,
                 fresh.llm.model = str(body.model)
         if not (fresh.llm.api_key or fresh.mock):
             raise HTTPException(400, "未配置模型 API Key，请先填写")
-        if not test_warnings:
-            # 「测试连接」没带地址覆盖时，测的就是存着的那条 —— 警告同样要说，
-            # 否则用户点完只看到「连接正常」，永远不知道该把它换成 https。
-            test_warnings = _link_warnings(fresh)
         ok, detail = LLMClient(fresh.llm, mock=fresh.mock).ping()
         return {"ok": ok, "detail": detail, "model": fresh.llm.model,
-                "base_url": fresh.llm.base_url, "warnings": test_warnings}
+                "base_url": fresh.llm.base_url}
 
     return app
 
@@ -1497,13 +1550,20 @@ def parent_alive(pid: int) -> bool:
     return True
 
 
-def watch_parent(pid: int, interval: float = 2.0) -> None:
+def watch_parent(pid: int, interval: float = 0.5) -> None:
     """父进程（Electron 主进程）一没就自杀，别留孤儿引擎。
 
     实测：主进程被强杀或崩溃时，Windows 上子进程不会跟着走。多崩几次就有几份
     引擎常驻，每份占一个端口 + 一份内存；更糟的是下一次启动的健康检查可能被
     **旧引擎**应答（它同样在 127.0.0.1 上回 200），于是界面连到的是一个
     拿着旧 token / 旧配置的僵尸进程。
+
+    ⚠ 轮询间隔从两秒收到半秒：那条「旧引擎抢答健康检查」的路已经被
+      `/api/health` 的 nonce 堵住了（壳用 `TALKSCRIPT_HEALTH_NONCE` 确认应答者
+      是它刚启动的那个），所以剩下的只是**孤儿占着端口与内存的那段时间**。
+      代价是 OpenProcess + GetExitCodeProcess 每秒两次 —— 两个系统调用，
+      相对一个常驻的 uvicorn 可以忽略。取值别再往回放大：那段时间里用户
+      重开应用会撞到「端口被占用」。
 
     用 `os._exit` 而不是优雅停机：拿不到 uvicorn 的 server 实例（`uvicorn.run`
     内部自建），而窗口都没了，等不到"当前作业写完"。产物落盘本来就是原子的

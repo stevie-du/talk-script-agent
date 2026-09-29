@@ -18,13 +18,16 @@
 // 每条都落的记号等于没有记号（对照 Claude / Linear 的侧栏）。
 // 失败记录能点开看原因 —— 后端会把 job.json 摘要返回给 /api/history/{id}。
 
-import { $, el, esc, fmtClock, fmtStamp, dayGroupKey, toast, bindOnce, sec } from "./util.js";
+import { $, el, esc, fmtClock, fmtStamp, dayGroupKey, toast, bindOnce, sec, isSubmitEnter } from "./util.js";
 import { api } from "./api.js";
 import { state, setResult, detachJob } from "./store.js";
-import { setLeftFolded, syncBusyAffordance, gotoView } from "./ui.js";
+import { setLeftFolded, syncBusyAffordance, gotoView, setLanding } from "./ui.js";
 import { attach, openRecord, dropLiveJobView } from "./jobs.js";
+import { showEngineDown, clearEngineDown, keepTrying, engineDown } from "./engine.js";
+import * as T from "./thread.js";
+import { setHead } from "./head.js";
 import { BUSY_STATES } from "./progress.js";
-import { STATE_LABEL, VERDICT, verdictKey } from "./words.js";
+import { STATE_LABEL, VERDICT, verdictKey, CHAT } from "./words.js";
 import { appConfirm } from "./overlays.js";
 
 const index = new Map();      // id -> 该行最近一次数据（委托 handler 从这里取，闭包不会过期）
@@ -105,6 +108,24 @@ export function packLabel(slug) {
 let allItems = [];
 let query = "";
 
+// ── 「屏幕上这份列表还是新的吗」───────────────────────────────
+// 拉取失败时**不重画成空列表**（那会被读成"记录丢了"），于是界面继续显示
+// 上一次成功那一份。这份数据的新鲜度必须说出来，而且要说出**是谁的**新鲜度：
+//   listStale  当前画出来的这一份是旧的
+//   lastOkAt   最后一次成功拉到的时刻（提示里写绝对时刻，不写"N 分钟前" ——
+//              那一行不会随时间自己重画，写相对值就会说过期话）
+//   staleWhy   失败原因。网络级失联时留空：全局横幅已经在右栏顶部说了同一件事，
+//              这里再抄一遍就是两份表示各说各话。
+let listStale = false;
+let lastOkAt = 0;
+let staleWhy = "";
+
+/** 「在跑」的记录在旧列表里读成什么。
+ *  引擎失联后，那几条最后一次看到的「文案撰写中」连同行首那颗呼吸点会**继续呼吸**
+ *  —— 呼吸是这一屏上唯一的"还活着"记号，而它现在说的是假话。
+ *  状态点退成默认那颗静止灰点（= 未知，与词表外状态同一档），文字改成这一句。 */
+const STALE_BUSY_LABEL = "状态未知（列表未刷新）";
+
 function matches(it) {
   if (!query) return true;
   const q = query.toLowerCase();
@@ -124,11 +145,25 @@ export async function loadSessions() {
     //   但 `items` 的初值是 `[]`，失败时 `paint([])` 画出来的是**空态**
     //   「还没有会话记录，先发一条试试」。注释与代码相反，而后果比"列表停住"
     //   严重：用户会以为**记录丢了**。现在真的保留上一次的列表（`allItems`），
-    //   并在顶部摊出失败原因。
-    showSessError(failed);
+    //   并把这一份标成旧的（见 paint 里的 sess-load-err）。
+    listStale = true;
+    // 网络级失败（请求根本没到引擎）→ 全局横幅，这里不再抄一遍原因；
+    // 引擎回了话（5xx / 超时）→ 它不是全局故障，原因就地摊在列表头上。
+    if (failed.netFail) { showEngineDown(""); staleWhy = ""; }
+    else { staleWhy = String(failed.message || failed); keepTrying(); }
+    // 重画一次而不是"什么都不做"：在跑的那几行要当场从呼吸点退成「状态未知」
+    // （updateRow 读 listStale），否则界面会留着一颗会说假话的呼吸点。
+    paint(allItems);
     return allItems;
   }
   allItems = items;
+  lastOkAt = Date.now();
+  listStale = false;
+  staleWhy = "";
+  // 列表拉回来了 = 引擎确实又在答话：收掉全局横幅与自动重连。
+  // （为什么判据放在这里而不是重连循环里：循环只是"再试一次"，
+  //   真正确认恢复的是这一次成功的请求本身。）
+  clearEngineDown();
   paint(items);
   clearTimeout(refreshTimer);
   // 只有**在跑**的作业才值得继续轮询（判据是 BUSY_STATES 白名单，
@@ -148,24 +183,34 @@ export function busyRecords() {
   return allItems.filter(it => BUSY_STATES.has(it.state || ""));
 }
 
-/** 拉取会话列表失败时，在列表**顶部**插一条告警。
- *
- *  **不重建列表** —— 重建会把「还没有会话记录」画出来，而用户会读成"记录丢了"。
- *  节点故意不带 `data-key`：`paint()` 开头会移除所有无 `data-key` 的子节点，
- *  所以下一次**成功**的 paint 会把它清掉（不必额外写清理逻辑）。
- *  同一时刻只留一条，免得轮询连续失败时叠成一摞。 */
-function showSessError(e) {
-  const list = $("session-list");
-  if (!list || list.querySelector(".sess-load-err")) return;
-  const msg = e && e.message ? e.message : String(e);
-  list.prepend(el("p", "hint cfg-err sess-load-err",
-    `会话列表没刷新成功（下面还是上次的结果）：${esc(msg)}`));
+/** 拉取失败时列表头上那一行。要说的是**新鲜度**，不是故障本身：
+ *  故障由右栏顶部的全局横幅讲（engine.js），那一行折叠侧栏也还在；
+ *  这一行只回答「下面这些是什么时刻抓的、为什么停住了」。
+ *  节点由 paint 统一挂/摘（不带 data-key ⇒ 下一次成功的 paint 开头就清掉），
+ *  所以这里只算文案，不碰 DOM。 */
+function sessNoteText() {
+  // 「连不上」这一档**问 engine.js**，不从"staleWhy 是空的"倒推：
+  // 空串可能只是这一次没带上原因，而把全局故障的判定抄进列表 = 两份判据各说各话。
+  const why = staleWhy ? `：${staleWhy}` : (engineDown() ? "（连不上本地引擎）" : "");
+  // 「什么时候抓的」只在**真的抓到过**的时候说：开机就没连上，
+  // 列表是空的，此时写「下面是 HH:MM 抓的旧列表」就是一句假陈述。
+  if (!allItems.length) return `会话列表还没拉出来${why}`;
+  return `下面是 ${lastOkAt ? fmtClock(lastOkAt) : "上一次"} 抓的旧列表，之后没刷新成功${why}`;
 }
 
 function paint(items) {
   const list = $("session-list");
+  // 开头先摘掉所有**非记录**节点（旧列表头提示 / 空态 / 截断说明），
+  // 再让 paintBody 按数据重画 —— 增量复用只针对带 data-key 的那些。
   Array.from(list.children).forEach(n => { if (!n.dataset.key) n.remove(); });
+  paintBody(list, items);
+  // 失联/失败期间：这份列表是旧的，第一屏就要说出来（挂在列表**内部**：
+  // 它说的是"下面这些"，位置即语义）。放在 paintBody 之后，是因为那里面
+  // 两个早退分支会 `innerHTML = ""`，先挂会被抹掉。
+  if (listStale) list.prepend(el("p", "hint cfg-err sess-load-err", esc(sessNoteText())));
+}
 
+function paintBody(list, items) {
   const shown = (items || []).filter(matches);
   if (query && !shown.length) {
     list.innerHTML = "";
@@ -186,7 +231,13 @@ function paint(items) {
 
   if (!items.length) {
     list.innerHTML = "";
-    list.appendChild(el("p", "hint sess-empty", "还没有会话记录，先发一条试试"));
+    // 「还没有会话记录」是一个**断言**（这条历史是空的），只有真的拉到一次列表才说得出。
+    // 一次都没拉成功时（开机就没连上）这里什么都不画：列表头上那一行
+    // 「会话列表还没拉出来」已经是全部已知的事实，再补一句「先发一条试试」
+    // 是让用户在一个连不上的界面上去做一件此刻做不到的事。
+    if (!listStale) {
+      list.appendChild(el("p", "hint sess-empty", "还没有会话记录，先发一条试试"));
+    }
     return;
   }
 
@@ -232,6 +283,19 @@ function paint(items) {
   }
   old.forEach(n => n.remove());
   applyRovingTabindex();
+  // 截断说明**常驻**列表末尾（P1-29）。改前它只在**搜不到**的那一支出现
+  // （`paint` 开头那个 `sess-empty`），于是平时这一屏对「还有更早的记录吗」
+  // 零解释：用户翻到底，看见最后一条分组，就算全部翻完了 —— 而左栏
+  // **没有任何翻页**（/api/history 只回最近 HISTORY_LIMIT 条，搜索也只在这批里筛）。
+  // 静默的截断最坏：用户据此以为某次生成从没发生过、以为记录丢了。
+  // 这行要说两件事，缺一件都不够：只列 N 条、**搜索也翻不到更早的**
+  // —— 只说前半句，用户下一步就是去搜索框里找那一条，然后什么也没找到。
+  // 判据仍读**刚拿到的条数**（不引用 meta 里的 total，理由同上）。
+  const cap = (state.meta && state.meta.history && state.meta.history.limit) || 0;
+  if (!query && cap > 0 && items.length >= cap) {
+    list.appendChild(el("p", "hint sess-cap",
+      `这里只列最近 ${cap} 条，搜索也只在这 ${cap} 条里找`));
+  }
   // 「几条还在后台跑」是这张表算出来的，读数就跟着这张表更新（见 ui.js 的 syncBusyAffordance）。
   syncBusyAffordance();
 }
@@ -330,6 +394,9 @@ function stateText(it, st) {
 function updateRow(row, it) {
   const st = it.state || "done";
   const done = settled(st);
+  // 旧列表里的「在跑」不算在跑：那颗呼吸点是这一屏上唯一的"还活着"记号，
+  // 而引擎失联之后它说的全是假话（最后一次成功拉取时它确实在跑）。
+  const staleBusy = listStale && !done;
   const isCur = done
     ? (!!state.result && it.id === state.result.id)
     : (!!state.job && it.id === state.job.id);
@@ -340,7 +407,8 @@ function updateRow(row, it) {
 
   const clock = fmtClock(it.created_at);
   // sig 要覆盖行上**看得见**的每一项，漏一项就是「数据变了但那一格不重画」。
-  const sig = [isCur, st, it.topic, it.passed, clock, it.duration, it.chars].join("\u0001");
+  const sig = [isCur, st, it.topic, it.passed, clock, it.duration, it.chars,
+    listStale ? "stale" : "fresh"].join("\u0001");
   if (row._sig === sig) return;
   row._sig = sig;
 
@@ -357,10 +425,13 @@ function updateRow(row, it) {
   //   `st === "done" ? … : st === "failed" ? "no" : "run"` —— 落到 else 的
   //   除了真正在跑的，还有 **cancelled** 与一切认不出来的旧枚举值，
   //   于是「已取消」的记录挂着一颗永远在呼吸的点，读成「还活着」。
-  const dotCls = BUSY_STATES.has(st) ? "run"
+  const dotCls = staleBusy ? ""
+    : BUSY_STATES.has(st) ? "run"
     : (st === "done" && it.passed !== false) ? "ok" : "no";
-  row.querySelector(".dot").className = "dot " + dotCls;
-  const aria = stateText(it, st);
+  // 空串 = 不带修饰 = 默认那颗**静止**灰点。CSS 里这一档的语义正是
+  // 「异常但认不出来」（见 styles.css 的 .dot::before 说明），与"不知道还在不在跑"同义。
+  row.querySelector(".dot").className = "dot" + (dotCls ? " " + dotCls : "");
+  const aria = staleBusy ? STALE_BUSY_LABEL : stateText(it, st);
   row.setAttribute("aria-label", `${it.topic || "未命名"}，${aria}`);
   row.querySelector(".sess-topic").textContent = it.topic || "";
   row.querySelector(".sess-time").textContent = clock;
@@ -446,7 +517,10 @@ function bindSearch() {
       if (box.value) { box.value = ""; apply(); ev.stopPropagation(); return; }
       box.blur();
     }
-    if (ev.key === "Enter") {
+    // ⚠ isComposing 来自 util.isSubmitEnter（P1-28）：搜索框「回车打开首条」也是提交动作。
+    //   以前没挡中文选词那一下回车 —— 用户在搜「家用 电梯」的中途按回车选词，
+    //   界面当场跳进一条不相干的会话，搜索词还留在框里。
+    if (isSubmitEnter(ev)) {
       const first = $("session-list").querySelector(".sess-item");
       if (first) first.click();
     }
@@ -577,7 +651,16 @@ async function deleteSession(it) {
     // 并且继续呼吸。它已经 toast 过「已停止本次生成」，这里就不重复报一句。
     const wasLive = !!state.job && state.job.id === it.id;
     const viewed = wasLive && dropLiveJobView();
-    if (state.result && state.result.id === it.id) setResult(null);
+    // 正在看的那条被删掉：右栏必须一起收掉。原来只 setResult(null)（只改 state），
+    // 于是**右屏还留着那一整篇稿子**——一份磁盘上已经不存在的东西。行消失了、
+    // 稿子还在，用户要么以为删除失败（于是再点一次删除、撞 404），
+    // 要么把这份"幽灵稿"复制走。与点「新建对话」落到同一个空态。
+    if (state.result && state.result.id === it.id) {
+      setResult(null);
+      T.clearThread();
+      setLanding(true);
+      setHead(CHAT.title, "", "");
+    }
     if (!viewed) toast(done ? "已删除" : "已放弃");
     loadSessions();
   } catch (e) {
@@ -613,8 +696,22 @@ async function deleteGroup(gid) {
   }
   // 当前开着的那条 / 正在跑的那条如果被抹掉了，界面要跟着松手，
   // 否则会留着一块指向已删记录的正文（与 deleteSession 同一套）。
-  if (state.job && ids.includes(state.job.id)) dropLiveJobView({ silent: true });
-  if (state.result && ids.includes(state.result.id)) setResult(null);
+  // ⚠ **必须排除 failed 里的 id**（复审 P0）：「未删成」不是理论情形 ——
+  //   下面那句 toast「文件可能正被占用」正是在说它。少了这一层，
+  //   用户正在看的那条因为文件被占用没删掉，右屏却被清成了 landing、
+  //   头部写「新对话」，同一时刻 toast 说「已删除 4 条，1 条未删成」，
+  //   loadSessions() 之后左栏里那条还在 —— 屏幕与事实相反。
+  if (state.job && ids.includes(state.job.id) && !failed.includes(state.job.id)) {
+    dropLiveJobView({ silent: true });
+  }
+  // 同 deleteSession：正在看的那条被抹掉，右屏要一起收 —— 只 setResult(null)
+  // 的话界面上还留着那一整篇稿子，而磁盘上已经没有了。
+  if (state.result && ids.includes(state.result.id) && !failed.includes(state.result.id)) {
+    setResult(null);
+    T.clearThread();
+    setLanding(true);
+    setHead(CHAT.title, "", "");
+  }
   const n = ids.length - failed.length;
   toast(failed.length
     ? `已删除 ${n} 条，${failed.length} 条未删成（文件可能正被占用），可稍后重试`

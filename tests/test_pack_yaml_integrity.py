@@ -573,6 +573,133 @@ def test_generate_returns_409_for_shape_error(tmp_path):
     assert "不符合约定" in r.json()["detail"]
 
 
+def _with_stages(root, keep: list[str]):
+    """把 skill.yaml 的 stages 砍成只留 `keep` 这几格（其余全部删掉）。"""
+    sk = root / "packs" / "elevator" / "skill.yaml"
+    data = yaml.safe_load(sk.read_text(encoding="utf-8"))
+    data["stages"] = {k: data["stages"][k] for k in keep if k in data["stages"]}
+    sk.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    return data["stages"]
+
+
+@pytest.mark.skipif(TestClient is None, reason="需要 fastapi TestClient")
+def test_pack_missing_write_stage_is_refused_before_spending(tmp_path):
+    """缺 write 阶段 → 409，**且一次模型调用都不该发生**。
+
+    为什么单列：导入/列表对 stages 齐不齐**不查**（结构合法、YAML 能解析），
+    而生成链路在回炉轮渲染 `stages.write` 时是**裸下标** `self.skill["stages"][stage]`
+    —— 缺了就 KeyError。没有这道闸门，用户是「选题跑完、花掉一次调用的钱」
+    才看到「生成失败」。
+    """
+    root = _root(tmp_path)
+    _with_stages(root, ["select", "storyboard"])      # 故意不留 write
+    (root / "config.yaml").write_text(
+        "llm:\n  api_key: MOCK\n  model: mock\n", encoding="utf-8")
+
+    c = TestClient(create_app(root, token=TOKEN), base_url=LOOPBACK,
+                   headers={"X-TalkScript-Token": TOKEN})
+    r = c.post("/api/generate", json={"pack": "elevator", "topic": "随便一个话题"})
+    assert r.status_code == 409, r.text
+    assert "缺少阶段声明" in r.json()["detail"], r.json()["detail"]
+    assert "write" in r.json()["detail"], r.json()["detail"]
+
+
+@pytest.mark.skipif(TestClient is None, reason="需要 fastapi TestClient")
+def test_pack_with_draft_but_no_write_is_also_refused(tmp_path):
+    """**有 draft 也仍然要求 write** —— 复审发现的洞。
+
+    第一版闸门写成「有 draft 就整段放过」，理由是 draft 路径不走 select。
+    但 draft 只省掉**选题那一轮**：回炉轮（只要首轮没过就必然走到）渲染的
+    仍是 `stages.write`，而它是裸下标 —— 缺 write 照样在**花完钱之后** KeyError。
+    另有一处更隐蔽：`voice_parts` 读 `stages.write.anti_ai`，缺了会**静默退成
+    ("", "")**，人味档位整条失效、界面上一个字都不说。
+    """
+    root = _root(tmp_path)
+    _with_stages(root, ["draft"])                     # 有 draft，**没有** write
+    (root / "config.yaml").write_text(
+        "llm:\n  api_key: MOCK\n  model: mock\n", encoding="utf-8")
+
+    c = TestClient(create_app(root, token=TOKEN), base_url=LOOPBACK,
+                   headers={"X-TalkScript-Token": TOKEN})
+    r = c.post("/api/generate", json={"pack": "elevator", "topic": "随便一个话题"})
+    assert r.status_code == 409, r.text
+    assert "缺少阶段声明" in r.json()["detail"], r.json()["detail"]
+    assert "write" in r.json()["detail"], r.json()["detail"]
+
+
+@pytest.mark.skipif(TestClient is None, reason="需要 fastapi TestClient")
+def test_a_complete_pack_still_gets_through_the_stage_gate(tmp_path):
+    """反空转：内置包（select/draft/write 齐全）必须**过**这道闸门。
+
+    闸门是「缺就拒」，所以它天然有把好包一起拒掉的风险 ——
+    那种情况不会报错，只会变成「所有包都生成失败」，极难察觉。
+
+    ⚠ 判据是**受理成功（200 + job_id）**，不是"响应里没有那句话"。
+      原来的 `"缺少阶段声明" not in r.text` 是弱否定，实测两种改坏都通过：
+      ① 把闸门改成「任何包都拒、但换一句文案」→ 409，断言为 True；
+      ② 把 start_generate 整个搞崩 → 500，断言**也为 True**。
+      也就是说，它测不出自己 docstring 里点名的那个形态。
+      要钉的是"完整包被受理了"，那是这条测试唯一要说的。
+    """
+    root = _root(tmp_path)
+    stages = _with_stages(root, ["select", "draft", "write"])
+    assert "write" in stages, "夹具没保住 write，这条测的就不是闸门本身"
+    (root / "config.yaml").write_text(
+        "llm:\n  api_key: MOCK\n  model: mock\n", encoding="utf-8")
+
+    c = TestClient(create_app(root, token=TOKEN), base_url=LOOPBACK,
+                   headers={"X-TalkScript-Token": TOKEN})
+    r = c.post("/api/generate", json={"pack": "elevator", "topic": "随便一个话题"})
+    assert r.status_code == 200, f"完整包被闸门拒了：{r.text}"
+    assert r.json().get("job_id"), r.json()
+
+
+@pytest.mark.skipif(TestClient is None, reason="需要 fastapi TestClient")
+def test_a_stage_without_its_templates_is_refused(tmp_path):
+    """缺 `system` / `user_template` 的那一格 → 409（复审实测抓到的漏网）。
+
+    `skill_shape_error` 对 `stages: {write: {files: {...}}}` 返回**空串**
+    —— 它只查 stages/cfg 是不是 dict，不查那两个键。于是那种包一路过闸门、
+    跑到 `prompts.render` 才 `KeyError: 'system'`，症状是「选题跑完、
+    烧掉一次调用的钱、然后生成失败」—— 正是这道闸门要消灭的那种。
+    """
+    root = _root(tmp_path)
+    sk = root / "packs" / "elevator" / "skill.yaml"
+    data = yaml.safe_load(sk.read_text(encoding="utf-8"))
+    del data["stages"]["write"]["system"]          # 留下 user_template
+    sk.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    (root / "config.yaml").write_text(
+        "llm:\n  api_key: MOCK\n  model: mock\n", encoding="utf-8")
+
+    c = TestClient(create_app(root, token=TOKEN), base_url=LOOPBACK,
+                   headers={"X-TalkScript-Token": TOKEN})
+    r = c.post("/api/generate", json={"pack": "elevator", "topic": "随便一个话题"})
+    assert r.status_code == 409, r.text
+    assert "write" in r.json()["detail"], r.json()["detail"]
+
+
+@pytest.mark.skipif(TestClient is None, reason="需要 fastapi TestClient")
+def test_a_stage_template_present_but_empty_is_refused(tmp_path):
+    """空串同样算坏 —— `Template("")` 渲染出一条空指令。
+
+    模型那边就是「没说要干什么」，比报错更坏：作业会顺利跑完、
+    界面上看不出任何异常。所以空串与缺键走同一条道。
+    """
+    root = _root(tmp_path)
+    sk = root / "packs" / "elevator" / "skill.yaml"
+    data = yaml.safe_load(sk.read_text(encoding="utf-8"))
+    data["stages"]["write"]["user_template"] = "   "
+    sk.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    (root / "config.yaml").write_text(
+        "llm:\n  api_key: MOCK\n  model: mock\n", encoding="utf-8")
+
+    c = TestClient(create_app(root, token=TOKEN), base_url=LOOPBACK,
+                   headers={"X-TalkScript-Token": TOKEN})
+    r = c.post("/api/generate", json={"pack": "elevator", "topic": "随便一个话题"})
+    assert r.status_code == 409, r.text
+    assert "user_template" in r.json()["detail"], r.json()["detail"]
+
+
 def test_healthy_pack_logs_nothing(tmp_path, caplog):
     """对照：正常包不能刷日志 —— 否则真出问题时那条会淹在噪音里。"""
     root = _root(tmp_path)
@@ -627,9 +754,71 @@ def test_template_pack_matches_elevator_contract():
     # 且无任何日志。draft 与 write 两个模板都要有（elevator 两处都有）。
     import re as _re
     for stage in ("draft", "write"):
-        pat = "^  " + stage + r":\n(.*?)(?=^  \w+:$|^\w+:$|\Z)"
+        pat = "^  " + stage + r":\n(.*?)(?=^  \w+:$|^\w+:|\Z)"
         m = _re.search(pat, tpl_skill, _re.S | _re.M)
         assert m and "$alt_guide" in m.group(1), f"模板的 {stage} 模板缺 $alt_guide"
+
+
+# ── 审查 #30：rules/duration.md 的配额表与 pack.yaml 互相打架 ─────────
+def _duration_md_table(pack_dir: Path) -> dict:
+    """从 rules/duration.md 的「字数配额表」那张 markdown 表里取
+    `时长 → (total, hook, body, cta)`。
+
+    只认「| 15s | 70 | 15 | 47 | 8 |」这种整行五个纯数字的格子 ——
+    表下面那几行散文里也可能出现数字，宽泛的匹配会把它当表格。
+    """
+    import re as _re
+    text = (pack_dir / "rules" / "duration.md").read_text(encoding="utf-8")
+    out: dict[int, tuple] = {}
+    for line in text.splitlines():
+        m = _re.match(r"^\|\s*(\d+)s\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|\s*$", line)
+        if m:
+            out[int(m.group(1))] = (int(m.group(2)), int(m.group(3)),
+                                    int(m.group(4)), int(m.group(5)))
+    return out
+
+
+@pytest.mark.parametrize("pack", ["_template", "elevator"])
+def test_duration_md_quota_table_matches_pack_yaml(pack):
+    """`rules/duration.md` 里那张配额表必须与同目录 `pack.yaml` 逐格相同。
+
+    为什么这两份不能各写一遍：模型读的是**两份都读**（rules 那一节进提示词，
+    quota_table 由引擎单独注入）。15 秒档 elevator 已经修成「钩子重、引导轻」
+    （`{body:47, cta:8}`，P2-26），而**模板那份 md 还停在 `body 40 / cta 15`** ——
+    `packgen.py` 把它原样复制，于是**每个向导生成的新包里两份配额表互相打架**：
+    字数配了 47、正文要求写 40。差 7 字在界面上看不出来，差在超配额判定上。
+
+    审查报告另附一条实证：把 `duration.md` 的 15s 行 total 改成 `999`，
+    `pytest tests/` **全绿** —— `test_template_pack_matches_elevator_contract`
+    只比 `pack.yaml` ↔ `pack.yaml`，从不碰这张 md 表。这就是本条要补的洞。
+    """
+    import re as _re
+    d = ROOT / "packs" / pack
+    yml = yaml.safe_load((d / "pack.yaml").read_text(encoding="utf-8"))["quota_table"]
+    md = _duration_md_table(d)
+    assert md, f"{pack}/rules/duration.md 里没解析出配额表 —— 表格形状变了就得同步改这条守卫"
+
+    mismatched = []
+    for dur, cell in sorted(yml.items()):
+        dur = int(dur)
+        want = (int(cell["total"]), int(cell["hook"]), int(cell["body"]), int(cell["cta"]))
+        got = md.get(dur)
+        if got is None:
+            mismatched.append(f"{dur}s：pack.yaml 有 {want}，md 表里这一档不见了")
+        elif got != want:
+            mismatched.append(f"{dur}s：pack.yaml {want} vs md 表 {got}")
+    # md 里多出来的档（pack.yaml 已删）同样是漂移，一并报出来
+    for dur, got in sorted(md.items()):
+        if int(dur) not in {int(k) for k in yml}:
+            mismatched.append(f"{dur}s：md 表里有 {got}，pack.yaml 里没有这一档")
+    assert not mismatched, \
+        f"{pack}: rules/duration.md 的配额表与 pack.yaml 对不上（改一处必须改两处）：\n" \
+        + "\n".join(mismatched)
+
+    # 正向对照：这张表得真的在量它自己那份 md。
+    # （守卫若改成只比 pack.yaml ↔ pack.yaml，上面那组全部空转 —— 就是审查点名的病。）
+    assert f"| {list(yml)[0]}s |" in (d / "rules" / "duration.md").read_text(encoding="utf-8"), \
+        "夹具前提失真：md 里已经找不到第一档那一行了"
 
 
 

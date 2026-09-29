@@ -29,12 +29,25 @@ const SECTIONS = {
   contrast: require("./sections/contrast"),
   packimport: require("./sections/packimport"),
   xss: require("./sections/xss"),
+  // 复审轮那批（s34 组变异检验的宿主）。要 fs/path/stripJsComments 做
+  // 静态扫，所以分组的调用点比别的组多传一个 ctx。
+  review: require("./sections/review"),
 };
 const ONLY = (process.argv[2] || "").trim();
 
 const RENDERER = path.resolve(__dirname, "..", "desktop", "renderer");
 const REPO_ROOT = path.resolve(__dirname, "..");
 const SHOT_DIR = __dirname;
+// 静态扫（`staticChecks`）与浏览器流程**两边都要**用的两个读取，提到模块作用域。
+// 留在 main() 里会让 `verify:static` 分组撞上 TDZ —— 分组在 main 的早期就调用
+// 静态扫，而那两条声明还没执行到（第 29 轮给 `verify:` 那批变异降成本时踩到的）。
+const JS_DIR = path.join(REPO_ROOT, "desktop", "renderer", "js");
+const htmlSrc = fs.readFileSync(path.join(REPO_ROOT, "desktop", "renderer", "index.html"), "utf8");
+
+  const stripJsComments = (s) => s
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("\n").filter(l => !/^\s*\/\//.test(l)).join("\n")
+    .replace(/ \/\/ [^\n]*/g, "");
 
 /**
  * 从 `app/server.py` 里读出**生产那份** CSP 常量。
@@ -109,6 +122,13 @@ const RESULT = {
     ai_tells: {
       score: 88, strong: 0, weak: 2, tells_enabled: ["bookish_connective", "no_specific"],
       config_warnings: [], placeholders: { count: 1, per_100: 2.4, cap: 4 },
+      // L2 形态面板（后端 `AITells.shape_metrics` 的形状）。数值照一份 268 字的
+      // 四段稿子给；`idioms_per_1000` **故意给 null** —— 那一路要显示"本包没配成语表"，
+      // 而不是一个冒充 0 的数（"没测"与"测了、很好"必须是两种形状）。
+      shape: { mattr: 0.86, trigram_repeat: 0.12,
+               clause_len: { n: 9, p50: 12, p90: 26, gt30: 0.111 },
+               particles_per_100: 3.2, funcword_entropy: 3.41,
+               idioms_per_1000: null, chars: 268 },
       hits: [
         { id: "bookish_connective", severity: "weak", count: 2, where: "第2段",
           detail: "第一×1、第二×1", words: ["第一，看井道尺寸和载重。"] },
@@ -186,6 +206,12 @@ const META = {
         //   的桩上永远绿（空转）—— 本项目对空转断言的判定是"等于没有守卫"。
         { id: "policy_library", label: "政策库", platform: "国务院", role: "口径库",
           cadence: "quarterly", note: "不是雷达是口径库：给的是可引的文号与条款",
+          params: {}, enabled: true, wired: true },
+        // ⚠ 这一条是**今日跳过**的活样本（INTEL_TODAY.groups 里 state: cooling）。
+        // 「抓取失败 / 今日跳过 / 未接入」是三句话，下一步动作各不相同；
+        // 桩里不各留一个样本，那三条断言就会在"其它两态恰好为空"时永远绿。
+        { id: "weibo_hot", label: "微博热搜", platform: "微博", role: "破圈触发器",
+          cadence: "daily", note: "泛榜对电梯行业覆盖≈0，只等关键词命中",
           params: {}, enabled: true, wired: true },
       ] },
     { name: "fitment", display_name: "全屋定制包", draft: true,
@@ -275,6 +301,12 @@ const INTEL_TODAY = {
     mk2("g-n3", "加装电梯资金怎么摊", "下拉词", "demand_terms", "旧楼加装", 30),
     mk2("g-b2", "维保记录为什么查不到", "B站同类", "bilibili_search", "维保", 20),
     mk2("g-b3", "电梯年检到底查什么", "B站同类", "bilibili_search", "检验检测", 10));
+  // 事件详情里的条目要**带可点出处**：桩里给空 url 的话，"出处链接真的渲染出来了"
+  // 这条断言就只能量到 '#' 兜底，等于没测。
+  const byG = {};
+  for (const it of INTEL_TODAY.items) byG[it.guid] = it;
+  byG["g-n2"].url = "https://www.baidu.com/s?wd=weixiu";
+  byG["g-b2"].url = "https://b/2";
 })();
 INTEL_TODAY.groups[0].items = INTEL_TODAY.items.filter(i => i.source_label === "下拉词");
 INTEL_TODAY.groups[1].items = INTEL_TODAY.items.filter(i => i.source_label === "B站同类");
@@ -288,6 +320,134 @@ INTEL_TODAY.groups[2].items = INTEL_TODAY.items.filter(i => i.source_label === "
   for (const it of INTEL_TODAY.items) it.key = it.guid || it.url || `title:${it.title}`;
   INTEL_TODAY.items[0].key = 'srv:g-new';
 })();
+
+// ── 排行层的事件（app/intel.py 的 build_events 落盘形状）───────
+// 桩里带 events 是**必须的**：没有它，排行那一面会走"旧产物降级"分支，
+// 于是四根信号条 / 状态药丸 / 平台热度 / 赛道 chip 全都量不到真数据。
+// 四个事件各自要演一件事：
+//   A 跨两源、有 hot、持续在榜、争议 + 低粉爆文 + 推荐位（信息最全的一行）
+//   B 爆发中（增速有值）
+//   C 衰退中（增速为 0.4，热度为 null —— 平台没给数）
+//   D 信号不足（四根分项全 null，总分 null）：§3.5 的第三种"没有"
+(function () {
+  const byKey = {};
+  for (const it of INTEL_TODAY.items) byKey[it.key] = it;
+  // 平台真实热度：§1.2 #1 的病灶是"抓了没人接"。桩里给真数值，
+  // 界面上那一格才有活样本可量（写 null 会让"hot 有人接"那条断言空转）。
+  byKey['srv:g-new'].hot = 2475642;
+  byKey['g-b2'].hot = 41000;
+  byKey['g-hot'].hot = 99040000;
+  // 一条**恶意形状**的出处：这一列的每个字符都来自外网响应，界面把它做成可点的
+  // 链接就等于把执行权交给平台返回的字符串。桩里没有这一条，"只认 http(s)"
+  // 那句就只是一句注释 —— 给它一个活样本，判据才量得到（javascript: 必须退成纯文本）。
+  byKey['g-hot'].url = "javascript:alert(1)";
+  byKey['g-b3'].hot = null;
+  const evs = [
+    { key: "ev:0a1b2c3d4e5f", title: "电梯应急更换程序指引", segment: "维保",
+      platforms: ["下拉词", "B站同类"], source_count: 2,
+      item_keys: ["srv:g-new", "g-b2"], hot: 2475642,
+      first_seen: "2026-09-19T09:00:00+08:00", seen_before: true, days_on_board: 4,
+      signals: { diversity: 0.5, rank: 0.92, velocity: null, persistence: 0.57 },
+      growth: null, decay: 0, hot_score: 82, status: "persistent",
+      status_label: "持续在榜", stage: "peak", weak_signal: false,
+      contested: true, underdog: true, featured: true, quadrant: "高热高配", opportunity: 78,
+      brief: "absent" },
+    { key: "ev:111122223333", title: "被关 30 分钟，能索赔吗", segment: "维保",
+      platforms: ["抖音热榜", "微博热搜"], source_count: 2,
+      item_keys: ["g-hot"], hot: 99040000,
+      first_seen: "2026-09-23T08:00:00+08:00", seen_before: false, days_on_board: 1,
+      signals: { diversity: 0.5, rank: 0.6, velocity: 1, persistence: 0.14 },
+      growth: 6.2, decay: 0, hot_score: 71, status: "breakout",
+      status_label: "爆发中", stage: "rising", weak_signal: false,
+      contested: false, underdog: false, featured: true, quadrant: "高热高配", opportunity: 70,
+      brief: "absent" },
+    { key: "ev:444455556666", title: "住宅老旧电梯申报国债补贴工作指引",
+      segment: "旧楼加装", platforms: ["下拉词"], source_count: 1,
+      item_keys: ["g-old"], hot: null,
+      first_seen: "2026-09-14T07:30:00+08:00", seen_before: true, days_on_board: 9,
+      signals: { diversity: 0.25, rank: null, velocity: 0.2, persistence: 1 },
+      growth: 0.4, decay: 25, hot_score: 12, status: "fading",
+      status_label: "衰退中", stage: "fading", weak_signal: false,
+      contested: false, underdog: false, featured: false, quadrant: "低热高配", opportunity: 5,
+      brief: "stale" },
+    { key: "ev:777788889999", title: "年检标准两处口径不一致", segment: "",
+      platforms: ["B站同类"], source_count: 1, item_keys: ["g-b3"], hot: null,
+      first_seen: "", seen_before: false, days_on_board: 1,
+      signals: { diversity: null, rank: null, velocity: null, persistence: null },
+      growth: null, decay: 0, hot_score: null, status: "", status_label: "",
+      stage: "peak", weak_signal: true, contested: false, underdog: false,
+      featured: false, quadrant: "低热低配", opportunity: 10, brief: "absent" },
+  ];
+  // rows 从 items 现算：桩里如果手写一份行数据，"详情展开读的是同一份条目"
+  // 这条断言就会变成在测两份手抄稿是否恰好一致。
+  for (const ev of evs) {
+    ev.rows = (ev.item_keys || []).map(function (k) {
+      const it = byKey[k] || {};
+      return { key: k, title: it.title || "", source_label: it.source_label || "",
+               platform: it.platform || "", hot: it.hot === undefined ? null : it.hot,
+               published: it.published || "", url: it.url || "", desc: it.desc || "",
+               segment: it.segment || "",
+               opportunity: (it.score || {}).opportunity === undefined
+                 ? null : (it.score || {}).opportunity };
+    });
+    ev.sources = (ev.platforms || []).map(function (p, i) {
+      return { label: p, rank: i + 1, total: 50, hot: ev.hot };
+    });
+  }
+  INTEL_TODAY.events = evs;
+  // 源健康（§3.1）：近 7 天的 成/败。政策库那一条同时是"抓取失败"的活样本；
+  // 微博热搜演的是**今日跳过**（连续失败到闸值，这一轮没去试）。
+  INTEL_TODAY.groups[0].health = { ok: 6, fail: 0, hits: 24, consecutive_fails: 0 };
+  INTEL_TODAY.groups[1].health = { ok: 5, fail: 1, hits: 18, consecutive_fails: 0 };
+  INTEL_TODAY.groups[2].health = { ok: 4, fail: 2, hits: 3, consecutive_fails: 1 };
+  INTEL_TODAY.groups[4].health = { ok: 2, fail: 4, hits: 0, consecutive_fails: 4 };
+  INTEL_TODAY.groups.push({ id: "weibo_hot", label: "微博热搜", platform: "微博",
+    role: "破圈触发器", cadence: "daily",
+    note: "泛榜对电梯行业覆盖≈0，只等关键词命中",
+    params: {}, enabled: true, wired: true, state: "cooling", count: 0, items: [],
+    error: "连续 3 次抓取失败，今天先跳过 —— 下一次自动再试（近 7 天 2 成 / 3 败）",
+    health: { ok: 2, fail: 3, hits: 0, consecutive_fails: 3 } });
+  INTEL_TODAY.groups[3].health = { ok: 0, fail: 0, hits: 0, consecutive_fails: 0 };
+  // 忽略清单（§3.5）：一条今天的、一条已沉底的。
+  INTEL_TODAY.ignored_list = [
+    { key: "g-n2", title: "电梯维保记录该谁存", segment: "维保",
+      source_label: "下拉词", days: ["2026-09-23"], ignored_today: true, buried: false },
+    { key: "g-old", title: "住宅老旧电梯申报国债补贴工作指引", segment: "旧楼加装",
+      source_label: "下拉词", days: ["2026-09-21", "2026-09-22", "2026-09-23"],
+      ignored_today: true, buried: true },
+  ];
+  INTEL_TODAY.buried = 1;
+})();
+
+// 一张选题卡（§3.4 建议层）的桩数据。形状 = app/schemas.py 的 IntelBrief，
+// 数值故意带**风险档**与**命中禁用词**两种：那样"卡片把风险说出来"和
+// "摘标之后写 {{待补}}"这两条断言才有活样本，而不是在一份全干净的卡上空转。
+const BRIEF_CARD = {
+  event_key: "ev:0a1b2c3d4e5f", stage: "peak",
+  created_at: "2026-09-23T10:20:00+08:00",
+  angles: [
+    { type: "解读",
+      titles: { trend: ["电梯应急更换程序指引：这条到底在说什么"],
+                evergreen: ["电梯应急更换 常见问题一次讲清"] },
+      hook: { type: "疑问", line: "第一反应多半是错的，为什么？" },
+      audience: "关注自家小区改造的业主",
+      keywords: ["应急更换", "申报流程"], risk: "无", fit: 0.82 },
+    { type: "反方",
+      titles: { trend: ["别急着信：应急更换的另一面"],
+                evergreen: ["应急更换为什么各家说法不一致"] },
+      hook: { type: "反常识", line: "{{待补}}" },
+      audience: "已经看过热榜、想听第二句话的人",
+      keywords: ["争议"], risk: "命中禁用词", fit: 0.51 },
+  ],
+};
+
+// 最后一颗事件挂一份「盘上今天已有的选题卡」（`/api/intel/today` 的 `brief_card`）。
+// 不留这份卡，排行面就只在"我刚点出来的那张"这一种形态上量过 —— 而"切走再切回
+// 卡片凭空消失、那一行还写着「还没有这张卡的选题角度」"正是没水合时唯一的症状。
+// 挂在最后一行而不是榜首：前面每一条断言都拿第一行当现场，别共享。
+INTEL_TODAY.events[3].brief = "fresh";
+INTEL_TODAY.events[3].brief_card = Object.assign({}, BRIEF_CARD,
+                                                 { event_key: INTEL_TODAY.events[3].key });
 
 function stubScript() {
   // ⚠ 返回的是**纯 JS**，不带 <script> 包装 —— 它现在由 serve() 作为同源外部
@@ -329,6 +489,11 @@ window.__addCount = 0;
   // 直接在桩里写 INTEL_TODAY 是拿不到的 —— 那是 Node 侧的常量，
   // 浏览器里没有它，fetch 一抛就被 load() 的 catch 接成空态（症状：全 0 条）。
   var INTEL = ${JSON.stringify(INTEL_TODAY)};
+  // 池子的**键清单**挂到 window 上：断言"排行与按来源是同一份池子"要拿全集比，
+  // 而 #topics-root 上一屏只有 PAGE_SIZE 张卡 —— 拿渲染出的卡当全集，
+  // 第二条之后的事件键当然"对不上"（那是判据自己算错了基数，不是缺陷）。
+  window.__intelPool = INTEL.items.map(function (i) { return i.key; });
+  var BRIEF = ${JSON.stringify(BRIEF_CARD)};
   // 2026-09-17：把 META 挂到 window 上，让 verify.js 的 evalIn 也能读当前 pack 的
   // params 列表（任务 2 的"全量参数"断言需要比对 expectedKeys 与实际渲染的 keys）。
   // 仅暴露元信息（不暴露 mock 函数 / 接口状态），是只读快照，不污染调用方。
@@ -435,13 +600,15 @@ window.__addCount = 0;
     return d;
   }
   function hasKey(){ return !!activeRaw().api_key; }
-  // 后端 GET /api/config 常驻 base_url_warnings、保存/测试回 warnings。
+  // 后端 GET /api/config 常驻 base_url_warnings（**配置里存着的非法地址**）。
   // 桩**固定给一条**：这里验的是「后端给了字段，界面有没有人读」，
-  // 判定逻辑（哪个地址该警、哪个不该）由后端自己的
+  // 判定逻辑（哪个地址该拒、哪个照样能存）由后端自己的
   // tests/test_server_hardening.py::test_base_url_rejects_and_warns 守，
   // 不在渲染层重算一遍 —— 那只会让两边一起错。
-  var WARN_HTTP = ['当前模型地址走明文 http（http://192.168.2.10:9200/v1）：'
-                   + '密钥与整段提示词会明文穿过网络，请只在可信内网这样用。'];
+  // ⚠ 装的不再是「明文 http」黄字：那句 2026-09-28 按用户要求去掉了，
+  //   桩要是还发它，验的就是一个产品里已经不存在的东西。
+  var WARN_BAD_URL = ['模型「内网网关」的请求地址不合法：'
+                      + '请求地址要以 http:// 或 https:// 开头'];
   function err(code, detail) {
     return Promise.resolve(new Response(JSON.stringify({ detail: detail }),
       { status: code, headers: { 'Content-Type': 'application/json' } }));
@@ -468,7 +635,7 @@ window.__addCount = 0;
              config_error: CFGERR
                ? "config.yaml 语法有误（mapping values are not allowed here，第 2 行第 44 列）"
                : "",
-             base_url_warnings: WARN_HTTP };
+             base_url_warnings: WARN_BAD_URL };
   }
   var calls = { gen:0, job:0, cancel:0, rewrite:0, pg:0 };
   // created_at 在一个作业的生命周期里是**固定**的（真引擎取的是 Job.created_at）。
@@ -727,6 +894,29 @@ window.__addCount = 0;
     //   现在至少「请求带的是哪个包」可断言（见 sections/topics.js 的两条前置与收口判据）。
     if (s.indexOf('/api/intel/today') >= 0) {
       window.__intelReqs = (window.__intelReqs || []).concat([s]);
+      // ?noevents=1 或 window.__stripEvents：演**旧产物**（latest.json 里
+      // 没有 events 键）那一条降级路。不留开关，排行那一面永远只在"新格式"上量，
+      // 而 §3.1 承诺的兼容降级就只存在于注释里。
+      if (/[?&]noevents=1/.test(location.search) || window.__stripEvents) {
+        var legacy = Object.assign({}, INTEL, { events: [] });
+        return mk(legacy);
+      }
+      // window.__buryTop：把**榜首那颗**标成已沉底再回一轮。
+      // 不在夹具里直接写死 buried：那样整屏行序跟着变，药丸 / 四象限 / 平台热度
+      // 那三条顺序断言全要跟着重写 —— 一条断言的成本转嫁给三条无关断言。
+      // 也不给那颗最低的：它本来就在最后，"沉底排最后"在它身上永远证不出来。
+      if (window.__buryTop) {
+        var bur = Object.assign({}, INTEL, {
+          events: INTEL.events.map(function (e, i) {
+            return i === 0 ? Object.assign({}, e, { buried: true }) : e; }) });
+        return mk(bur);
+      }
+      // window.__noIgnoredToday：今天没点过忽略、但清单里还有历史条目。
+      // 「已忽略 N」那颗按钮的禁用条件过去认的是 N，于是唯一能恢复被沉底条目的
+      // 入口恰好在这时打不开。
+      if (window.__noIgnoredToday) {
+        return mk(Object.assign({}, INTEL, { ignored_today: 0 }));
+      }
       return mk(INTEL);
     }
     if (s.indexOf('/api/intel/refresh') >= 0) {
@@ -740,6 +930,37 @@ window.__addCount = 0;
       // 界面那行如果拿错口径，读到的就是 18 而不是 2。
       return mk({ ok: true, ignored: window.__ignoredKeys.length + 17,
                   ignored_today: window.__ignoredKeys.length + 1 });
+    }
+    if (s.indexOf('/api/intel/unignore') >= 0) {
+      var ub = {}; try { ub = JSON.parse(o && o.body || '{}'); } catch (_) {}
+      window.__unignoredKeys = (window.__unignoredKeys || []).concat([ub.key]);
+      // 恢复 = 记录整条删掉，所以两个计数都要往回走一格（与后端同一个语义）。
+      var left = Math.max(0, (window.__ignoredKeys || []).length
+        - window.__unignoredKeys.length);
+      return mk({ ok: true, ignored: left + 17, ignored_today: left + 1 });
+    }
+    if (s.indexOf('/api/intel/brief') >= 0) {
+      var bb = {}; try { bb = JSON.parse(o && o.body || '{}'); } catch (_) {}
+      window.__briefCalls = (window.__briefCalls || []).concat([bb.key]);
+      // 当日缓存命中：不发作业（§3.4「重复点击不重扣费」）。
+      // 桩**必须**区分这两条出口 —— 都回 job_id 的话"零成本的第二次点击演成
+      // 一次昂贵调用"在界面上看不出来，而那是这条硬约束唯一的可观察面。
+      if (window.__briefCached) return mk({ state: 'cached', job_id: '', brief: BRIEF });
+      if (window.__briefNoKey) {
+        return err(400, '还没有配置模型 —— 请在「设置 → 模型接口」里点右上角「添加模型」');
+      }
+      return mk({ state: 'job', job_id: 'briefjob1', brief: null, note: '' });
+    }
+    if (s.indexOf('/api/jobs/briefjob1') >= 0) {
+      if (window.__briefPending) {
+        return mk({ id:'briefjob1', kind:'intel_brief', state:'briefing',
+                    params:{ pack:'elevator', key:'ev:0a1b2c3d4e5f' },
+                    steps:[], error:null, created_at:'2026-09-23T10:20:00', result:null });
+      }
+      return mk({ id:'briefjob1', kind:'intel_brief', state:'done',
+                  params:{ pack:'elevator', key:'ev:0a1b2c3d4e5f' },
+                  steps:[{ id:'brief_done', label:'选题卡已生成', status:'done' }],
+                  error:null, created_at:'2026-09-23T10:20:00', result: BRIEF });
     }
     if (s.indexOf('/api/jobs/inteljob1') >= 0) {
       // window.__intelPending 为真时把这条抓取作业停在「进行中」——
@@ -871,10 +1092,10 @@ window.__addCount = 0;
         return err(409, '行业包 elevator 的结构不符合约定（version 必须是数字）');
       }
       // 主题里带「失败」就返回一个必然失败的作业，用来覆盖失败态渲染
-      // ⚠ __failRetry 是 P0-1 那条守卫的开关：失败之后点「用同样的参数重试」
-      //   必须拿到**成功**的作业（job1），于是同一个气泡里出现
-      //   「版本 1 = 失败、版本 2 = 成功」。没有这个分支的话重试又是失败，
-      //   断言量到的就不是那条路径。
+      // ⚠ __failRetry 是 P0-1 那条守卫的开关：它只在**已经失败过一次之后**
+      //   的重试里生效（首次 generate 仍回 jobfail，于是失败卡真的出现，
+      //   点它的「用同样的参数重试」才拿得到 job1）。开关提前打开的话，
+      //   首次 generate 就成功了，压根没有失败卡可点，量到的不是那条路径。
       window.__lastJobId = /失败/.test(gtopic) && !window.__failRetry ? 'jobfail'
         : /停不掉/.test(gtopic) ? 'jobrun'
         : /占位/.test(gtopic) ? 'jobph'
@@ -968,20 +1189,15 @@ window.__addCount = 0;
                 { key: 'check_r1', title: '校验·第 1 轮', ts: '2026-09-13T10:00:09', data:{} }],
         result: altResult });
     }
-    if (s.indexOf('/api/jobs/jobfail/cancel') >= 0) {
-      // 「失败后用同样的参数重试」那条路：重试会拿到 job1（成功），
-      // 于是同一个气泡里出现「版本 1 = 失败、版本 2 = 成功」，
-      // 翻回第 1 版必须看到**它自己没有产物**，而不是第 2 版的稿子（P0）。
-      if (window.__failRetry) return mk({ id:'jobfail', state:'failed',
-        error:'模型返回的结构不对（这次是真的失败）', params:{} });
-      return mk({ id:'jobfail', state:'cancelled', params:{} });
-    }
     if (s.indexOf('/api/jobs/job1/cancel') >= 0) {
       calls.cancel++;
       return mk({ id:'job1', state:'cancelled', params:{} });
     }
     if (s.indexOf('/api/jobs/job1/rewrite_segment') >= 0) {
-      calls.rewrite++; calls.job = 0; return mk({ id:'job1', state:'rewriting' });
+      // 重写请求本身：立刻回 rewriting，之后由 /api/jobs/job1 的 __rwHold 分支
+      // 决定它停在 rewriting 还是落 done（那条守卫需要它一直停在 rewriting）。
+      calls.rewrite++; calls.job = 0;
+      return mk({ id:'job1', state:'rewriting' });
     }
     if (s.indexOf('/api/jobs/job1') >= 0) {
       calls.job++;
@@ -1000,6 +1216,15 @@ window.__addCount = 0;
       //   桩原来两个都给，界面照它画就会多出一行重复的阶段名 —— 拿一个
       //   后端根本产不出的组合去截图和断言，量到的都是假东西。
       //   rewriting（第 2 轮回炉）才是「已有 select + write 两步、仍在跑」的合法形态。
+      // __rwHold：让作业**一直**停在 rewriting —— 「重写进行中按 Esc」那条
+      // 守卫（P0）需要它，落 done 之后就没有「正在重写」可停了。
+      if (window.__rwHold) return mk({ id:'job1', state:'rewriting',
+        created_at: bornAt('job1', 8000),
+        params:{ topic:'家用电梯怎么挑？', pack:'elevator', duration:60 },
+        steps:[{ key:'select', title:'选题策划', ts:'2026-09-13T10:00:01', data:{} },
+               { key:'write_r1', title:'单段重写', ts:'2026-09-13T10:00:05', data:{} }],
+        stream:{ phase:'单段重写', reasoning_tail:'正在改写这一段……',
+                 reasoning_len:30, content_len:0 } });
       if (calls.job <= 2) return mk({ id:'job1', state:'rewriting',
         created_at: bornAt('job1', 8000),
         params:{ topic:'家用电梯怎么挑？', pack:'elevator', duration:60 },
@@ -1042,6 +1267,11 @@ window.__addCount = 0;
     }
     if (s.indexOf('/api/history/') >= 0) {
       var hid = decodeURIComponent(s.split('/').pop());
+      // 打开一条记录 = 真去取了一次产物。这是「开没开这条」唯一不受桩限制的痕迹：
+      // 桩对每条历史记录回的是**同一份** RESULT（连 id 都一样），所以
+      // 「页头标题换没换」「左栏高亮挪没挪」都量不出开没开 —— 都会被这份桩抹平。
+      // IME 那组断言（回车是否真的打开了一条）就靠这个计数。
+      (window.__opened || (window.__opened = [])).push(hid);
       // 三态里「没有结论」那一档的真实现场：老产物 / 未校验的产物，引擎回的是
       // **没有 passed 这个键**（app/store.py 明写 None）。见列表桩里的 __nullVerdict。
       if (window.__nullVerdict && hid === 's6') {
@@ -1050,15 +1280,31 @@ window.__addCount = 0;
         delete hnv.check.passed;
         return mk(hnv);
       }
-      // 另外三档现场（同一套机制：只改 payload，不改判据）：
+      // P1-25：三种「没有分镜」的真实现场（同一套机制：只改 payload，不改判据）。
+      //   __sbMiss='voice' 输出内容只要口播 → 是用户的决定
+      //   __sbMiss='fail'  终版没通过校验   → 分镜这一步本来就不画
+      //   __sbMiss='skip'  其余（调用失败 / 包里没有这步）→ 指向日志
+      // 改前页签被 hide，屏幕上"没有分镜"零解释（page 的 render 压根不跑）。
+      if (window.__sbMiss && hid === 's1') {
+        var sp = JSON.parse(JSON.stringify(RESULT));
+        sp.id = 's1';
+        sp.storyboard = [];
+        if (window.__sbMiss === 'voice') sp.params.format = 'voice';
+        if (window.__sbMiss === 'fail') { sp.check.passed = false; sp.check.blockers = ['偏差超过容差']; }
+        return mk(sp);
+      }
+      // 另外四档现场（同一套机制：只改 payload，不改判据）：
       //   __badVerdict 结论=未通过   —— 钉「未通过校验」那格页签**真的**变红
       //   __tol=N      容差被改小     —— 钉偏差胶囊吃的是报告里的 tolerance_pct 而不是写死的 10
       //   __noSmell    词表缺失未测   —— 钉「未测」那一档既不绿也不红（三态不许压成二分）
-      if (window.__badVerdict || typeof window.__tol === 'number' || window.__noSmell) {
+      //   __noShape    老产物没有 L2 —— 钉「形态指标」整块**不画**（而不是画一排 0）
+      if (window.__badVerdict || typeof window.__tol === 'number' || window.__noSmell
+          || window.__noShape) {
         var bp = JSON.parse(JSON.stringify(RESULT));
         bp.id = hid;
         if (typeof window.__tol === 'number') bp.check.tolerance_pct = window.__tol;
         if (window.__noSmell) bp.check.ai_tells = null;
+        if (window.__noShape && bp.check.ai_tells) delete bp.check.ai_tells.shape;
         if (window.__badVerdict) {
           bp.check.passed = false;
           bp.check.blockers = ['偏差超过容差'];
@@ -1092,14 +1338,20 @@ window.__addCount = 0;
       }
       return mk(RESULT);
     }
-    // 未配置 Key 的模式要模拟「真·首次运行」：没有 Key **也没有历史记录**，
-    // 否则 boot() 会按设计跳过自动打开设置（有历史说明不是第一次用）。
+    // 请求**根本没到引擎**（进程没起 / 端口没绑）：浏览器交给 fetch 的是一个
+    // 拒绝，不是一条带状态码的响应。全局失联横幅只由这一种触发，所以必须能
+    // 单独造出来 —— 下面那个 503 是"引擎回了话"，它不该把整个界面标成红色。
+    if (s.indexOf('/api/history') >= 0 && window.__netFail) {
+      return Promise.reject(new TypeError('Failed to fetch'));
+    }
+    // 引擎不可达：返回一个**真失败**（不是空列表）—— 空列表与"没有记录"
+    // 在界面上同形，正是这条断言要分开的东西。
     if (s.indexOf('/api/history') >= 0 && window.__histFail) {
-      // 引擎不可达：返回一个**真失败**（不是空列表）—— 空列表与"没有记录"
-      // 在界面上同形，正是这条断言要分开的东西。
       return Promise.resolve(new Response(JSON.stringify({ detail: '引擎暂时不可用' }),
         { status: 503, headers: { 'Content-Type': 'application/json' } }));
     }
+    // 未配置 Key 的模式要模拟「真·首次运行」：没有 Key **也没有历史记录**，
+    // 否则 boot() 会按设计跳过自动打开设置（有历史说明不是第一次用）。
     if (s.indexOf('/api/history') >= 0 && NOKEY) return mk([]);
     // 会话桩：**跨 4 天**，且日子是相对「今天」实算的。
     // ⚠ 不能写死日期（如 2026-09-13）：分组口径是相对时间（今天 / 昨天 / MM-DD），
@@ -1107,8 +1359,10 @@ window.__addCount = 0;
     // 这里按「今天 / 昨天 / 3 天前 / 10 天前」各造一条，覆盖 dayGroupKey 的
     // 三个分支（相对词、带星期的近一周、只留日期的更早）。
     if (s.indexOf('/api/history') >= 0) return mk(histStub());
-    if (s.indexOf('/api/config/test') >= 0) return mk({ ok:true, model:'glm-4.7', detail:'延迟 320ms',
-      warnings: WARN_HTTP });
+    // 「测试连接」的响应里**没有 warnings** —— 与真后端一致：
+    // 后端只在 GET /api/config 常驻 base_url_warnings（配置里存着的非法地址），
+    // 保存 / 测试那两次不回明文提示（2026-09-28 去掉了那条常驻黄字）。
+    if (s.indexOf('/api/config/test') >= 0) return mk({ ok:true, model:'glm-4.7', detail:'延迟 320ms' });
     // 必须在 /api/config 的通用匹配之前：indexOf('/api/config') 也会命中 reset
     if (s.indexOf('/api/config/reset') >= 0) return mk({ ok:true, fields:['base_url'] });
     // 匹配任意包名的转正：实际请求可能是 fitment（测试里切过包）。
@@ -1441,19 +1695,26 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   // ── 分组早退：只要这一组，就不必把整网的前置流程走完 ──────────────
   if (ONLY) {
-    const suite = SECTIONS[ONLY];
+    // `static` 不是 sections/ 里的一个文件，而是**本文件里那段不开浏览器的静态扫**
+    // （`staticChecks`，函数声明提升所以这里够得着）。给它一个分组入口的理由很具体：
+    // 锚点落在那一段上的变异有几十条，过去每条都要跑完整张网（约 12 分钟），
+    // 于是没人跑全量门 —— 而"没人跑"就是变异表腐烂没人看见的成因（第 29 轮）。
+    const suite = ONLY === "static" ? staticChecks : SECTIONS[ONLY];
     // ⚠ 两个静默降级都必须堵死，否则分组入口就是一台假绿发生器：
     //   ① 分组名写错 → suite 是 undefined，什么都不跑、退出码 0 = "全绿"；
     //   ② 分组跑完一条断言都没落 → 同样是"全绿"。
     //   两条都直接判失败，绝不允许"没跑到"被读成"跑过了"。
     if (!suite) {
-      console.error(`FAIL: 没有叫「${ONLY}」的分组，可选：${Object.keys(SECTIONS).join(" / ")}`);
+      console.error(`FAIL: 没有叫「${ONLY}」的分组，可选：static / ${Object.keys(SECTIONS).join(" / ")}`);
       cleanupAll();
       process.exit(3);
     }
     // ⚠ resolvedToken / contrastRatio 也一起传：对比度组要用，而它们**只在
     //   verify.js 里定义一份**（整网里还有 8 处断言在用），分组不能自己抄一份。
-    await suite({ evalIn, sleep, check, resolvedToken, contrastRatio });
+    //   ctx 同理：review 组要做静态扫（字面量池 / 词表真值），fs/path/
+    //   stripJsComments 也不能在分组里另抄一份 —— 抄的那份会先烂掉。
+    await suite({ evalIn, sleep, check, resolvedToken, contrastRatio,
+      ctx: { RENDERER, fs, path, stripJsComments } });
     if (!results.length) {
       console.error(`FAIL: 分组「${ONLY}」一条断言都没跑到（分组是空的？）`);
       cleanupAll();
@@ -1579,10 +1840,19 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     `rows=${boot.sessions} groups=${boot.groups}`);
   check("请求带上了访问令牌", await evalIn("return window.__sawToken === true;"), "");
 
-  // ── 1a-3) 会话列表拉取失败（P2-3）────────────────────────
+  // ── 1a-3) 会话列表拉取失败：两种失败必须分两种画法 ───────────
   // 判据是**转移**：先成功（上面那条已确认 6 条），再让 /api/history 失败 ——
   // 只有转移才验得出"保留上一次的列表"。修复前是空 catch + items 初值 []，
   // paint([]) 会把列表换成空态「还没有会话记录」，用户以为**记录丢了**。
+  // 这一批加进来的是**分档**：引擎回了 5xx = 它活着、这一件事办砸了，
+  // 不许把整个界面染红；请求根本没到引擎 = 全局阻断，才许摊右栏那条横幅，
+  // 并且那条横幅要真的能把界面接回去（原先只有一行会随列表滚走的小字，
+  // 既没有出口也没有自动重试）。
+  const engShown = () => evalIn(`var b = document.getElementById('engine-banner');
+    return { hidden: getComputedStyle(b).display === 'none',
+             text: b.textContent, btn: !!b.querySelector('#eb-retry') };`);
+
+  // (a) 引擎回了 5xx：只说列表，不许升全局
   await evalIn(`window.__histFail = true;
     return window.__ts.loadSessions().then(function () { return true; });`);
   const sessFail = await evalIn(`return (function () {
@@ -1592,19 +1862,83 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
              err: !!e, errText: e ? e.textContent : '',
              empty: list.textContent.indexOf('还没有会话记录') >= 0 };
   })()`);
-  check("会话列表拉取失败：保留上一次的列表 + 顶部摊出原因（不再谎报「还没有会话记录」）",
-    sessFail.items === 6 && sessFail.err && !sessFail.empty,
+  check("会话列表拉取失败：保留上一次的列表 + 列表头摊出原因（不再谎报「还没有会话记录」）",
+    sessFail.items === 6 && sessFail.err && !sessFail.empty
+      && sessFail.errText.indexOf('引擎暂时不可用') >= 0
+      && sessFail.errText.indexOf('下面是') >= 0,
     JSON.stringify(sessFail));
+  const eng503 = await engShown();
+  check("★ 引擎回了话（5xx）不算全局失联：右栏横幅不许出现（局部错误不许冒充全局故障）",
+    eng503.hidden, JSON.stringify(eng503));
   // 恢复：切回成功态，告警必须被清掉 —— 否则它会一直挂着变成背景噪音
   await evalIn(`window.__histFail = false;
     return window.__ts.loadSessions().then(function () { return true; });`);
-  const sessOk = await evalIn(`return (function () {
+  const sessBack = await evalIn(`return (function () {
     var list = document.getElementById('session-list');
     return { items: list.querySelectorAll('.sess-item').length,
              err: !!list.querySelector('.sess-load-err') };
   })()`);
   check("恢复后失败提示被清掉（提示不能变成常驻噪音）",
-    sessOk.items === 6 && !sessOk.err, JSON.stringify(sessOk));
+    sessBack.items === 6 && !sessBack.err, JSON.stringify(sessBack));
+
+  // (b) 请求根本没到引擎：全局横幅 + 在跑的行不许再呼吸
+  await evalIn(`window.__netFail = true;
+    return window.__ts.loadSessions().then(function () { return true; });`);
+  const engNet = await engShown();
+  check("★ 请求根本没到引擎：右栏顶部摊出全局横幅，并给出「重试」这条出路",
+    !engNet.hidden && engNet.btn && engNet.text.indexOf('连不上本地引擎') >= 0,
+    JSON.stringify(engNet));
+  const staleRows = await evalIn(`return (function () {
+    var list = document.getElementById('session-list');
+    var r = list.querySelector('.sess-item[data-id="s2"]');
+    var d = r ? r.querySelector('.dot') : null;
+    var note = list.querySelector('.sess-load-err');
+    return { items: list.querySelectorAll('.sess-item').length,
+             dot: d ? d.className : '(这一行没画出来)',
+             run: list.querySelectorAll('.dot.run').length,
+             aria: r ? (r.getAttribute('aria-label') || '') : '',
+             note: note ? note.textContent : '' };
+  })()`);
+  check("★ 失联期间在跑的那几行退成「状态未知」：那颗呼吸点此刻说的是假话",
+    staleRows.items === 6 && staleRows.dot === 'dot' && staleRows.run === 0
+      && staleRows.aria.indexOf('状态未知') >= 0, JSON.stringify(staleRows));
+  check("列表头那一行只说新鲜度，不抄浏览器原始错串（Failed to fetch 不许上屏）",
+    staleRows.note.indexOf('Failed to fetch') < 0
+      && staleRows.note.indexOf('连不上本地引擎') >= 0
+      && staleRows.note.indexOf('下面是') >= 0, staleRows.note);
+  // (c) 点「重试」：meta 通了但列表还是拉不回来 ⇒ 横幅必须留着。
+  //     钉的是"握手成功 ≠ 恢复"：只看 /api/meta 就收横幅，会把一个仍然读不到
+  //     历史的界面标成"好了"—— 那正是这一批要消灭的形状（说了假话的提示）。
+  await evalIn(`document.getElementById('eb-retry').click(); return 1;`);
+  await evalIn(`return new Promise(function (res) { setTimeout(function () { res(1); }, 400); });`);
+  const engRetryFail = await engShown();
+  check("点「重试」而引擎仍不可达：横幅不收（只有真的拉回列表才算恢复）",
+    !engRetryFail.hidden, JSON.stringify(engRetryFail));
+  // (d) 引擎回来了：还是那颗「重试」，要把横幅、列表头提示、呼吸点全部接回去
+  await evalIn(`window.__netFail = false;
+    document.getElementById('eb-retry').click(); return 1;`);
+  const recovered = await evalIn(`return new Promise(function (res) {
+    var deadline = Date.now() + 4000;
+    (function wait() {
+      var b = document.getElementById('engine-banner');
+      if (getComputedStyle(b).display === 'none') return res(true);
+      if (Date.now() > deadline) return res(false);
+      setTimeout(wait, 50);
+    })();
+  });`);
+  check("★ 引擎回来后点「重试」真的把界面接回去了（不必刷新窗口、不必重开应用）",
+    recovered, recovered ? "横幅已收" : "超时仍挂着：重连那条路没走通");
+  const sessOk = await evalIn(`return (function () {
+    var list = document.getElementById('session-list');
+    var r = list.querySelector('.sess-item[data-id="s2"]');
+    return { items: list.querySelectorAll('.sess-item').length,
+             err: !!list.querySelector('.sess-load-err'),
+             dot: r ? r.querySelector('.dot').className : '',
+             aria: r ? (r.getAttribute('aria-label') || '') : '' };
+  })()`);
+  check("恢复后在跑的那一行重新呼吸、状态字回到真值（旧列表的降级不许留在界面上）",
+    sessOk.items === 6 && !sessOk.err && sessOk.dot === 'dot run'
+      && sessOk.aria.indexOf('状态未知') < 0, JSON.stringify(sessOk));
 
   // ── 1a-4) 打开设置时配置读不到（P2-4）────────────────────
   // 修复前是空 catch：设置页会停在 HTML 初始值 / 上一次加载的值 ——
@@ -1693,7 +2027,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     ".nav-item kbd { padding: 1px var(--s1) }",          // 键帽的墨底补偿，与上面同一写法
     ".sess-search > kbd { padding: 1px var(--s1) }",     // 搜索框 Ctrl+K 同属键帽一族（同上）
     ".msg-assistant .avatar { margin-top: 2px }",        // 24 的头像盒对齐 15/1.6 首行
-    ".res-tab { margin-bottom: -1px }",                  // 选中态的黑线压在容器分隔线上
+    // 「.res-tab { margin-bottom: -1px }」这条已从名单里删掉：页签选中态改成
+    // 靠字重表态之后，那条用来把 2px 黑线压在容器分隔线上的负margin 一起没了
+    // （2026-09-28 重排版）。名单只会被写短，不会越写越长。
     "#session-list { gap: 1px }",                        // 相邻涂底行之间的缝（§2 例外三）
     // —— 容器尺度，不是节奏 ——
     "select { padding: var(--s2) 28px var(--s2) var(--s3) }",   // 给自绘箭头留位
@@ -2026,6 +2362,31 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       && Number(afterTick.elapsed.replace(/[^0-9]/g, "")) >= 8
       && !!afterTick.jobCreatedAt,
     JSON.stringify(afterTick));
+
+  // ── 等待期必须说得出「最长等到什么时候」（2026-09-27 修）──────────
+  // 生成要几分钟，而这一行原来只有「已用 N 秒」一个数：用户据此判断不了
+  // 「正常」还是「卡死」，等引擎那 20 分钟硬闸把它停掉之前一句预警都没有。
+  // 判据要点：那个上限必须**等于引擎给作业的硬闸**（不是「通常几分钟」这种
+  // 没依据的承诺），所以这里对着 `api.js` 的 JOB_BUDGET_MS 量。
+  const budgetHint = await evalIn(`var b = document.querySelector('#gen-budget');
+    if (!b) return { missing: true };
+    var r = b.getBoundingClientRect();
+    return { text: b.textContent, right: Math.round(r.right),
+             rowRight: Math.round(b.closest('.gen-status').getBoundingClientRect().right) };`);
+  check("★ 等待期给出作业的硬上限（用户据此判断「正常」还是「卡死」）",
+    !budgetHint.missing && /最长/.test(budgetHint.text)
+      && /到点会停/.test(budgetHint.text), JSON.stringify(budgetHint));
+  check("★ 那句上限贴在状态行最右（不与「已用 N 秒」抢主位）",
+    !budgetHint.missing && budgetHint.right <= budgetHint.rowRight
+      && budgetHint.right >= budgetHint.rowRight - 40, JSON.stringify(budgetHint));
+
+  // ── 切到别的应用时要知道「好了没」（2026-09-27 修）──────────────
+  // 全仓原来没有任何 document.title 改动、也没有系统通知：用户切去剪映
+  // 剪素材，生成完了他完全不知道，回来只能翻左栏有没有多出一行。
+  const titleRunning = await evalIn(`return { t: document.title };`);
+  check("★ 作业在跑时窗口标题带主题与进度（不进窗口也看得见）",
+    /家用电梯/.test(titleRunning.t) && /TalkScript/.test(titleRunning.t),
+    JSON.stringify(titleRunning));
   check("生成中发送键变为「停止」", /停止/.test(running.btnTitle), running.btnTitle);
   // 停止键必须是**实心按钮**，不能是淡底。判据看 backgroundImage 而不是
   // backgroundColor：--grad-btn 是 linear-gradient，它落在 background-image 上，
@@ -2341,38 +2702,56 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   // 触发链：失败 → 点「用同样的参数重试」成功 → 翻回第 1 版。
   // 修前这一格里仍然是第 2 版的完整稿子（只重画了版本条），于是用户以为在
   // 对照两版、实际看的是同一份，并据此做发布决定。现在必须是「这一版没有产物」。
-  await evalIn(`window.__failRetry = true; return true;`);
   await evalIn(`const t = document.getElementById('topic');
     t.value = '失败后重试'; t.dispatchEvent(new Event('input', {bubbles:true}));
     document.getElementById('btn-generate').click(); return true;`);
-  await sleep(1500);
-  await evalIn(`const b = document.querySelector('[data-act="retry"]');
-    if (b) b.click(); return !!b;`);
-  await sleep(3200);
-  const failedRetry = await evalIn(`return {
-    bar: document.querySelectorAll('.ver-bar').length,
-    label: document.querySelector('.ver-label')?.textContent || '',
-    cards: document.querySelectorAll('.script-card').length };`);
+  await sleep(2600);
+  // 失败卡要先真的出现才点重试（轮询两拍才落到 failed，早了会点空 → 后面全红）。
+  // __failRetry 在**点下去的那一刻**才打开：首次 generate 已经拿到 jobfail，
+  // 接下来点重试才换成 job1，于是出现「版本 1 = 失败、版本 2 = 成功」。
+  const gotFail = await evalIn(`const b = Array.from(document.querySelectorAll('[data-act="retry"]'))
+    .find(x => /重试/.test(x.textContent));
+    if (!b) return false;
+    window.__failRetry = true;
+    b.click();
+    return true;`);
+  check("失败后点「用同样的参数重试」真的点到了按钮", gotFail, `gotFail=${gotFail}`);
+  await sleep(3600);
+  const failedRetry = await evalIn(`const bars = document.querySelectorAll('.ver-bar');
+    const bar = bars[bars.length - 1];   // 失败重试那条是新气泡，取最后一个
+    return {
+      bars: bars.length,
+      label: bar?.querySelector('.ver-label')?.textContent || '',
+      cards: bar?.closest('.msg')?.querySelectorAll('.script-card').length || 0 };`);
   check("失败后重试成功 → 版本条记成 2 / 2（第一版是无产物的那版）",
-    failedRetry.bar === 1 && /2 \/ 2/.test(failedRetry.label) && failedRetry.cards > 0,
+    failedRetry.bars >= 1 && /2 \/ 2/.test(failedRetry.label) && failedRetry.cards > 0,
     JSON.stringify(failedRetry));
-  await evalIn(`document.querySelector('.ver-btn[data-d="-1"]').click(); return true;`);
+  await evalIn(`const bars = document.querySelectorAll('.ver-bar');
+    const bar = bars[bars.length - 1];
+    bar.querySelector('.ver-btn[data-d="-1"]').click(); return true;`);
   await sleep(250);
-  const noRes = await evalIn(`return {
-    label: document.querySelector('.ver-label')?.textContent || '',
-    cards: document.querySelectorAll('.script-card').length,
-    banner: document.querySelector('.msg:last-of-type .banner')?.textContent || '',
-    goto: document.querySelector('.msg:last-of-type [data-act="goto"]')?.textContent || '' };`);
+  // ⚠ 所有断言都必须**落在同一个 .msg 内**：版本条与卡片是每条气泡各自的，
+  //   跨气泡查会量到另一条消息的稿子（第一版就是栽在这里：全页 8 张卡片）。
+  const noRes = await evalIn(`const bars = document.querySelectorAll('.ver-bar');
+    const msg = bars[bars.length - 1].closest('.msg');
+    return {
+      label: bars[bars.length - 1].querySelector('.ver-label')?.textContent || '',
+      cards: msg.querySelectorAll('.script-card').length,
+      banner: msg.querySelector('.banner')?.textContent || '',
+      goto: msg.querySelector('[data-act="goto"]')?.textContent || '' };`);
   // 关键两条：稿子必须**不在**屏幕上（0 张卡片），且要说清「这一版没有产物」
   check("★ 翻回没有产物的那一版 → 不再显示别的版本的稿子（P0）",
     noRes.cards === 0, JSON.stringify(noRes));
   check("★ 那一版说清「没有产物」，并给一个通往有产物版本的出口",
     /没有产物/.test(noRes.banner) && /去看版本/.test(noRes.goto), JSON.stringify(noRes));
-  await evalIn(`const g = document.querySelector('[data-act="goto"]');
-    if (g) g.click(); return !!g;`);
+  await evalIn(`const bars = document.querySelectorAll('.ver-bar');
+    const msg = bars[bars.length - 1].closest('.msg');
+    msg.querySelector('[data-act="goto"]').click(); return true;`);
   await sleep(250);
-  const jumped = await evalIn(`return { label: document.querySelector('.ver-label')?.textContent || '',
-    cards: document.querySelectorAll('.script-card').length };`);
+  const jumped = await evalIn(`const bars = document.querySelectorAll('.ver-bar');
+    const msg = bars[bars.length - 1].closest('.msg');
+    return { label: bars[bars.length - 1].querySelector('.ver-label')?.textContent || '',
+      cards: msg.querySelectorAll('.script-card').length };`);
   check("「去看版本 N」能跳到有产物的那一版",
     /2 \/ 2/.test(jumped.label) && jumped.cards === 4, JSON.stringify(jumped));
   await evalIn(`window.__failRetry = false; return true;`);
@@ -2390,6 +2769,38 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const rw = await evalIn(`const b = document.querySelector('.card-foot .rw');
     return { disabled: b.disabled, title: b.title };`);
   check("有后台作业时单段重写可用", rw.disabled === false, JSON.stringify(rw));
+
+  // ── 7b) 重写进行中按 Esc：稿子必须**留在屏幕上**（P0）─────
+  // 触发链：起一次重写（桩把它一直按在 rewriting）→ 按 Esc 取消。
+  // 修前这条落进 onCancelled → renderStopped，整份稿子被擦成
+  // 「已停止本次生成。产物未落盘」—— 而产物好好地在 result.json 里，
+  // 而且那一句本身是假的。用户最怕的「我的东西会不会丢」就是这样来的。
+  await evalIn(`window.__rwHold = true; return true;`);
+  await evalIn(`const inp = document.querySelector('.card-foot .rw-feedback');
+    inp.focus();
+    inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    return true;`);
+  await sleep(900);
+  const rwBusy = await evalIn(`const b = document.getElementById('btn-generate');
+    return { cards: document.querySelectorAll('.script-card').length,
+      stopping: b.classList.contains('stopping'),
+      aria: b.getAttribute('aria-label') || '' };`);
+  // 按钮里只有两个 aria-hidden 的图标，「是不是停止态」看 class 与 aria-label，
+  // 不看 textContent（那里只有空白）
+  check("重写进行中：稿子还在，发送键变成「停止」",
+    rwBusy.cards >= 4 && rwBusy.stopping && /停止/.test(rwBusy.aria), JSON.stringify(rwBusy));
+  await evalIn(`document.getElementById('btn-generate').click(); return true;`);  // Esc 同一条路
+  await sleep(1200);
+  const rwAfterStop = await evalIn(`return {
+    cards: document.querySelectorAll('.script-card').length,
+    stopped: document.body.textContent.includes('产物未落盘'),
+    toast: document.querySelector('.toast')?.textContent || '',
+    keep: /稿子还是原来那版/.test(document.querySelector('.toast')?.textContent || '') };`);
+  check("★ 取消重写后整份稿子仍在屏幕上（P0：修前被擦成「产物未落盘」）",
+    rwAfterStop.cards >= 4 && !rwAfterStop.stopped, JSON.stringify(rwAfterStop));
+  check("★ 取消重写要说清「稿子还是原来那版」（不谎报产物丢失）",
+    rwAfterStop.keep, JSON.stringify(rwAfterStop));
+  await evalIn(`window.__rwHold = false; return true;`);
 
   // ── 8) 停止生成 ──────────────────────────────────────────
   await evalIn(`const t = document.getElementById('topic');
@@ -3387,7 +3798,7 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       var titles = ph ? ph.querySelector(':scope > .page-head-titles') : null;
       var h2 = titles ? titles.querySelector('h2') : null;
       var hint = titles ? titles.querySelector('.hint') : null;
-      // computed font-size：所有面板的 h2 字号应一致（var(--f-xl) = 20px）
+      // computed font-size：所有面板的 h2 字号应一致（走 --f-display 那一档）
       out[ids[i]] = {
         hasTitlesWrap: !!titles,
         hasH2: !!h2,
@@ -3444,7 +3855,7 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   // 现在改成「三者相等 **且** 落在 :root 的字阶表里」—— 字阶表**从 CSS 变量现场读**，
   // 不在测试里重抄一遍数字（同一信息两份表示正是本项目要防的）。
   const typeScale = await evalIn(`var cs = getComputedStyle(document.documentElement);
-    return ['--f-2xs','--f-sm','--f-md','--f-xl'].map(function(k){
+    return ['--f-2xs','--f-sm','--f-md','--f-display'].map(function(k){
       return cs.getPropertyValue(k).trim(); });`);
   check("三个右列顶部 h3 字号字重字距一致（同角色 h3 不分家）",
     fsSet.size === 1 && typeScale.indexOf([...fsSet][0]) >= 0
@@ -3502,6 +3913,10 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
                      ghosts: ghosts.map(function(p){ return p.pane+":"+p.btn.id; }) }));
 
   // ── 完整流程：草稿转正（fitment 包是草稿态）──
+  // ⚠ 「键面归 words.js 的 PROOF.act 所有」那条断言在 sections/review.js 里
+  //   （它属于 s34 那批，与不可逆确认框、删除清屏放在一起；变异检验跑的是
+  //   那一组）。这里只钉"显不显示" —— 两处同名的断言比一处更糟：
+  //   改了一处忘了另一处，人会以为另一处也在守着。
   await evalIn(`const sel = document.getElementById('pack');
     sel.value = 'fitment'; sel.dispatchEvent(new Event('change', {bubbles:true}));
     window.__ts.setPane('packinfo'); return true;`);
@@ -4928,59 +5343,10 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       && /文案撰写中$/.test(marks.run.aria),
     JSON.stringify([marks.ok.aria, marks.no.aria, marks.run.aria]));
 
-  // ── 校验结论三态：同一块屏幕只许有一种说法（文案线 P0-3 / P1-4）──────
-  // 改前页头与合规页签写的是 `passed === true ? 好 : 坏` 的二分 —— 「引擎没给出结论」
-  // 的产物，页头挂着红色「✗ 需人工确认」、正下方横幅却写着「本次没有校验结论」，
-  // 一屏两话，而用户会照着红的那句去反复重跑。
-  // ⚠ 桩默认**不给**这一档（每条 done 都带 true/false），所以整网从没跑过它：
-  //   这里用 window.__nullVerdict 把 s6 变成本产物，**列表摘要与详情 payload 同时**改，
-  //   只改一边就是桩自己在打架。跑完把先前开着的那条放回去，别影响后面的断言。
-  const nvPrev = await evalIn(`var a = document.querySelector('#session-list .sess-item.active');
-    return a ? a.dataset.id : '';`);
-  await evalIn(`window.__nullVerdict = true; return 1;`);
-  await evalIn(`document.querySelector('#session-list .sess-item[data-id="s1"]').click(); return 1;`);
-  await sleep(500);
-  const nvOk = await evalIn(`return (function () {
-      var rh = document.getElementById('rh-state');
-      var row = document.querySelector('#session-list .sess-item[data-id="s1"]');
-      return { rh: rh ? rh.textContent.trim() : '',
-               ok: rh ? rh.classList.contains('ok') : false,
-               rowAria: row ? row.getAttribute('aria-label') : '' };
-    })();`);
-  check("正向对照：通过那一档在页头与左栏是同一个词",
-    /^已通过校验/.test(nvOk.rh) && nvOk.ok && /已通过校验$/.test(nvOk.rowAria),
-    JSON.stringify(nvOk));
-  await evalIn(`document.querySelector('#session-list .sess-item[data-id="s6"]').click(); return 1;`);
-  await sleep(600);
-  const nv = await evalIn(`return (function () {
-      var rh = document.getElementById('rh-state');
-      var tabs = Array.prototype.slice.call(document.querySelectorAll('.res-tab'));
-      var tab = tabs.filter(function (t) { return /合规/.test(t.textContent); })[0];
-      var ban = Array.prototype.slice.call(document.querySelectorAll('.banner'))
-        .filter(function (b) { return /^没有校验结论/.test(b.textContent.trim()); })[0];
-      var row = document.querySelector('#session-list .sess-item[data-id="s6"]');
-      return { rh: rh ? rh.textContent.trim() : '',
-               rhBad: rh ? rh.classList.contains('bad') : true,
-               tab: tab ? tab.textContent : '', tabBad: tab ? tab.classList.contains('bad') : true,
-               banner: ban ? ban.textContent.slice(0, 24) : '',
-               rowAria: row ? row.getAttribute('aria-label') : '' };
-    })();`);
-  // 「没有结论」不是「结论是坏的」：三处都不许落红（配色也走表里的空档）。
-  check("结论缺失时页头说「没有校验结论」且不落红（改前是二分到 ✗）",
-    nv.rh === "没有校验结论" && nv.rhBad === false, JSON.stringify(nv));
-  check("同一块屏幕上页签与横幅说的是同一句结论（不许一屏两话）",
-    /没有校验结论/.test(nv.tab) && nv.banner.indexOf("没有校验结论") === 0,
-    JSON.stringify({ tab: nv.tab, banner: nv.banner }));
-  check("结论缺失时合规页签不落红", nv.tabBad === false, nv.tab);
-  check("左栏那一行也说没有校验结论（三处一屏，不许两套话）",
-    /已完成 · 没有校验结论$/.test(nv.rowAria), nv.rowAria);
-  await evalIn(`window.__nullVerdict = false; return 1;`);
-  if (nvPrev) {
-    await evalIn(`var r = document.querySelector('#session-list .sess-item[data-id="${nvPrev}"]');
-      if (r) r.click(); return 1;`);
-    await sleep(450);
-  }
-
+  // 校验结论三态那组搬进了 sections/review.js 的 ⑫（连同「正向对照」那条）——
+  // 它要打桩的 window.__nullVerdict，而那面开关 s34-8 的变异检验会碰，
+  // 放在 review 组里两边跑的是同一段代码。
+  // ⚠ 整网**仍会跑到它**（verify.js 末尾有 SECTIONS.review 的调用）。
   // ── 结论档位要在**屏幕上真看得见**（第 8 轮审查 P1：类有了、CSS 规则没有）──
   // 上面那组只比过 classList.contains('bad') —— 而 `.res-tab.ok/.bad` 全站没有一条规则，
   // 于是"不落红"与"落红"在屏幕上长得一模一样：失败不可见，判据也量不到。
@@ -5040,8 +5406,174 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     JSON.stringify({ dev: vTol.devText, cls: vTol.devCls }));
   await evalIn(`window.__tol = undefined; return 1;`);
   await openRec("s1");
-  if (nvPrev) await openRec(nvPrev);              // 把屏幕交还给流程原本停着的那条
+  // 把屏幕交还给流程原本停着的那条（nvPrev 随三态那组一起搬进了 review 组，
+  // 那边自己会交还；这里只需要把容差桩复位、停在 s1 上即可）。
 
+  // ── L2「形态指标」：只展示、不设门；没有数的时候**整块不画**（A-9 §3.5/§3.7）─────
+  // 三条各守一件事：
+  //   1. 六个信号都摆出来，且**分数一个字没动**（88）—— 这就是"只展示不设门"的可证伪形态：
+  //      哪天有人拿 shape 去改 score，第 1 条与第 3 条会同时给不出同一个 88；
+  //   2. 本包没配成语表时那一格写的是"没配成语表"，不是冒充 0；
+  //   3. 老产物（payload 里没有 shape）整块消失 —— 而不是留下一个空表或一排 0。
+  const readShape = async () => evalIn(`return (function () {
+      var tab = Array.prototype.slice.call(document.querySelectorAll('.res-tab'))
+        .filter(function (x) { return x.textContent.indexOf('人味分') >= 0; })[0];
+      if (tab) tab.click();
+      var pane = document.getElementById('rpane-smell');
+      if (!pane) return null;
+      var tb = Array.prototype.slice.call(pane.querySelectorAll('table'))
+        .filter(function (t) { return t.textContent.indexOf('怎么读') >= 0; })[0];
+      var hint = Array.prototype.slice.call(pane.querySelectorAll('.hint'))
+        .filter(function (p) { return p.textContent.indexOf('形态指标') >= 0; })[0];
+      var n = pane.querySelector('.smell-score .n');
+      return { rows: tb ? tb.querySelectorAll('tr').length - 1 : 0,
+               hint: hint ? hint.textContent : '',
+               score: n ? n.textContent.trim() : '',
+               cells: tb ? Array.prototype.slice.call(tb.querySelectorAll('td code'))
+                 .map(function (c) { return c.textContent.trim(); }) : [] };
+    })();`);
+  await sleep(400);
+  const shp = await readShape();
+  check("人味分面板里的「形态指标」六项都在，而分数照旧是 88（只展示、不参与判定）",
+    !!shp && shp.rows === 6 && shp.score === "88", JSON.stringify(shp));
+  check("「形态指标」旁边写明只作参考、不参与校验结论（不设门这件事要说在屏幕上）",
+    !!shp && shp.hint.indexOf("只作参考") >= 0 && shp.hint.indexOf("不参与校验结论") >= 0,
+    JSON.stringify(shp && shp.hint));
+  check("本包没配成语表时那一格说「没配成语表」，不拿 0 冒充「一篇都没有」",
+    !!shp && shp.cells.some(function (c) { return c.indexOf("没配成语表") >= 0; }),
+    JSON.stringify(shp && shp.cells));
+
+  await evalIn(`window.__noShape = true; return 1;`);
+  await openRec("s1");
+  const shpOld = await readShape();
+  await evalIn(`window.__noShape = false; return 1;`);
+  await openRec("s1");
+  check("老产物（没有 shape 字段）整块「形态指标」不画，而不是空表或一排 0",
+    !!shpOld && shpOld.rows === 0 && shpOld.hint === "" && shpOld.score === "88",
+    JSON.stringify(shpOld));
+
+  // ── 「没有分镜」必须在屏幕上说得出是哪种没有（P1-25）─────────────────
+  // 改前是 `hide: !storyboard.length`：分镜为空时整颗页签被藏掉，于是
+  // 「我本来就只要口播」与「分镜这一步炸了」在界面上长得一模一样，
+  // 用户只能自己去「数据」页翻那条 storyboard_skip。
+  // 这一组分别造三份 payload（三者只有 storyboard 与一个判据键不同），
+  // 钉四件事：页签还在、badge 说「未生成」、那一格真的吃 --warn、
+  // 三种原因给出三段**互不相同**的说明（一句模板套三种场合等于没说）。
+  // ⚠ 颜色比的是计算色不是 class —— `.res-tab.warn` 曾经只有类没有规则，
+  //   「落 warn」在屏幕上量不到（本项目已吃过一次这个亏）。
+  const colWarn = await resolvedToken("--warn");
+  const readStory = async () => evalIn(`return (function () {
+      // ⚠ 必须限定在「含分镜那一条 bar」上：.res-tab 全站两族（选题/情报源同名），
+      //   不圈定就会把那两颗一起数进来（本项目第 9 轮已为同类陷阱留过注）。
+      var t = Array.prototype.slice.call(document.querySelectorAll('.res-tab'))
+        .filter(function (x) { return /分镜/.test(x.textContent); })[0];
+      if (!t) return null;
+      var bar = t.parentNode;
+      var b = t.querySelector('.rt-b');
+      var pane = document.getElementById('rpane-story');
+      var ban = pane ? Array.prototype.slice.call(pane.querySelectorAll('.banner'))[0] : null;
+      return { badge: b ? b.textContent.trim() : '',
+               cls: t.className,
+               colour: b ? getComputedStyle(b).color : '',
+               tabs: bar.querySelectorAll('.res-tab').length,
+               names: Array.prototype.slice.call(bar.querySelectorAll('.rt-t'))
+                      .map(function (x) { return x.textContent.trim(); }).join('|'),
+               why: ban ? ban.textContent.trim() : '' };
+    })();`);
+  const sbWhy = {};
+  for (const k of ["voice", "fail", "skip"]) {
+    await evalIn(`window.__sbMiss = "${k}"; return 1;`);
+    await openRec("s1");
+    sbWhy[k] = await readStory();
+  }
+  await evalIn(`window.__sbMiss = null; return 1;`);
+  const SB_TABS = "文案|分镜|人味分|字幕|合规|数据";
+  check("分镜为空时页签仍然在（改前被 hide：两种『没有分镜』在界面上同形）",
+    ["voice", "fail", "skip"].every(k => sbWhy[k] && sbWhy[k].tabs === 6 && sbWhy[k].names === SB_TABS),
+    JSON.stringify(Object.fromEntries(Object.entries(sbWhy).map(([k, v]) => [k, v && [v.tabs, v.names]]))));
+  check("空分镜那一格 badge 说「未生成」，不落成「0 镜」这种看着像有数据的写法",
+    ["voice", "fail", "skip"].every(k => sbWhy[k].badge === "未生成"),
+    JSON.stringify(Object.fromEntries(Object.entries(sbWhy).map(([k, v]) => [k, v && v.badge]))));
+  check("「未生成」那一格真的吃 --warn（类有规则、屏幕上看得见）",
+    ["voice", "fail", "skip"].every(k => sbWhy[k].colour === colWarn
+      && /\bwarn\b/.test(sbWhy[k].cls)),
+    JSON.stringify({ 实测: sbWhy.skip && sbWhy.skip.colour, 期望: colWarn }));
+  const whys = ["voice", "fail", "skip"].map(k => sbWhy[k].why);
+  check("三种『没有分镜』各说各的原因，不是同一段话套三遍",
+    whys.every(w => w.length > 10)
+      && new Set(whys).size === 3
+      && /口播/.test(whys[0]) && /校验/.test(whys[1]) && /日志/.test(whys[2]),
+    JSON.stringify(whys));
+  await openRec("s1");
+
+  // ── 后续建议只给包里**真有**的档位（P1-26）──────────────────
+  // 改前那两个胶囊的档位是写死的，点下去走的是 `sel.value = "<那档>"`：
+  // 包里没有那一档的话 selectedIndex 落 -1、浏览器把 value 取回第一个 option，
+  // 界面退回包的默认值，而 toast 无条件说「已设为那档」—— 屏幕与承诺相反，
+  // 且用户没有任何办法察觉。
+  // 现场：把当前包的时长档换成两个包里原本没有的值（产物时长不在档位里），
+  // 再看胶囊说的数、点下去落到的档、以及 toast 承诺的那个数。
+  await evalIn(`return (async () => {
+    var pk = window.__ts.meta.packs.filter(function (p) { return p.name === 'elevator'; })[0];
+    window.__durBak = JSON.parse(JSON.stringify(pk.params.duration));
+    pk.params.duration.options = [45, 120];
+    pk.params.duration.default = 45;
+    document.getElementById('p-duration').innerHTML =
+      '<option value="45">45 秒</option><option value="120">2 分钟</option>';
+    window.__ts.applyPackSwitch();
+    return true;
+  })();`);
+  await sleep(300);
+  await openRec("s1");
+  const fuOdd = await evalIn(`return (function () {
+      var sel = document.getElementById('p-duration');
+      var chips = Array.prototype.slice.call(document.querySelectorAll('.fu-chip'))
+        .filter(function (b) { return /压缩到|扩到/.test(b.textContent); });
+      var opts = Array.prototype.slice.call(sel.options).map(function (o) { return o.value; });
+      var before = sel.value;
+      // 逐条点过去，把「这一条建议把界面落到哪一档、toast 又说了什么」记下来。
+      // ⚠ 不从胶囊文字里抠数字当判据：长的那档印的是「x 分」（不是秒数），
+      //   抠出来是另一个数 —— 断言会被显示格式牵着走，而格式本来就该自由。
+      //   真正的不变量是**点了之后落在哪**：那一档必须在包里、且与 toast 一致。
+      // ⚠ 注释里不许出现反引号：这段整体是一个模板字符串（踩过三次）。
+      var landed = chips.map(function (b) {
+        b.click();
+        return { label: b.textContent.trim(), dur: sel.value,
+                 idx: sel.selectedIndex,
+                 truth: String(window.__ts.collectParams().duration),
+                 toast: (document.querySelector('.toast') || {}).textContent || '' };
+      });
+      return { n: chips.length, opts: opts, before: before, landed: landed };
+    })();`);
+  // 断言 1：每条时长建议点下去都落到包里**真实存在**的一档
+  //   （档位写死时这里会两条都落回同一个默认值 —— 建议等于没生效）
+  check("每条时长建议点下去都落到包里真实存在的那一档（档位写死时落不回去）",
+    fuOdd.n === 2 && fuOdd.landed.every(l =>
+      fuOdd.opts.includes(l.dur) && l.idx >= 0 && l.truth === l.dur
+      && fuOdd.opts.includes((l.toast.match(/已设为 (\d+)/) || [])[1])),
+    JSON.stringify({ 包的档位: fuOdd.opts, 逐条结果: fuOdd.landed }));
+  // 断言 2：两个方向各自落到**不同**的一档，且一档比产物时长短、一档比它长
+  //   （只剩一档可去 = 建议退化成了重复的那一句）
+  const landedDur = fuOdd.landed.map(l => Number(l.dur));
+  const prodDur = Number(await evalIn("return (window.__ts.result || {}).params?.duration;"));
+  check("压缩与扩到落在不同的两档，且分列产物时长两侧（建议不许退化成同一个数）",
+    landedDur.length === 2 && new Set(landedDur).size === 2
+      && landedDur.filter(d => d < prodDur).length === 1
+      && landedDur.filter(d => d > prodDur).length === 1,
+    JSON.stringify({ 产物时长: prodDur, 落到: landedDur }));
+  // 断言 3：toast 承诺的那个数，就是界面真落到的那一档
+  check("toast 说的数与界面落到的档是同一个（屏幕与承诺不许分叉）",
+    fuOdd.landed.every(l => l.toast.includes("已设为 " + l.dur)),
+    JSON.stringify(fuOdd.landed.map(l => [l.dur, l.toast])));
+  // 复原：把包与控件放回桩的原样，别让后面的流程带着改过的时长档跑
+  await evalIn(`return (async () => {
+    var pk = window.__ts.meta.packs.filter(function (p) { return p.name === 'elevator'; })[0];
+    pk.params.duration = window.__durBak;
+    window.__ts.applyPackSwitch();
+    return true;
+  })();`);
+  await sleep(250);
+  await openRec("s1");
   // ── 话术表的静态对账（Node 侧，不开浏览器）───────────────────────
   // 上面那组钉的是「同一块屏幕不许两话」，这一组钉的是「代码里不许有第二套词」：
   // 有人在任何一处渲染里写回别名，这里就红 —— 不必等到那一屏被跑到才暴露。
@@ -5049,11 +5581,14 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   //   讲病因的人钉死。剥法很粗（整行 // 与 /* */ 两块），只会漏「字符串里恰好有
   //   空格-斜杠-斜杠-空格」这一种写法，渲染层没有 —— 它宁漏不误红，
   //   误红那一面由上面那组屏幕对照兜着。
-  const JS_DIR = path.join(REPO_ROOT, "desktop", "renderer", "js");
-  const stripJsComments = (s) => s
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .split("\n").filter(l => !/^\s*\/\//.test(l)).join("\n")
-    .replace(/ \/\/ [^\n]*/g, "");
+  // `JS_DIR` / `htmlSrc` 在模块作用域（见文件顶部），这里直接用。
+  // ⚠ 下面这一整段（到 `await staticChecks()`）是**不开浏览器**的静态扫：读文件、
+  //   剥注释、比字面量。把它包成一个函数是为了给 `verify:static` 分组用 ——
+  //   锚点落在这一族的变异（`_verify/mutate.py` 里那 40 条写 `verify:` 的）
+  //   过去每条都要跑完整张界面回归网（约 12 分钟），现在几秒。
+  //   整网跑的时候仍然照旧在**同一个位置**调用它，断言条数与判据一字不变。
+  //   `JS_DIR` 留在函数外面：5671 / 5696 那两处静态扫还要用。
+  async function staticChecks() {
   const ALIAS = ["合格", "已取消", "需人工确认", "重掷", "整体重生成", "整篇回炉", "精修包"];
   const aliasHits = fs.readdirSync(JS_DIR).filter(f => f.endsWith(".js")).flatMap(f => {
     const src = stripJsComments(fs.readFileSync(path.join(JS_DIR, f), "utf8"));
@@ -5087,7 +5622,6 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   // —— 界面给自己配了一条没人实现的规则；同时卡片把机会分除以 100 印成 0.72，
   // 与图例的「≥ 60」两套刻度并排（用户无法判断手里这条够不够线）。
   const intelPy = fs.readFileSync(path.join(REPO_ROOT, "app", "intel.py"), "utf8");
-  const htmlSrc = fs.readFileSync(path.join(REPO_ROOT, "desktop", "renderer", "index.html"), "utf8");
   const legendBlock = (htmlSrc.match(/<div class="score-legend">([\s\S]*?)<\/div>/) || ["", ""])[1];
   const oppTh = (intelPy.match(/elif opp >= ([0-9]+)/) || [])[1];
   const sTh = (intelPy.match(/S is not None and S >= ([0-9.]+)/) || [])[1];
@@ -5143,6 +5677,8 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   check("「超配额」的线只有一处常量，句子里把这条线说给人听",
     !/quota \* 1\.3/.test(resSrc) && ratioUses >= 3 && /三成/.test(resSrc),
     `常量出现 ${ratioUses} 次`);
+  }
+  await staticChecks();
   const tempo = await evalIn(`var c = Array.from(document.querySelectorAll('.res-top .m-chip'))
       .find(function (x) { return /超配额/.test(x.textContent); });
     return c ? { text: c.textContent.replace(/\\s+/g, ' ').trim(), title: c.title } : null;`);
@@ -5158,6 +5694,88 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       topics: getComputedStyle(document.getElementById('view-topics')).scrollbarGutter };`);
   check("两条滚动列都留滚动条槽位（只有一侧留 = 切视图整列横移半个滚动条）",
     gutters.chat === gutters.topics && /stable/.test(gutters.chat), JSON.stringify(gutters));
+
+  // ── 「回车即提交」四处都得挡中文选词（P1-28）────────────────────
+  // 病根不是"某一处漏写"，而是**判据被抄成了多份**：isComposing 这层守卫只装在
+  // 主输入框（ui.js）上，而「按回车就提交」的输入框有四处 —— 另三处（就地改用户
+  // 消息 / 单段重写意见 / 会话搜索）没有。中文选词按的那一下回车会在那儿**提交**：
+  // 改掉一条用户气泡、按一段拼音去重写稿子、搜到一半跳进不相干的会话。
+  // 所以修法不是"补三处"，是把判据收进 util.isSubmitEnter、四处引同一份。
+  //
+  // 静态这条钉的是**唯一性**：渲染层里 isComposing 只许出现在 util.js。
+  // 它同时防两类退化 —— 有人把这份判据又抄进某个文件（抄来抄去迟早漏一处，
+  // 正是这条缺陷的来路），以及有人改了 util 那一份而别处各自为政。
+  // ⚠ 两条都得先剥注释：讲病因的注释里会写 isComposing 这个词名
+  //   （另见上面那个反引号陷阱：这段本身不能出现反引号）。
+  // ⚠ 也不是去扫「哪些 Enter 分支��带守卫」：页面里还有 Space 激活、
+  //   自绘菜单项、Ctrl+Enter 全局派发等好几种回车，它们不是提交，
+  //   强按一条规则绑过去只会逼出一堆没意义的写法。
+  const utilSrc = stripJsComments(fs.readFileSync(path.join(JS_DIR, "util.js"), "utf8"));
+  const imeFiles = fs.readdirSync(JS_DIR).filter(f => f.endsWith(".js"))
+    .filter(f => /isComposing|keyCode\s*!==?\s*229/.test(
+      stripJsComments(fs.readFileSync(path.join(JS_DIR, f), "utf8"))));
+  check("中文选词的守卫只有一份（渲染层里 isComposing 只许出现在 util.js）",
+    imeFiles.length === 1 && imeFiles[0] === "util.js", imeFiles.join(",") || "一处都没有");
+  check("那一份还兼收老 WebKit 的 keyCode 229（只认 isComposing 的写法在旧引擎上失效）",
+    /keyCode\s*!==?\s*229/.test(utilSrc), "");
+
+  // 行为这一组：三条输入框各喂一个「正在选词」的回车，再喂一个正常的回车。
+  // 两个方向都要量：挡得住（选词时不提交）**且**没把手脚捆住（不选词时照常提交）。
+  // 「开没开那条会话」的判据读桩记下的 __opened（真去取了一次产物）——
+  // 页头标题与左栏高亮都量不出来：桩对每条历史记录回的是同一份 RESULT，
+  // 连 id 都一样，两处都会被这份桩抹平。
+  const imeGuard = await evalIn(`return (async () => {
+    function composing(over) {
+      var e = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+      Object.defineProperty(e, 'isComposing', { get: function () { return over; } });
+      return e;
+    }
+    var t = document.getElementById('toast');
+    function lastToast() {
+      return t.classList.contains('hidden') ? '' : t.textContent;
+    }
+    var out = {};
+    // 1) 会话搜索「回车打开首条」：先筛出**另一条**（s5）再回车。
+    var box = document.getElementById('sess-search');
+    box.value = '维保避坑';
+    box.dispatchEvent(new Event('input', { bubbles: true }));
+    window.__opened = [];
+    box.dispatchEvent(composing(true));
+    out.searchKept = window.__opened.length === 0;
+    box.dispatchEvent(composing(false));
+    out.searchNormal = window.__opened.length > 0;
+    out.searchTo = window.__opened.join(',');
+    box.value = ''; box.dispatchEvent(new Event('input', { bubbles: true }));
+    // 2) 单段重写意见框：处理器跑过就会给一句话（历史记录上是「请用换一版」）。
+    var rw = document.querySelector('.script-card .rw-feedback');
+    out.hasRw = !!rw;
+    if (rw) {
+      t.classList.add('hidden'); t.textContent = '';
+      rw.value = '第一点讲';
+      rw.dispatchEvent(composing(true));
+      out.rwHeld = lastToast() === '';
+      rw.value = '第一点讲';
+      rw.dispatchEvent(composing(false));
+      out.rwNormal = lastToast() !== '';
+      out.rwMsg = lastToast();
+      rw.value = ''; rw.classList.remove('editing');
+      t.classList.add('hidden'); t.textContent = '';
+    }
+    // 3) 主输入框（正对照：这一处一直是对的）
+    var ta = document.getElementById('topic');
+    var gen0 = window.__calls.gen;
+    ta.value = '输入中'; ta.dispatchEvent(composing(true));
+    out.topicHeld = window.__calls.gen === gen0;
+    ta.value = ''; ta.dispatchEvent(composing(false));
+    return out;
+  })();`);
+  check("中文选词时的回车：不跳会话、不触发重写、不发送（isSubmitEnter 真挡得住）",
+    imeGuard.hasRw && imeGuard.searchKept && imeGuard.rwHeld && imeGuard.topicHeld,
+    JSON.stringify(imeGuard));
+  // 反向对照：不选词时回车**必须照常提交**（守卫不许把功能一起挡掉）。
+  check("不是选词时回车照常提交（守卫不许把手脚一起捆住）",
+    imeGuard.searchNormal && imeGuard.rwNormal,
+    JSON.stringify({ 跳到: imeGuard.searchTo, 重写那句话: imeGuard.rwMsg }));
 
   // 演示模式与「搜不到 ≠ 没有」那两条判据住在文件末尾，走**真启动**渲染：
   // 那里解释了为什么不能用 dynamic import 改 state（量到的是另一个模块实例）。
@@ -6043,19 +6661,27 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   // 两个条件各自吃劲：颜色证明用的是 --warn 而不是普通 hint 灰；
   // status 证明警示是**追加**的，没有把状态行整行换掉 ——
   // 换掉的话用户就看不到「当前用的是哪条模型」了。
-  // 后端每次保存 / 测试都回 warnings、GET /api/config 常驻 base_url_warnings，
-  // 修复前渲染层**一个字都没读**：明文 http 这件事只活在一次性 toast 里。
+  // 后端 GET /api/config 常驻 base_url_warnings，修复前渲染层**一个字都没读**。
+  // ⚠ 2026-09-28 这一行装的内容换了：只剩「配置里存着的非法地址」，
+  //   「明文 http 打到远端」那句黄字按用户要求去掉了。下面两条一起守 ——
+  //   第一条守「后端给了字段、界面得有人读」，第二条守「去掉的那句不许回来」。
+  //   少了第二条，谁把黄字加回模型页照样全绿（这正是它当年被加进来的方式）。
   const urlWarn = await evalIn(`return (function(){
     var n = document.getElementById('md-warn');
     if (!n) return { missing: true };
     var cs = getComputedStyle(n);
+    var pane = document.getElementById('pane-llm');
     return { hidden: n.classList.contains('hidden'), display: cs.display,
-             text: n.textContent, color: cs.color };
+             text: n.textContent, color: cs.color,
+             pane: (pane ? pane.innerText : '') || '' };
   })()`);
-  check("明文地址警告常驻在模型页（不是被顶掉的一次性提示）",
+  check("配置里存着的非法地址常驻在模型页（不是被顶掉的一次性提示）",
     !urlWarn.missing && urlWarn.hidden !== true && urlWarn.display !== 'none'
-      && /明文|http/.test(urlWarn.text),
+      && urlWarn.text.indexOf('不合法') >= 0 && urlWarn.text.indexOf('http://') >= 0,
     JSON.stringify(urlWarn));
+  check("「明文 http」黄字不在模型页任何一处（2026-09-28 按要求去掉，含状态行）",
+    !urlWarn.missing && urlWarn.pane.indexOf('明文') < 0,
+    JSON.stringify({ row: urlWarn.text, pane: urlWarn.pane.slice(0, 160) }));
   check("警告行用 warn 色（与配置读坏那行同一族）",
     urlWarn.color === await resolvedToken("--warn"), JSON.stringify(urlWarn));
   check("警示用 warn 色且不顶掉原状态行",
@@ -6600,6 +7226,33 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   check("额度满的 409 说的是队列，且界面立刻可用",
     /额度/.test(quotaCase.toast) && !/pack\.yaml/.test(quotaCase.toast)
       && !quotaCase.busy && !quotaCase.jobId, JSON.stringify(quotaCase));
+  // P1-27：被 409 挡住的那一屏，必须**指一条这屏上真的走得通的出路**。
+  // typeAndSend 走的是 newChat()，所以此刻是 landing（首页）——
+  // 正是「停止全部后台生成」那颗按钮被刻意收起来的那一屏
+  // （composer-foot 的 28px 高度不变量，见上面「首页：后台作业那一行不写进输入卡下方」）。
+  // 改前那句指路让用户去下方找一颗**不存在的按钮**：于是并发占满时首页上
+  // 既看不到读数、也没有任何能腾出额度的入口，用户只能干等。
+  // 判据反过来写：凡是指路里提到的那个东西，必须在这一屏上真的在场。
+  const quotaLanding = await evalIn(`return (function () {
+      var b = document.getElementById('btn-stop-all');
+      var rows = Array.prototype.slice.call(document.querySelectorAll('#session-list .sess-item'))
+        .filter(function (x) { return x.querySelector('.dot.run, .dot.running')
+          || /生成中/.test(x.textContent); });
+      return { toast: document.getElementById('toast').textContent,
+               landing: document.getElementById('view-chat').classList.contains('is-landing'),
+               stopAllHidden: b ? b.classList.contains('hidden') : null,
+               rows: rows.length };
+    })();`);
+  check("首页被 409 挡住：指路不许指向那颗被收起的「停止全部」按钮",
+    quotaLanding.landing && quotaLanding.stopAllHidden
+      && !/停止全部/.test(quotaLanding.toast),
+    JSON.stringify(quotaLanding));
+  // 前提钉住：首页能走的那条路（左栏里在跑的那几条）这一屏上真的有东西。
+  check("首页被 409 挡住：左栏里确有挂着呼吸点的在跑会话（上一条的前提）",
+    quotaLanding.rows >= 1, JSON.stringify(quotaLanding));
+  check("首页被 409 挡住：指路说清是左栏那几条、且怎么才能停下来",
+    /左栏/.test(quotaLanding.toast) && /停止/.test(quotaLanding.toast)
+      && /[1-9]/.test(quotaLanding.toast), JSON.stringify(quotaLanding.toast));
   const brokenCase = await typeAndSend('坏包测试：这条应该说出是哪个包坏了');
   check("坏包的 409 把引擎那句原话说全（包名 + 文件名 + 行列号）",
     /pack\.yaml/.test(brokenCase.toast) && /第 4 行第 6 列/.test(brokenCase.toast)
@@ -7600,13 +8253,325 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       tabOn: tab ? tab.classList.contains('on') : false,
       paneVisible: pane ? !pane.classList.contains('hidden') : false,
       score: pane ? pane.querySelector('.smell-score .n').textContent.trim() : '',
-      hitRows: pane ? pane.querySelectorAll('table tr').length - 1 : 0,
-      saysNotGated: pane ? /不参与校验结论/.test(pane.textContent) : false,
+      // ⚠ 「命中明细」的行数只数**那张表**：L2「形态指标」的六行表也在同一张卡里，
+      //   整块 pane 一起数会把形态指标算成命中数（本次加 L2 当场撞红 —— 红得对，
+      //   错的是判据把"这块屏上有几张表"当成了"有几条命中"）。
+      hitRows: (function () {
+        var t = Array.prototype.slice.call(pane ? pane.querySelectorAll('table') : [])
+          .filter(function (x) { return x.textContent.indexOf('档位') >= 0; })[0];
+        return t ? t.querySelectorAll('tr').length - 1 : 0;
+      })(),
+      // 同理，"只报不拦"这句话要认的是**分数下面那句口径说明**（含"扣分口径"），
+      // 不是"pane 里任何地方提过一次校验" —— 否则 L2 那句参考说明会替它把断言撑住。
+      saysNotGated: (function () {
+        var hs = Array.prototype.slice.call(pane ? pane.querySelectorAll('.hint') : [])
+          .filter(function (p) { return p.textContent.indexOf('扣分口径') >= 0; });
+        return hs.length === 1 && hs[0].textContent.indexOf('不参与校验结论') >= 0;
+      })(),
       phShown: pane ? /占位事实/.test(pane.textContent) : false,
     }; })()`);
   check("人味标记可定位：点正文里的下划线真的切到「人味分」面板",
     smell.tabOn && smell.paneVisible && smell.tabLabel.indexOf("人味分") === 0,
     JSON.stringify(smell));
+
+  // ── 那条「N 处人味标记」必须**键盘可达**（2026-09-27 修）──────────
+  // 它是一枚可点的 span（cursor:pointer + 委托点击），原来只有鼠标路径：
+  // Tab 走遍全页到不了它、读屏只当一段文字。同一文件的 .banner.jumpable
+  // 早就做对了，两处一处对一处错。
+  const jumpKb = await evalIn(`var j = document.querySelector('.card-foot .tell-jump');
+    return { role: j.getAttribute('role'), tab: j.getAttribute('tabindex'),
+             aria: j.getAttribute('aria-label') || '',
+             focusable: j.tabIndex >= 0 };`);
+  check("★「N 处人味标记」有 role=button + tabindex，读屏能念出它是干什么的",
+    jumpKb.role === "button" && jumpKb.tab === "0" && /人味标记/.test(jumpKb.aria),
+    JSON.stringify(jumpKb));
+  // 真的能用键盘打开：聚焦它 → 派发 Enter → 面板切换
+  await evalIn(`document.querySelector('.res-tab[data-tab="script"]').click(); return true;`);
+  await sleep(150);
+  const kbOpened = await evalIn(`var j = document.querySelector('.card-foot .tell-jump');
+    j.focus();
+    var focused = document.activeElement === j;
+    j.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    return { focused: focused };`);
+  await sleep(200);
+  const kbAfter = await evalIn(`var p = document.querySelector('.res-pane[data-tab="smell"]');
+    return { paneVisible: p ? !p.classList.contains('hidden') : false };`);
+  check("★ 回车能从那枚标记跳到人味分明细（键盘路径与鼠标路径等价）",
+    kbOpened.focused && kbAfter.paneVisible, JSON.stringify({ ...kbOpened, ...kbAfter }));
+  // 焦点环：能 Tab 选中就必须看得见（--shadow-focus 是规格里的焦点环）
+  // ⚠ 判据**从样式表读规则**而不是 `getComputedStyle`（量了三次才发现）：
+  //   CDP `Runtime.evaluate` 注入的合成上下文里，`:focus` / `:focus-visible`
+  //   这类**依赖焦点态**的伪类不会反映到 `getComputedStyle` 的计算值上 ——
+  //   上一条「回车能跳过去」已经证明 `document.activeElement === j` 成立，
+  //   但 `box-shadow` 仍量到 `none`。本文件对这一类早有共识（见本文件 1900 行
+  //   附近那段注释：动效时长也改读「样式表里写下的值」而不是计算值）。
+  //   所以这里两件事分开量：
+  //     · 能不能被聚焦 / 能不能用键盘打开 → 量 DOM（已由上面两条断言覆盖）
+  //     · 聚焦时有没有焦点环 → 量样式表里那条规则存不存在、用的哪个 token
+  const kbFocus = await evalIn(`var sel = null, decl = '';
+    for (var i = 0; i < document.styleSheets.length; i++) {
+      var rules = null;
+      try { rules = document.styleSheets[i].cssRules; } catch (_) { continue; }
+      for (var j2 = 0; j2 < (rules || []).length; j2++) {
+        var r = rules[j2];
+        if (!r.selectorText) continue;
+        if (r.selectorText.indexOf('.tell-jump:focus') >= 0
+            && /shadow-focus/.test(r.cssText)) { sel = r.selectorText; decl = r.cssText; }
+      }
+    }
+    var j = document.querySelector('.card-foot .tell-jump');
+    document.querySelector('.res-tab[data-tab="script"]').click();
+    j.focus();
+    return { sel: sel, decl: decl, focusable: j.tabIndex >= 0,
+             focused: document.activeElement === j };`);
+  check("★ 那枚标记有焦点环规则且用的是 --shadow-focus（拿不到焦点环比不能选还糟）",
+    !!kbFocus.sel && /shadow-focus/.test(kbFocus.decl)
+      && kbFocus.focusable && kbFocus.focused, JSON.stringify(kbFocus));
+
+  // ── 「入口不许用 opacity 表达弱」守卫（2026-09-27）──────────────
+  // §5 说得很直白：需要更弱的表达请用**非文字色 / 字重**，不要拿透明度叠加。
+  // 这一族问题（审查 P1 里的 4 条）全属同一形态：给承载信息的元素加 `opacity`，
+  // 把 token 本身的对比度乘回去。token 解析值是对的、量 token 的门禁也全绿，
+  // 而屏幕上那一格字已经读不出来 —— 也就是说**量 token 的门禁量不到它**。
+  //
+  // ⚠ 这一族**一律静态扫 styles.css**，不按 DOM 量（两次踩坑，值得写下来）：
+  //   ① `.rw` / `.step-dur` 在界面上有多种形态（可用 / `:disabled` / `.editing`），
+  //      「这一刻是哪一种」取决于前面几百行断言把界面留在了什么状态 ——
+  //      第一版量到的是 `:disabled` 的 .16（那是**有意**的弱化）；
+  //   ② `.step-dur` / `.step-note` 只在**生成中**那几秒在 DOM 里，而这组断言
+  //      跑的时候界面已停在结果页，按 DOM 量会得到「元素不在」而被 `if` 跳过 ——
+  //      而「跳过」在门禁里读起来和「通过」一模一样。变异检验实测：把
+  //      `.step-note` 的 opacity 加回去，全网仍然全绿（守卫空转）。
+  //   样式表是这件事的**真相所在**，量它没有上面两个问题。
+  //
+  // ⚠ 位置仍要在**结果页已渲染**之后：`.res-pane` / `.card-foot` 这些选择器
+  //   在早于那一步的界面状态下匹配不到东西。
+  const dimRules = async (selRe, skipRe) => evalIn(`var hits = [];
+    for (var i = 0; i < document.styleSheets.length; i++) {
+      var rules = null;
+      try { rules = document.styleSheets[i].cssRules; } catch (_) { continue; }
+      for (var j = 0; j < (rules || []).length; j++) {
+        var r = rules[j];
+        if (!r.selectorText || !r.style) continue;
+        var op = r.style.opacity;
+        if (!op) continue;
+        if (!${selRe}.test(r.selectorText)) continue;
+        if (${skipRe} && ${skipRe}.test(r.selectorText)) continue;
+        hits.push(r.selectorText + ' { opacity: ' + op + ' }');
+      }
+    }
+    return hits;`);
+  // 白名单只放**有意**的弱化：`:disabled`（历史回看点不动）、`.editing`（输入框展开）。
+  const INTENTIONAL = "/:disabled|\\.editing/";
+  const rwCss = await dimRules("/\\.rw(\\s|$|,|:|\\.)/", INTENTIONAL);
+  check("★「重写本段」可用态不靠 opacity 变弱（曾 1.86:1，鼠标不在卡上就看不见）",
+    rwCss.length === 0, JSON.stringify(rwCss));
+  const tjCss = await dimRules("/\\.tell-jump(\\s|$|,|:|\\.)/", INTENTIONAL);
+  check("★「N 处人味标记」不靠 opacity 变弱（另一处同类入口）",
+    tjCss.length === 0, JSON.stringify(tjCss));
+  const progCss = await dimRules("/\\.(step-dur|step-note|ts-meta)(\\s|$|,|:|\\.)/", INTENTIONAL);
+  check("★ 进度区耗时/备注不靠 opacity 变弱（曾 3.10:1，是「还在跑」的关键信号）",
+    progCss.length === 0, JSON.stringify(progCss));
+  // 状态点：**只查基础档**（`.dot::before`）。`.dot.no::before { opacity: .85 }`
+  // 与 `.dot.run::before { opacity: 1 }` 都是有意的 —— 前者是红点、后者是
+  // 呼吸动画的基线（关键帧打的是 `50% { opacity: .2 }`，少一个基线渐变就没了）。
+  // `.dot.ok` 整格 `visibility: hidden`，也不该被算进来。
+  const dotCss = await dimRules("/^\\.dot(::before)?(\\s*\\{|$)/", "/\\.dot\\.(ok|no|run)/");
+  check("★ 左栏状态点默认态不叠 opacity（曾 1.97:1，与「无记号」视觉难分）",
+    dotCss.length === 0, JSON.stringify(dotCss));
+
+  // ── 刻度不许被绕开（审查 P2 视觉第 3/4 条，2026-09-27）────────────
+  // 上面那组守的是"对比度不许靠 opacity 打折"。这一组守的是**另一面**：
+  // 间距与控件高度写死了字面量（`gap: 8px` / `height: 28px`），而旁边
+  // 就有 `--s2: 8px` / `--h-sm: 28px` 两档刻度。值一样时看不出问题 ——
+  // **改刻度的那天**才会露馅：改 --s2 的人以为全站间距跟着动，
+  // 而这十处留在原地，于是同一个"8px"在两套数值之间分叉。
+  //
+  // 判据形态与上面那组同源、也同理由：**静态扫样式表**。元素不在屏时
+  // 按选择器量不到，那在门禁里读起来和"通过"一模一样（已踩过）。
+  const scaleRules = async (propRe, valueRe) => evalIn(`var hits = [];
+    var prop = ${JSON.stringify(propRe)};
+    var want = new RegExp(${JSON.stringify(valueRe)});
+    for (var i = 0; i < document.styleSheets.length; i++) {
+      var rules = null;
+      try { rules = document.styleSheets[i].cssRules; } catch (_) { continue; }
+      for (var j = 0; j < (rules || []).length; j++) {
+        var r = rules[j];
+        if (!r.selectorText || !r.style) continue;
+        var v = r.style[prop];
+        if (!v) continue;
+        for (var piece of String(v).split(/\\s+/)) {
+          if (want.test(piece)) { hits.push(r.selectorText + ' { ' + prop + ': ' + v + ' }'); break; }
+        }
+      }
+    }
+    return hits;`);
+  // 间距 8px 必须走 --s2，高度 28px 必须走 --h-sm（两者的解析值都是 8 / 28）
+  const hardGap = await scaleRules("gap", "^8px$");
+  check("★ 间距不许写死 8px 而不走 --s2（改刻度那天这十处会留在原地）",
+    hardGap.length === 0, JSON.stringify(hardGap));
+  const hardH = await scaleRules("height", "^28px$");
+  check("★ 控件高度不许写死 28px 而不走 --h-sm（同上，另一档刻度）",
+    hardH.length === 0, JSON.stringify(hardH));
+  // 动效只许一档：规范 §刻度表「动效 --dur 一个时长」。
+  // ⚠ 只查**一次性入场**（animation 简写里带 animation-name）——
+  //   循环类（dotPulse / gs-live / flashHit）是"持续状态"，
+  //   把它们压到 --dur 那一档会变成频闪。那不是收敛，是坏掉。
+  const enterAnims = await evalIn(`var hits = [];
+    for (var i = 0; i < document.styleSheets.length; i++) {
+      var rules = null;
+      try { rules = document.styleSheets[i].cssRules; } catch (_) { continue; }
+      for (var j = 0; j < (rules || []).length; j++) {
+        var r = rules[j];
+        if (!r.selectorText) continue;
+        var sh = r.style && r.style.animation;
+        if (!sh) continue;
+        if (/infinite/.test(sh)) continue;               // 循环类不在此列
+        if (!/\\b(fadeIn|fadeUp|pop|toastUp|screenIn)\\b/.test(sh)) continue;   // 只看入场
+        if (/var\\(--dur\\)/.test(sh)) continue;           // 已归一
+        hits.push(r.selectorText + ' { animation: ' + sh + ' }');
+      }
+    }
+    return hits;`);
+  check("★ 入场动效只用 --dur 一个时长（规范 §刻度表；曾有五档 .15/.18/.22/.24/.26）",
+    enterAnims.length === 0, JSON.stringify(enterAnims));
+  // 孤儿刻度：定义了却**零使用**的 CSS 变量。留着的害处不是浪费一行，
+  // 而是人会去改它 —— 改完发现全站没有任何反应，下一个人再来一遍。
+  const cssText = fs.readFileSync(path.join(RENDERER, "styles.css"), "utf8");
+  const declaredVars = [...cssText.matchAll(/^\s*(--[a-z0-9-]+)\s*:/gim)].map(m => m[1]);
+  const orphanVars = [...new Set(declaredVars)].filter(
+    v => (cssText.match(new RegExp("var\\(" + v + "[,)]", "g")) || []).length === 0);
+  check("★ 没有定义了却零使用的 CSS 变量（曾有 --f-xl，注上写着「页标题」）",
+    orphanVars.length === 0, orphanVars.join(",") || "一处都没有");
+  // 死选择器：styles.css 里有规则，但**没有任何 HTML/JS 产出**这个类名。
+  //
+  // 量法踩过的坑，顺序不能换（每一步都是被自己的守卫绊倒才发现的）：
+  //  ① 只认 class="a b" / classList 那几种写法 → 一次报出 106 个「死类名」，
+  //     而 .brand / .right-head / .composer-foot 全是活的。**本项目产出类名
+  //     的主力是 el(tag, "a b")**（util.js 里直接 e.className = cls），
+  //     原来的判据压根看不见这条路 —— 一条会喊狼来了的守卫比没有更坏。
+  //  ② 改成「整份源码裸词扫描」→ .page 永远判不死：topics.js 有 let page = 0，
+  //     而 `第 ${page+1}/${pages} 批` 这种模板串更是把标识符塞进了正文。
+  //  ③ 改成「只扫字符串字面量」→ 模板串的插值又漏了，得先剔掉 ${...}。
+  // 所以判据是：**字面量池 + 剔插值 + 前后不许挨着 [\w-]**。
+  // 最后那半条边界同样要写：- 是类名的内部字符，\b 会把 .page 判成
+  // 「被 .page-head 用掉了」（page 就是这么漏过去的）。
+  // ⚠ 这里**不能**先过 stripJsComments：它那句 .replace(/ \/\/ [^\n]*/g,"")
+  //   是从行内第一个「 // 」删到行尾，**连收尾的引号一起删**。删过之后
+  //   后面所有字符串的引号配对全部错位，字面量一个都抠不出来 —— 实测连
+  //   index.html 里明写的 class="brand" 都从池子里消失了，一次报出 49 个
+  //   假的「死类名」。字面量提取只能读原文。
+  //
+  // ⚠ 还要**逐文件**扫、不能拼成一大份再扫：一个文件里错位会把后面
+  //   所有文件的字面量配对一起带偏。
+  const dropInterp = (s) => {          // 剔掉模板串里的插值，只留字面文本
+    let out = "", depth = 0;
+    for (let i = 0; i < s.length; i++) {
+      if (s[i] === "$" && s[i + 1] === "{") { depth++; i++; continue; }
+      if (depth > 0) { if (s[i] === "{") depth++; else if (s[i] === "}") depth--; continue; }
+      out += s[i];
+    }
+    return out;
+  };
+  const litRe = /"((?:[^"\\\n]|\\.)*)"|'((?:[^'\\\n]|\\.)*)'|`((?:[^`\\]|\\.)*)`/g;
+  // 池子分两桶：**页面里的**（index.html）与 **脚本里的**（js/*.js）。
+  // 静态兜底那份文案只许待在 index.html —— 脚本没起来时全靠它（见下面 ⑩⑪），
+  // 而 ⑩⑪ 两条守卫要查的正是「JS 里不许再手写一遍」，混在一个池子里就分不清
+  // 是真漂移还是那份豁免的兜底。
+  const jsLit = [], htmlLit = [];
+  for (const f of ["index.html", ...fs.readdirSync(path.join(RENDERER, "js"))
+      .filter(n => n.endsWith(".js"))]) {
+    const raw = fs.readFileSync(path.join(RENDERER, f === "index.html" ? "" : "js", f), "utf8");
+    const re = new RegExp(litRe.source, "g");
+    const sink = f === "index.html" ? htmlLit : jsLit;
+    let m;
+    while ((m = re.exec(raw)) !== null) {
+      sink.push(dropInterp(m[1] !== undefined ? m[1]
+        : m[2] !== undefined ? m[2] : m[3] || ""));
+    }
+  }
+  const litPool = jsLit.concat(htmlLit);
+  const litText = litPool.join("\n");
+  // 正向对照：判据自己得先站得住。index.html 明写 class="brand"，
+  // 池里抠不出来就说明提取器坏了 —— 那时下面那条会报一堆假死类名。
+  check("（前置）字面量池真的抠得出类名（否则下一条会报一堆假的）",
+    /(?<![\w-])brand(?![\w-])/.test(litText),
+    /(?<![\w-])brand(?![\w-])/.test(litText) ? "抠出来了" : "池里没有 brand，提取器坏了");
+  const selectors = [...cssText.matchAll(/^\s*\.([a-zA-Z][\w-]*)\s*(?=[,{:>.\s])/gm)].map(m => m[1]);
+  // 方向：宁可漏、不能误红。注释里提到过的类名一律算它活着（实测
+  // `.res-panes` 只剩注释里那一处，这条就抓不到它了）—— 那是故意的：
+  // 误红会让人去改本来正确的代码，漏报只是少抓一次。
+  const deadClasses = [...new Set(selectors)].filter(c =>
+    !new RegExp("(?<![\\w-])" + c + "(?![\\w-])").test(litText));
+  check("★ styles.css 里没有零产出方的类名（死规则会让下一个人改了个寂寞）",
+    deadClasses.length === 0, deadClasses.join(",") || "一处都没有");
+
+  // ── 交互瑕疵（审查 P2 交互组，2026-09-27）────────────────────────
+  // 这一组的共同形状：**缺陷都发生在「点了之后 / 打字的时候」**，
+  // 静态读代码看不出来，元素不在屏时按选择器也量不到。所以判据一律是
+  //「屏幕上真的出现了那句话」或「源码里那一行收口还在」。
+  //
+  // ⚠ 只留 result.js 那一份：ui/jobs/sessions/words 四份原先在这里各读一遍，
+  //   搬进 sections/review.js 后它们在整网这边一个引用都没有 ——
+  //   留着就是"读了一遍给人看自己很全"的死代码，而下一个人会以为
+  //   改整网这份就能改到 review 组（那份才是被变异检验验的那一份）。
+  const resJsSrc = stripJsComments(fs.readFileSync(path.join(RENDERER, "js", "result.js"), "utf8"));
+
+  // ① 时长只许一种读法（规范 §8）。修前同一块屏幕上：页头那行印
+  //    「预计 N 秒」、节奏卡印「目标 N 秒」，而同一份结果的分镜
+  //    时间列与进度步耗时都走 sec()/fmtDur 的分档读法 —— 同一个钟
+  //    分成两套读法，用户得自己做心算去对上。
+  //    判据是**静态扫模板**：那两行曾写成 `${…} 秒`，一个手拼的「秒」
+  //    就是绕过 sec() 的证据。量法同类踩过的坑：只量运行时的话，
+  //    这两行在历史记录视图里压根不渲染，「跳过」读起来和「通过」一样。
+  const secBypass = [...resJsSrc.matchAll(/\$\{[^}]*\}\s*秒/g)].map(m => m[0].trim());
+  check("★ 没有在模板里手拼「${…} 秒」绕开 sec()（时长只有一种读法）",
+    secBypass.length === 0, secBypass.join(" | ") || "一处都没有");
+  // 正向对照：sec() 得真的被结果页用着（上一条在「一个调用都没有」的
+  // 情况下也是绿的 —— 那正是"守卫空转"的样子）。
+  check("（前置）结果页真的在用 sec() 印时长（否则上一条是空转）",
+    /sec\(/.test(resJsSrc), /sec\(/.test(resJsSrc) ? "在用" : "结果页压根没调 sec()");
+
+  // ② 「重写『要点1』」不许被 slice 挤掉。chip 最多 5 颗
+  //    （时长两档 + 平台 + 受众 + 重写），而过去是 `chips.slice(0, 4)` ——
+  //    默认那档时长下**重写恒被切掉**，而那是唯一一颗作用在这一稿
+  //    上的建议。
+  const fwChips = await evalIn(`var box = document.querySelector(".followups:not(.hidden)");
+    if (!box) return { missing: true };
+    return Array.from(box.querySelectorAll(".fu-chip")).map(b => b.textContent);`);
+  if (!fwChips.missing) {
+    check("★ 「下一步」那一排里有「重写」那颗（它曾被 slice(0,4) 恒切掉）",
+      fwChips.some(t => /重写/.test(t)), JSON.stringify(fwChips));
+  }
+  check("★ 「下一步」那排胶囊不许按个数截断（挤掉的是最后一颗）",
+    !/chips\.slice\(0,\s*\d/.test(resJsSrc),
+    /chips\.slice\(0,\s*\d/.test(resJsSrc) ? "还在截断" : "不截断");
+
+  // ③~⑪ 复审轮那批（不可逆确认 / 换包提示 / Ctrl+Enter 闸门 / 停止空窗 /
+  //   失败卡模型 / 删除清屏 / 词表 / 快捷键与校对两份真值 / 键面归表）。
+  //   ⚠ 断言搬进 sections/review.js 了，**整网跑的是同一个函数** ——
+  //   留一份内联拷贝就等于给变异检验和默认门禁各养一条会分家的判据
+  //   （review.js 头部与 packimport.js 头部写的是同一条纪律）。
+  await SECTIONS.review({ evalIn, sleep, check,
+    ctx: { RENDERER, fs, path, stripJsComments } });
+  const sendDisabled = await evalIn(`var b = document.getElementById('btn-generate');
+    b.disabled = true;
+    var s = getComputedStyle(b);
+    var out = { op: s.opacity, bg: s.backgroundColor, color: s.color };
+    b.disabled = false; return out;`);
+  check("★ 发送键禁用态不叠全局 opacity .5（叠了之后图标基本消失，像空块）",
+    Number(sendDisabled.op) >= 0.999, JSON.stringify(sendDisabled));
+  // 状态点默认态（词表外 / 异常落点）已在上面与 `.rw` 同法量过（静态扫）
+  // prefs-reduced-motion：循环动画必须**放一轮就停**，不能是高速闪
+  const rm = await evalIn(`var dot = document.querySelector('.dot.run');
+    if (!dot) return { missing: true };
+    var b = getComputedStyle(dot, '::before');
+    return { iter: b.animationIterationCount, name: b.animationName };`);
+  if (!rm.missing) {
+    check("★ 降低动效偏好下，循环动画放一轮就停而不是高速闪（曾每 0.01ms 一轮）",
+      rm.iter === "1", JSON.stringify(rm));
+  }
+
   check("人味分面板：分数 + 逐条命中明细 + 明说「不参与校验结论」（只报不拦）",
     smell.score === "88" && smell.hitRows === 2 && smell.saysNotGated && smell.phShown,
     JSON.stringify({ score: smell.score, rows: smell.hitRows,
@@ -7629,6 +8594,28 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   check("列表已到上界时空结果要说清「这里只列最近 5 条」（搜不到 ≠ 没有）",
     /这里只列最近 5 条/.test(truncOn), truncOn);
 
+  // P1-29：那句截断说明只在**搜不到**的时候才出现，平时（非搜索、有结果）
+  // 这一屏对它零解释 —— 而左栏**没有任何翻页**，用户翻到底就以为全部翻完了，
+  // 于是据此以为某次生成从没发生过。所以它必须**常驻**在列表末尾。
+  const capLine = await evalIn(`return (async function () {
+      var box = document.getElementById('sess-search');
+      box.value = '';
+      box.dispatchEvent(new Event('input', { bubbles: true }));
+      await new Promise(function (r) { setTimeout(r, 250); });
+      var n = document.querySelector('#session-list .sess-cap');
+      var list = document.getElementById('session-list');
+      return { text: n ? n.textContent.trim() : '',
+               // 常驻 = 它是列表的**最后一个子节点**（在所有分组之下），
+               // 不是藏在某处、也不是被某次搜索顶掉
+               last: list.lastElementChild === n,
+               rows: list.querySelectorAll('.sess-item').length };
+    })();`);
+  check("到上界时列表末尾常驻一行「只列最近 5 条」（平时也不许对截断零解释）",
+    /这里只列最近 5 条/.test(capLine.text) && capLine.last && capLine.rows >= 5,
+    JSON.stringify(capLine));
+  check("那行还说清「搜索也只在这 5 条里找」（否则用户下一步就是去搜索框找）",
+    /搜索也只在这 5 条里找/.test(capLine.text), capLine.text);
+
   await cdp.send("Page.navigate",
     { url: `http://127.0.0.1:${PORT}/?token=stubtoken&mock=1&hist=0` });
   await sleep(1900);
@@ -7643,6 +8630,20 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       return { pick: btn ? btn.textContent.trim() : '', title: sel ? sel.title : '',
                empty: n ? n.textContent : '' };
     })();`);
+  // 反向对照（?hist=0：limit 100、样本 6 条 = **没到上界**）：那行必须不在。
+  // 只钉"到上界时它在"是不够的 —— 常驻成一句放之四海皆准的话，
+  // 比缺了它更坏：没截断时也告诉用户"只列最近 100 条"。
+  const capOff = await evalIn(`return (async function () {
+      var box = document.getElementById('sess-search');
+      box.value = '';
+      box.dispatchEvent(new Event('input', { bubbles: true }));
+      await new Promise(function (r) { setTimeout(r, 250); });
+      var list = document.getElementById('session-list');
+      return { cap: (document.querySelector('#session-list .sess-cap') || {}).textContent || '',
+               rows: list.querySelectorAll('.sess-item').length };
+    })();`);
+  check("没到上界时列表末尾那行不许出现（limit 100、只有 6 条 = 全都列得下）",
+    capOff.cap === "" && capOff.rows >= 5, JSON.stringify(capOff));
   check("演示模式那一支真的经启动渲染出来，且不印内部黑话（选择器上只有中文）",
     demo.pick === "演示模式" && !/[A-Za-z]{3,}/.test(demo.pick), JSON.stringify(demo));
   check("悬停说明跟着状态走：演示模式不说「当前模型 / 切换后对后续生成生效」",
@@ -7681,12 +8682,22 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     narrow.docOverflow <= 1, JSON.stringify(narrow));
 
   // 两列左边界在窄窗也必须重合（§9：新视图不跟媒体查询一起降内边距 = 差 8px）。
+  // 选题现在有两个阅读面（排行 / 按来源），**两面都要量**：只量其中一面会漏掉
+  // "新加的那一面没进同一条媒体查询" —— 那正是 §9 记过的原始病灶。
   await evalIn(`document.getElementById('btn-topics').click(); return 1;`);
   await sleep(700);
+  const narrowRank = await evalIn(`return {
+      rankLeft: document.getElementById('rank-root').getBoundingClientRect().left,
+      chatLeft: ${narrow.chatLeft} };`);
+  check("窄窗下首页列与**排行面**左边界重合（新面不跟媒体查询降内边距就会错开）",
+    Math.abs(narrowRank.rankLeft - narrowRank.chatLeft) <= 1,
+    JSON.stringify(narrowRank));
+  await evalIn(`document.getElementById('ttab-topics').click(); return 1;`);
+  await sleep(300);
   const narrowAlign = await evalIn(`return {
       topicsLeft: document.getElementById('topics-root').getBoundingClientRect().left,
       chatLeft: ${narrow.chatLeft} };`);
-  check("窄窗下首页列与选题列左边界重合（内边距没跟着降档就会错开）",
+  check("窄窗下首页列与**按来源面**左边界重合（内边距没跟着降档就会错开）",
     Math.abs(narrowAlign.topicsLeft - narrowAlign.chatLeft) <= 1,
     JSON.stringify(narrowAlign));
   await evalIn(`window.__ts.gotoView('chat'); return 1;`);
@@ -7707,6 +8718,35 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     narrowPack.viewW > 0 && narrowPack.groupsW > 0, JSON.stringify(narrowPack));
   check("窄窗下包详情两列不横向溢出（溢出=右侧内容读不到）",
     narrowPack.colsOverflow <= 1, JSON.stringify(narrowPack));
+
+  // ⚠ 上一条量的是**左栏折叠**状态（默认态，那次实测 viewW=118）。但用户
+  //   不会一直折着：`#left` 固定 276px，`#left.folded ~ #right .right-head`
+  //   的 padding-left 56px 那条还没有任何媒体查询跟着降。展开 + 1000px 窗
+  //   下右列只剩 ~466px，`.pi-groups-col`（下限 200）+ gap 会把 `.kb-view`
+  //   压到很窄 —— 也就是「文件查看器基本等于消失」那个形态在更窄的窗上复发。
+  //   §9 明写「判据必须在 1320 与 1000 两个视口都成立」，而左栏两种状态
+  //   都要算，所以这里把左栏展开再量一遍。
+  //   ⚠ 用**真的按钮**而不是某个导出函数：`setLeftFolded` 没挂在 window.__ts 上，
+  //     而且走真交互才顺带量到 `localStorage` 持久化那一条路径。
+  const wasFolded = await evalIn(`return document.getElementById('left')
+    .classList.contains('folded');`);
+  if (wasFolded) { await evalIn(`document.getElementById('btn-toggle-left').click(); return 1;`); }
+  await sleep(500);
+  const narrowPackWide = await evalIn(`var v = document.querySelector('.kb-view');
+    var cols = document.querySelector('.pi-cols');
+    var g = document.querySelector('.pi-groups-col');
+    var card = document.querySelector('.page-card');
+    return { viewW: v ? +v.getBoundingClientRect().width.toFixed(1) : -1,
+             colsOverflow: cols ? cols.scrollWidth - cols.clientWidth : -1,
+             groupsW: g ? +g.getBoundingClientRect().width.toFixed(1) : -1,
+             cardW: card ? +card.getBoundingClientRect().width.toFixed(1) : -1 };`);
+  check("★ 窄窗 + **左栏展开**时查看器仍有可读宽度（P1：左栏降档要等到 860px）",
+    narrowPackWide.viewW >= 120 && narrowPackWide.groupsW > 0,
+    JSON.stringify(narrowPackWide));
+  check("★ 窄窗 + 左栏展开时包详情两列仍不横向溢出",
+    narrowPackWide.colsOverflow <= 1, JSON.stringify(narrowPackWide));
+  if (wasFolded) { await evalIn(`document.getElementById('btn-toggle-left').click(); return 1;`); }
+  await sleep(300);
 
   await cdp.send("Emulation.clearDeviceMetricsOverride");
   await sleep(300);

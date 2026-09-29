@@ -10,7 +10,7 @@
 // 点「换一版」看起来像结果被覆盖；且 renderResult 每次都无条件 scrollBottom()，
 // 用户上滚查看前文时会被强行拽回底部。
 
-import { $, el, esc, toast, bindOnce } from "./util.js";
+import { $, el, esc, toast, bindOnce, isSubmitEnter } from "./util.js";
 import { state } from "./store.js";
 
 export const streamEl = () => $("chat-stream");
@@ -89,7 +89,10 @@ function beginEdit(m, onEdit) {
   bub.querySelector('[data-a="cancel"]').onclick = () => done(false);
   bub.querySelector('[data-a="go"]').onclick = () => done(true);
   ta.addEventListener("keydown", e => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); e.stopPropagation(); done(true); }
+    // ⚠ isComposing 来自 util.isSubmitEnter（P1-28）：就地编辑也是「回车即提交」，
+    //   以前只有主输入框挡了中文选词那一下回车 —— 在这里，改一次用户气泡
+    //   会把用户还在拼的半截拼音当成新主题提交出去。
+    if (isSubmitEnter(e) && !e.shiftKey) { e.preventDefault(); e.stopPropagation(); done(true); }
     // ⚠ stopPropagation 不能省（P2-6）：document 上那个全局 Esc 分派
     // 的顺序是「收菜单 → 收浮层 → 关设置 → **停止生成**」，就地编辑框不拦事件的话，
     // 用户按 Esc 只想关掉这个输入框，实测同时把正在跑的那条作业停了

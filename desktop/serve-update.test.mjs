@@ -15,7 +15,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
-import { parseRange, startServer } from './scripts/serve-update.mjs';
+import { parseRange, startServer, feedUrls, auditFeed } from './scripts/serve-update.mjs';
 
 // 临时目录交给系统清；fixture 在模块级建一次，所有测试共享。
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'ts-serve-'));
@@ -208,6 +208,106 @@ test('越界 Range → 416 + Content-Range: bytes */size', async () => {
     const r = await get(srv.port, '/hello.bin', { headers: { Range: 'bytes=999-' } });
     assert.strictEqual(r.status, 416);
     assert.strictEqual(r.headers['content-range'], 'bytes */200');
+  } finally { await srv.close(); }
+});
+
+// ── 差分前提自检（auditFeed / feedUrls，P1-15）────────────────────
+// 这一组是 P1-15 的正身：差分**失效时客户端不报错**（拿不到 blockmap 就回退
+// 全量，版本号照样变、安装照样成功），而 blockmap 又是唯一不在 latest.yml 里的
+// 一项（builder ≥27 的 files[] 只列 exe，客户端自己拼 "<exe URL>.blockmap"）。
+// 于是照真 yml 的形状造 fake-feed，最容易漏的偏偏是它，冒烟会"通过"而什么都没验。
+// 判据钉在纯函数上：起服务时的那声喊必须真的喊得出来。
+function feedDir(name, files) {
+  const d = path.join(TMP, name);
+  fs.mkdirSync(d, { recursive: true });
+  for (const [n, body] of Object.entries(files)) {
+    fs.writeFileSync(path.join(d, n), body);
+  }
+  return d;
+}
+
+// builder 25 的**真实形状**：files[] 里只有 exe，blockmap 靠客户端自己拼。
+const YML_25 = [
+  'version: 0.2.2',
+  'files:',
+  '  - url: TalkScript Setup 0.2.2.exe',
+  '    sha512: AAAA',
+  '    size: 200',
+  'path: TalkScript Setup 0.2.2.exe',
+  'sha512: AAAA',
+  'releaseDate: 2026-09-01T00:00:00.000Z',
+  '',
+].join('\n');
+
+test('feedUrls 只取 files[] 段里的 url（path:/sha512: 那些同名字段不算）', () => {
+  assert.deepStrictEqual(feedUrls(YML_25), ['TalkScript Setup 0.2.2.exe']);
+});
+
+test('feedUrls：files 段之后的顶层键不会被当成条目', () => {
+  const yml = ['files:', '  - url: a.exe', 'extraFiles:', '  - url: b.exe', ''].join('\n');
+  assert.deepStrictEqual(feedUrls(yml), ['a.exe']);
+});
+
+test('缺 blockmap 时自检必须报出来（这一条就是 P1-15 的判据）', () => {
+  const d = feedDir('nb', { 'latest.yml': YML_25, 'TalkScript Setup 0.2.2.exe': 'x'.repeat(200) });
+  const a = auditFeed(d);
+  assert.strictEqual(a.problems.length, 1, JSON.stringify(a));
+  assert.match(a.problems[0], /没有配套的 \.blockmap/);
+  assert.match(a.problems[0], /静默跳成全量/);
+});
+
+test('blockmap 齐了就没问题（自检不许变成"永远报警"的噪音源）', () => {
+  const d = feedDir('ok', {
+    'latest.yml': YML_25,
+    'TalkScript Setup 0.2.2.exe': 'x'.repeat(200),
+    'TalkScript Setup 0.2.2.exe.blockmap': 'y'.repeat(50),
+  });
+  const a = auditFeed(d);
+  assert.deepStrictEqual(a.problems, [], JSON.stringify(a));
+  assert.deepStrictEqual(a.exe, ['TalkScript Setup 0.2.2.exe']);
+  assert.ok(a.notes.some((n) => /差分前提齐了/.test(n)));
+});
+
+test('latest.yml 列的 exe 不在目录里 → 也算问题（否则 404 才现形）', () => {
+  const d = feedDir('missing-exe', { 'latest.yml': YML_25 });
+  const a = auditFeed(d);
+  assert.ok(a.problems.some((p) => /不在目录里/.test(p)), JSON.stringify(a));
+});
+
+test('连 latest.yml 都没有 → 报出来（客户端连"有没有新版本"都问不到）', () => {
+  const d = feedDir('noyml', { 'hello.bin': 'z' });
+  const a = auditFeed(d);
+  assert.ok(a.problems.some((p) => /没有 latest\.yml/.test(p)), JSON.stringify(a));
+});
+
+test('正向对照：上面那条「缺 blockmap」的目录真的取不到 blockmap（自检没在编）', () => {
+  const d = feedDir('nb', { 'latest.yml': YML_25, 'TalkScript Setup 0.2.2.exe': 'x'.repeat(200) });
+  assert.strictEqual(fs.existsSync(path.join(d, 'TalkScript Setup 0.2.2.exe.blockmap')), false);
+});
+
+test('传输量记账：差分那一趟记的是 Range 数与实拉字节（验收线就量这两个数）', async () => {
+  const srv = await startServer(TMP, 0);
+  try {
+    const t0 = srv.tally();
+    assert.deepStrictEqual(t0, { requests: 0, rangeRequests: 0, bytes: 0 });
+    await get(srv.port, '/hello.bin', { method: 'HEAD' });
+    await get(srv.port, '/hello.bin', { headers: { Range: 'bytes=0-99' } });
+    await get(srv.port, '/hello.bin', { headers: { Range: 'bytes=100-149' } });
+    const t = srv.tally();
+    assert.strictEqual(t.requests, 3, JSON.stringify(t));
+    assert.strictEqual(t.rangeRequests, 2, JSON.stringify(t));
+    // HEAD 不发体，一个字节都不该被记进传输量
+    assert.strictEqual(t.bytes, 150, JSON.stringify(t));
+  } finally { await srv.close(); }
+});
+
+test('反向对照：全量那一趟 Range 数是 0、字节等于整包（分得出差分与全量）', async () => {
+  const srv = await startServer(TMP, 0);
+  try {
+    await get(srv.port, '/hello.bin');
+    const t = srv.tally();
+    assert.strictEqual(t.rangeRequests, 0, JSON.stringify(t));
+    assert.strictEqual(t.bytes, 200, JSON.stringify(t));
   } finally { await srv.close(); }
 });
 

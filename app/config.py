@@ -144,10 +144,16 @@ CONFIG_TEMPLATE = """# TalkScript 配置
 #   想改哪一项，把该行的 `#` 去掉并填值，保存后重启（或点「保存」）即可。
 #
 # 三种配置方式，优先级从高到低：
-#   1. 环境变量（密钥不落盘时用；数值项会**夹逼**回合法区间，与界面同一道闸，
-#      见 app/config.py 的 _ENV_NUM_BOUNDS）
-#   2. 本文件（保存走界面时会校验区间，见 app/server.py 的 NUMERIC_BOUNDS）
+#   1. 环境变量（密钥不落盘时用）
+#   2. 本文件
 #   3. 内置默认值
+#
+# ⚠ 数值项在**三条路上都过同一道区间闸**（app/config.py 的 NUMERIC_BOUNDS）：
+#   环境变量与本文件的越界值都会**被夹回合法区间**，并在设置页标成
+#   「内置默认」—— 写错了当场看得见，不会静默生效（以前只有界面那条路有闸，
+#   手改这个文件能写进 retries: 9999 然后真的去请求上游一万次）。
+#   合法区间：retries 0~10 · timeout 5~1800 秒 · max_tokens 256~200000 ·
+#             temperature 0.0~2.0（0.0 合法，求确定性输出用）
 #
 # ⚠ 界面上改不到的两项：`temperature` 与 `max_tokens` 自 2026-09-17 起不在设置页里，
 #   只能改这个文件或环境变量。
@@ -230,6 +236,42 @@ _LLM_ENV = {
 }
 _LLM_CAST = {"temperature": float, "retries": int, "timeout": float, "max_tokens": int}
 
+# 数值项的合法区间。**全库唯一的一份**（P0-6）。
+#
+# 以前这张表住在 `app/server.py`，只有 `POST /api/config` 那一个写入口查它，
+# 于是另两条入口是**裸的**：
+#   · 环境变量 → `_ENV_NUM_BOUNDS` 另抄了一份（靠 `tests/test_env_bounds.py`
+#     逐项比对，漂了会红，但机制本身是「靠测试维持的两份」）；
+#   · **手改 config.yaml** → 什么都没有。而 README 第 205-207 行恰恰教用户
+#     「temperature 与 max_tokens 只能改这个文件」（它们已被移出设置页），
+#     `load_config` 照单全收：`retries: 9999` 被 `llm.py` 算成 10000 次尝试
+#     （约 150 次真实 HTTP 请求打向上游，再乘 JSON 解析重试）、`max_tokens: 0`
+#     让上游回 400，而 `config_error` 与 `llm_defaulted` 都是空串 —— 设置页把
+#     这些值当「用户配过的」显示，用户无从自查。这是「用户照文档操作就会踩」的洞。
+#
+# 为什么放在 config.py 而不是继续留在 server.py：这张表是**读取侧**的约束
+# （越界就夹逼 + 报一行），读取侧在 config.py；`server.set_config` 是**写入侧**
+# 的拒绝（越界就 400），那才需要 HTTP 语境的报错。两边 import 同一份常量，
+# 「两份表靠测试比对」这个结构本身就消掉了。
+#
+# temperature 的下界含 0.0：0 是合法采样温度（求确定性输出），
+# 而 `load_config` 曾经用 `or 默认值` 把它当成「没填」（P0-2）。
+NUMERIC_BOUNDS: dict[str, tuple[float, float]] = {
+    "retries": (0, 10),
+    "timeout": (5, 1800),
+    "max_tokens": (256, 200000),
+    "temperature": (0.0, 2.0),
+}
+
+# 环境变量名 → 字段名。`_ENV_NUM_BOUNDS` 由它从 NUMERIC_BOUNDS 派生，
+# 于是环境变量与文件两条路**共用同一张表**。
+_LLM_FIELD_OF_ENV: dict[str, str] = {
+    "TALKSCRIPT_TEMPERATURE": "temperature",
+    "TALKSCRIPT_RETRIES": "retries",
+    "TALKSCRIPT_TIMEOUT": "timeout",
+    "TALKSCRIPT_MAX_TOKENS": "max_tokens",
+}
+
 
 def _env(name: str, fallback: str = "") -> str:
     v = os.environ.get(name)
@@ -260,16 +302,20 @@ def _env_num(name: str, fallback, cast):
     return v
 
 
-# 环境变量数值项的合法区间。**键是环境变量名**（`_env_num` 收到的就是它）。
-# 区间与 `server.set_config` 的 NUMERIC_BOUNDS（app/server.py）**逐项一致**
-# （retries 0~10、timeout 5~1800、max_tokens 256~200000、temperature 0.0~2.0）
-# —— 环境变量夹逼与设置页保存是同一道闸，两端不许漂移：
-# tests/test_env_bounds.py 把这张表与 server 的 NUMERIC_BOUNDS 比对钉住。
+# 环境变量数值项的合法区间。**从 NUMERIC_BOUNDS 派生**，不再是手抄的第二份。
+#
+# 以前这里是四行字面量（0.0~2.0 / 0~10 / 5.0~1800.0 / 256~200000），
+# 靠 `tests/test_env_bounds.py` 逐项比对 server 的那张表来维持一致 ——
+# 「靠测试维持的两份」本身就是漂移的温床（P0-6 把它收成一份）。
+# 键是**环境变量名**（`_env_num` 收到的就是它）——修复前表里写的是字段名
+# （max_tokens），`.get(name)` 恒为 None，夹逼从未执行过（实测
+# TALKSCRIPT_MAX_TOKENS=100 / RETRIES=999 / TIMEOUT=0 / TEMPERATURE=-5
+# 全部原样生效）。下面这行就是那次事故留下的钉子：键名写错会当场 ImportError，
+# 不会静默退化成「不夹逼」。
 _ENV_NUM_BOUNDS: dict[str, tuple[float, float]] = {
-    "TALKSCRIPT_TEMPERATURE": (0.0, 2.0),
-    "TALKSCRIPT_RETRIES": (0, 10),
-    "TALKSCRIPT_TIMEOUT": (5.0, 1800.0),
-    "TALKSCRIPT_MAX_TOKENS": (256, 200000),
+    env: NUMERIC_BOUNDS[field]
+    for env, field in _LLM_FIELD_OF_ENV.items()
+    if field in NUMERIC_BOUNDS
 }
 
 
@@ -278,17 +324,20 @@ def _truthy(v) -> bool:
 
 
 def _num(data: dict, key: str, default, cast, fallbacks: list | None = None):
-    """取一个数值配置项：**只有键缺失或为空时才用默认值**。
+    """取一个数值配置项：**只有键缺失或为空时才用默认值**，并**夹逼到合法区间**。
 
     为什么不能写成 `data.get(key) or default` —— 那会把合法的 0 当成「没填」。
-    `temperature` 的合法区间包含 0.0（见 `server.set_config` 的 0.0 ~ 2.0），
+    `temperature` 的合法区间包含 0.0（见 `NUMERIC_BOUNDS` 的 0.0 ~ 2.0），
     于是「把温度调到 0 求确定性输出」会变成静默无效：设置页提示保存成功，
     写进 config.yaml 的也是 0.0，但每次生成实际仍用默认的 0.7 ——
     不报错、不可见、与用户意图相反，正是本项目一直在整治的「静默降级」。
 
-    同类写法在 timeout / max_tokens 上也有，当前只是靠接口层的区间校验挡着
-    才没出事（0 不在它们的合法区间里），但 `TALKSCRIPT_TIMEOUT=0` 这类
-    环境变量路径绕得过去，所以一并收口到这里。
+    ⚠ **越界值必须夹逼，且必须记账**（P0-6）。以前这一层只判「能不能转成数」，
+      手改 config.yaml 写 `retries: 9999` / `max_tokens: 0` / `timeout: 0`
+      都会照单全收直落请求层，而用户是从 README 学会改这个文件的。
+      现在：越界 → 夹逼到边界 + log.warning + 追加进 `fallbacks`
+      （于是它进 `llm_defaulted`、设置页标「内置默认」，用户看得见自己那份
+      配置没生效，也不会把兜底值当成自己配的）。
 
     值非法（如 `temperature: 快`）时退回默认并留一条日志 —— 不回退会让
     `float("快")` 的 ValueError 冒到 `create_app`，引擎直接起不来。
@@ -297,7 +346,7 @@ def _num(data: dict, key: str, default, cast, fallbacks: list | None = None):
     if v is None or v == "":
         return default
     try:
-        return cast(v)
+        n = cast(v)
     except (TypeError, ValueError):
         log.warning("配置项 %s 的值 %r 不是合法的 %s，已改用默认值 %r",
                     key, v, cast.__name__, default)
@@ -307,6 +356,16 @@ def _num(data: dict, key: str, default, cast, fallbacks: list | None = None):
             # 当成「用户配的」—— 兜底值冒充用户输入，只是换了个入口。
             fallbacks.append(key)
         return default
+    lo, hi = NUMERIC_BOUNDS.get(key, (None, None))
+    if lo is not None and not (lo <= n <= hi):
+        capped = max(lo, min(hi, n))
+        log.warning("配置项 %s=%r 超出合法区间 [%s, %s]（%s），已夹逼为 %s。"
+                    "文件里这个值不生效——改数据目录的 config.yaml 时注意区间。",
+                    key, n, lo, hi, cast.__name__, capped)
+        if fallbacks is not None:
+            fallbacks.append(key)
+        return capped
+    return n
 
 
 def read_config_file(p: Path) -> tuple[dict, str]:

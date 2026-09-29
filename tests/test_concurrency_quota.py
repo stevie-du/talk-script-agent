@@ -157,7 +157,7 @@ def test_every_live_state_occupies_quota():
                           TERMINAL_STATES, TRANSITIONS)
 
     live = {"queued", "selecting", "writing", "checking", "rewriting", "storyboarding",
-            "packing", "fetching"}
+            "packing", "fetching", "briefing"}
     assert live == set(TRANSITIONS) - TERMINAL_STATES, (
         "状态机加了新状态，请同步判断它占不占额度 —— 默认应当占")
     assert set(ALL_BUSY_STATES) == set(BUSY_STATES) | set(INTEL_BUSY_STATES)

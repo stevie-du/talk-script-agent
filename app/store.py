@@ -533,7 +533,10 @@ def render_script_md(result: dict) -> str:
     ai = ch.get("ai_tells") or {}
     if ai:
         lines += [f"> 人味分 {ai.get('score', '-')}/100"
-                  f"（明显 {ai.get('strong', 0)} 处 · 轻微 {ai.get('weak', 0)} 处）"
+                  # 「条」不是「处」：这一对数字取的是**命中条数**（每条 tell 一段算一条），
+                  # 而下一条明细里印的 `count` 才是处数。扣分按条（需求方案 §2.1 的公式），
+                  # 印成"处"会让人按 −12×处 反推分数，且与结果页的"条"自相矛盾。
+                  f"（明显 {ai.get('strong', 0)} 条 · 轻微 {ai.get('weak', 0)} 条）"
                   " —— 不参与校验结论，只是「念出来像不像人」的提示。", ""]
         for h in (ai.get("hits") or [])[:8]:
             # 不印 `h["id"]`（`bookish_connective` 这类机器键）：交付物是给人看的，

@@ -11,14 +11,14 @@ import { $, toast } from "./util.js";
 import { api, ApiError, modelSetupGap, MODEL_SETUP_REPLY, JOB_BUDGET_MS, POLL_MS } from "./api.js";
 import { state, setJob, setResult, setBusy, detachJob, stopPolling } from "./store.js";
 import * as T from "./thread.js";
-import { placeholderBody, renderProgress, startTicker, stopTicker, BUSY_STATES } from "./progress.js";
-import { STATE_LABEL } from "./words.js";
-import { renderResult, renderFailure, renderStopped, jumpToFirstPlaceholder } from "./result.js";
+import { placeholderBody, renderProgress, startTicker, stopTicker, BUSY_STATES, setDocTitle, resetDocTitle } from "./progress.js";
+import { STATE_LABEL, CHAT } from "./words.js";
+import { renderResult, renderFailure, renderStopped, renderVersionNoResult, jumpToFirstPlaceholder } from "./result.js";
 import { setHead } from "./head.js";
 import { loadSessions, busyRecords, packLabel } from "./sessions.js";
 import { openSettings } from "./settings.js";
 import { closeOverlays } from "./overlays.js";
-import { setLanding, syncBusyAffordance, refreshGate } from "./ui.js";
+import { setLanding, syncBusyAffordance, refreshGate, setParam, setCfgHint } from "./ui.js";
 
 const POLL_MAX_MISSES = 3;
 // 重写的等待上限。**必须不短于后端对同一个操作给出的上限**，否则两边说的是相反的话：
@@ -32,6 +32,21 @@ const POLL_MAX_MISSES = 3;
 // 「重写失败」，而后端在那之后把改写结果写进了 result.json。
 // 与后端作业预算同一本账（api.js 的 JOB_BUDGET_MS）：真正的超时语义由后端作业状态给出。
 const REWRITE_TIMEOUT_MS = JOB_BUDGET_MS;
+
+/** jobId → 提交那一刻用的模型名。失败卡要印它，而不是印**此刻**的全局值
+ *  （用户在跑作业期间去设置里换了模型，卡上就写着那个新模型，
+ *  于是他照着去查一个跟这次失败毫无关系的模型）。
+ *  ⚠ 不能靠后端回传：作业快照的 params 是 `req.model_dump()`，
+ *  `GenerateRequest` 里没有这个字段 —— 发过去、存下来都不会有它。
+ *  作业**离手**即删（成功 / 取消 / 失败三条出口都调 `_forgetModel`）：
+ *  桌面端是长驻进程，只在失败那条 delete 的话，一天生成几百条之后
+ *  这张表就单调攒到窗口关闭，而键值早已没人读。 */
+const modelByJob = new Map();
+
+/** 作业离手（成功 / 取消 / 失败）时清掉它的模型记录。 */
+function _forgetModel(jobId) {
+  if (jobId) modelByJob.delete(jobId);
+}
 
 
 // ── 参数 ────────────────────────────────────────────────────
@@ -123,8 +138,21 @@ export async function send(overrides = {}, opts = {}) {
 
   state.sentTopic = params.topic;
   setBusy(true, true);
+  // 记下**这次**用的模型（审查 P2 交互）：失败卡原来印的是 `state.meta.model`
+  // —— 那是**此刻**的全局值。用户在跑作业期间去设置里换了模型，卡上就写着那个
+  // 新模型，于是他照着去查那个模型的配额/日志，而真正跑挂的是另一个。
+  //
+  // ⚠ 存在**本模块的这张表**里，不在 state.job.params、也不在后端：
+  //   失败卡读的 `snap.params` 来自后端作业快照，而那是 `req.model_dump()`
+  //   （app/pipeline.py 建 Job 时）—— GenerateRequest 里没有这个字段，
+  //   所以**发过去 / 存下来都不会有它**，写进 state.job.params 只是本地一份，
+  //   失败时那一行照样落回 `state.meta.model`（= 本轮要修的那个 bug 原样）。
+  //   按 jobId 存而不是全局一个变量：一次只挂一条作业，但轮询响应可能过期
+  //   （下面的过期响应守卫），按 id 取才不会把别那条的模型印出来。
+  const modelAtSubmit = state.meta?.model || "";
   try {
     const { job_id } = await api.generate(params);
+    modelByJob.set(job_id, modelAtSubmit);
     snapshotParams();
     updateStale();
     // 必须走 setJob：refreshGate 订阅了 job 事件。直接赋值的话，发送键
@@ -209,16 +237,30 @@ function packBroken(e) {
   syncBusyAffordance();
 }
 
-/** 额度满了：说清是谁占着，并给一个能立刻腾出额度的动作。
+/** 额度满了：说清是谁占着，并指一条**这一屏上真的走得通**的出路。
  *  修复前这里只是一句「生成失败：同时进行的生成已达上限…」——
  *  而那些作业是用户连点几次「新建对话」留下的**后台**作业，界面上除了一颗
- *  呼吸点什么都没有，既不知道是谁占的也没有任何入口停掉它们。 */
+ *  呼吸点什么都没有，既不知道是谁占的也没有任何入口停掉它们。
+ *
+ *  ⚠ 指路必须分两种屏幕（2026-09-27 修 P1-27）：landing（首页）**刻意**不显示
+ *  「停止全部后台生成」那颗按钮 —— composer-foot 有一条 28px 高度不变量，
+ *  首页多一行就把 hero 挤歪（实测 chipsGap 16 → 44，verify.js 钉着）。
+ *  所以在首页说「点下方『停止全部后台生成』」是让用户去找一颗不存在的按钮；
+ *  而首页真正能走的那条路是**左栏**：行首挂呼吸点的那几条，点开任意一条，
+ *  下方就有那颗停止键。两条指路各说各屏上真有的东西。 */
 function quotaDenied() {
   const bg = busyRecords();
   setBusy(false);
   stopTicker();
   if (!bg.length) { toast("生成失败：同时进行的生成已达上限，稍后再试", 4500); return; }
-  toast(`发送被拒：还有 ${bg.length} 条生成在后台进行，占住了额度`, 5200);
+  const landing = $("view-chat")?.classList.contains("is-landing");
+  if (landing) {
+    // 与 newChat 那句保持同一份事实与同一个下名词（同一个坑，两处指路不许各说各的）。
+    toast(`发送被拒：还有 ${bg.length} 条生成在后台进行，占住了额度。`
+      + `它们在左栏里挂着呼吸点，点开任意一条可以接着看、或在那里停止它。`, 7000);
+  } else {
+    toast(`发送被拒：还有 ${bg.length} 条生成在后台进行，占住了额度`, 5200);
+  }
   syncBusyAffordance();
 }
 
@@ -297,6 +339,10 @@ export function poll() {
 function onDone(snap, body, jobId) {
   setBusy(false);
   stopTicker();
+  _forgetModel(jobId);           // 成功了就不必再记「当时用的哪个模型」
+  // 标题打上「✓ 完成」（2026-09-27）：用户切到别的应用剪素材去了，
+  // 任务栏那一行是唯一能告诉他「好了」的地方 —— 不进窗口也看得见。
+  setDocTitle(snap.params?.topic || state.sentTopic || "", 0, 0, true);
   setResult(snap.result);
   $("stale-banner").classList.add("hidden");
 
@@ -311,6 +357,20 @@ function onDone(snap, body, jobId) {
 function renderVersion(body) {
   const v = T.currentVersion(body);
   if (!v || !v.result) {
+    // ⚠ 这一版**没有产物**（失败 / 被停止）。以前这里只重画版本条就 return，
+    //   于是「版本 1 / 2」的条底下仍然是第 2 版的完整稿子 —— 用户以为在对照
+    //   两版，实际看的是同一份，并据此做发布决定（P0）。
+    //   现在清空并画一张说明卡，并指明哪一版有产物可看。
+    setResult(null);
+    // 找**最近**的、真的有产物的那一版做跳转目标（通常就是重试成功的那版）
+    let hasIndex = -1;
+    for (let i = body._versions.length - 1; i >= 0; i--) {
+      if (body._versions[i]?.result) { hasIndex = i; break; }
+    }
+    renderVersionNoResult(body, v, hasIndex, (idx) => {
+      body._vi = idx;
+      renderVersion(body);
+    });
     T.renderVersionBar(body, renderVersion);
     return;
   }
@@ -326,10 +386,17 @@ function renderVersion(body) {
 
 export function resultOpts(body) {
   const r = T.currentVersion(body)?.result;
+  const packParams = state.meta?.packs?.find(p => p.name === $("pack").value)?.params || {};
   return {
     rwOk: !!(state.job && state.result),
-    platforms: state.meta?.packs?.find(p => p.name === $("pack").value)?.params?.platform?.options || [],
-    audiences: state.meta?.packs?.find(p => p.name === $("pack").value)?.params?.audience?.options || [],
+    platforms: packParams.platform?.options || [],
+    audiences: packParams.audience?.options || [],
+    // 时长档同样取自**当前包**（2026-09-27 修 P1-26）：下游建议过去写死
+    // 「压缩到 30 / 扩到 90」，而行业包可以只给 [45, 120]。写死的档位在
+    // 这种包里根本不存在，点下去 `<select>` 的 selectedIndex 变 -1 ——
+    // 键从 DOM 上被删掉、`sel.value = "30"` 落空，界面退回包的默认值，
+    // 而 toast 还在说「已设为 30 秒」（屏幕与承诺相反）。
+    durations: (packParams.duration?.options || []).map(Number).filter(n => n > 0),
     onRewrite: (i, fb) => rewriteSegment(i, fb),
     onRerun: () => send({ topic: r?.params?.topic || "" }, { asVersionOf: body, keepTopic: true }),
     onRevary: () => send({ topic: r?.params?.topic || "", reroll: true },
@@ -341,41 +408,65 @@ export function resultOpts(body) {
 
 /** 后续建议：只预填参数 + 聚焦，不自动提交。 */
 function prefill(act, value) {
-  const sel = $("p-" + act);
-  if (sel) {
-    sel.value = String(value);
-    sel.dispatchEvent(new Event("change", { bubbles: true }));
-  }
+  // ⚠ 走 ui.setParam 而不是直接 `sel.value = …`（2026-09-27 修 P1-26）。
+  //   `sel.value = 不存在的键` 在 <select> 上会让 selectedIndex 落 -1 ——
+  //   浏览器随即把 selectedIndex 复位成 -1 且 value 取第一个 option，
+  //   界面看起来「没点上」，而 toast 无条件说「已设为 N」。
+  //   setParam 是"程序化改参数"的唯一入口：它先验这一档在当前包里存不存在，
+  //   不存在就返回 false（一个字都不写）。
+  const ok = setParam(act, value);
   if (state.sentTopic) $("topic").value = state.sentTopic;
   updateStale();
+  // 改前那句 `dispatchEvent(new Event("change"))` 会顺带触发 document 上那个
+  // 监听（ui.js:844 → updateStale + setCfgHint）。setParam 只写值与重画，
+  // 工具条那颗「设置」按钮的 title 摘要得自己刷，否则预填之后它还念旧参数。
+  setCfgHint();
   // ⚠ 主题这里是**程序化赋值**，不触发 input —— 发送键的 disabled 不会自己跟上，
   //   而 Enter 做的事就是 `$("btn-generate").click()`：点一颗 disabled 按钮是空操作。
   //   所以必须显式刷一次门，否则 toast 承诺"回车即可生成"而回车什么都不发生（P1）。
   refreshGate();
   autoGrowTopic();
-  // 两句都要真做得到：主题没填上时不许说"回车即可"。
+  // 三句都要真做得到：没设上不许说设上了，主题没填上不许说"回车即可"。
   const has = !!$("topic").value.trim();
-  toast(has ? `已设为 ${value} —— 回车即可生成新版本`
-            : `已设为 ${value} —— 填好主题后点发送`, 3200);
+  if (!ok) {
+    toast(`这个包里没有「${value}」这一档 —— 自己在「更多参数」里挑一个`, 3600);
+  } else {
+    toast(has ? `已设为 ${value} —— 回车即可生成新版本`
+              : `已设为 ${value} —— 填好主题后点发送`, 3200);
+  }
   $("topic").focus();
 }
 
 function onFailed(snap, body, jobId) {
   setBusy(false);
   stopTicker();
+  // 失败/停止不进「✓ 完成」—— 那是骗人。还原成中性标题
+  // （2026-09-27）：`renderProgress` 在最后一帧写的还是「(4/5) 主题」，
+  // 作业已经不在跑了还挂着进度数，任务栏那一行会一直说「在生成」。
+  resetDocTitle();
   const failParams = snap.params || {};
   setJob(null);
   const err = snap.error || "未知错误";
   setHead(state.sentTopic, "生成失败", "失败", "bad");
+  // ⚠ 失败也必须**占一个版本槽**（P0）。修前这里只画一张失败卡、`_vi` 一直是 -1，
+  //   于是「用同样的参数重试」成功之后 pushVersion 落到下标 0，整个气泡只有
+  //   一个版本 —— 翻页条不出现，用户无从知道「刚才那次失败过」。
+  //   更糟的是：只有 1 个版本时 renderVersionBar 直接把条删掉，于是
+  //   「版本 1 = 失败、版本 2 = 成功」这条路径根本走不到 P0-1 那张卡上。
+  //   登记之后这条路径才成立，翻回第 1 版也才有「它自己没有产物」可显示。
+  const vi = body._vi >= 0 ? body._vi : T.pushVersion(body,
+    { id: jobId, result: null, state: "failed", error: err, params: failParams });
+  body._versions[vi] = { id: jobId, result: null, state: "failed", error: err, params: failParams };
   renderFailure(body, {
     title: "生成失败",
     message: err,
-    detail: `行业包：${failParams.pack ? packLabel(failParams.pack) : "-"} · 模型：${state.meta?.model || "-"}`,
+    detail: `行业包：${failParams.pack ? packLabel(failParams.pack) : "-"} · 模型：${modelByJob.get(jobId) || state.meta?.model || "-"}`,
     retryLabel: "用同样的参数重试",
   }, {
     onRetry: () => send({ ...failParams }, { asVersionOf: body }),
     onOpenSettings: () => openSettings("llm"),
   });
+  _forgetModel(jobId);            // 印完就收：这条作业已经离手
   toast("生成失败：" + err, 5000);
   T.follow(true);
   loadSessions();
@@ -389,13 +480,20 @@ function onFailed(snap, body, jobId) {
 function onCancelled(body, why = "cancelled", opts = {}) {
   setBusy(false);
   stopTicker();
+  // 同 onFailed：作业不在跑了，标题就别再挂着进度数（2026-09-27）
+  resetDocTitle();
+  _forgetModel(state.job && state.job.id);   // 必须在 setJob(null) 之前取 id
   setJob(null);
   // 保留主题（与 onFailed 同口径）：线程里还挂着这个主题的用户气泡和
   // 「已停止」卡，头部却回到「新对话」，两条收尾分支对同一场景两种说法（P3）。
-  setHead(state.sentTopic || "新对话", "本次生成" + STATE_LABEL.cancelled, "");
+  setHead(state.sentTopic || CHAT.title, "本次生成" + STATE_LABEL.cancelled, "");
   if (body) {
-    const vi = body._vi;
-    if (vi >= 0) body._versions[vi] = { ...body._versions[vi], state: "cancelled" };
+    // 与 onFailed 同口径：被停掉的这一版也要占槽，于是「停掉 → 再来一次」
+    // 之后翻回第 1 版能说清「它被停了，没有产物」，而不是顶着上一版的稿子（P0）。
+    // `_vi < 0` 说明这个气泡还没有任何版本，id 也就无从取（本来也没有产物）。
+    const vi = body._vi >= 0 ? body._vi : T.pushVersion(body,
+      { id: null, result: null, state: "cancelled" });
+    body._versions[vi] = { ...body._versions[vi], state: "cancelled" };
     renderStopped(body, {
       title: why === "cancelled" ? "已停止本次生成" : "这次生成已经中断（后台没有它在跑的作业了）",
       onRetry: () => send({ topic: state.sentTopic }, { asVersionOf: body, keepTopic: true }),
@@ -425,6 +523,15 @@ export function dropLiveJobView(opts = {}) {
 }
 
 // ── 停止 ────────────────────────────────────────────────────
+/** 正在飞的那次**单段重写**（{jid, body, vi, owner}），没有则 null。
+ *  存在期间，Esc / 停止键取消的是**这次重写**，不是那条已完成的生成作业。 */
+let rewriteInFlight = null;
+
+/** 这次取消取消的是「一段重写」而不是「整条生成」吗？ */
+function cancellingRewrite() {
+  return !!rewriteInFlight && !!state.job && state.job.id === rewriteInFlight.jid;
+}
+
 export async function abort() {
   const job = state.job;
   // 兜底：正常入口都带 `state.job` 门控（按钮在 busy&&!job 时 disabled，
@@ -437,6 +544,12 @@ export async function abort() {
   }
   stopPolling();
   const body = job.body || state.activeBody;
+  // 立刻说「正在停止…」（建包那条路早这么做过，settings.js 的 cancelPackgen）：
+  // cancel 是一次网络往返，这段空窗里按钮要是还写着「停止生成」，
+  // 用户只会当成没点上，于是再点一次。后端 cancel 幂等所以不会出两条作业，
+  // 但那颗键会一直在骗人。
+  state.stopping = true;
+  refreshGate();
   let snap = null, err = null;
   try {
     // 停止请求的**响应本身就是答案**：app/pipeline.py 的 cancel() 对已经结束的
@@ -446,6 +559,7 @@ export async function abort() {
   } catch (e) {
     err = e.message || "未知原因";
   }
+  state.stopping = false;
   if (err) {
     // 后端不同意时要说出来。修复前这里是全吞：用户看到「已停止」以为停了，
     // 实际后台还在跑并把结果写回来，于是出现「停止后又多出一条记录」的怪事。
@@ -496,6 +610,27 @@ export async function abort() {
     return;
   }
   if (st === "failed") { onFailed(snap, body, job.id); return; }
+  // ⚠ 取消的是**单段重写**，不是整条生成（P0）。这一支以前落进 onCancelled →
+  //   renderStopped，把整份稿子擦成「已停止本次生成。产物未落盘」—— 而产物
+  //   好好地在 result.json 里、好好地显示在界面上（取消发生在 `_stop_check`，
+  //   `write_result` 没执行）。用户因此以为稿子没了、两个按钮又不通向原稿。
+  //   现在只收掉重写的界面状态，**结果视图原样留着**，并说清「稿子还是原来那版」。
+  if (st === "cancelled" && cancellingRewrite()) {
+    const rw = rewriteInFlight;
+    rewriteInFlight = null;
+    stopTicker();
+    setBusy(false);
+    // 重写也停了，标题别再挂着进度（2026-09-27，与 onCancelled 同口径）
+    resetDocTitle();
+    // 结果视图**原样留着**（含仍在转圈的那颗点由 renderResult 自己收）。
+    // 只有当结果已经被别的动作换掉时，才退成不带「稿子还在」那句的说法。
+    const keep = !!rw.body && document.contains(rw.body) && !!state.result;
+    toast(keep ? "这一段的重写已停止，稿子还是原来那版" : "这一段的重写已停止", 3600);
+    state.activeBody = null;
+    loadSessions();
+    syncBusyAffordance();
+    return;
+  }
   onCancelled(body, st === "cancelled" ? "cancelled" : st || "cancelled");
 }
 
@@ -622,6 +757,14 @@ export async function openRecord(id) {
   //  全被送进 attach() —— 而 attach() 读的是内存里的作业，重启后必然 404，
   //  于是磁盘上明明有 job.json 摘要，界面上只剩一条 3.5 秒就消失的 toast。
   if (!r.sections) {
+    // ⚠ 必须把 state.result 清掉（与下面 done 那一支的 setResult 对齐，复审 P0）：
+    //   少了这一句，state.result 会**一直指着上一条打开过的记录**，
+    //   而右屏画的是这一条。于是 sessions.js 里
+    //   「`state.result.id === it.id` 才收屏」那个判据就成立了：
+    //   打开 A（有产物）→ 打开 B（失败、无产物，state.result 仍是 A）
+    //   → 回左栏删 A → 右屏里 B 的失败卡被无端抹掉、清成 landing。
+    //   同一类症状两种成因，而这一处是**根**。
+    setResult(null);
     T.addUserMsg(state.sentTopic, { onEdit: onEditUserMsg });
     const body = T.addAssistantMsg();
     T.pushVersion(body, { id, state: r.state || "failed" });
@@ -730,6 +873,11 @@ export async function rewriteSegment(index, feedback) {
   const owner = state.job;
   setBusy(true, true);
   toast("正在重写这一段…");
+  // 登记「在飞的是一次重写」：Esc / 停止键打到的 job 是**那条已完成的生成作业**
+  // （state.job 没换过），而产物就在界面上、好好地在 result.json 里。
+  // abort() 必须靠这个标记才知道「取消的是重写、不是生成」—— 否则它会走
+  // onCancelled → renderStopped，把整份稿子擦成「产物未落盘」（P0）。
+  rewriteInFlight = { jid, body, vi, owner };
   let keepBusy = false;
   try {
     await api.rewrite(jid, index, feedback);
@@ -740,7 +888,7 @@ export async function rewriteSegment(index, feedback) {
     // undefined，调用方一律念这一句 —— 于是被停止、被遗弃的重写也会 toast
     // 成功，而界面上那段文字根本没变（P1-2）。
     if (outcome === "done") toast("已重写并复检");
-    else if (outcome === "cancelled") toast("这一段的重写已停止", 3200);
+    else if (outcome === "cancelled") toast("这一段的重写已停止，稿子还是原来那版", 3600);
   } catch (e) {
     if (e instanceof RewriteDetached) return;      // 不还状态、不报成功、不报失败
     if (e instanceof RewritePending) {
@@ -751,6 +899,8 @@ export async function rewriteSegment(index, feedback) {
       if (document.contains(body)) toast("重写失败：" + e.message, 4000);
       else return;
     }
+  } finally {
+    if (rewriteInFlight && rewriteInFlight.jid === jid) rewriteInFlight = null;
   }
   if (!keepBusy) releaseRewriteUI(owner, body);
 }

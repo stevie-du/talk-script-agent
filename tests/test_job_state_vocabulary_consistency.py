@@ -272,8 +272,28 @@ def test_abandoning_a_live_record_lands_a_terminal_view():
     assert "detachJob()" not in body, \
         "deleteSession 里不该再有裸 detachJob()：那正是停在呼吸骨架的那条路"
     # 批量删组那条路同理（它过去也只 detach）
-    j = src.index("if (state.job && ids.includes(state.job.id))")
-    assert "dropLiveJobView(" in src[j:j + 120], "删整组时把在跑的那条又只 detach 了一遍"
+    # ⚠ 判据钉的是"**这条路径存在**"而不是某一行的字面：复审那轮把条件
+    #   补成了 `&& !failed.includes(...)`（部分删除失败时不能收右屏，
+    #   否则屏幕与事实相反），原来的整行匹配就找不到、这条直接抛
+    #   ValueError —— 一个"代码变好、测试变红"的假信号。
+    # ⚠ 用**行级切片取到下一个顶层声明**为止，不用定长窗口：定长窗口
+    #   会与下一个函数的窗口重叠，于是"把 deleteSession 里那句删掉"
+    #   仍能在窗口里命中 deleteGroup 那句而蒙混过关 —— 复审实测过。
+    k = src.index("async function deleteGroup")
+    lines = src[k:].split("\n")
+    body = [lines[0]]
+    for ln in lines[1:]:
+        if re.match(r"^(export\s+)?(async\s+)?function\s", ln):
+            break
+        body.append(ln)
+    grp = "\n".join(body)
+    assert "dropLiveJobView(" in grp, "删整组时把在跑的那条又只 detach 了一遍"
+    # ⚠ 少了 failed 那一层，部分失败时正在跑的那条会被误收（右屏塌成
+    #   landing，而 toast 正说着「N 条未删成」）—— 见 deleteGroup 的注释。
+    assert "!failed.includes(state.job.id)" in grp, \
+        "删整组没收掉删除失败的那条（屏幕会与事实相反）"
+    assert "!failed.includes(state.result.id)" in grp, \
+        "删整组没收掉删除失败的那条（正在看的那条会被误清屏）"
 
 
 def test_quota_messages_still_carry_the_bucketing_marker():

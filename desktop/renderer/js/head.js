@@ -14,8 +14,9 @@
 // `topics.js` 里「状态不敢写全局头部」那条注释所担心的形态。
 
 import { $ } from "./util.js";
+import { CHAT } from "./words.js";
 
-const chatHead = { title: "新对话", sub: "", state: "", cls: "" };
+const chatHead = { title: CHAT.title, sub: "", state: "", cls: "" };
 /** 视图名 → { title, sub }。按视图存，不留"上一个视图的文案"串到新视图上。 */
 const viewHeads = {};
 
@@ -25,7 +26,7 @@ function currentView() {
 
 /** 会话头部。签名与搬过来时一致，调用点只换 import 来源。 */
 export function setHead(title, sub, stateText, cls) {
-  chatHead.title = title || "新对话";
+  chatHead.title = title || CHAT.title;
   chatHead.sub = sub || "";
   chatHead.state = stateText || "";
   chatHead.cls = cls || "";

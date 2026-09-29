@@ -13,7 +13,7 @@
 //     于是卡片上的「N/配额 字」和顶部「字数」永远对不上，卡片会莫名标红。
 //  2. 导出 SRT / MD 从不 revokeObjectURL，每导出一次泄漏一个 Blob。
 
-import { $, el, esc, fmtText, sec, shotTime, copyText, download, toast, wireTablist } from "./util.js";
+import { $, el, esc, fmtText, sec, shotTime, copyText, download, toast, wireTablist, isSubmitEnter } from "./util.js";
 import { api } from "./api.js";
 import { state } from "./store.js";
 import { packLabel } from "./sessions.js";
@@ -22,7 +22,7 @@ import { packLabel } from "./sessions.js";
 import { setHead } from "./head.js";
 // 校验结论的话术只有一份（words.js）：页头、合规页签、合规表、导出的 md、左栏
 // 那五处以前各说一套，为什么统一成三态见 words.js 顶部。
-import { VERDICT, verdictKey, severityLabel } from "./words.js";
+import { VERDICT, verdictKey, severityLabel, PROOF } from "./words.js";
 
 // 「超配额」的判定线只这一处：以前段卡与节奏条各写一个 `* 1.3`，
 // 改一处另一处不动 → 一边说"都合规"、另一边画红。
@@ -61,6 +61,13 @@ function passState(ch) {
   return typeof ch?.passed === "boolean" ? ch.passed : null;
 }
 
+/** 硬伤数 → 上屏的后缀。页头与合规页签对**同一个数**写了两份手抄
+ *  （「3 处硬伤」/「3 硬伤」），同块屏幕上两个名字说同一件事。
+ *  ⚠ 传 `0` 要得到空串：`0 处硬伤` 是句废话，而这一格常在 0 时也照常渲染。 */
+function hardSuffix(n) {
+  return n > 0 ? ` · ${n} 处硬伤` : "";
+}
+
 export function renderResult(r, body, opts = {}) {
   body.innerHTML = "";
   const ch = r.check || {};
@@ -71,7 +78,7 @@ export function renderResult(r, body, opts = {}) {
   // 于是「引擎没给出结论」的产物页头挂着红色「✗ 需人工确认」，而它正下方一条横幅写着
   // 「本次没有校验结论」—— 同一块屏幕两句话互相打脸，用户会照着红的那句反复重跑。
   const vk = verdictKey(passed);
-  const verdict = `${VERDICT[vk].word}${vk !== "none" && hardN ? ` · ${hardN} 处硬伤` : ""}`;
+  const verdict = `${VERDICT[vk].word}${vk !== "none" ? hardSuffix(hardN) : ""}`;
 
   setHead(
     r.params?.topic || "生成结果",
@@ -115,7 +122,7 @@ function renderHeader(r, ch, dev, hardN, opts) {
     </div>
     <div class="res-metric-list">
       <span class="m-chip">${ch.chars_total ?? "-"}/${ch.target_total ?? "-"} 字</span>
-      <span class="m-chip">预计 ${ch.estimated_seconds ?? "-"} 秒 / 目标 ${ch.duration_target ?? "-"} 秒</span>
+      <span class="m-chip">预计 ${sec(ch.estimated_seconds) || "-"} / 目标 ${sec(ch.duration_target) || "-"}</span>
       <span class="m-chip ${devCls}">偏差 ${dev > 0 ? "+" : ""}${dev}%</span>
       <span class="m-chip ${hardN === 0 ? "good" : "bad"}">禁用词 ${hardN} 硬 · ${(ch.soft_hits || []).length} 待确认</span>
     </div>`;
@@ -178,7 +185,7 @@ function renderBanners(r, ch, opts) {
 按 60/90/120 秒等档位写 total/hook/body/cta 四个数（见 docs/ 里的建包说明）。</pre></details>`);
   }
   if (r.pack_draft) {
-    items.push(`<div class="banner warn">⚠ 本结果来自草稿行业包，内容需人工校对</div>`);
+    items.push(`<div class="banner warn">⚠ 本结果来自草稿行业包，${PROOF.warn}</div>`);
   }
   if (!items.length) return null;
   const wrap = el("div", "res-banners");
@@ -242,6 +249,9 @@ function renderSmell(r) {
       <td>${esc(h.detail || "")}</td>
     </tr>`).join("");
   const warns = (a.config_warnings || []).map(w => `<p class="hint">⚠ ${esc(w)}</p>`).join("");
+  // 「形态指标」= L2 那一层（`ai_tells.shape`）。放在**同一张卡**里而不是新开一屏，
+  // 是为了让"这一项不参与判定"与分数挨在一起读，而不是被当成第二个成绩单。
+  const shapeHtml = renderShape(a.shape);
   // 下面那排 score-legend 必须与**真正生效的判据**同档位：这一屏只有一条线
   // （>= 90 绿 / 其余红）。以前画三档（含 50–89 橙、< 50 灰），于是 60 分被涂成红
   // 而图例说它是橙 —— 编出来的档位与 topics 那条「50–59 要换角度」是同一类假能力。
@@ -265,9 +275,44 @@ function renderSmell(r) {
       <p class="hint">占位事实 ${ph.count ?? 0} 处（上限 ${ph.cap ?? "-"}，
         每百字 ${ph.per_100 === null || ph.per_100 === undefined ? "—" : ph.per_100}）——
         超过上限就不再是「留了个空」而是「整篇没写」，会触发「通篇零具体」。</p>
+      ${shapeHtml}
       ${warns}
     </div>`;
   return wrap;
+}
+
+/** 「形态指标」（L2）那一块。**只展示，不参与任何判定** —— 这句话必须印在旁边。
+ *
+ *  为什么这一层永远不设门（需求方案 §2.1 + 调研报告-20260928 §3.5）：
+ *  humanizer 与解码参数（temperature/top-p）都能把困惑度、突发度这一类统计量
+ *  优化过去 —— 拿它当门，门就成了被攻击的目标函数。
+ *
+ *  ⚠ `shape` 缺失（老产物生成时还没有这组数）→ **整块不画**。
+ *  画一排 0 会把"没测"说成"测了、而且很低" —— 与本仓 `ai_tells` 落 null 同一条规矩。
+ *  口语基线本来就和书面语不同（重复多、句短、多样性低），所以每一行都带一句"怎么读"。
+ */
+function renderShape(s) {
+  if (!s) return "";
+  const dash = (v) => v === null || v === undefined;
+  const num = (v, suffix = "") => (dash(v) ? "—" : `${v}${suffix}`);
+  const cl = s.clause_len || {};
+  const gt30 = dash(cl.gt30) ? null : Math.round(cl.gt30 * 100);
+  const rows = [
+    ["词汇多样性 MATTR（窗口 50 字）", num(s.mattr), "口语天然偏低，别按书面语读这个数"],
+    ["实词 3-gram 重复率", num(s.trigram_repeat), "屏蔽虚词后的近似值，只看这一篇自己的趋势"],
+    [`分句长度 p50 / p90（共 ${cl.n ?? 0} 句）`, `${num(cl.p50)} / ${num(cl.p90)} 字`,
+      `超过 30 字的占 ${num(gt30, "%")} —— 口播里 >30 字基本必拆`],
+    ["语气词密度", num(s.particles_per_100, " / 百字"), "反向信号：越高越像人在说话"],
+    ["虚词分布熵", num(s.funcword_entropy), "越可预测（越低）越像模板"],
+    ["成语密度", dash(s.idioms_per_1000) ? "—（本包没配成语表）" : `${s.idioms_per_1000} / 千字`,
+      "阈值未校准，先攒分布再谈判不判"],
+  ];
+  const body = rows.map(x => `<tr><td>${esc(x[0])}</td><td><code>${esc(x[1])}</code></td>
+        <td>${esc(x[2])}</td></tr>`).join("");
+  return `<p class="hint"><b>形态指标</b> —— 这一组是统计量，<b>只作参考，不参与上面那个分数，
+    也不参与校验结论</b>；而且口语体的基线本来就与书面语不同，别拿它当"像不像 AI"的尺子。</p>
+    <div class="tbl-wrap"><table>
+      <tr><th>指标</th><th>读数</th><th>怎么读</th></tr>${body}</table></div>`;
 }
 
 // ── 3) 分段卡片 ─────────────────────────────────────────────
@@ -321,7 +366,7 @@ function renderTempo(r) {
   // title 里的数字与 QUOTA_OVER_RATIO 同源，不另写一遍。
   return `<div class="page-card">
     <div class="res-top"><b class="card-title">节奏</b>
-      <span class="hint">目标 ${r.params?.duration ?? "-"} 秒 · 预计 ${r.check?.estimated_seconds ?? "-"} 秒</span>
+      <span class="hint">目标 ${sec(r.params?.duration) || "-"} · 预计 ${sec(r.check?.estimated_seconds) || "-"}</span>
       <span class="topics-grow"></span>
       <span class="m-chip ${over ? "bad" : "good"}"
             title="判定线：段字数超过该段配额的 ${Math.round((QUOTA_OVER_RATIO - 1) * 100)}% 以上才算超">
@@ -430,15 +475,31 @@ function renderSections(r, opts) {
              title="这段念出来的语速（字数 ÷ 净口播秒数，已扣掉段间 0.5 秒停顿）vs 本风格目标">`
         + `${rate.toFixed(1)} 字/秒 · 目标 ${target}</span>`;
     const marks = tellWords(r, i);
+    // ⚠ 这是一枚**可点的 span**（`cursor: pointer` + `:hover` + 委托点击），
+    //   所以它必须同时具备 role / tabindex / 键盘处理（2026-09-27 修）：
+    //   原来只有鼠标路径 —— 全键盘操作时 Tab 走遍全页永远到不了它，
+    //   读屏也只把它当一段文字（听不出这是个可点的东西）。
+    //   同一个文件的 `.banner.jumpable` 早就做对了（role + tabindex + onkeydown），
+    //   两处一处对一处错。
     const markTip = marks.length
-      ? `<span class="tell-jump" data-goto="smell" title="点一下看这条人味标记的明细">`
+      ? `<span class="tell-jump" data-goto="smell" role="button" tabindex="0"
+             title="点一下看这条人味标记的明细（键盘：Tab 选中，Enter 或空格打开）"
+             aria-label="查看这 ${marks.length} 处人味标记的明细">`
         + `${marks.length} 处人味标记</span>` : "";
+    // 时间码与字幕提示从段头那一行挪到**右侧注栏**：改前 `.card-head` 是
+    // 「左簇 + `margin-left:auto` 的 .meta」，两头中间空 350px 一条缝，
+    // 而正文吃满 716px = 一行 45 个汉字。挪走之后正文 544px（≈36 字/行，
+    // 与 `.pg-empty-d` 的 38em 同口径），那条缝没了、一个字不少。
+    // ⚠ 措辞原样保留（`字幕：X`、没有也印「—」）—— §八 那张词表不因排版而改口。
+    const timeTxt = tm ? sec(tm.start) + "–" + sec(tm.end) : "";
+    const hasSide = !!(timeTxt || s.subtitle);
+    if (!hasSide) card.classList.add("no-side");
     card.innerHTML = `
+      <div class="seg-main">
       <div class="card-head">
         <span class="seg-tag ${esc(s.type)}">${esc(label)}</span>
         ${quota}
         ${rateChip}
-        <span class="meta">${tm ? sec(tm.start) + "–" + sec(tm.end) : ""}${tm ? " · " : ""}字幕：${esc(s.subtitle || "—")}</span>
       </div>
       <div class="card-text">${markTells(fmtText(s.text), marks)}</div>
       <div class="card-foot">
@@ -447,7 +508,10 @@ function renderSections(r, opts) {
           ? "单段重写：只改这一段并重新校验，不动其他段"
           : "单段重写只在刚生成的那条上可用；历史记录请用「换一版」"}">✎ 重写本段</button>
         <input class="rw-feedback" placeholder="给这段的修改意见（可选），回车提交">
-      </div>`;
+      </div>
+      </div>
+      ${hasSide ? `<div class="seg-side">${timeTxt ? `<b>${esc(timeTxt)}</b>` : ""}
+        <span>字幕：${esc(s.subtitle || "—")}</span></div>` : ""}`;
     const input = card.querySelector(".rw-feedback");
     const rwBtn = card.querySelector(".rw");
     rwBtn.onclick = () => {
@@ -457,7 +521,10 @@ function renderSections(r, opts) {
       if (foot.classList.contains("editing")) input.focus();
     };
     input.addEventListener("keydown", ev => {
-      if (ev.key === "Enter" && !ev.shiftKey) {
+      // ⚠ isComposing 来自 util.isSubmitEnter（P1-28）：意见框也是「回车即提交」，
+      //   以前没挡中文选词那一下回车 —— 用户还在拼「第一点讲…」就已经把半截
+      //   拼音当修改意见提交出去，稿子按一段乱码被改掉了。
+      if (isSubmitEnter(ev) && !ev.shiftKey) {
         ev.preventDefault();
         if (!opts.rwOk) { toast("历史记录不支持单段重写，请用「换一版」"); return; }
         opts.onRewrite?.(i, input.value.trim());
@@ -495,9 +562,19 @@ function renderResultTabs(r, ch, hardN, opts) {
   const defs = [
     { id: "script", label: "文案", badge: "",
       render: () => renderScriptPane(r, opts) },
-    { id: "story", label: "分镜", badge: `${(r.storyboard || []).length} 镜`,
-      render: () => renderStoryboard(r),
-      hide: !(r.storyboard || []).length },
+    // ⚠ 分镜为空时**保留页签**（2026-09-27 修）：原来 `hide: !storyboard.length`
+    //   把整颗页签藏掉，于是「输出内容选了口播+分镜、但分镜这一步失败/被跳过」
+    //   与「我本来就只要口播」在界面上**长得一模一样** —— 屏幕上没有任何一处
+    //   说「本次没有分镜」，用户只能进「数据」页翻那条 storyboard_skip 日志。
+    //   `app/pipeline.py:519-528` 的注释写着「界面仍看得到『为什么没有分镜』」，
+    //   而当时页签已被藏掉，那句注释是假的。
+    //   现在两种「没有分镜」都能点到，且各自说清原因：
+    //     · 输出内容只要口播 → 「你选了只要口播」（是用户的决定，不是故障）
+    //     · 分镜生成失败 / 被跳过 → 「分镜这一步没出来」，并指向日志
+    { id: "story", label: "分镜", badge: (r.storyboard || []).length
+        ? `${(r.storyboard || []).length} 镜` : "未生成",
+      cls: (r.storyboard || []).length ? "" : "warn",
+      render: () => renderStoryboard(r) },
     { id: "smell", label: "人味分",
       // ⚠ 与面板同一个读取口径（`smellScore`）：缺失**不许**当成满分，也不许当成差。
       cls: smell === null ? "" : smell >= 90 ? "ok" : "bad",
@@ -506,7 +583,7 @@ function renderResultTabs(r, ch, hardN, opts) {
     { id: "subs", label: "字幕", badge: "",
       render: () => renderSubtitlePane(r) },
     { id: "comp", label: "合规", cls: comply.cls,
-      badge: ck === "none" ? comply.word : `${comply.word}${hardN ? ` · ${hardN} 硬伤` : ""}`,
+      badge: ck === "none" ? comply.word : `${comply.word}${hardSuffix(hardN)}`,
       render: () => renderCompliance(r) },
     { id: "data", label: "数据", badge: `${logs.length} 条日志`,
       render: () => renderDataPane(r) },
@@ -515,7 +592,12 @@ function renderResultTabs(r, ch, hardN, opts) {
   const wrap = el("div", "res-tabs-wrap");
   const bar = el("div", "res-tabs");
   bar.setAttribute("role", "tablist");
-  const panes = el("div", "res-panes");
+  // 容器**不给类名**（2026-09-27 修）：它原来叫 `res-panes`，而 styles.css 里
+  // **没有任何一条规则**匹配那个类 —— 一个不改变任何渲染结果的钩子。
+  // 留着比删掉更坏：下一个人会照着 `.res-pane`（单数，那条有规则）去推这个
+  // 复数容器该长什么样，然后发现"改了没有任何反应"。
+  // 盒子本身要留 —— 各面板是 appendChild 到它里面的。
+  const panes = el("div");
 
   defs.forEach((d, i) => {
     const btn = el("button", "res-tab" + (i === 0 ? " on" : "") + (d.cls ? " " + d.cls : ""));
@@ -556,11 +638,25 @@ function renderResultTabs(r, ch, hardN, opts) {
   // `[data-goto]` 的委托处理器：正文里那枚「N 处人味标记」与卡脚的提示都靠它。
   // ⚠ 委托在 `wrap` 上而不是逐元素绑 —— 卡片是每次渲染重建的，
   //   逐元素绑会在重渲染后失效（点了没反应，而界面看不出来）。
-  wrap.addEventListener("click", e => {
-    const g = e.target.closest("[data-goto]");
-    if (!g) return;
+  const goto = (g) => {
     const id = g.dataset.goto;
     if (bar.querySelector(`.res-tab[data-tab="${id}"]`)) selectTab(id);
+  };
+  wrap.addEventListener("click", e => {
+    const g = e.target.closest("[data-goto]");
+    if (g) goto(g);
+  });
+  // 键盘路径（2026-09-27 补）：`[data-goto]` 是真能点的（role=button + tabindex），
+  // 就必须能用键盘打开，否则「鼠标用户能跳到人味分明细、键盘用户不能」——
+  // 这正是 §无障碍里最常见的那类半拉子。Enter 与空格都算「打开」；
+  // 空格必须 preventDefault，否则页面会跟着往下滚一屏。
+  wrap.addEventListener("keydown", e => {
+    if (e.key !== "Enter" && e.key !== " " && e.key !== "Spacebar") return;
+    const g = e.target.closest("[data-goto]");
+    if (!g) return;
+    e.preventDefault();
+    e.stopPropagation();
+    goto(g);
   });
 
   wrap.appendChild(bar);
@@ -616,9 +712,17 @@ function renderDataPane(r) {
 // ── 5) 后续建议（点了只预填，不自动提交）────────────────────
 function renderFollowups(r, opts) {
   const chips = [];
-  const dur = Number(r.params?.duration) || 60;
-  if (dur > 30) chips.push({ label: `压缩到 ${sec(30)}`, act: "duration", value: 30 });
-  if (dur < 90) chips.push({ label: `扩到 ${sec(90)}`, act: "duration", value: 90 });
+  // 时长建议取**相邻两档**（2026-09-27 修 P1-26）：过去按 `dur > 30` / `dur < 90`
+  // 写死两个数字，于是包里没有那一档时点下去等于把 select 的键删掉
+  // （selectedIndex 落 -1），界面退回包默认值而 toast 还在报「已设为 30 秒」。
+  // 现在只从当前包 `duration.options` 里挑真正存在的、比现值更短/更长的最近一档；
+  // 一档都没有就不出这条建议（宁可不给，也不给一个点了不生效的）。
+  const dur = Number(r.params?.duration) || 0;
+  const durs = (opts.durations || []).slice().sort((a, b) => a - b);
+  const shorter = durs.filter(d => d < dur).pop();
+  const longer = durs.find(d => d > dur);
+  if (shorter) chips.push({ label: `压缩到 ${sec(shorter)}`, act: "duration", value: shorter });
+  if (longer) chips.push({ label: `扩到 ${sec(longer)}`, act: "duration", value: longer });
   const platforms = opts.platforms || [];
   const other = platforms.find(p => p !== r.params?.platform);
   if (other) chips.push({ label: `换平台：${other}`, act: "platform", value: other });
@@ -631,8 +735,12 @@ function renderFollowups(r, opts) {
   }
   if (!chips.length) return el("div", "followups hidden");
   const box = el("div", "followups");
+  // 以前是 chips.slice(0, 4)：而 chip 最多 5 颗（时长两档 + 平台 + 受众 + 重写），
+  // 默认那档时长下**「重写『要点1』」恒被切掉** —— 那是唯一一颗作用在**这一稿**
+  // 上的建议，改稿的人第一反应要点的东西反而永远不出现。
+  // 容器本来就是 flex-wrap: wrap，多一颗自己换行，不截。
   box.innerHTML = `<span class="fu-label">下一步</span>` +
-    chips.slice(0, 4).map((c, i) =>
+    chips.map((c, i) =>
       `<button class="fu-chip" data-i="${i}">${esc(c.label)}</button>`).join("");
   box.querySelectorAll(".fu-chip").forEach(b => {
     b.onclick = () => {
@@ -654,9 +762,39 @@ function renderFollowups(r, opts) {
 }
 
 // ── 子渲染 ──────────────────────────────────────────────────
+/** 分镜为什么是空的（`app/pipeline.py:510-528` 记了那四种，产物里能分出来）。
+ *
+ * ⚠ 这一段以前是**死代码**：`renderStoryboard` 里那句「本次未生成分镜（输出内容
+ *   选择了『仅口播』）」的判据是 `!storyboard.length`，而页签那一侧同时
+ *   `hide: !storyboard.length` —— 页签被藏掉、`render` 永不被调用，那句话
+ *   屏幕上永远不会出现。两种完全不同的「没有分镜」（用户主动只要口播 /
+ *   分镜这一步失败）因此长得一模一样（2026-09-27 修：页签保留，判据按
+ *   `params.format` 与 `check.passed` 分开说）。
+ */
+function storyboardEmptyReason(r) {
+  if (r.params?.format === "voice") {
+    return { head: "你选了「仅口播」", body: "输出内容里没有勾分镜，所以这一版不画分镜。"
+      + "想要画面的话，在「更多参数」里把输出内容改成含分镜，再生成一版。" };
+  }
+  if (r.check && r.check.passed === false) {
+    // ⚠ 用词走 `words.js` 那张表（`VERDICT.ok` = 「已通过校验」）：
+    //   「合格」是它的**别名**，项目规定别名只许留在注释里 —— 同一个结论在
+    //   屏幕上只能有一种说法（verify.js「渲染层没有第二套终态话术」钉着）。
+    return { head: "终版没通过校验，没画分镜",
+      body: "分镜只在正文通过校验之后才画 —— 这一版的正文仍有硬伤，"
+        + "先按「合规」页签把它修掉，再生成一版。" };
+  }
+  // 剩下的两种（模型调用失败 / 包里没有 storyboard 阶段）都只在作业日志里
+  // 留了 `storyboard_skip`，产物里不带那个标记 —— 所以这里指向日志，
+  // 而不是编一个具体原因（正文已落盘，作业没失败）。
+  return { head: "本次没有分镜", body: "分镜这一步没能出结果（正文已落盘、不受影响）。"
+    + "具体原因在「数据」页的那条分镜日志里。" };
+}
+
 export function renderStoryboard(r) {
   if (!(r.storyboard || []).length) {
-    return `<p class="hint">本次未生成分镜（输出内容选择了「仅口播」）。</p>`;
+    const why = storyboardEmptyReason(r);
+    return `<div class="banner warn"><b>${esc(why.head)}</b><br>${esc(why.body)}</div>`;
   }
   const rows = r.storyboard.map((sh, i) => {
     const tm = (r.timings || [])[i];
@@ -695,7 +833,7 @@ export function renderCompliance(r) {
     ["回炉/重写记录", (r.revisions || []).length
       ? r.revisions.map((v, i) => `第${i + 1}次：${esc(v.action || v.feedback || "单段重写")}`).join("；")
       : "无"],
-    ["行业包状态", r.pack_draft ? `⚠ 草稿包，内容需人工校对` : `<span class="ok">✅ 已校对</span>`],
+    ["行业包状态", r.pack_draft ? `⚠ 草稿包，${PROOF.warn}` : `<span class="ok">✅ ${PROOF.cleared}</span>`],
   ];
   return `<div class="tbl-wrap"><table>
     <thead><tr><th class="col-item">检查项</th><th>结果</th></tr></thead>
@@ -746,6 +884,40 @@ export function renderStopped(body, opts = {}) {
   body.querySelector('[data-act="revary"]').onclick = () => opts.onRevary?.();
 }
 
+/** 翻到了**没有产物**的那一版（失败 / 被停止 / 还排队）。
+ *
+ *  ⚠ 这条路径以前是 P0：它只 `T.renderVersionBar(body, …)` 就 return，于是
+ *    「版本 1 / 2」的版本条底下**仍然是第 2 版的完整稿子** —— 用户以为自己在
+ *    对照两版，实际看的是同一份，并据此做发布决定，屏幕上查不出来。
+ *    典型触发：第一次失败 → 点「用同样的参数重试」成功 → 点 `‹` 回看第一版。
+ *
+ *  所以这里必须**清空并画一张说明卡**，说清「这一版没有产物」以及「哪一版有」，
+ *  并给一个直接跳过去的出口。留一条会骗人的版本条是不够的。
+ *
+ * @param {number} hasIndex 邻近的、**有产物**的版本下标（没有则 -1）
+ * @param {(index:number)=>void} [onSwitch] 「去看版本 N」的回调（通常切 _vi 后重画）
+ */
+export function renderVersionNoResult(body, v, hasIndex, onSwitch) {
+  const n = body._versions.length;
+  const why = {
+    failed: "这次生成失败了",
+    cancelled: "这次生成被停止了",
+  }[v?.state] || "这次生成没有产物";
+  const jump = hasIndex >= 0 && hasIndex < n
+    ? `<div class="fail-actions">
+        <button class="ghost" data-act="goto">去看版本 ${hasIndex + 1}</button>
+      </div>`
+    : `<p class="hint">${n > 1
+        ? "这一组里还没有任何一版有产物，用 › 翻到其它版本看看。"
+        : "这一组里还没有任何一版有产物。"}</p>`;
+  body.innerHTML = `
+    <div class="banner warn"><b>${esc(why)}</b><br>所以这一版没有产物可看。</div>
+    ${jump}`;
+  body.querySelector('[data-act="goto"]')?.addEventListener("click", () => {
+    if (typeof onSwitch === "function") onSwitch(hasIndex);
+  });
+}
+
 // ── 操作绑定 ────────────────────────────────────────────────
 function bindActions(body, r, opts) {
   const q = s => body.querySelector(s);
@@ -790,7 +962,7 @@ export function resultMarkdown(r) {
   (r.sections || []).forEach((s, i) => {
     const tm = r.timings?.[i];
     const label = s.type === "point" ? `要点${++pi}` : TYPE_LABEL[s.type];
-    lines.push(`**【${label}】** ${tm ? `${tm.start}-${tm.end} 秒` : ""}`);
+    lines.push(`**【${label}】** ${shotTime("", tm)}`);
     // ／ 是停顿符：导出成一行会让整段挤成一坨，读的人找不到断句
     lines.push(String(s.text || "").replace(/／/g, "\n"), "");
   });

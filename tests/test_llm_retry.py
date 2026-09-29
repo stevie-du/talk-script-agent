@@ -287,6 +287,39 @@ def test_streaming_length_truncation_retries_with_upgraded_budget():
     assert "完整输出" in bodies[1]["messages"][-1]["content"], bodies[1]["messages"][-1]
 
 
+def test_every_pipeline_task_has_a_chinese_stage_name():
+    """pipeline 传给 `chat_json` 的每一个 task 都得有中文阶段名（2026-09-27 修）。
+
+    病根是一张**手抄的**映射表漏了一项：`draft`（选题+撰写合并调用）不在
+    `_STAGE_NAME` 里，于是走**最常见那条路径**的用户，看到的空内容/截断报错
+    只说「本次调用实际预算 …」—— 眼前就这一次调用，读者无从知道是哪件事坏了。
+    表里其余四项都在，唯独最常用的那项不在，肉眼极难发现。
+
+    判据反过来写：**从 pipeline 源码里抽出所有传给 chat_json 的第一个参数**，
+    逐个要求它在表里有名字。这样将来新增一个阶段忘了配名字，这里立刻红 ——
+    比"断言表里有 N 项"这种会随两边一起漂的写法可靠。
+    """
+    import re
+    import re as _re
+    src = (ROOT / "app" / "pipeline.py").read_text(encoding="utf-8")
+    used = set()
+    # 两种写法都在：client.chat_json("select", …) 与 chat_json(\n  "select", …)
+    for m in _re.finditer(r"chat_json\(\s*[\"']([a-z_]+)[\"']", src):
+        used.add(m.group(1))
+    assert "draft" in used, (
+        "夹具前提失真：pipeline 里已经找不到 chat_json(\"draft\", …) 那条合并路径了")
+    assert "select" in used, "夹具前提失真：pipeline 里已经找不到 chat_json(\"select\", …)"
+
+    from app.llm import _STAGE_NAME
+    missing = sorted(used - set(_STAGE_NAME))
+    assert not missing, (
+        f"这些生成阶段没有中文名，报错文案就只能说「本次调用」：{missing}")
+    # 反向对照：名字得是给人看的，不是把机器码原样端上屏
+    for task, name in _STAGE_NAME.items():
+        assert name and not re.fullmatch(r"[a-z_]+", name), \
+            f"阶段 {task} 的中文名是空的或就是机器码：{name!r}"
+
+
 def test_streaming_429_retried_with_backoff():
     """流式分支的 429（RetryableStatus）走同一套限流专用退避。"""
     cfg = _cfg(retries=2, timeout=5)
@@ -321,17 +354,44 @@ def test_brief_masks_secrets():
     # 1) 单独一个 Bearer 令牌
     out = _brief(f"error: Bearer {key} 更多内容" + "x" * 300)
     assert key not in out and key[3:] not in out, f"Key 泄漏: {out}"
-    assert "Bearer" in out and "***" in out, out
+    assert "[已脱敏]" in out, out
 
     # 2) Authorization 头（连同整个令牌值掩掉）
     out2 = _brief(f"Authorization: Bearer {key} 上下文" + "x" * 300)
     assert key not in out2 and key[3:] not in out2, f"Key 泄漏: {out2}"
-    assert "authorization" in out2.lower() and "***" in out2, out2
+    assert "[已脱敏]" in out2, out2
 
     # 3) 裸 Key（不带 Bearer 前缀）
     out3 = _brief(f"context={key}" + "x" * 300)
     assert key not in out3 and key[3:] not in out3, f"Key 泄漏: {out3}"
     assert "sk-" in out3 and key[3:] not in out3, out3
+
+
+def test_brief_masks_non_sk_shaped_key_in_authorization_header():
+    """★ `Authorization: Bearer <key>` 里的 key **不一定是 sk- 形态**（P1）。
+
+    原来的 `_AUTH_MASK` 是 `authorization\\s*[:=]\\s*\\S+`，那个 `\\S+` 只吃掉紧随其后的
+    一个非空白串 —— 也就是 `Bearer` 这个词本身，真正的 key 留在原地等 `_BEARER_MASK`，
+    而那时已经没得可盖了。`sk-` 那条能救 sk- 开头的（智谱/DeepSeek 恰好都是），
+    于是一律测不出来；直到企业网关自签 token / GitHub `ghp_` / 内部 `id.secret`
+    这种形态出现，key 就原样落进 job.error、历史与界面。
+    修法：`(?:bearer\\s+)?\\S+` 连着 Bearer 一起吃。
+    """
+    from app.llm import _brief
+    # 三种**都不是 sk-** 的真实形态
+    for key in ("0123456789abcdef.ABCDEFGHIJKLMNOPQRST",
+                "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+                "id.secret-value-not-sk"):
+        out = _brief(f'{{"Authorization": "Bearer {key}"}}' + "x" * 300)
+        assert key not in out, f"非 sk- 形态的 Key 泄漏（{key[:6]}…）: {out}"
+        assert "[已脱敏]" in out, out
+        # 脱敏之后整个头仍然可读：排障要看得见「是哪个头出的问题」
+        assert "uthorization" in out, out
+
+    # 独立 Bearer（没有 authorization: 前缀）同样要盖住
+    bare = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    out2 = _brief(f"upstream said Bearer {bare} here" + "x" * 300)
+    assert bare not in out2, f"独立 Bearer 泄漏: {out2}"
 
 
 def test_streaming_content_accumulates_and_excludes_reasoning():

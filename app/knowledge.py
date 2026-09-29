@@ -299,6 +299,13 @@ def pack_info(pack_dir: Path) -> PackInfo:
             # **不是错误** —— 情报是锦上添花，不是生成的前提。
             intel_sources=[IntelSourceModel(**s.as_dict())
                            for s in parse_sources(data.get("intel_sources", []))[0]],
+            # 加载期体检（P1）：以前只在 `Pack.__init__` 里算，产物 `Pack.warnings`
+            # **全库零消费方**（`PackInfo` 连字段都没有）—— 包作者在改包时
+            # 拿不到任何静态反馈，只能跑一次生成再从作业日志里翻。
+            # 这里用 `_AuditView`（定义在本类之后，运行期才取）借 `Pack` 的只读方法，
+            # 不走 `Pack.__init__` —— 那会因 pack_error 抛，而本函数对坏包
+            # 必须照常返回（「列表宽松、生成严格」是这个模块的分工）。
+            warnings=audit_pack(_AuditView(pack_dir, data, _skill)),
             pack_error=err,
             **_import_mark(pack_dir),
         )
@@ -391,9 +398,18 @@ def resolve_ai_tells(pack_dir: Path, pack_data: dict) -> tuple[dict | None, list
                 notes.append(f"{rel} 的 lexicon.{cat} 需要字符串列表，现在是 "
                              f"{type(words).__name__} —— 本类已忽略")
                 continue
-            keep = [w for w in words if isinstance(w, str) and len(w) >= 2]
-            if len(keep) != len(words):
-                notes.append(f"{rel} 的 lexicon.{cat} 里有非字符串或单字词（{[w for w in words if w not in keep][:3]}）"
+            # 条目形态由 `ai_tells._lex_entry` 认（A-9 schema #1）：纯字符串、
+            # `{词: 限定说明}`、`{词: {note:…, unless:[…]}}` 三种都算合法，
+            # **原样交给引擎**去解析 —— 这里只管"能不能读出一个 ≥2 字的词"。
+            # 只留字符串会把带限定的条目当成"非字符串"丢掉，于是「闭环：仅黑话义」
+            # 这种写法在加载层就静默失效（引擎那边写得再对也没用）。
+            from .ai_tells import _lex_entry
+            keep, dropped = [], []
+            for item in words:
+                w, _spec = _lex_entry(item)
+                (keep if len(w) >= 2 else dropped).append(item)
+            if dropped:
+                notes.append(f"{rel} 的 lexicon.{cat} 里有读不出词或单字词（{dropped[:3]}）"
                              " —— 这些词已丢掉，剩下的照常生效")
             if keep:
                 fixed[cat] = keep
@@ -648,6 +664,25 @@ def pack_shape_error(data: dict) -> str:
     if banwords is not None and not isinstance(banwords, str):
         return (f"pack.yaml 的 banwords 不符合约定：应是文件路径字符串"
                 f"（如 banwords.yaml），实际是 {type(banwords).__name__}")
+    # `points_by_duration` 的**值域**（P1）：以前只判「键在不在表里」，0 / 负数
+    # 全部走通 —— `int()` 接受它们，于是提示词里逐字写「0 个要点」，
+    # 却同时要求「每要点约 190 字」（`prompts.py` 的 quota_body_per），
+    # `checker` 的 n_points 又是从实际段落数出来的，两本账对不上。
+    # 表现：模型多半不产出 point 段 → 段落超配额与字数判定双双失真，
+    # 而包在设置页与生成入口**全绿**（`param_audit` 只在键不在表里时记 note，
+    # `0` 这个键是在表里的 → 一条 note 都不产生）。与 duration_tolerance_pct
+    # 同一处收口：加载期判死，别让它静默流到提示词里。
+    pbd = data.get("points_by_duration")
+    if pbd is not None:
+        if not isinstance(pbd, dict):
+            return (f"pack.yaml 的 points_by_duration 不符合约定：应是映射"
+                    f"（时长档 → 该档的要点个数），实际是 {type(pbd).__name__}")
+        for k, v in pbd.items():
+            if not isinstance(v, int) or isinstance(v, bool) or v < 1:
+                return (f"pack.yaml 的 points_by_duration[{k!r}] = {v!r} 不合法："
+                        f"要点个数必须是 **正整数**（1 或更多）—— 0 或负数会让提示词"
+                        f"写出「0 个要点」却同时要求每要点若干字，段落与字数判定"
+                        f"双双失真，而界面上看不出任何异常")
     return ""
 
 
@@ -922,36 +957,13 @@ class Pack:
         探针实测的空注入是**完全静默**的：把 `## 核心术语` 改名后 `$terms` 是空串，
         提示词留着一个光秃秃的小标题，作业里没有 `tpl_*`、`pack_error=''`、报 done。
         运行期那一半由 `PromptRenderer.unfilled` 补上（同一份名单，同一套判据）。
+
+        ⚠ 产物是 `audit_pack(self)` 的返回值，`pack_info` 也调它 —— 以前只有
+          `Pack._audit` 算，`pack_info`（列表/设置页那一侧）**从不调**，于是
+          这族警告在界面上完全不可见（`PackInfo` 连字段都没有）。包作者在改包时
+          没有任何静态体检反馈，只能跑一次生成再从作业日志里翻。
         """
-        notes: list[str] = []
-        for key, spec in sorted(self.stage_files_map().items()):
-            rel, _, section = str(spec).partition("#")
-            rel = rel.strip()
-            if not self.file_text(rel).strip():
-                notes.append(f"{rel} 读不到内容：${key} 注入为空")
-                continue
-            if section.strip() and not self.file_slice(spec).strip():
-                notes.append(f"{rel}#{section.strip()} 切片为空：${key} 注入为空"
-                             "（多半是那节被改名或删空了；`#章节` 找不到时不退回整份）")
-        for rel, key, kind, getter, marker in (
-                ("knowledge/topics.md", "segment", "细分", self.topics_slice, "$topics_slice"),
-                ("knowledge/audience.md", "audience", "受众", self.audience_slice,
-                 "$audience_slice")):
-            text = self.file_text(rel)
-            titles = [ln.lstrip("#").strip() for ln in _heading_lines(text)]
-            for option in self.param_options(key):
-                if getter(str(option)).strip():
-                    continue
-                # 把竞争的标题一起点名：只说「切片为空」，作者还得自己去猜是哪两个
-                # 名字打架了（P1-2 要求的「naming the option and the competing headings」）。
-                _hit, rivals = name_matches(titles, str(option))
-                why = (f"与这些章节歧义：{'、'.join(str(r) for r in rivals)}" if rivals
-                       else f"{rel} 里没有对应章节")
-                notes.append(f"{kind}「{option}」{marker} 注入为空（{why}；"
-                             "不退回整份，越界取值会把选题带偏）")
-        _, tells_notes = self._resolve_ai_tells()
-        notes.extend(tells_notes)
-        self.warnings = list(dict.fromkeys(notes))
+        self.warnings = audit_pack(self)
 
     # ── 知识切片 ────────────────────────────────────────────
     def slice_heading(self, rel: str, keyword: str) -> str:
@@ -1122,11 +1134,21 @@ class Pack:
         return v if v > 0 else DEFAULT_RATE
 
     def points_limit(self, duration: float) -> int:
+        """该时长档的要点个数。
+
+        ⚠ **非正数一律退回 3**（P1）。`int()` 接受 0 与负数，而 `pack_info` 的
+          `pack_shape_error` 只在包**走正常加载路径**时判死值域；这里必须自己
+          兜住「绕过列表直接来取」的情况（`Pack` 可以被 packgen / 导入流程
+          单独构造）。0 会让提示词逐字写「0 个要点」却同时要求「每要点约 190 字」，
+          而 `checker` 的 n_points 从实际段落数出来 —— 两本账对不上，
+          段落超配额与字数判定双双失真。
+        """
         table = self.data.get("points_by_duration", {}) or {}
         try:
-            return int(table.get(str(int(duration)), table.get(int(duration), 3)))
+            n = int(table.get(str(int(duration)), table.get(int(duration), 3)))
         except (TypeError, ValueError):
             return 3
+        return n if n >= 1 else 3
 
     def duration_tolerance(self) -> float | None:
         """时长偏差容差（百分比），`pack.yaml` 的 `duration_tolerance_pct`（P2-27 的后半）。
@@ -1190,6 +1212,27 @@ class Pack:
                 seen.add(w)
                 uniq.append(w)
         return uniq
+
+    def intel_contested(self) -> tuple[str, ...]:
+        """本包的**争议词**（§3.3 第 5 条：命中给选题卡挂黄标「争议话题」）。
+
+        为什么单独一个键，而不是复用 banwords 的 `soft` 档：soft 收的是
+        「最 / 第一 / 最新」这类**广告法语境的绝对化用语**，一条正常新闻标题
+        几乎必带"最新" —— 拿它当争议词，每张卡都会挂黄标，那正是 P1-21
+        那次 169/175 轮假命中的同一个错法。争议词问的是"这题有没有对立面在吵"
+        （维权 / 纠纷 / 判赔 / 通报），与"这句话违不违法"是两件事。
+
+        没配就是**不标**（空元组）：新行业包不该被电梯包的争议口径套住。
+        形状宽容处理（字符串当一个词、非字符串丢掉）—— 与 `_str_list` 同一个理由：
+        `list("维权")` 会拆成单字，于是每个"维"字开头的标题都挂黄标。
+        """
+        raw = self.data.get("intel_contested", [])
+        if isinstance(raw, str):
+            return (raw,) if raw.strip() else ()
+        if not isinstance(raw, list):
+            return ()
+        return tuple(str(x).strip() for x in raw if isinstance(x, (str, int))
+                     and str(x).strip())
 
     def ai_tells_data(self) -> dict | None:
         """文风 tell 词表（`pack.yaml` 的 `ai_tells` 键指定文件名）；结构坏了返回 None。
@@ -1271,6 +1314,86 @@ class Pack:
                 blocks.append(f"=== 私有资料 · {stem} ===\n"
                               + yaml.safe_dump(slim, allow_unicode=True, sort_keys=False))
         return "\n".join(blocks)
+
+
+class _AuditView(Pack):
+    """给 `audit_pack` 用的**只读视图**：继承 `Pack` 但**跳过 `__init__`**。
+
+    为什么这样做（试过两条路，第二条才对）
+    --------------------------------------
+    · 继承但不调 `__init__`：`pack_info` 对**坏包也必须照常返回**
+      （列表宽松、生成严格是这个模块的分工），而 `Pack.__init__` 遇到
+      pack_error 会直接抛 `PackBrokenError` —— 体检恰恰最该在这种时候跑
+      （它要说的就是「这个包哪里注入不进来」）。所以 `self.dir` / `self.data`
+      / `self._skill` / `self._ai_tells_cache` 由本类自己填；`self.info`
+      只在 `Pack` 的报错文案里用到，体检不报错，给个空壳即可。
+    · 借方法（`__getattr__` + 白名单）：看着更省事，实际**追不完传递依赖** ——
+      `topics_slice` 内部还调 `self._heading_body`，漏一个就是
+      `AttributeError: _heading_body`，而它会被 `pack_info` 的 try 兜成
+      「pack.yaml 的内容不符合约定」，把一个真包误报成坏包。继承拿到的是
+      完整方法集，依赖关系不用我们维护。
+
+    只需覆写一个方法：`skill()` —— `Pack.skill()` 读坏会抛，而体检不能被
+    同一个错打断（skill.yaml 读错本身已经由 `pack_error` 报了，不该重复）。
+    """
+
+    def __init__(self, pack_dir: Path, data: dict, skill: dict | None):
+        self.dir = pack_dir
+        self.data = data
+        self._skill = skill
+        self._ai_tells_cache = None
+        self.info = None      # 体检不报错，用不到报错文案里的包名
+
+    def skill(self) -> dict | None:
+        """体检期间**不抛**的 skill.yaml 读法（读到的就是 `pack_info` 已经解析过的那份）。
+
+        `Pack.skill()` 读坏会抛 `PackBrokenError`（生成期该中止），但体检的用途
+        恰恰是「这个包哪里坏了」—— 读不到就当没有声明 `stages.*.files`
+        （那本身是 `pack_error` 的事，体检不重复说），不能让体检被同一个错打断。
+        """
+        return self._skill or None
+
+
+def audit_pack(pack: Pack) -> list[str]:
+    """加载期体检：列出「注入回来是空的」这类降级，一句人话一条。
+
+    ⚠ 为什么是模块级函数而不是 `Pack._audit` 独一份（P1）：
+      `pack_info` 是**模块函数**、不持有 `Pack` 实例，而设置页与包列表走的
+      正是它。以前体检只在 `Pack.__init__` 里跑，于是 `Pack.warnings`
+      算完之后**全库零消费方**（`PackInfo` 连字段都没有）——
+      包作者在改包时（产品明确鼓励「开编辑器 + 存盘 + 回来点刷新」）
+      拿不到任何静态反馈，只能跑一次生成再从作业日志里翻。
+      现在两边共用这一个函数，`PackInfo.warnings` 把它下发到界面。
+    """
+    notes: list[str] = []
+    for key, spec in sorted(pack.stage_files_map().items()):
+        rel, _, section = str(spec).partition("#")
+        rel = rel.strip()
+        if not pack.file_text(rel).strip():
+            notes.append(f"{rel} 读不到内容：${key} 注入为空")
+            continue
+        if section.strip() and not pack.file_slice(spec).strip():
+            notes.append(f"{rel}#{section.strip()} 切片为空：${key} 注入为空"
+                         "（多半是那节被改名或删空了；`#章节` 找不到时不退回整份）")
+    for rel, key, kind, getter, marker in (
+            ("knowledge/topics.md", "segment", "细分", pack.topics_slice, "$topics_slice"),
+            ("knowledge/audience.md", "audience", "受众", pack.audience_slice,
+             "$audience_slice")):
+        text = pack.file_text(rel)
+        titles = [ln.lstrip("#").strip() for ln in _heading_lines(text)]
+        for option in pack.param_options(key):
+            if getter(str(option)).strip():
+                continue
+            # 把竞争的标题一起点名：只说「切片为空」，作者还得自己去猜是哪两个
+            # 名字打架了（P1-2 要求的「naming the option and the competing headings」）。
+            _hit, rivals = name_matches(titles, str(option))
+            why = (f"与这些章节歧义：{'、'.join(str(r) for r in rivals)}" if rivals
+                   else f"{rel} 里没有对应章节")
+            notes.append(f"{kind}「{option}」{marker} 注入为空（{why}；"
+                         "不退回整份，越界取值会把选题带偏）")
+    _, tells_notes = pack._resolve_ai_tells()
+    notes.extend(tells_notes)
+    return list(dict.fromkeys(notes))
 
 
 # 溯源字段：包作者写了这两个键，就是在声明"这条有出处、我核过"。

@@ -5,16 +5,18 @@
 // 是散落的全局变量（busyNow / currentJob / setSettingsPane…），没有边界也没有
 // 文档；现在收敛成一个带注释的接口，顺便让「测试依赖什么」变得可审阅。
 
-import { $, esc, toast, dayGroupKey } from "./util.js";
+import { $, toast, dayGroupKey } from "./util.js";
 import { api } from "./api.js";
 import { state, detachJob } from "./store.js";
 import * as T from "./thread.js";
 import { abort, send, autoGrowTopic, collectParams, reattachBusyJob,
   stopAllBackgroundJobs } from "./jobs.js";
 import { loadSessions, bindSessionList, busyRecords } from "./sessions.js";
+import { bindEngine, setEngineRetry, showEngineDown } from "./engine.js";
 import { bindSettings, openSettings, setPane, settingsOpen, closeSettings } from "./settings.js";
 import { resultSrt, resultMarkdown, voicePlainText, errorText } from "./result.js";
 import { setHead } from "./head.js";
+import { PROOF, SHORTCUT, CHAT } from "./words.js";
 import {
   bindShell, renderSamples, refreshGate, gotoView, fillPackSelect, setCfgHint,
   renderModelPicker, setLanding, applyPackSwitch,
@@ -28,9 +30,27 @@ import { bindTopics } from "./topics.js";
 // 方案 §7 必改项 3。无副作用（模块只导出两个函数）。
 import "./about.js";
 
+/** 向引擎握手一次：拉 meta → 重画依赖它的三块 → 拉会话列表。
+ *
+ *  开机走它，「重试」那颗键与后台自动重连也走它 —— **三条路必须是同一份动作**。
+ *  这一条不是顺手抽的：模型选择器要显式渲染一次（它平时挂在 meta 事件上，
+ *  而这里是直接赋值、不发事件，少一句首屏工具条就没有模型名），
+ *  那句话原先只写在 boot 里 —— 于是"重连成功了"的那两条路会永远把模型名
+ *  漏在工具条外：界面恢复了，顶部却还写着空模型。
+ *  返回值 = 这次拿到的会话条目（首启引导要据此判断是否「真的第一次」）。 */
+async function handshake() {
+  state.meta = await api.meta();
+  fillPackSelect();
+  setCfgHint();
+  renderModelPicker();
+  return loadSessions();
+}
+
 async function boot() {
   bindShell();
   bindSettings();
+  bindEngine();
+  setEngineRetry(handshake);
 
   bindSessionList();
   bindTopics();
@@ -41,20 +61,28 @@ async function boot() {
 
   $("btn-generate").onclick = () => (state.busy ? abort() : send());
   $("btn-new-chat").onclick = () => { closeSettings(); gotoView("chat"); newChat(); };
+  // 输入框那两处提示语从 words.js 回填（审查 P2 交互：快捷键说明有三份且互不一致）。
+  // index.html 里仍留着一份兜底文案 —— 脚本没跑起来时读屏也读得到那句话，
+  // 但**真值只有 words.js 一处**，静态扫 HTML 抓到的任何差异都算漂移。
+  $("topic").placeholder = `输入主题，生成口播脚本…（${SHORTCUT.box}）`;
+  $("topic").title = SHORTCUT.box;
+  // 「校对」一族同理（words.js 的 PROOF）：那颗键的可见文字原先写在
+  // index.html 里，而 PROOF.act 的注释声称拥有「键面」—— 改表不改键，
+  // 按钮与确认框就分家了（同一件事两份表示）。index.html 那份留作兜底。
+  const undraft = $("pi-undraft");
+  if (undraft) undraft.textContent = PROOF.act;
 
+  let sessions = [];
   try {
-    state.meta = await api.meta();
+    sessions = await handshake();
   } catch (e) {
-    showEngineDown(e);
+    // 连 /api/meta 都拿不到 = 这个窗口什么都干不了：摊全局横幅并交给 engine.js
+    // 自动重连。detail 只在**引擎回了话**的时候给（401「缺少或无效的访问令牌」
+    // 正是靠那句才知道该用哪个地址打开页面）；网络级失败没有那句话，
+    // 而它那句 "无法连接本地引擎" 与横幅主句是同一句话，不抄两遍。
+    showEngineDown(e.netFail ? "" : e.message);
     return;
   }
-  fillPackSelect();
-  setCfgHint();
-  // 模型选择器要在这里显式渲染一次：它平时挂在 meta 事件上，而 boot 里的
-  // `state.meta = await api.meta()` 是**直接赋值**、不发事件 —— 不补这一句，
-  // 首屏工具条上就没有模型名（原来头部的只读胶囊正是这么漏掉的）。
-  renderModelPicker();
-  const sessions = await loadSessions();
   refreshGate();
   autoGrowTopic();
 
@@ -87,7 +115,7 @@ function newChat() {
   state.result = null;
   state.paramsSnapshot = null;
   state.sentTopic = "";
-  setHead("新对话", "", "");
+  setHead(CHAT.title, "", "");
   $("topic").focus();
   // 「不取消」是有代价的：并发额度只有 4 条，连点四次新建对话之后再发就是 409，
   // 而那几条作业在界面上只剩左栏几颗呼吸点。所以这里必须**说出来**，
@@ -105,14 +133,6 @@ function newChat() {
       + `（左栏里挂着呼吸点的那几条）。点开任意一条可以接着看，或在那里停止它。`
       + `同时最多 4 条，占满了新任务会被拒`, 7000);
   });
-}
-
-function showEngineDown(e) {
-  // e.message 可能带上服务端 detail / 上游响应片段，进 innerHTML 前必须转义
-  $("empty").innerHTML = `<h3>无法连接本地引擎</h3>
-    <p class="hint">${esc(e.message || "")}<br>
-    若在浏览器里直接打开，请使用启动时打印的带 token 的地址。</p>`;
-  toast("无法连接本地引擎", 4000);
 }
 
 // ── 自动化 / 调试接口 ───────────────────────────────────────

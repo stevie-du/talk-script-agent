@@ -1327,10 +1327,16 @@ def test_undraft_preserves_comments(tmp_path=None):
 
 
 def test_base_url_rejects_and_warns(tmp_path=None):
-    """缺陷 5：地址校验只管「存了必然出错」的，其余只警告但必须常驻可见。
+    """缺陷 5：地址校验只管「存了必然出错」的；配置里存着的非法地址必须常驻可见。
 
-    ⚠ 不许拦明文 http 的本机 / 内网地址 —— 用户正在用 `http://<ip>:9200/v1`
-    跑本地模型，拦了就是把他能跑的配置改坏（这条同时是回归守卫）。
+    2026-09-28 改口径（用户原话「你在页面中展示这个干嘛，去掉」）：
+    **明文 http 打到远端不再警告** —— 它是合法用法，模型页那行黄字只剩
+    「已经写在配置里的非法地址」。本函数因此钉四件事：
+      1. 非法的一律 400（写不进去）；
+      2. 本机与内网的明文 http **照样能存**，且不拦、不警告（不许改坏用户在跑的配置）；
+      3. 保存 / 测试的响应里不再有 `warnings` 这个字段（字段没了就是没了，
+         留着空数组等于让渲染层去读一个不存在的信号 —— 那正是它当年藏 bug 的方式）；
+      4. 手工写进 config.yaml 的非法地址，GET /api/config 要逐条说得出。
     """
     tmp = _tmp_root()
     c = _client(tmp)
@@ -1351,20 +1357,25 @@ def test_base_url_rejects_and_warns(tmp_path=None):
     r = c.post("/api/config", json={"base_url": "http://user:pass@host/v1"})
     assert r.status_code == 400, r.text
 
-    # 本机明文 http：过，且**不警告**
-    r = c.post("/api/models", json={"id": "", "base_url": "http://127.0.0.1:9200/v1",
-                                    "model": "local"})
-    assert r.status_code == 200, r.text
-    assert r.json()["warnings"] == [], r.text
-
-    # 远端明文 http：过，但随响应回警告
-    r = c.post("/api/models", json={"id": "", "base_url": "http://192.168.1.20:9200/v1",
-                                    "model": "lan"})
-    assert r.status_code == 200, r.text
-    assert any("明文" in w and "192.168.1.20" in w for w in r.json()["warnings"]), r.text
-    # 而且**不是只在保存那一刻说一次**：GET /api/config 常驻下发
+    # 本机 / 内网明文 http：都**过**，而且都不警告 —— 拦或警都是把用户在用的配置改坏
+    for url, name in (("http://127.0.0.1:9200/v1", "local"),
+                      ("http://192.168.1.20:9200/v1", "lan")):
+        r = c.post("/api/models", json={"id": "", "base_url": url, "model": name})
+        assert r.status_code == 200, (url, r.text)
+        assert "warnings" not in r.json(), r.text
     got = c.get("/api/config").json()
-    assert any("明文" in w for w in got["base_url_warnings"]), got["base_url_warnings"]
+    assert got["base_url_warnings"] == [], got["base_url_warnings"]
+    assert not any("明文" in w for w in got["base_url_warnings"]), got["base_url_warnings"]
+
+    # 配置里**已经存着**的非法地址（手工编辑 / 老版本写过，绕过写闸）要说得出来
+    from app.config import load_raw_models, save_models
+    raw, active = load_raw_models(tmp)
+    raw.append({"id": "m9", "name": "内网网关", "base_url": "api.openai.com/v1",
+                "api_key": "", "model": "x"})
+    save_models(tmp, raw, active)
+    got = c.get("/api/config").json()["base_url_warnings"]
+    assert any("内网网关" in w and "不合法" in w for w in got), got
+    assert not any("明文" in w for w in got), got
     shutil.rmtree(tmp, ignore_errors=True)
 
 
@@ -1795,12 +1806,14 @@ def test_config_test_covers_its_branches(tmp_path=None):
     assert r.status_code == 400, (r.status_code, r.text)
     assert r.json()["detail"], "400 但没说原因"
 
-    # ③ 正常：mock Key → 200 + model / base_url / warnings
+    # ③ 正常：mock Key → 200 + model / base_url，且**不再带 warnings 字段**
+    #   （明文 http 那句黄字 2026-09-28 去掉了；留着空数组会让渲染层去读一个
+    #    永远为空的信号，正是它当年「后端给了没人读」的镜像形态）
     r = c.post("/api/config/test", json={})
     assert r.status_code == 200, (r.status_code, r.text)
     body = r.json()
     assert body["ok"] is True and body["model"] == "mock-model", body
-    assert isinstance(body["warnings"], list), body
+    assert "warnings" not in body, body
 
     # ④ model_id 覆盖：测的是**指定那条**，不是当前那条（active 是 m1）
     (tmp / "config.yaml").write_text(

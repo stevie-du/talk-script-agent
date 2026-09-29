@@ -46,6 +46,41 @@ test('已有尾斜杠不重复拼（幂等）', () => {
   assert.strictEqual(resolveFeedUrl('https://a.test/talkscript/'), 'https://a.test/talkscript/');
 });
 
+// ── 畸形但「前缀对」的地址（P0）────────────────────────────────
+// 前缀过了不等于 URL 合法。`new NsisUpdater({url})` 在构造函数里同步
+// setFeedURL → newBaseUrl → `new URL(url)`，抛 TypeError [ERR_INVALID_URL]；
+// initUpdater 跑在没有 .catch 的 whenReady 链上，于是「窗口开出来、主进程死掉」，
+// 日志里一行都留不下（写日志那一句在构造函数之后）。所以这些值必须**早退** ——
+// 早退 = 按「没配」处理：零请求、状态行说未配置、绝不崩。
+test('★ 畸形但前缀对的地址 → null（P0：否则主进程在窗口开出来后崩掉）', () => {
+  const bad = [
+    'https://',            // 漏了域名（README 那条 setx 最常见的手滑）
+    'https:///',           // 只有斜杠
+    'http://[::1',         // 少一个 ]
+    'https://:8080/x/',    // 冒号前没主机名
+    'https://?a=1',        // 有查询串但没主机
+    'https://a b/',        // 复制时带进空格
+    'http://[',            // 半个 IPv6
+  ];
+  for (const b of bad) {
+    // 判据不是「我们自己返 null」而是「new URL 真的会抛」—— 后者才是崩溃的来源
+    let throws = false;
+    try { new URL(b.endsWith('/') ? b : b + '/'); } catch (_) { throws = true; }
+    assert.ok(throws, `${b} 其实不是非法 URL，这条用例失去意义（新的手滑形态？）`);
+    assert.strictEqual(resolveFeedUrl(b), null, `${b} 不该被启用（会让主进程崩）`);
+  }
+});
+
+test('合法地址不受影响（补主机名 / 带端口 / 带路径都照常启用）', () => {
+  assert.strictEqual(resolveFeedUrl('https://updates.example.com/talkscript'),
+    'https://updates.example.com/talkscript/');
+  assert.strictEqual(resolveFeedUrl('http://127.0.0.1:9000/'), 'http://127.0.0.1:9000/');
+  assert.strictEqual(resolveFeedUrl('https://a.test:8443/x/y/'), 'https://a.test:8443/x/y/');
+  // 主机名有但其余畸形 → new URL 能过，仍启用（错到深处会由 error 事件说人话）
+  assert.strictEqual(resolveFeedUrl('https://a.test/talkscript?k=1'),
+    'https://a.test/talkscript?k=1/');
+});
+
 // ── scheme 与明文警示（P2-18）────────────────────────────────
 
 test('非 http/https 的地址一律不启用（file: / ftp: 不是 electron-updater 能用的形态）', () => {

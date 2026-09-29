@@ -162,6 +162,20 @@ intel_sources:
     cadence: daily
     params: { board: zhihu, match: keyword }
     note: 已接入，多数时候今日无行业命中
+  - id: weibo_hot
+    label: 微博热搜
+    platform: 微博
+    role: 破圈触发器
+    cadence: daily
+    params: { match: keyword }
+    note: 公开榜免登录（实测 2026-09-28）；泛榜对电梯行业覆盖≈0，只等关键词命中
+  - id: baidu_hot
+    label: 百度热搜
+    platform: 百度
+    role: 破圈触发器
+    cadence: daily
+    params: { match: keyword }
+    note: 公开 JSON（platform=pc 那一份才带热度数），同样只做关键词命中
   - id: policy_library
     label: 政策库
     platform: 国务院
@@ -181,3 +195,20 @@ intel_sources:
     cadence: "—"
     enabled: false
     note: 未接入：没有可用公开榜，要 x-s 签名逆向 —— 不做（要它的内容请走「人工导入」）
+
+# 争议词（需求方案 §3.3 第 5 条）：热榜标题命中这些词的，选题卡挂黄标「争议话题」，
+# 提醒"两边都能蹭不等于两边都能赢"（§2.4）。
+# ⚠ **不是** banwords 的 soft 档：soft 收的是「最 / 第一 / 最新」这类广告法语境的
+# 绝对化用语，正常新闻标题几乎必带"最新"，拿它当争议词会张张卡都黄
+# （同一个错法在 P1-21 那次 169/175 轮假命中里已经付过一次学费）。
+intel_contested:
+  - 维权
+  - 纠纷
+  - 起诉
+  - 判赔
+  - 赔偿
+  - 通报
+  - 谣言
+  - 冲突
+  - 停工
+  - 反对

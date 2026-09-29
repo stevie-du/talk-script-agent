@@ -75,17 +75,45 @@ ERROR_BODY_CHARS = 160
 # 全部掩掉 —— 实测上游 500 回显里放 46 字符假 Key 会原样落进 job.error / 历史 /
 # 界面。**先掩码后截断**：密钥会被整体替换成短掩码，即使原本跨 160 字符边界
 # 也不会把密钥尾巴露出来。
+#
+# ⚠ `authorization` 那条必须**连着 Bearer 一起吃**（`(?:bearer\s+)?\S+`）。
+#   原来的 `\S+` 只吃掉紧随其后的**一个**非空白串，也就是 `Bearer` 这个词本身，
+#   真正的密钥留在原地等下一条 —— 而下一条已经没得可盖了。实测：
+#     入  {"Authorization": "Bearer 0123456789abcdef.ABCDEFGHIJKLMNOPQRST"}
+#     出  {"Authorization": authorization: *** 0123456789abcdef.ABCDEFGHIJKLMNOPQRST"}
+#   `sk-` 那条能救 sk- 开头的（智谱/DeepSeek 恰好都是），但任何**非 sk- 形态**的
+#   Key（企业网关自签 token、GitHub ghp_、内部 id.secret）会原样进 job.error。
+#   修法也可以是「把 Bearer 挪到 Authorization 之前」，但那样两条各盖一半、
+#   顺序一换就又漏；直接在这条里连着吃更稳（desktop/engine-dialogs.js 的
+#   maskSecrets 是同一个病、同一个修法 —— 两侧必须一起改）。
+#   ⚠ `[:=]` 之后要能跨过**引号与空格**：上游 JSON 回显的原文是
+#   `{"Authorization": "Bearer <key>"}`，`:` 后面还有 ` "Bearer`。只吃引号
+#   而不吃空格会在 `": "` 上失配（那一版实测就是红的），key 照样漏。
+#   ⚠ 组 1 是**头名**（`Authorization`），`_brief` 用它拼回 `Authorization: [已脱敏]`
+#   —— 脱敏是为了不泄漏，不是为了让排障看不到「是哪个头出的问题」。
 _KEY_MASK = re.compile(r"sk-[A-Za-z0-9_\-]{8,}")
 _BEARER_MASK = re.compile(r"(?i)bearer\s+\S+")
-_AUTH_MASK = re.compile(r"(?i)authorization\s*[:=]\s*\S+")
+_AUTH_MASK = re.compile(
+    r"""(?ix)(authorization)\s*["']?\s*[:=]\s*["']?\s*(?:bearer\s+)?\S+""")
 
 # 各生成阶段的中文名，错误文案里给用户指路用（见 _ensure_content）。
 # pipeline 传入的 task 只有这几种。
 _STAGE_NAME = {
+    # `draft` 是**合并路径**（选题+撰写一次调用），也是现在绝大多数包走的那条
+    # —— skill.stages 里有 draft 就走它（见 pipeline._plan_and_draft）。
+    # 它原来漏在这一张表外，于是空内容/截断的报错只说「本次调用」，
+    # 眼前就这一次调用，读者根本不知道是哪件事出的问题（2026-09-27 修）。
+    # 注意它**不是**写死的阶段预算（走 cfg.max_tokens），所以 `_ensure_content`
+    # 的 `stage_budget` 对它必须是 False —— 两个字段名相近，别一起改。
+    "draft": "选题与撰写",
     "select": "选题",
     "write": "文案撰写",
     "storyboard": "分镜",
     "rewrite_segment": "单段重写",
+    # §3.4 选题卡（建议层）。它**不在生成链路里**（用户手动点一次才跑一次），
+    # 但一样是一次真花钱的调用，出错文案必须说得出是哪件事 —— 漏配的后果是
+    # 用户在选题页看到一句「本次调用实际预算…」，而那一屏根本没有"本次调用"这个东西。
+    "intel_brief": "选题卡",
     # 建包用的是全代码库最大的单次输出（PackGenOut），也是最容易把预算想满的那次
     # ——文案要能说出"是哪件事失败了"，否则用户只看到一句没有主语的「模型返回空内容」。
     "packgen": "行业包生成",
@@ -233,11 +261,16 @@ def _merge_usage(target: dict, u: dict) -> None:
 def _brief(text: str) -> str:
     """压缩上游响应体：去换行、对敏感信息掩码、截断。
 
-    掩码顺序：Authorization 头 → Bearer → sk- 密钥。先掩后截（见 _KEY_MASK 的注释）。
+    掩码顺序：Authorization 头（连 Bearer 一起吃）→ 独立 Bearer → sk- 密钥。
+    先掩后截（见 _KEY_MASK 的注释）。
+
+    两条头相关的替换都**保留头名**（`Authorization: [已脱敏]`）：脱敏是为了
+    不泄漏，不是为了让排障看不到「是哪个头出的问题」——job.error 要能直接
+    交给上游看。头名本身不是凭证。
     """
     t = re.sub(r"\s+", " ", (text or ""))
-    t = _AUTH_MASK.sub("authorization: ***", t)
-    t = _BEARER_MASK.sub("Bearer ***", t)
+    t = _AUTH_MASK.sub(lambda m: f"{m.group(1).strip()}: [已脱敏]", t)
+    t = _BEARER_MASK.sub("Bearer [已脱敏]", t)
     t = _KEY_MASK.sub("sk-***", t)
     return t[:ERROR_BODY_CHARS]
 
@@ -294,6 +327,17 @@ class LLMClient:
         mt = max_tokens
         for attempt in range(max_retries + 1):
             truncated = False
+            # ⚠ `content` 必须在**每轮开头**初始化（P2）。下面两个 except 分支
+            #   都会 `messages.append({"role": "assistant", "content": content})`，
+            #   而 `content` 只在 try 内第一行 `_complete` 成功返回后才有值。
+            #   `except (ValueError, ValidationError)` 比 `_complete` 自己的
+            #   except 列表宽得多 —— `_complete` 里任何一处冒出的 ValueError
+            #   都会落进那个分支，于是 `UnboundLocalError` 盖掉真正的错误信息，
+            #   作业失败原因变成一句与病因无关的英文。
+            #   今天没有实际可达路径（`httpx.InvalidURL` 不是 ValueError 的子类，
+            #   `_complete` 内部的 ValueError 都就地转成了 LLMError），但那是
+            #   「下一层库改一次异常继承关系」就会踩到的雷 —— 初始化成本一个 `= ""`。
+            content = ""
             try:
                 content, finish = self._complete(messages, on_retry=on_retry,
                                                  temperature=temperature,
@@ -349,7 +393,11 @@ class LLMClient:
                 last_err = e
                 if on_retry:
                     on_retry("JSON 结构不符合要求", attempt + 1, max_retries + 1)
-                messages.append({"role": "assistant", "content": content})
+                # 空 content 不进 messages：塞一个空的 assistant 轮是在骗模型
+                # 「你刚才那么答」，而它其实什么都没答（`_complete` 自己抛的错
+                # 就属于这一类，见本函数开头的 `content = ""`）。
+                if content:
+                    messages.append({"role": "assistant", "content": content})
                 messages.append({"role": "user", "content":
                                  f"你的输出不是合法的目标 JSON：{_validation_detail(e)}。"
                                  f"只输出一个符合给定字段结构的 JSON 对象，不要多余文字。"})

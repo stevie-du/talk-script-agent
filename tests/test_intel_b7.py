@@ -136,6 +136,98 @@ def test_plan_key_stable_across_intel_refresh():
            Pipeline._plan_key(client, system, user_v2, "a1")
 
 
+def test_plan_key_does_not_trust_block_position():
+    """★ 情报块放在**开头或中间**时，选题指纹仍必须区分不同上下文（P1）。
+
+    旧实现是 `user.split(PROMPT_HEAD, 1)[0]`：砍掉「第一次出现 PROMPT_HEAD
+    之后的**全部**内容」。块在末尾时那正好等于情报块（内置两个包的真实形状），
+    但 `POST /api/packs/import` 是产品明确支持的入口，第三方包作者把
+    `$intel_block` 放在开头或中间时，被砍掉的不只是情报块，还有
+    **主题 / 时长 / 细分 / 受众** —— 剩下的静态前缀对任意两次生成都一样，
+    于是同包内所有生成共用一个指纹：换主题拿到上个主题的 plan，
+    作业日志还写「复用上次选题（本次未调用模型）」，界面上一切正常。
+
+    上面那条 `test_plan_key_stable_across_intel_refresh` 只量了块在末尾的形状
+    （两个内置包都放对了，所以它一直绿）。这里把块挪到开头与中间，
+    走**新**的 ctx 路径。
+    """
+    import dataclasses
+
+    from app.pipeline import Pipeline
+    from tests.test_engine_audit10 import CFG  # noqa: F401
+
+    client = LLMClient(dataclasses.replace(CFG.llm, base_url="https://api.A.com/v1",
+                                           model="deepseek-chat"))
+    system = "s"
+    # 块在开头：主题与时长全在情报块**之后**，切一刀会把它们一起砍掉
+    u_at_head = PROMPT_HEAD + "\n- 标题\n" + "主题：家用电梯\n时长：60\n"
+    # 块在中间：砍掉的是「块 + 它后面的一切」
+    u_mid = "主题：家用电梯\n" + PROMPT_HEAD + "\n- 标题\n" + "时长：60\n"
+    base_ctx = {"topic": "家用电梯", "duration": 60, "intel_key": "a1"}
+    other_ctx = {"topic": "加装电梯", "duration": 60, "intel_key": "a1"}
+
+    k_head_a = Pipeline._plan_key(client, system, u_at_head, "a1", base_ctx)
+    k_head_b = Pipeline._plan_key(client, system, u_at_head, "a1", other_ctx)
+    assert k_head_a != k_head_b, \
+        "块在开头时，换主题仍然命中同一个指纹 → 会拿上一个主题的 plan"
+
+    k_mid_a = Pipeline._plan_key(client, system, u_mid, "a1", base_ctx)
+    k_mid_b = Pipeline._plan_key(client, system, u_mid, "a1", other_ctx)
+    assert k_mid_a != k_mid_b, \
+        "块在中间时，换主题仍然命中同一个指纹"
+
+    # 同一份 ctx 无论块放哪，指纹都该一致（位置不该影响结果）
+    assert k_head_a == k_mid_a, "块的位置不该改变指纹（同一份上下文两次算出两个值）"
+
+
+def test_plan_key_ignores_intel_block_content_but_keeps_intel_key():
+    """★ 情报块**内容**仍然不进指纹（§2.9 B-3 的原意一点没变）。
+
+    新实现排除了 `ctx["intel_block"]`，只让 `intel_key` 决定要不要换指纹。
+    少了这一条，情报每次刷新都会让所有历史版本失效 = 每次刷新都重选题、
+    白花一次 4000 token —— 那是 B-3 当初要解决的问题，不能为了修 P1 把它改回去。
+    """
+    import dataclasses
+
+    from app.pipeline import Pipeline
+    from tests.test_engine_audit10 import CFG  # noqa: F401
+
+    client = LLMClient(dataclasses.replace(CFG.llm, base_url="https://api.A.com/v1",
+                                           model="deepseek-chat"))
+    system, user = "s", "u"
+    ctx_a = {"topic": "家用电梯", "duration": 60, "intel_key": "a1",
+             "intel_block": PROMPT_HEAD + "\n- 旧标题\n"}
+    ctx_b = {"topic": "家用电梯", "duration": 60, "intel_key": "a1",
+             "intel_block": PROMPT_HEAD + "\n- 新标题（微调措辞）\n"}
+    ctx_c = {"topic": "家用电梯", "duration": 60, "intel_key": "b1",
+             "intel_block": PROMPT_HEAD + "\n- 旧标题\n"}
+    # 块内容变、选中项没变 → 指纹不变（缓存可复用）
+    assert Pipeline._plan_key(client, system, user, "a1", ctx_a) == \
+           Pipeline._plan_key(client, system, user, "a1", ctx_b)
+    # 选中项变了 → 指纹变（该重选就重选）
+    assert Pipeline._plan_key(client, system, user, "a1", ctx_a) != \
+           Pipeline._plan_key(client, system, user, "b1", ctx_c)
+
+
+def test_plan_key_ignores_key_ordering():
+    """ctx 序列化按名排序：键的插入顺序不该改变指纹。"""
+    import dataclasses
+
+    from app.pipeline import Pipeline
+    from tests.test_engine_audit10 import CFG  # noqa: F401
+
+    client = LLMClient(dataclasses.replace(CFG.llm, base_url="https://api.A.com/v1",
+                                           model="deepseek-chat"))
+    a = {"topic": "家用电梯", "duration": 60, "style": "亲和", "intel_key": ""}
+    b = {"style": "亲和", "intel_key": "", "duration": 60, "topic": "家用电梯"}
+    assert Pipeline._plan_key(client, "s", "u", "", a) == \
+           Pipeline._plan_key(client, "s", "u", "", b)
+    # 少一个键 → 指纹变（ctx 不完整就可能算出「另一个上下文」的同一个键）
+    c = {"topic": "家用电梯", "duration": 60, "intel_key": ""}
+    assert Pipeline._plan_key(client, "s", "u", "", a) != \
+           Pipeline._plan_key(client, "s", "u", "", c)
+
+
 def _make_items(segment: str) -> list[dict]:
     """造一组覆盖各分支的情报条目。"""
     return [

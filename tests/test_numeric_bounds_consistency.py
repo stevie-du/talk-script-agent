@@ -148,3 +148,82 @@ def test_temperature_accepts_zero():
     """0.0 必须落在区间内 —— P0-2 修的就是「0 存不进去」。"""
     lo, hi = NUMERIC_BOUNDS["temperature"]
     assert lo <= 0.0 <= hi
+
+
+# ── 4. 散文里抄的区间也要对（2026-09-27 修）──────────────────────
+# 上面那几条守的是**能执行的**三处（JS 表 / HTML min-max / 后端表）。
+# 但同一个区间还有两份**给人读的抄件**：`config.example.yaml` 与
+# `app/config.py` 的 `CONFIG_TEMPLATE`（引擎首次运行写给用户的那份配置，
+# 逐字列了四项的合法区间）。它们一改就漂，漂了没人知道 ——
+# 用户照着过期区间写 config.yaml，越界值被夹回边界，而那份注释还在
+# 告诉他"这个数是合法的"。
+#
+# 与 P0-6 是同一件事的两个面：那张表已经从 server.py 下沉到 config._num
+# （可执行的闸只有一处），但**给人看的两份抄件**还各写一遍。
+# 所以这里把它们逐项读出来与表比对 —— 改表的人会立刻在这里被逮住。
+#
+# 写法说明：两份文件的散文形状不同（一份用 `retries      0 ~ 10` 的对齐写法，
+# 一份用 `retries 0~10 · timeout 5~1800 秒 …` 的串行写法），所以只取
+# 「字段名 + 紧跟其后的那个区间」这一对，与表的键名对账。
+_PROSE = {
+    "config.example.yaml": ROOT / "config.example.yaml",
+    "CONFIG_TEMPLATE": ROOT / "app" / "config.py",
+}
+
+
+def _fmt(v) -> str:
+    """把区间端点渲染成散文里会写的那个写法（0.0 写 0、2.0 写 2）。
+
+    留着是因为写这条时踩过一次：文档里 `0.0 ~ 2.0` 与 `0 ~ 2` 都合法，
+    但两端一端带小数一端不带，读起来像两套数 —— 判据统一按 float 比。
+    """
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v)
+
+
+@pytest.mark.parametrize("label", sorted(_PROSE))
+def test_prose_copies_of_the_ranges_match_the_table(label):
+    path = _PROSE[label]
+    text = path.read_text(encoding="utf-8")
+    missing, wrong = [], []
+    for field, (lo, hi) in NUMERIC_BOUNDS.items():
+        if field not in text:
+            missing.append(field)
+            continue
+        # 扫**所有**含该字段名的行，取第一个带区间的 —— 不能只看第一次出现。
+        # ⚠ 实测踩过：`config.example.yaml` 里 `retries` 第一次出现是在
+        #   「界面上能改的只有 retries / timeout 两项」那一句（那一行没有区间），
+        #   真正抄着区间的是后面第 N 行的注释块。只看第一次出现 → m 为 None →
+        #   `continue` → **整条比较空转**，而"改了表忘了改文档"照样全绿。
+        #   这与 P1-28 那条 IME 守卫同形：判据量不到东西时读起来和"通过"一样。
+        m = None
+        for ln in text.splitlines():
+            at = ln.find(field)
+            if at < 0:
+                continue
+            # ⚠ 只在**字段名之后**找区间。CONFIG_TEMPLATE 那行是
+            #   「合法区间：retries 0~10 · timeout 5~1800 秒 · max_tokens 256~200000 ·」
+            #   —— 三个字段名同行，整行找第一个区间的话 timeout/max_tokens 都会
+            #   量成 retries 的 0~10（实测第二版就这样：一行改动红了两条，理由是假的）。
+            # ① 跨行找会撞上**日期**：`2026-09-17` 会被当成区间（实测第一版）。
+            # ② `a-b` 是日期里的短横，不是区间 —— 所以只认波浪号。
+            hit = re.search(r"(?<![\d-])(\d+(?:\.\d+)?)\s*[~～]\s*(\d+(?:\.\d+)?)",
+                            ln[at + len(field):])
+            if hit:
+                m = hit
+                break
+        if not m:
+            continue                       # 该字段在这份文件里没抄区间（合法）
+        got = (float(m.group(1)), float(m.group(2)))
+        want = (float(lo), float(hi))
+        if got != want:
+            wrong.append(f"{field}：文档写 {got}，表里是 {want}")
+    assert not wrong, \
+        f"{label} 里抄的区间与 NUMERIC_BOUNDS 对不上（改表的人会在这里被逮住）：\n" \
+        + "\n".join(wrong)
+    # 正向对照：这几份抄件都真的抄了 —— 上面那组在"一处都没抄"时会全绿。
+    assert not missing, \
+        f"{label} 里这些字段没提到，改区间时它不会被提醒：{missing}"
+    assert "0 ~ 10" in text or "0~10" in text, \
+        "夹具前提失真：这份文件里已经找不到 retries 的区间那一行了"

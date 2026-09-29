@@ -9,6 +9,7 @@ export const state = {
   job: null,             // { id, state, params } —— 当前挂着的作业
   result: null,          // 当前展示的结果
   busy: false,           // 是否有作业在跑（决定发送键是「发送」还是「停止」）
+  stopping: false,       // 已点停止、等后端回话的那段空窗（发送键写「正在停止…」）
   loading: false,        // 本次是「生成中」而非「停止后待重挂」
   paramsSnapshot: null,  // 上次生成时的参数快照（检测「参数已改、结果未旧」）
   sentTopic: "",         // 本次发送的主题（重跑 / 换角度重选复用）

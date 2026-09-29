@@ -96,6 +96,23 @@
       </div>
     </div>
 
+    <!-- 引擎失联横幅：全局阻断故障，钉在右栏顶部（会话视图与选题视图都看得见，
+         侧栏折叠也不受影响）。开关与自动重连收在 js/engine.js，
+         为什么不能只写在左栏列表头上，见那个文件顶部的说明。
+         ⚠ 它是 #right 的直接子节点而**不是** .view —— gotoView 按 `#right > .view`
+           切屏，挂成视图就会被整族选择器扫到、跟着一起被藏掉。
+         ⚠ 主句与「重试」是静态的（脚本没起来时也要读得懂、点得动），
+           只有 .eb-why 由 JS 填引擎那句原话。这里**不留**「请用带 token 的地址打开」
+           那半句：令牌不对时引擎回的 detail 本来就带着它（抄一遍是两句话），
+           而真·连不上时那句话与用户无关（引擎根本没在听）。 -->
+    <div id="engine-banner" class="banner bad hidden" role="alert" aria-live="assertive">
+      <div class="eb-text">
+        <div class="eb-msg">连不上本地引擎 —— 生成、选题抓取、保存与导出现在都会失败。</div>
+        <div class="eb-why"></div>
+      </div>
+      <button type="button" class="link-btn" id="eb-retry">重试</button>
+    </div>
+
     <!-- 首页（landing）布局骨架，2026-09-20 参考 ZCode 重排。
          改前三块：居中的 hero 块（大图标 + 标题 + 副标题 + 2×2 示例卡 + 底注）飘在
          中上部，输入卡钉在底部，两者之间实测 220px 空白 —— 最该被看见的输入框
@@ -126,13 +143,15 @@
         <div id="composer-body">
           <!-- 这一栏没有可见的字段标签（信息全在 placeholder 里），所以无障碍名要显式给：
                placeholder 只是**兜底**的名字，输入到一半它就被内容顶掉了。 -->
+          <!-- 这两行只是脚本没起来时的兜底；真值在 words.js 的 SHORTCUT，
+               main.js 起手时回填。改文案改那边，别在这里另写一份。 -->
           <textarea id="topic" rows="1" aria-label="口播主题"
-                    placeholder="输入主题，生成口播脚本…（Enter 发送 · Esc 停止）" title="Enter 发送 · Shift+Enter 换行 · Esc 停止生成"></textarea>
+                    placeholder="输入主题，生成口播脚本…（Enter 发送 · Shift+Enter 换行 · Ctrl+Enter 也可发送 · Esc 停止生成）" title="Enter 发送 · Shift+Enter 换行 · Ctrl+Enter 也可发送 · Esc 停止生成"></textarea>
           <div class="composer-tools">
             <div class="quick-bar" id="quick-params"></div>
             <div class="composer-actions">
               <div id="model-pick" class="model-pick"></div>
-              <button id="btn-generate" class="primary send" title="生成（Ctrl + Enter）">
+              <button id="btn-generate" class="primary send" title="生成（Enter / Ctrl+Enter）">
                 <svg class="ic-send" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
                 <svg class="ic-stop" viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><rect x="6.5" y="6.5" width="14" height="14" rx="2.4"/></svg>
               </button>
@@ -169,14 +188,41 @@
          （`#chat-stream` + 吸顶页签条），也免得居中列之间差半个滚动条槽位。 -->
     <div id="view-topics" class="view hidden">
       <nav class="res-tabs topics-tabs" id="topics-tabs" role="tablist" aria-label="今日选题">
-        <button class="res-tab on" type="button" role="tab" id="ttab-topics"
-                aria-controls="topics-scroll" aria-selected="true" tabindex="0" data-tab="topics">
-          <span class="rt-t">选题</span></button>
+        <!-- 三视图（需求方案 §3.5）：**排行**（默认，事件粒度·热点分）/
+             **按来源**（原来那屏卡片，保留）/ **情报源**。
+             排行是默认：用户问的是"今天该做什么"，而按来源回答的是"某个平台今天有什么"。
+             筛选轴不混（B6 老规矩）：排行视图只筛**赛道**，来源胶囊只在按来源那一面出现。 -->
+        <button class="res-tab on" type="button" role="tab" id="ttab-rank"
+                aria-controls="topics-rank" aria-selected="true" tabindex="0" data-tab="rank">
+          <span class="rt-t">排行</span></button>
+        <button class="res-tab" type="button" role="tab" id="ttab-topics"
+                aria-controls="topics-scroll" aria-selected="false" tabindex="-1" data-tab="topics">
+          <span class="rt-t">按来源</span></button>
         <button class="res-tab" type="button" role="tab" id="ttab-sources"
                 aria-controls="topics-src" aria-selected="false" tabindex="-1" data-tab="sources">
           <span class="rt-t">情报源</span></button>
       </nav>
-      <div class="topics" id="topics-scroll" role="tabpanel" aria-labelledby="ttab-topics" tabindex="0">
+      <div class="topics" id="topics-rank" role="tabpanel" aria-labelledby="ttab-rank" tabindex="0">
+        <div class="topics-inner">
+          <div class="topics-head">
+            <div class="src-pills" id="seg-chips"></div>
+          </div>
+          <div class="topics-head">
+            <p class="hint" id="rank-meta"></p>
+            <span class="topics-grow"></span>
+            <button class="ghost tiny" id="btn-rank-order" type="button"
+                    aria-pressed="true">按热点分</button>
+            <button class="ghost tiny" id="btn-rank-more">换一批</button>
+            <button class="ghost tiny" id="btn-ignored">已忽略 0</button>
+          </div>
+          <!-- 忽略清单（§3.5「已忽略 N 点开是列表，可恢复」）：默认藏着，
+               点上面那颗才出现 —— 它不是"今天少看了哪几条"的常驻信息。 -->
+          <div class="ignored-box hidden" id="topics-ignored"></div>
+          <div id="rank-root" class="rank-list"></div>
+          <p class="hint" id="rank-note"></p>
+        </div>
+      </div>
+      <div class="topics hidden" id="topics-scroll" role="tabpanel" aria-labelledby="ttab-topics" tabindex="0">
         <div class="topics-inner">
           <!-- 两行：第一行整行给筛选（九颗胶囊在 780 列里必然换到第二行，
                把翻页动作留在同一行会让它们孤零零掉到第三行）；
@@ -188,7 +234,6 @@
             <p class="hint" id="topics-meta"></p>
             <span class="topics-grow"></span>
             <button class="ghost tiny" id="btn-more">换一批</button>
-            <button class="ghost tiny" id="btn-ignored">已忽略 0</button>
           </div>
           <!-- 分组列表容器吃现成的 `.kb-groups`（组与组之间 gap --s4）：
                不写它，一屏出现两个来源时上一组最后一张卡与下一组标题会贴死 0px
@@ -611,9 +656,11 @@
                 </div>
               </div>
               <p class="hint" id="md-status"></p>
-              <!-- 地址警告**常驻**行（与 #md-status 分开）：toast 与状态行会被下一次
-                   操作顶掉，而"这个地址走明文 http、密钥会被明文传输"是每天都要成立的事实。
-                   文案来自后端 GET /api.config 的 base_url_warnings 与保存/测试回的 warnings。
+              <!-- 地址问题**常驻**行（与 #md-status 分开）：状态行会被下一次操作顶掉，
+                   而"配置文件里存着的这个地址根本发不出去"是一直成立的事实。
+                   文案来自后端 GET /api/config 的 base_url_warnings，
+                   现在只装「已经写在配置里的非法地址」——
+                   明文 http 打到远端不再往这里写（2026-09-28 去掉常驻黄字）。
                    复用 .cfg-err 一族（同一套警示底色），不新增样式。 -->
               <p class="hint cfg-err hidden" id="md-warn"></p>
               <div class="page-actions">

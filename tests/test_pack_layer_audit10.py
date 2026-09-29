@@ -29,7 +29,7 @@ sys.path.insert(0, str(ROOT))
 
 from app.checker import Banwords, validate_banwords               # noqa: E402
 from app.knowledge import (Pack, PackError, name_matches,          # noqa: E402
-                           param_audit)
+                           pack_info, param_audit)
 from app.packgen import PackGenOut, _match_by_name, create_pack    # noqa: E402
 
 
@@ -249,6 +249,66 @@ def test_param_audit_stays_clean_for_the_elevator_pack():
     audit = param_audit(ROOT / "packs" / "elevator", p.data)
     assert audit == {}, f"电梯包被新增的降级检查点到了：{audit}"
     assert not p.warnings, p.warnings
+
+
+# ── P1：体检结论要真的下发到 PackInfo（以前是死信号）────────────
+#
+# 以前 `Pack._audit` 算完 `Pack.warnings` 之后**全库零消费方** ——
+# `PackInfo` 连字段都没有，于是「`## 核心术语` 被改名 → `$terms` 注入空串 →
+# 提示词留个光秃秃的小标题」这件事，除了跑一次生成去翻作业日志之外无处可查。
+# 上面那条 `assert not p.warnings` 一直在量一个没人看的东西。
+def test_pack_info_exposes_the_same_warnings_as_pack(tmp_path):
+    """同一份包，`pack_info(...).warnings` 必须与 `Pack(...).warnings` 一致。
+
+    两边共用 `audit_pack`，所以这不是两条独立的实现，是同一条结论的两个出口。
+    不一致就说明有一侧漏了调用 —— 而漏掉的那侧正是界面看到的那一侧。
+    """
+    shutil.copytree(ROOT / "packs", tmp_path / "packs")
+    # 把电梯包的一个 `#章节` 注入点的章节改名，制造「切片为空」
+    # （`skill.yaml` 的 `select.files.redlines: compliance/industry.md#红线速查`）
+    red = tmp_path / "packs" / "elevator" / "compliance" / "industry.md"
+    text = red.read_text(encoding="utf-8")
+    # 把「红线速查」那一节的**正文清空**（标题留着）。
+    # ⚠ 不能改标题：`_heading_slice` 是**关键词包含**匹配
+    #   （`## 0. 红线速查（引擎注入用…）` 改名成 `…（被改名）` 之后仍然包含
+    #   「红线速查」四个字，切片照样取得到）—— 那量不到这条断言要量的形态。
+    #   真正会命中空白的是**标题在、正文没了**：探针实测的形态正是这个
+    #   （`## 核心术语` 被改成空节之后 `$terms` 注入空串，提示词留个光秃秃的小标题）。
+    head, sep, tail = text.partition("红线速查")
+    assert sep, "电梯包的章节名变了，本用例要跟着改"
+    nxt = tail.index("\n## ", 1)          # 下一节（level 2 标题）
+    emptied = head + "红线速查\n\n" + tail[nxt:]
+    red.write_text(emptied, encoding="utf-8")
+
+    p = Pack(tmp_path, "elevator")
+    info = pack_info(tmp_path / "packs" / "elevator")
+    assert p.warnings, "改完章节名之后 Pack 竟然没有报（体检本身坏了？）"
+    assert info.warnings == p.warnings, (info.warnings, p.warnings)
+    assert any("红线" in w for w in info.warnings), info.warnings
+
+
+def test_pack_info_warnings_is_empty_for_a_healthy_pack():
+    """反向对照：健康包一条都不许报（误报会让这行提示彻底失去可信度）。"""
+    info = pack_info(ROOT / "packs" / "elevator")
+    assert info.pack_error == "", info.pack_error
+    assert info.warnings == [], info.warnings
+
+
+def test_pack_info_warnings_survives_a_broken_pack(tmp_path):
+    """体检不能被包自己的坏处打断（它要说的就是「哪里坏」）。
+
+    `pack_info` 对坏包**必须照常返回**（列表宽松、生成严格是这个模块的分工），
+    而 `Pack(root, name)` 遇到 pack_error 会直接抛 `PackBrokenError`。
+    所以体检走的是 `_AuditView`：继承 `Pack` 的只读方法但不跑它的 `__init__`。
+    """
+    shutil.copytree(ROOT / "packs", tmp_path / "packs")
+    (tmp_path / "packs" / "elevator" / "banwords.yaml").write_text(
+        "hard: [1, 2\n", encoding="utf-8")     # 语法坏
+    info = pack_info(tmp_path / "packs" / "elevator")
+    assert info.pack_error, "坏包没有被标出来"
+    # 标出来之外还要**活着返回** —— 以前这里会变成「整个包从列表消失」
+    assert info.name == "elevator", info
+    assert info.params, "坏包的参数条空了：列表上会看到一个什么都选不了的包"
 
 
 def test_model_cannot_inject_a_heading_into_the_pack_display_name(tmp_path):

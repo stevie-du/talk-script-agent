@@ -680,6 +680,36 @@ def test_readable_error_does_not_print_the_cause_twice():
     assert "上一步" not in _readable_error(outer2)
 
 
+def test_attribute_error_blames_the_pack_only_when_the_shape_is_data():
+    """§9.8 的账：凡是 `has no attribute` 一律说成「行业包配置类型不对」是**错误归因**。
+
+    原来那一条判据是对整条消息做子串匹配，于是测试桩少一个属性
+    （`'Scripted' object has no attribute 'mock'`）也被指到包作者头上 —— 而 yaml 里
+    根本没有叫 `mock` 的东西可改。现在按**形状**分：接收者是包写得出来的类型
+    （标量/容器）**且**被调的方法是我们对着配置数据调的那几个，才谈得上"数据写坏了"。
+    两个方向都要钉住，只钉一个的话把整条判据删掉也照样绿。
+    """
+    from app.pipeline import _readable_error
+    for msg in ("'str' object has no attribute 'get'",
+                "'NoneType' object has no attribute 'items'",
+                "'int' object has no attribute 'strip'"):
+        err = _readable_error(AttributeError(msg))
+        assert "行业包配置类型不对" in err, f"数据形状的问题没人认领：{msg} → {err}"
+        assert "原文" in err, (msg, err)
+    for msg in ("'Scripted' object has no attribute 'mock'",
+                "'Pipeline' object has no attribute 'llm'"):
+        err = _readable_error(AttributeError(msg))
+        # 判据是"有没有被指成配置问题"，不是"句子里出没出现过『行业包』三个字" ——
+        # 内部错误那句本来就要说"这不是行业包能改出来的"。
+        assert "行业包配置类型不对" not in err, f"代码内部缺陷被说成包的问题：{msg} → {err}"
+        assert "程序内部错误" in err, (msg, err)
+        owner, attr = msg.split("'")[1], msg.split("'")[3]
+        assert owner in err and attr in err, f"连是谁缺什么属性都没说清：{err}"
+    # 认不出形状的消息不许瞎认领（截断过的原文就是这一类）
+    loose = _readable_error(AttributeError("... object has no attribute 'x'"))
+    assert "行业包配置类型不对" not in loose and "程序内部错误" not in loose, loose
+
+
 def test_terminal_states_cover_the_busy_states():
     """守卫：新增忙态却忘了给它通往终态的迁移，上面的漏槽修复就全部失效。"""
     from app.jobs import BUSY_STATES, TRANSITIONS

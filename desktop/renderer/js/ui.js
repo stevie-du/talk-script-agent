@@ -6,7 +6,7 @@
 //  · 全局 change / keydown 监听只注册一次（修复前「新建行业包完成」会二次
 //    boot()，导致 Ctrl+\ 连翻两次等于没翻）。
 
-import { $, $$, el, esc, toast, bindOnce, sec } from "./util.js";
+import { $, $$, el, esc, toast, bindOnce, sec, isSubmitEnter } from "./util.js";
 import { state, setBusy, on, emit, setGenParam, resetGenParams } from "./store.js";
 import { api } from "./api.js";
 import { updateStale, autoGrowTopic, getParam, stopAllBackgroundJobs, SENDABLE_PARAMS } from "./jobs.js";
@@ -15,6 +15,7 @@ import { focusSessionSearch, busyRecords } from "./sessions.js";
 import { closeSettings, openSettings, setPane, settingsOpen } from "./settings.js";
 import { anyOverlayOpen, closeOverlays, appConfirm } from "./overlays.js";
 import { paintHead } from "./head.js";
+import { SHORTCUT } from "./words.js";
 
 // 输入区工具条常显的参数：只留「生成前必须确认」的硬约束 ——
 // 写什么（细分领域）、给谁（受众）、多长（时长）、发哪（平台）。
@@ -97,8 +98,18 @@ export function fillPackSelect({ selectLast = false, prefer = null } = {}) {
  * 程序化换包都调用这里 —— 谁改了 #pack.value，谁就负责走到这里，不许靠事件间接。
  */
 export function applyPackSwitch() {
+  // 清空是对的（P1-2：新包里根本不存在旧取值，留着就是静默降级），
+  // 但**默默清掉**是另一回事：用户刚在工具条上逐项挑过，换个包回来一看
+  // 全回到默认值，界面上没有任何一个字解释这件事 —— 只能理解成"这软件自己
+  // 乱改了"。所以把「丢了哪几项」说出来（本来就没有可丢的时不弹，
+  // 首启那一次 genParams 是空的，不该凭空弹一句）。
+  const lost = Object.keys(state.genParams || {})
+    .filter(k => SENDABLE_PARAMS.includes(k));
   resetGenParams();
   renderPackParams();
+  if (lost.length) {
+    toast(`换包后重置了 ${lost.length} 项参数（${lost.length > 3 ? "含" + lost.slice(0, 3).join("、") + "等" : lost.join("、")}）—— 新包的选项与默认值都不同`, 5200);
+  }
   // 换包这件事对**界面各处**都是"你看到的数据要跟着换"：选题视图的分区、
   // 胶囊、计数、头部副标题都按包取。以前它只挂在 `#pack` 的 change 上，
   // 而换包有三条路径、其中两条（面板点选 / fillPackSelect 程序化指包）**不派发 change**
@@ -720,14 +731,22 @@ export function refreshGate() {
   const btn = $("btn-generate");
   const empty = !$("topic").value.trim();
   const canStop = state.busy && state.job;
-  btn.disabled = state.busy ? !canStop : empty;
+  // 点了停止之后到后端回话之间有个空窗（cancel 是网络往返）。这段里按钮
+  // 一直写着「停止生成」，人会以为没点上而再点一次 —— 建包那条路早就为
+  // 这个空窗写过乐观反馈（settings.js 的 cancelPackgen），生成这条一直没有。
+  // 「正在停止…」同时把键置灰：重复发取消没有意义（后端幂等），但一颗
+  // 看上去还活着的键就是在骗人。
+  const stopping = canStop && state.stopping === true;
+  btn.disabled = stopping || (state.busy ? !canStop : empty);
   btn.classList.toggle("stopping", !!canStop);
-  btn.title = canStop ? "停止生成（Esc）"
+  btn.title = stopping ? "正在停止…"
+    : canStop ? "停止生成（Esc）"
     : state.busy ? "生成中…"
-      : empty ? "输入主题后发送" : "发送（Enter / Ctrl + Enter）";
+      : empty ? "输入主题后发送" : SHORTCUT.send;
+  btn.setAttribute("aria-busy", stopping ? "true" : "false");
   // 按钮里只有两个 aria-hidden 的图标 —— 读屏下它**没有名字**，
   // 而「生成中」时它是界面上唯一能做的动作。title 不算可靠的无障碍名。
-  btn.setAttribute("aria-label", canStop ? "停止生成" : "生成脚本");
+  btn.setAttribute("aria-label", stopping ? "正在停止生成" : canStop ? "停止生成" : "生成脚本");
 }
 
 export function lockParams(lock) {
@@ -830,11 +849,11 @@ export const bindShell = bindOnce(function bindShell() {
   $("topic").addEventListener("input", () => { refreshGate(); autoGrowTopic(); });
   // Enter 发送、Shift+Enter 换行 —— placeholder、按钮 title、README 三处都这么承诺，
   // 而之前只有 Ctrl/Cmd+Enter 能用（按 Enter 只换行，界面一声不响）。
-  // ⚠ isComposing 这层守卫不能省：这是中文输入应用，拼音/五笔选词时按的就是 Enter，
-  //   不挡的话每确认一个候选词都会把半截消息发出去。keyCode 229 是老 WebKit 的等价写法。
+  // ⚠ 中文输入的 isComposing 这层守卫不能省：这是中文输入应用，拼音/五笔选词时按的就是
+  //   Enter，不挡的话每确认一个候选词都会把半截消息发出去。判据与另外三处
+  //   「回车即提交」的输入框共用 util.isSubmitEnter（P1-28：以前只装在这一处）。
   $("topic").addEventListener("keydown", e => {
-    if (e.key !== "Enter" || e.shiftKey) return;
-    if (e.isComposing || e.keyCode === 229) return;
+    if (e.shiftKey || !isSubmitEnter(e)) return;
     e.preventDefault();
     $("btn-generate").click();
   });
@@ -850,6 +869,13 @@ export const bindShell = bindOnce(function bindShell() {
 
   document.addEventListener("keydown", e => {
     const mod = e.ctrlKey || e.metaKey;
+    // ⚠ 已经有人处理过就别再来一遍（审查 P2 交互）：Ctrl+Enter 在输入框里
+    // 会**先**被上面 #topic 那条接住（Enter 且没按 Shift → 发送），而那条只
+    // preventDefault 没有 stopPropagation，事件继续冒到这里，于是第二条
+    // 监听又点一次发送键 —— 一次按键起两条作业、真金白银翻倍。
+    // 判据用 defaultPrevented 而不是 target：任何更局部的处理都会设它，
+    // 而 target 判据要在这份文件里复述一遍"哪些控件会自己处理回车"。
+    if (e.defaultPrevented) return;
     if (mod && e.key === "Enter") {
       e.preventDefault();
       // 全局快捷键要认当前视图。人在「今日选题」或设置页里按 Ctrl+Enter，

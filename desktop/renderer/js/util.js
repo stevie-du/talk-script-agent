@@ -42,10 +42,26 @@ export function bindOnce(fn) {
 
 /** HTML 转义。
  *  修复前不转义单引号 —— 当前所有动态值都进文本节点或双引号属性，没有可利用路径，
- *  但行业包的 label 等是用户可编辑内容，一旦将来用于单引号属性就会破。补上更省心。 */
+ *  但行业包的 label 等是用户可编辑内容，一旦用于单引号属性就会破。补上更省心。 */
 export function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, c => (
     { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+/** 「这一下回车是提交」—— 全站唯一的判据（2026-09-27 修 P1-28）。
+ *
+ *  isComposing 这层守卫以前**只装在输入框那一个**（ui.js 的 #topic 绑定），
+ *  而「按回车就提交」的输入框共有四处：输入框、就地编辑用户消息（thread.js）、
+ *  单段重写意见框（result.js）、会话搜索框（sessions.js）。另外三处漏了这层，
+ *  症状与主输入框一模一样却是**在别处**冒出来的：中文拼音选词按的那一下回车
+ *  会把半截内容提交出去 —— 改一次用户气泡、重写一次稿子、搜到一半跳进别的会话。
+ *  修好一处不会带上另外两处，所以判据收在这里，让四处引同一份。
+ *
+ *  keyCode 229 是老 WebKit 的等价写法（isComposing 那时还没普及），留着。
+ *  刻意**不**管 shiftKey：那一键的语义各处不同（提交 vs 打开首条），
+ *  留在各自的判断里更清楚。 */
+export function isSubmitEnter(e) {
+  return e.key === "Enter" && !e.isComposing && e.keyCode !== 229;
 }
 
 let toastTimer = null;

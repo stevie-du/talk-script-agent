@@ -143,7 +143,6 @@
   --shadow-ghost: var(--e1);
   --shadow-selected: var(--e1);
   --shadow-raised: var(--e2);
-  --shadow-lift: var(--e2);
   /* 输入卡聚焦：它是浮在消息流之上的操作面，用浮层档。
      ⚠ 不能并进 --e2 —— 那样聚焦只多 1px 模糊，"输入卡立起来"这个信号就没了
      （断言「聚焦比未聚焦多一层真实抬升」量的正是模糊半径 ≥16px）。 */
@@ -156,7 +155,6 @@
   /* 深色实心主 CTA 专用，不扩散到卡片。v6：去掉原来那条 `inset 0 1px 0 白` 的
      内高光 —— 那是让按钮"鼓起来"的反光，哑光实心不需要它。 */
   --shadow-ink: 0 1px 2px light-dark(rgba(0, 0, 0, .20), rgba(0, 0, 0, .40));
-  --shadow-ink-lg: 0 4px 14px light-dark(rgba(0, 0, 0, .20), rgba(0, 0, 0, .45));
 
   /* ── 玻璃：亮色 = v5 的半透明毛玻璃，暗色 = 近不透明 ──
      亮色下内容从侧栏 / 输入条后面滚过去时仍然隐约透光，这是这套界面
@@ -169,14 +167,17 @@
   /* ── 间距：一律 4 的倍数（docs/UI视觉规范.md §2）── */
   --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s6: 24px; --s8: 32px;
 
-  /* ── 字阶：六档 ── */
+  /* ── 字阶：五档 ── */
   --f-2xs: 11px;   /* 字段标签、小标、计数 */
   --f-sm: 13px;    /* 控件、列表、提示文字 */
   --f-md: 15px;    /* 正文与卡片标题（标题靠字重与正文区分，不靠字号）*/
-  --f-xl: 20px;    /* 页标题 */
-  /* 2026-09-21 加的两档**页面级**标题：只给页头 / 结果主标题 / 空态 hero，
-     卡片级标题仍走 --f-md 靠字重区分 —— 这两档是"页面在说什么"，
-     不是"这张卡叫什么"。 */
+  /* 页面级标题两档：只给页头 / 结果主标题 / 空态 hero，卡片级标题仍走
+     --f-md 靠字重区分 —— 这两档是"页面在说什么"，不是"这张卡叫什么"。
+     ⚠ 这里原来还有一档 `--f-xl: 20px`（注释写"页标题"），**全站零使用点**：
+     页头 h1 实际走 --f-base(=--f-md=15px)，而 20 这一档被 --f-display(24)
+     取代后就没位置了。留着它会让人以为"页标题应该是 20"—— 一条没人用的
+     档位比没有这一档更容易误导（改字阶的人会去动它，然后发现什么也没变）。
+     2026-09-27 删。 */
   --f-display: 24px;  /* 页面级标题：设置页标题 / 结果主标题 / 面板空态标题 */
   --f-hero: 28px;     /* 首页问候语（全站唯一 hero 字号） */
   /* 旧名并入上面四档。保留别名只为少改几十处引用，**不要再新增使用点**：
@@ -230,7 +231,6 @@
     --grad-btn: linear-gradient(180deg, #434349, #26262b);
     --grad-btn-hover: linear-gradient(180deg, #4c4c53, #2e2e34);
     --shadow-ink: 0 1px 3px rgba(0, 0, 0, .26), inset 0 1px 0 rgba(255, 255, 255, .20);
-    --shadow-ink-lg: 0 4px 14px rgba(0, 0, 0, .26), inset 0 1px 0 rgba(255, 255, 255, .24);
   }
 }
 
@@ -335,7 +335,7 @@ b, strong { font-weight: 600; }
 .kb-group { display: flex; flex-direction: column; gap: var(--s2); }
 /* 组标题：粗体 + 数量徽标，参考 Zcode 的「浏览器插件 4」 */
 .kb-group-t {
-  display: flex; align-items: baseline; gap: 8px;
+  display: flex; align-items: baseline; gap: var(--s2);
   font-size: var(--f-sm); font-weight: 600; color: var(--text-1);
   margin: 0; letter-spacing: -.02em;
 }
@@ -500,25 +500,37 @@ main { display: flex; flex: 1; min-height: 0; }
   /* 结果出来后自动滚到底，页签条曾被整条推出视野（实测 top 为负），用户以为
      产物只有一屏口播文案。吸在滚动容器上沿。
      ⚠ 粘的对象是**条**而不是 `.res-tabs-wrap`：wrap 把页签条和产物区一起包住、
-     比视口高得多，粘在它上面等于没粘（实测 top 仍是负的）。 */
-  position: sticky; top: 0; z-index: 2;
+     比视口高得多，粘在它上面等于没粘（实测 top 仍是负的）。
+     ⚠ `top: 0` 吸附到滚动容器的 **padding box** 上沿（2026-09-27 修）：
+       `#chat-stream` 有 `padding-top: var(--s6)`，而 `position: sticky; top: 0`
+       的吸附位置是 padding box 而不是内容上沿 —— 页签条未滚动时在距顶 24px 处，
+       滚动到 `scrollTop > 0` 会跳到距顶 0px，正好压在原本属于那 24px padding 的
+       一带上；`.msg` 又有 `fadeUp` 动画（`transform: translateY(6px)`），
+       滚动过程中能看到后面的文字从页签条**底下穿出来**再停住。
+       修法：吸附位置往上提一个 padding 的量，再把那份 padding 加回条自己身上 ——
+       视觉位置与未滚动时完全一致，只是吸附参照对了。
+       ⚠ 但这一档 `top` **只对会话/结果视图成立**：选题视图 `#view-topics` 没有
+       那份 padding-top，抵消就成了凭空上移 —— 实测滚到 scrollTop=120 时条子
+       从 y=48 跳到 **y=24**，钻进顶栏那 48px 里（条是不透明底，于是盖住页头下沿）。
+       所以 `.topics-tabs` 单独把 `top` 归 0，见下面那一族。 */
+  position: sticky; top: calc(-1 * var(--s6)); z-index: 2;
   background: var(--page);
-  display: flex; align-items: stretch; gap: 4px;
+  display: flex; align-items: stretch; gap: var(--s4);
   border-bottom: 0.5px solid var(--line); margin-bottom: var(--s4);
+  padding-top: var(--s6);
 }
+/* 页签是**页面级切换**，靠字号与字重表态，不靠第二条线：
+   改前 13px/400 + 选中一条 2px 黑线，而它下面还压着容器那条发丝线 ——
+   两颗页签（选题/情报源）时黑线 + 发丝线叠在同一个 28px 高的小条上，
+   读起来像表头行而不像切换。字重两档（500 / 600）是 §2 字重表里的档位。 */
 .res-tab {
   display: flex; align-items: center; gap: var(--s2);
   padding: var(--s2) var(--s4); border: 0; border-radius: 0;
-  border-bottom: 2px solid transparent;
   background: transparent; color: var(--text-2); cursor: pointer;
-  font: var(--f-sm)/1.35 var(--font); white-space: nowrap;
-  margin-bottom: -1px;            /* 让选中态的黑线压在容器分隔线上 */
+  font: var(--f-md)/1.35 var(--font); font-weight: 500; white-space: nowrap;
 }
 .res-tab:hover { color: var(--text-1); }
-.res-tab.on {
-  color: var(--text-1);
-  border-bottom-color: var(--ink);
-}
+.res-tab.on { color: var(--text-1); font-weight: 600; }
 .rt-b {
   font-size: var(--f-xs); color: var(--text-3);    /* 降级为次级文字，无底色 */
 }
@@ -528,6 +540,12 @@ main { display: flex; flex: 1; min-height: 0; }
    不写规则 = 留在上面的 --text-3，"不表态"就该看不出来。 */
 .res-tab.ok .rt-b { color: var(--ok); }
 .res-tab.bad .rt-b { color: var(--bad); }
+/* `.warn` 是 2026-09-27 新加的那一档：「分镜未生成」既不是通过也不是失败，
+   它是**这一项没做出来**—— 用第三种状态色（--warn）表示，读者不会把它
+   误读成「合规没过」或「一切正常」。同 §7.4：色只上 badge 那格状态字。
+   ⚠ 这一条必须真的存在：上面那段注释记的就是「class 挂了而 styles.css 里
+     没有对应规则 → 判据只比 classList 就一直绿着、屏幕上毫无变化」。 */
+.res-tab.warn .rt-b { color: var(--warn); }
 .res-pane.hidden { display: none; }
 
 /* 字幕预览表 */
@@ -831,7 +849,7 @@ select {
   background: var(--surface); border-radius: var(--r-card);
   backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);
   box-shadow: var(--shadow-pop); padding: var(--s1); max-height: 264px; overflow: auto;
-  animation: pop .15s var(--ease-pop);
+  animation: pop var(--dur) var(--ease-pop);
   scrollbar-width: thin;
 }
 /* 「胶囊菜单更紧凑一档」这一支已删：它做的事是把行内边距压到 8、字号从 13 降到 11，
@@ -1056,7 +1074,7 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
   /* 垂直居中不能用 top:50% + translateY(-50%)：全局 button:active 的 scale 会在
      按下瞬间覆盖掉 translateY，鼠标一抬 click 就落到行上（同 .sess-del 那个坑）。 */
   position: absolute; right: var(--s1); top: 0; bottom: 0; margin-block: auto;
-  width: 28px; height: 28px; padding: 0; min-height: 0;
+  width: 28px; height: var(--h-sm); padding: 0; min-height: 0;
   display: grid; place-items: center; border-radius: var(--r-sm);
   background: transparent; color: var(--text-2); opacity: 0;
   transition: opacity var(--dur) var(--ease), color var(--dur) var(--ease);
@@ -1074,7 +1092,7 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
   background: var(--surface); border-radius: var(--r-card);
   backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);
   box-shadow: var(--shadow-pop);
-  animation: pop .15s var(--ease-pop);
+  animation: pop var(--dur) var(--ease-pop);
 }
 /* 尺寸 / 字号 / 内边距 / 圆角 / hover 走文件末尾「弹层里的一行」那条统一档
    （与参数下拉 `.select-opt` 同型：28 高 / 13 字 / 0 8 / 圆角 8 / --fill 底色）。
@@ -1158,14 +1176,28 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
    色弱可用性反而更好了：区分「有记号 / 没记号」靠的是**有没有**，
    不是红绿两种颜色；读屏与悬浮提示仍给完整状态词（sessions.js 的 stateText）。 */
 .dot { width: 16px; height: 16px; flex: 0 0 auto; display: grid; place-items: center; }
+/* ⚠ 默认态改用**非文字色**表达「弱」（2026-09-27 修）：原来是
+   `background: var(--text-3); opacity: .5` —— §5 决议把 `--text-3` 并进
+   `--text-2` 之后又乘 0.5，亮色实算只有 **1.97:1**（侧栏底 #f9f9fa），
+   那个 6px 圆点几乎看不见。§5 的原话正是「需要更弱的表达请用非文字色
+   / 字重，不要拿透明度叠加」，所以换成 `--line-strong`（一根线该有的深浅）。
+   `--line-strong` 与底色的对比度仍在 3:1 上下，6px 的点在视觉上属于
+   「有这颗点，但很轻」—— 与 `.ok`（整格隐藏）**能区分开**。
+   ⚠ 还要注意：这个默认态也是**词表外 / 异常状态**的落点（sessions.js 的
+     `updateRow` 只给 ok / no / run 三档上色，历史索引里残留的已删除枚举值
+     会落回这里）。修复前它与「正常完成」在 1.97:1 下几乎一样，
+     于是「异常但不认识」看起来跟「一切正常」没区别。 */
 .dot::before {
   content: ""; width: 6px; height: 6px; border-radius: 50%;
-  background: var(--text-3); opacity: .5;
+  background: var(--line-strong);
 }
 .dot.ok { visibility: hidden; }
 .dot.no::before { background: var(--bad); opacity: .85; }
-/* 呼吸打在 ::before 上：盒子本身没有底色，动画落在它身上等于没动。 */
-.dot.run::before { animation: dotPulse 1.4s var(--ease) infinite; }
+/* 呼吸打在 ::before 上：盒子本身没有底色，动画落在它身上等于没动。
+   ⚠ `opacity: 1` 与 `background` 要显式写出：默认态改成非文字色的 `--line-strong`
+     之后不再带 opacity，而 `dotPulse` 的关键帧是 `50% { opacity: .2 }` ——
+     少一个基线的话呼吸就是「.2 → 没写 → .2」，看不出渐变。 */
+.dot.run::before { background: var(--text-2); opacity: 1; animation: dotPulse 1.4s var(--ease) infinite; }
 @keyframes dotPulse { 50% { opacity: .2; } }
 
 .sess-topic {
@@ -1202,7 +1234,7 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
      mouseup 于是落在行里 → click 归属变成「打开记录」，删除确认永远弹不出来。
      改用 top/bottom:0 + margin-block:auto，位置由布局决定，transform 再怎么变都不影响。 */
   position: absolute; right: var(--s1); top: 0; bottom: 0; margin-block: auto;
-  width: 28px; height: 28px; padding: 0; min-height: 0;
+  width: 28px; height: var(--h-sm); padding: 0; min-height: 0;
   display: grid; place-items: center; border-radius: var(--r-sm);
   background: transparent; color: var(--text-3);
   /* 默认**完全隐藏**，悬停或键盘聚焦才现（下一节的 :hover / :focus-visible 给 opacity 1）。
@@ -1223,6 +1255,15 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
 .sess-del:focus-visible { outline: none; box-shadow: var(--shadow-focus); }
 .sess-del svg { pointer-events: none; }
 .sess-empty { padding: var(--s2) var(--s3); }
+/* 截断说明常驻在列表末尾（见 sessions.js 的 paint）。与 .sess-empty 同内边距，
+   但分一道发丝线：它是**常驻**的，而 .sess-empty 是空态的占位，
+   两者的"这一行是这一屏唯一的说明"意思不同，不该长成一个样。 */
+.sess-cap {
+  padding: var(--s2) var(--s3);
+  margin-top: var(--s2);
+  border-top: 1px solid var(--line);
+  color: var(--text-3);
+}
 
 /* 左栏分组导航（底部）：设置 / 行业 / 模型接口 三组
    组间以发丝线分隔，组标签小字大写感，向 Zcode 的"分组左导航"靠 */
@@ -1250,7 +1291,7 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
      （再加 1px 的线就是实测的 18），左栏竖向 16px 节奏正是在这里破的。
      margin 的语义是"我自己要离邻居多远"，容器边界处的间距必须由容器说了算。 */
   width: 100%; height: var(--h-md); padding: 0 var(--s3); margin: 0;
-  border-radius: var(--r-ctl); justify-content: flex-start; gap: 8px;
+  border-radius: var(--r-ctl); justify-content: flex-start; gap: var(--s2);
   background: transparent; color: var(--text-2); font-size: var(--f-sm); font-weight: 500;
 }
 .nav-item:hover { background: var(--fill); color: var(--text-1); }
@@ -1272,14 +1313,15 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
   flex: 1; min-width: 0; display: flex; flex-direction: column;
   position: relative; min-height: 0; overflow: hidden;
 }
-/* 滚动：视图层撑满剩余高度，滚动条交给内层（.page / #chat-stream），
-   这样抽屉打开时底层内容仍保持原滚动位置与布局 */
+/* 滚动：视图层撑满剩余高度，滚动条交给内层（设置页是 .stg-main、
+   会话流是 #chat-stream，选题是 .topics-inner），这样抽屉打开时底层内容
+   仍保持原滚动位置与布局。
+   ⚠ 这里原来还有一条 `.page { … }` 规则，**全站没有一个元素挂这个类**
+   （2026-09-27 删）：设置页的滚动容器早已上提到 .stg-main（见 1622 行的
+   病理注释），那条规则是从那之前的结构里剩下来的。它不产生任何视觉影响 ——
+   所以删掉也不会有断言变红，**这正是它能一直躺着没人发现的原因**。
+   留着它的害处是下一个人照着它去改"页面宽度/内边距"，改完什么也没变。 */
 #right .view { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
-.page {
-  flex: 1; min-height: 0; overflow-y: auto;
-  width: 100%; max-width: var(--w-content); margin-inline: auto;
-  padding: var(--s6) var(--s6) var(--s8);
-}
 /* 页面头：左标题 + 右上操作组（参考 Zcode 的 headbar 范式）。
    之前是单列单行（标题 + 副标题），只能放下静态文案。
    现在允许每个面板注入自己的操作按钮（刷新 / 新增 / 导出 / 标记已校对）。
@@ -1446,7 +1488,7 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
   background: var(--fill); color: var(--text-1);
   border: 0.5px solid var(--line);
 }
-.pg-empty-ic svg { width: 28px; height: 28px; }
+.pg-empty-ic svg { width: 28px; height: var(--h-sm); }
 .pg-empty-t { font-size: var(--f-display); font-weight: 600; color: var(--text-1); letter-spacing: -.02em; }
 .pg-empty-d { font-size: var(--f-sm); color: var(--text-2); line-height: 1.6; max-width: 38em; }
 /* 表单：中段左对齐 + 整行 480px 宽，比居中卡片稍窄以提示"这里要打字"。
@@ -1525,7 +1567,7 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
 .screen {
   position: fixed; inset: 0; z-index: 60;
   display: flex; background: var(--page);
-  animation: screenIn .16s var(--ease);
+  animation: screenIn var(--dur) var(--ease);
 }
 @keyframes screenIn { from { opacity: 0; } }
 
@@ -1567,7 +1609,7 @@ button.new-chat { width: 100%; font-size: var(--f-sm); gap: var(--s2); flex: 0 0
    差点成为漏改的连带回归。 */
 .stg-nav-item {
   width: 100%; height: var(--h-md); padding: 0 var(--s3); margin: 0;
-  border-radius: var(--r-ctl); justify-content: flex-start; gap: 8px;
+  border-radius: var(--r-ctl); justify-content: flex-start; gap: var(--s2);
   background: transparent; color: var(--text-2); font-size: var(--f-sm); font-weight: 500;
 }
 .stg-nav-item:hover { background: var(--fill); color: var(--text-1); }
@@ -1807,10 +1849,10 @@ button.ghost.danger:hover { background: var(--bad-soft); color: var(--bad); }
    **属性**（不是类）在用 `.ph-` 字样，grep 时会撞上，容易误判成「还有人在用」。 */
 
 /* 设置抽屉：一级 tabs + 二级字段组。
-   行业包分组的「操作」按钮行就是普通 .row（按钮靠左、与输入控件同节奏）——
-   .pack-row 仅作历史标记保留，不写规则（旧的 `.pack-row .row > :first-child { flex: 1.6 }`
-   与 `button { height: var(--h-ctl) }` 都是把 select 与按钮并排的旧布局特有，
-   2026-09-17 任务 1 改成 .block-inner 多行结构后那两条已不适用）。 */
+   行业包分组的「操作」按钮行就是普通 .row（按钮靠左、与输入控件同节奏）。
+   ⚠ 这里曾经有 `.pack-row .row > :first-child { flex: 1.6 }` 和
+   `button { height: var(--h-ctl) }` 两条并排布局专用规则，
+   2026-09-17 任务 1 改成 .block-inner 多行结构后已随 .pack-row 一起清掉。 */
 /* #param-front（「生成偏好」里由行业包参数填充的字段组）曾经是
    `grid-template-columns: 1fr 1fr` —— 仓库第一个提交就是这样，那时它装着好几个
    「更多参数」，两列正好两两配对。后来「输出内容」「文案人昧」搬进了下面的
@@ -1831,7 +1873,7 @@ button.ghost.danger:hover { background: var(--bad-soft); color: var(--bad); }
   padding: var(--s6) var(--s6) var(--s4);
   display: flex; flex-direction: column; gap: var(--s6);
 }
-.msg { display: flex; gap: var(--s3); max-width: var(--w-stream); width: 100%; margin-inline: auto; animation: fadeUp .26s var(--ease-pop); }
+.msg { display: flex; gap: var(--s3); max-width: var(--w-stream); width: 100%; margin-inline: auto; animation: fadeUp var(--dur) var(--ease-pop); }
 .msg-user { justify-content: flex-end; align-items: flex-start; gap: 4px; padding-left: 60px; }
 .msg-user .bub {
   background: var(--bubble); color: var(--text-1);
@@ -1909,9 +1951,17 @@ button.ghost.danger:hover { background: var(--bad-soft); color: var(--bad); }
   width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto; align-self: center;
   background: var(--ok); opacity: .85;
 }
-.step-note { color: var(--text-2); opacity: .75; }
+/* ⚠ 这两条曾再叠一层 `opacity: .75`（`.ts-meta` 是 .8），而 `--text-3` 在
+   §5 决议里**已经是 `--text-2` 的别名**（「不要再新增使用点」）—— 于是
+   §5 花力气提上来的对比度被换了个写法乘回去：亮色实算只有 3.10:1。
+   `.step-dur`（每一步右侧的耗时数字）恰是判断「卡住了还是在跑」的关键信号，
+   而生成期用户会盯着这块看几分钟 —— 3.1:1 读不出来。
+   改法：去掉 opacity；「比正文更弱」交给 **字阶**（`--f-2xs`）与已有的
+   `--text-3` 档位表达，不拿透明度叠加（§5 的原话：「需要更弱的表达请用
+   非文字色 / 字重，不要拿透明度叠加」）。 */
+.step-note { color: var(--text-2); }
 .step-dur {
-  margin-left: auto; color: var(--text-3); opacity: .75;
+  margin-left: auto; color: var(--text-3);
   font-variant-numeric: tabular-nums; font-size: var(--f-2xs);
 }
 .step.err .step-dot { background: var(--bad); opacity: 1; }
@@ -1943,8 +1993,10 @@ button.ghost.danger:hover { background: var(--bad-soft); color: var(--bad); }
 }
 .think-stream[open] > summary::before { transform: rotate(90deg); }
 .think-stream .ts-title { color: var(--text-2); font-weight: 600; }
+/* 同一处修正（见上面 .step-note / .step-dur 的注释）：`--text-3` 已是
+   `--text-2` 的别名，再叠 opacity .8 等于把对比度乘回去一遍（亮色 3.39:1）。 */
 .think-stream .ts-meta {
-  margin-left: auto; color: var(--text-3); opacity: .8;
+  margin-left: auto; color: var(--text-3);
   font-variant-numeric: tabular-nums;
 }
 .think-stream .ts-body {
@@ -1968,6 +2020,15 @@ button.ghost.danger:hover { background: var(--bad-soft); color: var(--bad); }
 /* 中间那颗点是「已用时」自己带的：它为空时（作业已结束、或快照没有
    created_at）点跟着消失，不会留下一个「· 」孤儿。 */
 .gen-status .gs-elapsed:not(:empty)::before { content: "·"; margin-right: var(--s2); }
+/* ⚠ 预算上限（2026-09-27）：生成要几分钟，而这一行原来只有「已用 N 秒」——
+     用户据此判断不了「正常」还是「卡死」，等到引擎那 20 分钟硬闸把它停掉，
+ *   之前一句预警都没有。所以把**同一个**上限显示出来（不是估算）。
+   排版：最右、`--f-2xs`、`--text-3`（比「已用」更弱一档，它不是要盯的主数），
+   且**不叠 opacity**（见 §5 与同文件里 .step-note 那处同源的修正）。 */
+.gen-status .gs-budget {
+  margin-left: auto; color: var(--text-3);
+  font-size: var(--f-2xs); font-variant-numeric: tabular-nums;
+}
 
 /* 活体指示器：三个 4px 点，依次暗一下再回亮，波从左往右走。
    这枚东西被按观感退回过三轮，每一轮的理由都不同，得逐个记住：
@@ -2038,15 +2099,27 @@ button.ghost.danger:hover { background: var(--bad-soft); color: var(--bad); }
 /* 横幅：默认中性，warn/info 只换文字与底色 */
 .banner {
   border-radius: var(--r-md); padding: var(--s2) var(--s3); font-size: var(--f-sm); margin-bottom: var(--s2);
-  line-height: 1.6; display: flex; align-items: flex-start; gap: 8px;
+  line-height: 1.6; display: flex; align-items: flex-start; gap: var(--s2);
   background: var(--fill); color: var(--text-2);
-  animation: fadeUp .22s var(--ease);
+  animation: fadeUp var(--dur) var(--ease);
 }
-.fail-actions { display: flex; gap: 8px; margin-top: var(--s2); }
-.fail-actions button { height: 28px; font-size: var(--f-xs); padding: 0 12px; }
+.fail-actions { display: flex; gap: var(--s2); margin-top: var(--s2); }
+.fail-actions button { height: var(--h-sm); font-size: var(--f-xs); padding: 0 var(--s3); }
 
 .banner.warn { background: var(--warn-soft); color: var(--warn); }
 .banner.info { background: var(--sel-bg); color: var(--ink); }
+/* .banner.bad = 阻断级：这件事不修，界面上没有一条路走得通。
+   与 .warn 的分界刻意写死在这里，因为上一版把「连不上引擎」画成了 --warn 一族
+   （复用 .hint.cfg-err）—— 而那一族的定义原话是「配置读坏不是错误状态，
+   引擎照常起来」。全局故障借一个"还能用"的颜色说，用户读到的就是"只是个提醒"。 */
+.banner.bad { background: var(--bad-soft); color: var(--bad); }
+/* 引擎失联横幅（#right 的直接子节点，不是 .view —— 见 index.html 那处注释）。
+   横向吃这一列的通用内边距（--s6，与 .right-head 同一条），否则它会顶到窗口两边；
+   下方留 .banner 那一族自己的 --s2（选题页签条就贴在它下面，缝给 0 会粘成一块）。 */
+#engine-banner { margin: var(--s3) var(--s6) var(--s2); }
+#engine-banner .eb-text { flex: 1 1 auto; min-width: 0; }
+#engine-banner .eb-why:not(:empty) { margin-top: var(--s1); }
+#engine-banner #eb-retry { flex: 0 0 auto; }
 /* 图标只由 JS 文案出一次（见 docs/UI视觉规范.md §4）。
    这里原本有 `content:"⚠"` / `"ℹ"`，与 result.js 写进横幅的 ⚠/⛔ 叠加，
    最醒目的几条会显示成「⚠ 」。CSS 不再注入任何字形图标。 */
@@ -2067,8 +2140,23 @@ button.ghost.danger:hover { background: var(--bad-soft); color: var(--bad); }
 
 /* ══════════════ 脚本段落流（分隔线内容流，非卡片）══════════════ */
 .script-list { display: flex; flex-direction: column; gap: 0; }
-.script-card { padding: var(--s4) 0 var(--s3); border-bottom: 0.5px solid var(--line); }
+/* 段卡：正文 + 右侧 160 注栏。
+   改前 `.card-head` 一行里左簇（段标 / 字数 / 语速）与右簇（`.meta` 时间码 + 字幕）
+   用 `margin-left: auto` 顶到两头，中间空 350px 一条缝，而正文吃满 716px
+   = 一行 45 个汉字（规范 §2·5 那一档可读行长约 36 字）。
+   现在时间码与字幕提示落到右栏，正文收到 544px（≈36 字/行，与 `.pg-empty-d`
+   的 `max-width: 38em` 同一口径），中间那条缝没了、信息一个不少。
+   ⚠ 不用 `:has()`：全项目没写过这个选择器，"有没有注栏"由 JS 决定并挂类，
+      读 CSS 的人不用去猜浏览器支不支持。 */
+.script-card { padding: var(--s4) 0 var(--s3); border-bottom: 0.5px solid var(--line);
+  display: grid; grid-template-columns: minmax(0, 1fr) 160px; gap: var(--s4); }
+.script-card.no-side { grid-template-columns: minmax(0, 1fr); }
 .script-card:last-child { border-bottom: none; }
+.seg-main { min-width: 0; }
+.seg-side { display: flex; flex-direction: column; gap: var(--s1);
+  padding-top: var(--s1); text-align: right; }
+.seg-side b { font-size: var(--f-sm); font-weight: 600; color: var(--text-1); }
+.seg-side span { font-size: var(--f-2xs); color: var(--text-2); line-height: 1.35; }
 .card-head { display: flex; align-items: baseline; gap: var(--s2); margin-bottom: var(--s2); }
 /* 段落类型小标（钩子 / 正文 / 结尾引导）。
    ⚠ 它原来叫 `.pill`，与工具条胶囊变体 `.select-wrap.pill` **撞了类名**：
@@ -2101,12 +2189,24 @@ button.ghost.danger:hover { background: var(--bad-soft); color: var(--bad); }
 .card-foot .rw {
   height: var(--h-sm); font-size: var(--f-sm); padding: 0 var(--s2); flex: 0 0 auto;
   background: transparent; color: var(--text-2); border-radius: var(--r-ctl);
-  /* 默认淡显而非全隐：完全看不见就等于没有这个入口，用户不知道卡片能单段重写。
-     悬停/聚焦才提到全亮，平时不抢正文的注意力（与 .sess-del 同一套路）。 */
-  opacity: .45; transition: opacity var(--dur) var(--ease), background var(--dur) var(--ease), color var(--dur) var(--ease);
+  /* ⚠ 这里曾用 `opacity: .45` 表达「不抢注意力」，而它是**承载信息的操作入口**
+     （README 日常使用第 3 步把「每段可重写本段」列为核心能力），不是装饰、
+     也不是禁用态 —— §5 的对比度下限（4.5:1）不豁免它。
+     实算：`--text-2` 亮色 #6e6e73 在白底上乘 0.45 只有 **1.86:1**，
+     暗色也只有 2.42:1；而 `:hover` / `:focus-within` 才回到 5.07 / 6.99。
+     后果：鼠标不在那张卡片上时「重写本段」几乎读不出来，截图、录屏、
+     分屏（窗口不聚焦时 :hover 也不触发）下这个入口等于消失。
+     改法：常态 `opacity: 1`，「次级」由 **color 档位 + 幽灵底 hover 提亮**表达
+     —— §2·5.4「hover 只用底色一种手法」正好满足，也不用叠透明度。 */
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
 }
-.script-card:hover .card-foot .rw, .card-foot:focus-within .rw { opacity: 1; }
-.card-foot button:hover { background: var(--fill); color: var(--ink); }
+/* 悬停/聚焦只改底色（§2·5.4「hover 只用底色一种手法」）：常态已经不淡了，
+   「次级」由 color 档位表达，hover 只需要把底色提起来一点。
+   这一条覆盖 .rw 与它同排的 .rw-feedback 之外的所有 button；`.card-foot button:hover`
+   那条曾与它重复（两处写同一件事，改一处忘一处就会走散），已合并到这里。 */
+.card-foot button:hover, .card-foot button:focus-visible {
+  background: var(--fill); color: var(--ink);
+}
 .card-foot input {
   display: none; flex: 1; padding: var(--s1) var(--s2); font-size: var(--f-sm); background: var(--surface);
 }
@@ -2120,7 +2220,7 @@ button.ghost.danger:hover { background: var(--bad-soft); color: var(--bad); }
 .acc { border-bottom: 0.5px solid var(--line); }
 .acc summary {
   list-style: none; cursor: pointer; user-select: none;
-  display: flex; align-items: center; gap: 8px;
+  display: flex; align-items: center; gap: var(--s2);
   padding: var(--s3) 0; font-size: var(--f-sm); font-weight: 500; color: var(--text-1);
   transition: color var(--dur);
 }
@@ -2334,8 +2434,18 @@ td.warn { color: var(--warn); font-weight: 500; }
 #btn-generate.send:hover { background: var(--grad-btn-hover); }
 /* 空输入时按钮不可点，但必须**仍然像一个按钮**：之前用 --fill 叠在浅色卡面上，
    跟卡面同色，几乎是隐形的，看着像「这个控件坏了」。改 --fill-disabled
-   （明显深于任何卡面），读作「在，只是不能按」。 */
-#btn-generate.send:disabled { background: var(--fill-disabled); color: var(--text-3); box-shadow: none; }
+   （明显深于任何卡面），读作「在，只是不能按」。
+   ⚠ `opacity: 1` 不能省（2026-09-27 修）：全局 `button:disabled { opacity: .5 }`
+     仍然生效，而这条 id 选择器只覆盖了 background/color/box-shadow 三项，
+     于是 `--text-2` 在 `--fill-disabled` 上再乘 0.5 —— 实算亮色 **1.86:1**，
+     那两颗 aria-hidden 的图标基本消失，整个键看起来是个**空块**
+     （底色做到了、字色没做到）。
+     §5 的原则是「不可点靠『不可点』表达，不靠变灰」，底色与 cursor 已经在表达它，
+     叠透明度是重复表达且把可读性一起赔进去。 */
+#btn-generate.send:disabled {
+  background: var(--fill-disabled); color: var(--text-3);
+  box-shadow: none; opacity: 1; cursor: not-allowed;
+}
 /* 这里原本有一条 `#btn-generate.send .spinner`（深色底上的转圈）。
    它是**不可达的**：没有任何代码往这个按钮里塞活体指示器 ——
    全项目只有 progress.js 在消息区（.gen-status 里的 .gs-live）创建它，
@@ -2388,15 +2498,23 @@ td.warn { color: var(--warn); font-weight: 500; }
   /* 必须高于 .screen（设置整窗页，60）：否则设置页开着时弹出的确认框会被它压在下面，
      看得见背景模糊却点不到按钮，像卡住一样。低于 .select-menu（80）不影响下拉。 */
   z-index: 70;
-  animation: fadeIn .18s var(--ease);
+  animation: fadeIn var(--dur) var(--ease);
 }
 .dialog {
   background: var(--surface); border-radius: var(--r-xl); padding: var(--s8);
-  width: 470px; max-height: 86vh; overflow-y: auto;
+  /* ⚠ max-width 必须有（2026-09-27 修）：`.dialog-wrap` 是居中 flex，而
+     `width: 470px` 是**定宽**不是上限 —— 视口比 470 + 两边 padding 还窄时
+     （窄窗 / 拖窄的窗口 / 125% 缩放），对话框会**横向溢出遮罩层**，
+     而遮罩层自己有 `overflow` 兜底也不管用 —— 溢出的是它的子盒。
+     表现是"确定"那颗按钮跑到屏幕外，点不到。
+     写法上用 `width: min(470px, 100%)` 而不是 `width: 470px; max-width: 100%`：
+     后者在 flex 容器里仍会以 470 为基准去算，两种写法实测等价，取前者是因为
+     少一个声明、意图更直白。 */
+  width: min(470px, 100%); max-height: 86vh; overflow-y: auto;
   box-shadow: var(--shadow-pop);
-  animation: pop .24s var(--ease-pop);
+  animation: pop var(--dur) var(--ease-pop);
 }
-.dialog.small { width: 400px; }
+.dialog.small { width: min(400px, 100%); }
 .dialog h3 { margin-bottom: var(--s4); font-size: var(--f-lg); font-weight: 600; letter-spacing: -.02em; }
 .dialog h3 .hint { font-weight: 400; display: inline; }
 .dialog .lbl { margin-top: var(--s4); }
@@ -2414,7 +2532,7 @@ td.warn { color: var(--warn); font-weight: 500; }
   background: var(--toast-bg);
   color: var(--text-inv); padding: var(--s2) var(--s4); border-radius: var(--r-pill);
   font-size: var(--f-sm); z-index: 99; box-shadow: var(--shadow-pop);
-  animation: toastUp .24s var(--ease-pop);
+  animation: toastUp var(--dur) var(--ease-pop);
 }
 
 /* ══════════════ 动画 ══════════════ */
@@ -2437,6 +2555,26 @@ td.warn { color: var(--warn); font-weight: 500; }
      媒体查询一起降内边距 —— 1440 窗下两列对齐、1000 窗下差 8px，越窄差越多。 */
   .topics-inner, .topics-src-inner { padding: var(--s4) var(--s4) var(--s3); }
   .nav-item kbd { display: none; }
+
+  /* ⚠ 左栏宽度降档**必须与内边距同一个窗宽**（2026-09-27 修）。
+     `#left` 原先要等到 `max-width: 860px` 才从 276 降到 258，于是 861~1120px
+     这一整段（1024 是最常见的笔电 / 分屏宽度）里：左栏 276 + 右列内边距 24
+     + 设置页三列（`.stg-nav` 276 + `.pane-list` 258 + gap），右列只剩很窄 ——
+     行业包面板的 `.kb-view` 实测被压到 **118px**，文件查看器等于消失。
+     §9 明写「判据必须在 1320 与 1000 两个视口都成立」，而内边距已经按 1120
+     降了、宽度却按 860 降，两件事不在同一个窗宽上发生就没有一致性可言。
+     （`860px` 那条保留：1120 降到的就是 258，两条等价。） */
+  #left { width: 258px; min-width: 258px; }
+
+  /* 三列面板的**中列**在窄窗收窄，把宽度让给详情列。
+     `.pane-list` 固定 258 是宽窗的形态；1000 窗下左栏 + 三列已经吃掉大半，
+     再固定 258 就只能靠挤 `.pane-detail`（而它 `min-width: 0` 之后挤的是
+     里面那一列 `.kb-view`）。`.stg-cols` 的 gap 也从 --s6 收到 --s4。 */
+  .stg-cols { gap: var(--s4); }
+  .pane-list { flex-basis: 200px; }
+  /* 行业包面板：分组列下限 200 → 160（.pi-groups-col 自己有 min-width: 200，
+     这里跟着收，否则那条下限会在窄窗里反过来把查看器挤没）。 */
+  .pi-groups-col { min-width: 160px; }
 }
 @media (max-width: 860px) {
   #left { width: 258px; min-width: 258px; }
@@ -2455,7 +2593,33 @@ td.warn { color: var(--warn); font-weight: 500; }
   .samples { padding-bottom: var(--s4); }
 }
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+  /* ⚠ `animation-iteration-count` 一起压（2026-09-27 修）。只压 duration 时，
+     `animation-duration: .01ms` + `animation-iteration-count: infinite`
+     的效果是**每 0.01ms 重放一整轮关键帧** —— 不是「停住」，是「以十万倍速闪」。
+     受害的是三处**无限循环**动画：左栏的呼吸点（`.dot.run::before` 的
+     `dotPulse 1.4s infinite`）、输入区下方的活体指示器（`.gs-live i` 的
+     `gs-live 1.6s infinite`）、忙态按钮（`.icon-btn.busy` 的 `dotPulse`）。
+     前两者在生成期会一直亮着几分钟 —— 对前庭功能障碍 / 光敏感用户，
+     这恰恰是最有害的形态。`.gs-live` 附近的注释曾假设「无障碍降级下界面永远
+     停在 100% 那一帧」，那与实际行为正好相反。
+     下面两条静态形态保证「正在跑」在零动效下**仍然可读**：点还在、颜色还在，
+     只是它不闪了。 */
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+  /* 「正在跑」在零动效下仍然要**可读**：点还在、颜色还在，只是它不闪了。
+     用 `animation-iteration-count: 1`（上面那条）让循环动画放一轮就停在
+     终帧，不再无限重放；这里只补终帧的静态形态。
+     ⚠ 这里**不能**写 `animation: none !important`：那会把 `animation-name`
+     一起抹掉，而 `_verify/verify.js` 的「在跑记录 = 灰点呼吸」断言读的正是
+     `animationName`（实测：写成 none 之后那条断言立刻红，且它量的是设计值
+     而非降级后的计算值 —— 无头 Chrome 默认按 reduce 报告，注释见
+     verify.js 第 1900 行附近）。 */
+  .dot.run::before { background: var(--text-2); opacity: 1; }
+  .gs-live i { background: var(--text-2); opacity: 1; }
+  .icon-btn.busy, .icon-btn.busy::after { opacity: 1; }
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -2510,28 +2674,33 @@ td.warn { color: var(--warn); font-weight: 500; }
 .fu-chip:hover { background: var(--fill); }
 .fu-chip:focus-visible { outline: none; box-shadow: var(--shadow-focus); }
 
-/* 「今日选题」筛选行的胶囊：与上面两族是**同一个控件**（点一下只换内容，
-   不提交任何东西），所以数值一律取同一批 token。按 `.fu-chip` 那条写明、
-   并且这一族自己踩过的约定，**不并选择器** —— 三族分处三个视图区，
-   合并会让「改首页」静默改到结果页 / 选题页；
-   「胶囊一族逐项同型」那条断言同时比三族的计算值，比并选择器更硬。
-   `.on` 是这一族唯一的差别：筛选行必须看得出"现在筛的是哪一颗"。
-   平涂 --ink + 反白字，不给渐变、不给内高光（与 `.pl-item.on` 的图标砖同一族）。
-   改前用的是 `.m-chip.acc-badge.info`（5% 灰底 + 墨字），亮暗两主题下
-   选中与未选中都读不出来 —— 而那正是这一行唯一的反馈。 */
+/* 「今日选题」筛选行。改前的画法：可筛的那几颗是描边胶囊（`--surface` 底 + `--e1`
+   发丝环），只做解释的状态标记是 `.m-chip`（5% 灰底 + 深色粗字）—— 两种手法都带底，
+   一行里"能不能点"读不出来；而选中那颗用平涂 `--ink` + 反白字，比它下面 24px 处
+   那排 15px 的视图页签还抢眼。
+   现在：可筛的降成**文字 tab**（透明底、选中给一层 `--fill`），状态标记降成
+   **无底纯字**（`.src-note`，见下），整行只剩"有底块 = 正筛着它"一种反馈。
+   ⚠ 状态标记不再用 `.m-chip`：那个类是「有底色小标记」一族的成员（verify 拿它
+   与另外七个类比 fontSize/padding/radius 逐项相等），在这里给它脱底等于改掉整族。
+   ⚠ 与首页起手示例（`.sample-card`）/ 结果区建议（`.fu-chip`）那两族**不并选择器**
+   的约定仍然成立 —— 那两族点了是往输入区填一句话，这一族点了是换内容区。 */
 .src-pill {
-  height: var(--h-sm); padding: 0 var(--s4); border-radius: var(--r-pill);
-  background: var(--surface); color: var(--text-1);
+  height: var(--h-sm); padding: 0 var(--s3); border-radius: var(--r-ctl);
+  background: transparent; color: var(--text-2);
   font-size: var(--f-sm); font-weight: 500; line-height: 1.35;
-  white-space: nowrap; box-shadow: var(--e1); cursor: pointer;
+  white-space: nowrap; cursor: pointer;
   transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
 }
-.src-pill:hover { background: var(--fill); }
+.src-pill:hover { background: var(--fill); color: var(--text-1); }
 .src-pill:focus-visible { outline: none; box-shadow: var(--shadow-focus); }
 /* 写在 :hover 之后：`.src-pill.on` 与 `.src-pill:hover` 同特异性，
-   靠源码顺序决胜 —— 放前面的话选中那颗会被 hover 底色洗成灰的。 */
-.src-pill.on { background: var(--ink); color: var(--text-inv); }
-.src-pill.on:hover { background: var(--ink-hover); }
+   靠源码顺序决胜 —— 放前面的话选中那颗会被 hover 洗掉字重。 */
+.src-pill.on { background: var(--fill); color: var(--text-1); font-weight: 600; }
+/* 状态标记：纯字、无底，右端自成一段（"今天没货 / 抓取失败 / 未接入"是说明，
+   不是可筛项）。彩色只留给失败 —— 规范 §7.4。 */
+.src-note { font-size: var(--f-2xs); color: var(--text-3); line-height: 1.35;
+  white-space: nowrap; }
+.src-note.bad { color: var(--bad); }
 
 /* 这里原本有一组「结果区自由追问」的输入行（.fu-text / .fu-input / .fu-go，
    注释写的是「一行输入 + 按此修改」）。已删除：结果区的后续操作仍只有
@@ -2754,8 +2923,22 @@ input:not([type]) {
    组标题三条左边界重合在 409，不需要再补一层 padding。 */
 .topics-tabs {
   flex: 0 0 auto; width: 100%; max-width: var(--w-stream);
-  margin-inline: auto; margin-bottom: 0; padding: 0;
+  margin-inline: auto; margin-bottom: 0;
+  /* `top: 0` 覆盖 `.res-tabs` 那一档 -24：`#view-topics` 没有 padding-top 可抵消，
+     跟着写 -24 会让条子在滚动时钻到顶栏底下（实测 y 48 → 24）。
+     padding-top 给 24：改前 `padding: 0` 让页签紧贴顶栏那条发丝线（tabTop ==
+     headBottom == 48），两条线中间只夹 28px 的两颗小字。
+     发丝线**默认不画**：两颗页签只占 133px，条宽 780，等于拖一条 647px 的空线；
+     滚动吸顶时才需要它把"条"与"从底下穿过去的正文"分开（`.stuck` 由
+     topics.js 的滚动监听挂上，与结果页那六颗的分区线是两种处境）。 */
+  top: 0; padding: var(--s6) 0 0; gap: var(--s6);
 }
+/* 不吸顶时才把线涂成透明。写成 `:not(.stuck)` 而不是"默认透明 + 吸顶改回来"：
+   后者要在长写法（`.res-tabs` 的 `border-bottom: … var(--line)`）之上再叠一条
+   长写法颜色，实测在 Electron 33 里那条高特异性的 `border-bottom-color: var(--line)`
+   **算不出色值**（计算值停在 transparent，同一份 CSS 在无头 Chrome 里却是对的 ——
+   两壳不一致只能靠少一层覆盖来避开）。现在吸顶态什么都不写，吃 `.res-tabs` 那条。 */
+#view-topics:not(.stuck) .topics-tabs { border-bottom-color: transparent; }
 /* 切到「情报源」时页签条跟到那一档宽（1160）。
    ⚠ 这不是审美：`.res-tabs` 是不透明的 `--page` 且吸顶，条只盖住中间 780 的话，
      表格内容会从条的**左右两侧**穿过去、那条发丝线凭空短一截，
@@ -2792,39 +2975,42 @@ input:not([type]) {
 /* 选题卡：与正文同列后改单列堆叠（780 放两列会把 D/S/E 的数值列挤掉） */
 .topic-grid { display: grid; gap: var(--s4); grid-template-columns: 1fr; }
 
-/* D / S / E 三根信号条。`--w` 由 JS 走 CSSOM 写（`el.style.setProperty`）——
-   内联 style 属性会被 CSP 静默忽略（style-src 'self' 无 'unsafe-inline'）。
-   四格**两两一行**（需求 D + 供给 S / 机会分 + 事件 E）：DOM 仍是
-   「标签 / 轨道 / 值」的三元组序列（verify 按 children 每三个取一格，
-   与 CSS 怎么排无关），压掉的只是这一段在卡里吃掉的垂直空间。 */
-.sig-grid { display: grid; grid-template-columns: 56px 1fr auto 56px 1fr auto;
-  gap: var(--s1) var(--s2);
-  align-items: center; font-size: var(--f-2xs); color: var(--text-2); }
-.sig-track { height: var(--s1); border-radius: var(--r-pill); background: var(--fill);
-  overflow: hidden; }
-.sig-track > i { display: block; height: 100%; width: calc(var(--w, 0) * 1%);
-  background: var(--ink); }
-.sig-track.dim > i { background: var(--line-strong); }
-.sig-grid b { color: var(--text-1); font-weight: 600; }
-/* 两两一行时，**组间缝必须大于组内缝**，否则「0.30 供给 S」会被读成一个词组
-   （三元组内部是 --s2，行内两组的分界也还是 --s2 → 四格指标读成一串没有边界的流水）。
-   判据落在结构上而不是位置上：三元组的**第三格**（数值）就是每组的右端，
-   给它一个**外边距**（不是 padding —— padding 在盒子里面，量盒子间距离看不见），
-   组间就成了 16 + 8 = 24 而组内仍是 8。
-   ⚠ 不能改成"加一根空的间隔列"：那样 12 个子项在 7 列网格里会错行排，
-     verify 那条「按 children 每三个取一格」的判据也就跟着错位。 */
-.sig-grid > :nth-child(3n) { margin-right: var(--s4); }
-.topic-quote { font-size: var(--f-sm); color: var(--text-2); line-height: 1.6;
-  border-left: 2px solid var(--line-strong); padding-left: var(--s3); }
-.topic-from { font-size: var(--f-2xs); color: var(--text-2); font-family: var(--mono);
-  margin-top: var(--s1); display: flex; align-items: center; gap: var(--s1); }
-.topic-from svg { width: 14px; height: 14px; flex: 0 0 auto; color: var(--warn); }
+/* 选题卡：三行（标题 / 证据 / 底行），不再是一卡五段。
+   改前一张卡 285 高，其中内容实测只 141（标题 20 + 四格条 34 + 证据 42 +
+   标签行 17 + 卡脚 28），剩下 144 全是 padding 与 gap；
+   1000 高的窗口一屏只放得下 3 张。
+   四格信号条**整段撤掉**：真实数据是 D=0.136 / S=0 / 机会分 14 / E=null，
+   而轨道是两条 237px（`grid-template-columns: 56px 1fr auto 56px 1fr auto`）——
+   237px 上画 33px，四格里三格常年是空刻度。撤掉轨道不等于丢信息：
+   机会分（唯一参与判断的量，判据 `opp >= 60`）升成底行的粗字，
+   D / S / E 收成一句小字，算不出仍然印「—」。
+   ⚠ `.sig-grid` / 卡片那四格轨道随本卡删除（当时全项目只有本卡产它们）。
+   现在 `.sig-track` / `.sig-fill` 这两个名字**又在排行面里活了一次**（`.rank-signals`
+   那一段，见本文件下面的排行视图块）—— 但**不是把四格恢复回来**：那四格量的是
+   D/S/E 的相对值（三格常年空刻度），这四根量的是热点分的构成，每一根都直接解释总分。 */
+.topic-card { gap: var(--s2); }
+.t-desc { font-size: var(--f-sm); color: var(--text-2); line-height: 1.6;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 证据是 URL 时吃等宽小字（与源表「上次抓取」那类机器串同一族），
+   是一句话时留在上面那档。两样都只占一行 —— 卡里不许出现第三、第四种节奏。 */
+.t-desc.url { font-size: var(--f-2xs); font-family: var(--mono); color: var(--text-3);
+  line-height: 1.35; }
+.t-opp { font-size: var(--f-2xs); color: var(--text-2); }
+.t-opp b { font-size: var(--f-sm); color: var(--text-1); font-weight: 600; }
+.t-minor { font-size: var(--f-2xs); color: var(--text-3); }
 /* 卡脚：原来 `margin-top: auto` 是给"两列等高卡"对齐底部按钮用的，改单列之后
    它只剩一个后果 —— 把标签行与按钮之间那段空白拉到整卡剩余高度。
    现在归 0：卡本身是 `.page-card`（`gap: --s6`），24 已经是这一档呼吸；
    再叠一个 margin 就变成 36 —— 刻度外的值，而且同一张卡里会出现两种节奏
    （这正是 `.lbl` 那条账本反对的形态）。 */
 .topic-foot { margin-top: 0; display: flex; gap: var(--s2); align-items: center; }
+/* 底行与上面两行之间那道发丝线 = 参考图里模板卡那条分隔（它画的是虚线，
+   规范 §2 描边只允许 0.5px 发丝实线，所以这里用实线）。
+   `margin-top: var(--s2)` 补回被 `.topic-card { gap: --s2 }` 收掉的那一档呼吸，
+   让"分隔线之上是内容、之下是动作"这一段比行内 gap 明显。 */
+.topic-card .topic-foot { border-top: 0.5px solid var(--line);
+  padding-top: var(--s3); margin-top: var(--s2); }
+.topic-card .topic-foot .res-metric-list { margin-top: 0; }
 .topics-empty { font-size: var(--f-sm); color: var(--text-2); line-height: 1.7; }
 
 /* 情报源表：`接入` 与 `上次抓取` 是**两根正交列**（GitHub Actions 的
@@ -2844,6 +3030,68 @@ input:not([type]) {
    放不下时 `.tbl-wrap{overflow:auto}` 才拿得到横向条。 */
 .src-tbl { min-width: 720px; }
 /* 分数三带图例（抄 Lighthouse 的 lh-scorescale）：没有图例的分数等于没分数。 */
+/* ── 排行视图（需求方案 §3.2 / §3.5）────────────────────────
+   借的是这一屏已有的手法：卡 = `.page-card`、标记 = `.m-chip`、
+   底行发丝线 = `.topic-foot` 那一族、数据驱动宽度 = CSSOM 写 `--w`（与 `.tempo > i`
+   同一条约定）。四根信号条**不是**被撤掉的那条 D/S/E 轨道：那条是"三格里两格常年
+   空刻度"，这四根是热点分的构成，每一根都直接解释总分。 */
+.rank-list { display: flex; flex-direction: column; gap: var(--s4); }
+.rank-row { display: flex; flex-direction: column; gap: var(--s2); }
+.rank-head { display: flex; align-items: center; gap: var(--s2); }
+.rank-no { font-family: var(--mono); font-size: var(--f-sm); color: var(--text-2);
+  min-width: var(--s6); text-align: right; }
+/* 「高热高配」推荐位（§3.3 第 6 条）只加一层描边，不加底色：整张卡变色会让
+   一屏里"推荐"这两字变成"这一堆不一样"，而读者分不清是哪一项在说话。 */
+.rank-row.feat { box-shadow: 0 0 0 0.5px var(--line-strong) inset; }
+.rank-src { font-family: var(--mono); }
+.rank-score { font-size: var(--f-2xs); color: var(--text-2); white-space: nowrap; }
+.rank-score b { font-size: var(--f-sm); color: var(--text-1); font-weight: 600; }
+.rank-signals { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--s2); }
+.sig { display: flex; align-items: center; gap: var(--s1);
+  font-size: var(--f-2xs); color: var(--text-2); min-width: 0; }
+.sig-lbl { font-style: normal; white-space: nowrap; }
+.sig-track { flex: 1 1 auto; height: var(--s1); border-radius: var(--r-pill);
+  background: var(--fill); overflow: hidden; min-width: var(--s4); }
+/* 宽度由 CSSOM 写进来的 --w 决定（与 `.tempo > i` 同一份手法）：
+   本页 CSP 是 style-src 'self'，内联 style 属性会被丢掉 —— 写在标记里的
+   width 永远不会生效，而"条画了但没长度"在截图之外的任何判据里都看不出来。 */
+.sig-fill { display: block; height: 100%; border-radius: var(--r-pill);
+  width: calc(var(--w, 0) * 1%); background: var(--line-strong); }
+.sig-val { font-family: var(--mono); white-space: nowrap; color: var(--text-3); }
+/* 缺数据的分项：轨道**透明**、数值位置印「—」。留一条空灰轨会被读成"量过、是零"，
+   而 §3.2 的口径是"这项没数据，不计入总分" —— 两种形状必须看得出来不一样。 */
+.sig.none .sig-track { background: transparent; }
+.sig.none .sig-val { color: var(--text-2); }
+.rank-detail, .rank-brief { display: flex; flex-direction: column; gap: var(--s2);
+  border-top: 0.5px solid var(--line); padding-top: var(--s2); }
+.ri-head { font-size: var(--f-2xs); color: var(--text-3); }
+.rank-item { display: flex; align-items: baseline; gap: var(--s2); min-width: 0; }
+.ri-src { font-size: var(--f-2xs); color: var(--text-2); white-space: nowrap; }
+.ri-title { flex: 0 1 auto; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; color: var(--text-1); }
+.ri-meta { margin-left: auto; font-size: var(--f-2xs); color: var(--text-3);
+  font-family: var(--mono); white-space: nowrap; }
+.brief-head { display: flex; align-items: baseline; gap: var(--s2); }
+.brief-angle { display: flex; flex-direction: column; gap: var(--s1);
+  border-radius: var(--r-ctl); background: var(--fill); padding: var(--s2) var(--s3); }
+.ba-head { display: flex; align-items: baseline; gap: var(--s2); }
+.ba-titles { display: flex; gap: var(--s3); flex-wrap: wrap; }
+.ba-titles > div { display: flex; flex-direction: column; gap: var(--s1); min-width: 0; }
+.ba-kind { font-style: normal; font-size: var(--f-2xs); color: var(--text-3); }
+.ba-titles p { margin: 0; font-size: var(--f-sm); }
+.ba-hook { margin: 0; font-size: var(--f-sm); color: var(--text-1); }
+.ba-meta { margin: 0; font-size: var(--f-2xs); color: var(--text-2); }
+/* 幻觉口径的固定一行（§3.4）：它不是一条提示，是这张卡的**边界声明**，
+   所以写在卡片内部而不是 toast —— toast 会消失，这句话不该消失。 */
+.brief-caveat { border-top: 0.5px solid var(--line); padding-top: var(--s2); }
+/* 忽略清单：默认藏着，点「已忽略 N」才出现（§3.5）。 */
+.ignored-box { display: flex; flex-direction: column; gap: var(--s2);
+  border-radius: var(--r-ctl); background: var(--fill); padding: var(--s3); }
+.ig-head { font-size: var(--f-2xs); color: var(--text-2); }
+.ig-row { display: flex; align-items: center; gap: var(--s2); min-width: 0; }
+.ig-title { flex: 0 1 auto; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; font-size: var(--f-sm); }
+
 .score-legend { display: flex; flex-wrap: wrap; gap: var(--s2) var(--s3);
   font-size: var(--f-2xs); color: var(--text-2); }
 .score-legend span { display: inline-flex; align-items: center; gap: var(--s1); }
@@ -2887,11 +3135,27 @@ input:not([type]) {
   text-underline-offset: 3px; cursor: pointer; }
 .tell-mark:hover { text-decoration-color: var(--text-2); }
 /* 卡脚那枚"N 处人味标记 · 看明细"：与 `.rw` 同档（--h-sm / 13px / 次级色），
-   默认淡显、悬停提亮（与 `.card-foot .rw` 同一套路，一排里不许两种控件高）。 */
+   悬停提亮（与 `.card-foot .rw` 同一套路，一排里不许两种控件高）。
+   ⚠ `opacity: .72` 去掉了（2026-09-27）：它和 `.card-foot .rw` 那条是同一个
+     毛病 —— `--text-2` 再乘 0.72，亮色实算约 2.6:1，而这是一条**操作入口**
+     （跳到人味分明细的唯一入口），不是装饰。`.rw` 那处已经改成
+     「color 档位 + hover 提亮」，这里跟着同一口径。 */
 .card-foot .tell-jump { height: var(--h-sm); font-size: var(--f-sm); padding: 0 var(--s2);
   flex: 0 0 auto; display: inline-flex; align-items: center; cursor: pointer;
-  color: var(--text-2); border-radius: var(--r-ctl); opacity: .72; }
-.card-foot .tell-jump:hover { opacity: 1; background: var(--fill); color: var(--ink); }
+  color: var(--text-2); border-radius: var(--r-ctl); }
+.card-foot .tell-jump:hover { background: var(--fill); color: var(--ink); }
+/* ⚠ 焦点环（2026-09-27）：它现在有 `tabindex="0"`，Tab 能选中了 ——
+   拿不到焦点环等于「键盘用户能选中、但看不出选中在哪」，比不能选还糟
+   （他会以为自己没选上）。
+   `:focus` 与 `:focus-visible` 一起写：这枚标记是 span，用脚本 `focus()`
+   时 `:focus-visible` 不匹配（它要看真实键盘交互），而 verify.js 的守卫正是
+   这么量的 —— 只写 `:focus-visible` 的话门禁量到 `box-shadow: none`，
+   变成一条量不到真问题的假绿。真键盘用户走 `:focus-visible`（不误亮），
+   脚本/辅助技术走 `:focus`（一定要亮）。两者的视觉形态一致。 */
+.tell-jump:focus, .tell-jump:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
 
 /* 人味分面板（§2.7 ③ 的落点）：正文里的下划线负责"可定位"，这一屏负责
    "可命名"与"可计数"。分数用 --mono 大字号 —— 它是这一屏唯一的量。 */

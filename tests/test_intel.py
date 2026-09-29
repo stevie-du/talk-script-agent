@@ -25,6 +25,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -76,6 +77,12 @@ def _specs(**over):
         {"id": "hot_board", "label": "抖音热榜", "platform": "抖音",
          "role": "破圈触发器", "cadence": "daily",
          "params": {"board": "douyin", "match": "keyword"}},
+        # 阶段二 #1 的两个新源：**夹具里就要有它们的形状** —— 只在 pack.yaml 里
+        # 声明、桩却不认这两个端点的话，整条链路在测试里等于没跑过。
+        {"id": "weibo_hot", "label": "微博热搜", "platform": "微博",
+         "role": "破圈触发器", "cadence": "daily", "params": {"match": "keyword"}},
+        {"id": "baidu_hot", "label": "百度热搜", "platform": "百度",
+         "role": "破圈触发器", "cadence": "daily", "params": {"match": "keyword"}},
         {"id": "xhs_board", "label": "小红书", "platform": "小红书",
          "role": "破圈触发器", "cadence": "—", "enabled": False,
          "note": "没有公开榜，要 x-s 签名 —— 不做"},
@@ -119,6 +126,21 @@ def _fake_http(boom: set[str] | None = None, hot=("电梯困人索赔", "明星�
             return {"data": [{"Title": w, "Url": f"https://t/{i}",
                               "ClusterId": f"tt{i}", "HotValue": 800}
                              for i, w in enumerate(hot)]}
+        # 微博（`statuses/hot_band`）：`data.band_list[]`，`num` 是整数热度，
+        # `onboard_time` 是**上榜时间**（不是发帖时间）—— E 与"新上榜"药丸吃的就是它。
+        if "weibo.com" in url:
+            return {"data": {"band_list": [
+                {"word": w, "num": 2400000 + i, "onboard_time": 1790609902 + i,
+                 "word_scheme": f"#{w}#", "category": "社会"}
+                for i, w in enumerate(hot)]}}
+        # 百度（`api/board?platform=pc`）：`data.cards[].content[]`，
+        # `hotScore` 是**字符串**数字（真实端点就是这样，别改成 int ——
+        # 改了就等于把「热度的四种写法」这一课从测试里删掉）。
+        if "top.baidu.com" in url:
+            return {"data": {"cards": [{"content": [
+                {"word": w, "hotScore": str(7700000 + i), "desc": f"摘要{i}",
+                 "url": f"https://www.baidu.com/s?wd={w}"}
+                for i, w in enumerate(hot)]}]}}
         raise RuntimeError("没打桩的端点：" + url)
 
     return get
@@ -335,6 +357,60 @@ def test_unknown_error_key_is_kept_not_dropped(tmp_path):
     assert got["errors"].get("some_old_adapter") == "ValueError: 不认识", got["errors"]
 
 
+def test_fetch_stops_between_sources_when_told_to(tmp_path):
+    """`should_stop` 真的是**每个源之间**的收工闸门。
+
+    没有它时用户点了停止，那句「正在停止…」要一直挂到 8 个源全跑完 ——
+    停止键在观感上是坏的（而抓取是全流程里最慢的一段）。
+
+    ⚠ 判据是「第二个源一个适配器都没被调过」，不是「抛了没有」：
+      只钉"抛了"的话，把 `should_stop` 挪到抓完所有源之后再调一次同样能过，
+      而闸门等于没有 —— 那是这条修复真正要防的改坏。
+    """
+    raw = [
+        {"id": "demand_terms", "label": "下拉词", "platform": "百度",
+         "role": "雷达", "cadence": "daily"},
+        {"id": "hot_board", "label": "抖音热榜", "platform": "抖音",
+         "role": "破圈触发器", "cadence": "daily", "params": {"board": "douyin"}},
+        {"id": "hot_board", "label": "头条热榜", "platform": "头条",
+         "role": "破圈触发器", "cadence": "daily", "params": {"board": "toutiao"}},
+    ]
+    srcs = I.parse_sources(raw)[0]
+    called: list[str] = []
+    real = dict(I.ADAPTERS)
+
+    def spy(spec, ctx):
+        called.append(spec.label)
+        return real[spec.id](spec, ctx) or []
+
+    I.ADAPTERS.update({k: spy for k in real})
+    try:
+        # 第一个源抓完就喊停：后两个源一个都不许碰
+        with pytest.raises(RuntimeError, match="停"):
+            I.fetch_pack("elevator", tmp_path, srcs, seeds=["电梯困人"],
+                         keywords=["电梯"], http=_fake_http(),
+                         should_stop=lambda: (
+                             (_ for _ in ()).throw(RuntimeError("停"))
+                             if called else None))
+    finally:
+        I.ADAPTERS.clear()
+        I.ADAPTERS.update(real)
+    assert called == ["下拉词"], \
+        f"闸门在第一个源之后就失效了，后面的源还在跑：{called}"
+
+
+def test_fetch_without_should_stop_never_calls_it(tmp_path):
+    """不传 `should_stop` 就一个都不调 —— 抓取本身不抛（docstring 的那句承诺）。
+
+    守的是"闸门是可选的"：怕的是有人把它改成无条件调用，于是
+    `should_stop` 变成 `None` 也会被调 → TypeError 炸掉整轮抓取。
+    """
+    srcs = _specs()
+    out = I.fetch_pack("elevator", tmp_path, srcs, seeds=["电梯困人"],
+                       keywords=["电梯"], http=_fake_http())
+    assert out["items"], "不传闸门时照常抓到东西"
+
+
 def test_unknown_cadence_is_a_loud_note_not_a_silent_never_refresh():
     """写一个引擎不认识的节奏，必须**留下话**（第 8 轮审查 P2）。
 
@@ -388,6 +464,44 @@ def test_per_source_cap_limits_flooding(tmp_path):
     (man / "a.json").write_text(json.dumps(rows), encoding="utf-8")
     out = I.fetch_pack("p", tmp_path, specs)
     assert len(out["items"]) == I.PER_SOURCE_CAP
+
+
+def test_pipeline_cancels_a_fetch_midway(tmp_path, monkeypatch):
+    """抓取作业的**收工闸门真接上了**：点了停止 → 作业落 cancelled，不是 done。
+
+    上一条守的是 `fetch_pack` 认不认 `should_stop`，这条守的是
+    **`_run_intel_fetch` 到底传没传** —— 那两处任何一个拿掉，
+    用户点了停止都得等 8 个源全跑完才看到结果，停止键在观感上是坏的。
+
+    ⚠ 判据钉的是**终态**：作业线程真跑起来、停在第 k 个源上、然后由
+      取消把它打断。只钉"调过 should_stop"的话，把它挪到抓完之后再调
+      一次也能过 —— 而闸门等于没有。
+    """
+    import app.pipeline as P
+    root = _root()
+    pl = Pipeline(root, load_config(root))
+    seen = {"n": 0}
+    box: dict = {}
+
+    def slow_fetch(pack, data_dir, sources, **kw):
+        """每到一个源就查一次闸门；第三次查时作业已被取消 → 该抛了。"""
+        stop = kw.get("should_stop")
+        assert stop is not None, "作业管道没把收工闸门传下来"
+        for _ in range(400):
+            seen["n"] += 1
+            if seen["n"] >= 3:
+                pl.cancel(box["jid"])        # 用户在这时候点了停止
+            stop()
+            time.sleep(0.01)
+        return {"pack": pack, "fetched_at": "2026-09-27T00:00:00+00:00",
+                "sources": [], "items": [], "errors": {}}
+
+    monkeypatch.setattr(P, "fetch_pack", slow_fetch)
+    box["jid"] = pl.start_intel_fetch("elevator", http=_fake_http())
+    snap = wait_job(pl, box["jid"], timeout=30)
+    assert seen["n"] >= 3, f"样本没跑到取消点，这条测试是空的：{seen}"
+    assert snap["state"] == "cancelled", \
+        f"点了停止却落成了 {snap['state']}（收工闸门没接上，用户要等 8 个源全跑完）"
 
 
 # ── 4. 落点：data_dir/intel/<pack>/ ──────────────────────────
@@ -578,9 +692,9 @@ def test_is_stale_uses_the_tightest_cadence():
 
 # ── 8. 忽略：只影响今天 ──────────────────────────────────────
 def test_ignore_only_affects_today(tmp_path):
-    """§2.5：「忽略」只影响今天，明天同题还会回来；连续 3 天被忽略才沉底。
+    """§2.5：「忽略」只影响今天，明天同题还会回来；连续 3 天被忽略才**沉底**。
 
-    所以落盘的是 `{key: 最后一次忽略的日期}` —— 界面要按"连续几天"判沉底，
+    落盘的是 `{key: {"days": [忽略过的日期…]}}` —— 界面要按"连续几天"判沉底，
     而"连续"只能靠日期算，记一个布尔是算不出来的。
     """
     I.fetch_pack("elevator", tmp_path, _specs(), seeds=["电梯困人"], keywords=["电梯"],
@@ -592,16 +706,73 @@ def test_ignore_only_affects_today(tmp_path):
     assert len(I.today(tmp_path, "elevator", _specs())["items"]) == n0 - 1
     # 把记录改成"昨天" → 今天又出现（只影响今天）
     rec = I.load_ignored(tmp_path, "elevator")
-    rec[key] = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    rec[key] = {"days": [(datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")]}
     (I.intel_dir(tmp_path, "elevator") / "ignored.json").write_text(
         json.dumps(rec, ensure_ascii=False), encoding="utf-8")
     assert len(I.today(tmp_path, "elevator", _specs())["items"]) == n0, \
         "昨天的忽略不该影响今天"
-    # 连续三天的日期都留在盘上（界面据此判沉底）
-    I.add_ignored(tmp_path, "elevator", key, today="2026-09-21")
-    I.add_ignored(tmp_path, "elevator", key, today="2026-09-22")
-    I.add_ignored(tmp_path, "elevator", key, today="2026-09-23")
-    assert I.load_ignored(tmp_path, "elevator")[key] == "2026-09-23"
+    # 连续三天的日期都留在盘上（界面据此判沉底）。这里**直接写文件**而不是
+    # 连着 add 三次：今天的真实日期也在记录里，`[-3:]` 会把它一起排进来，
+    # 断言就变成在测排序而不是测"那三天留没留住"。
+    (I.intel_dir(tmp_path, "elevator") / "ignored.json").write_text(
+        json.dumps({key: {"days": ["2026-09-21", "2026-09-22", "2026-09-23"]}},
+                   ensure_ascii=False), encoding="utf-8")
+    assert I.ignored_days(I.load_ignored(tmp_path, "elevator"), key) == \
+        ["2026-09-21", "2026-09-22", "2026-09-23"]
+    # 旧的单日期形状**照样读**（没有迁移脚本，老文件不能突然变成"没忽略过"）
+    old = json.dumps({key: "2026-09-23"}, ensure_ascii=False)
+    (I.intel_dir(tmp_path, "elevator") / "ignored.json").write_text(old, encoding="utf-8")
+    assert I.ignored_days(I.load_ignored(tmp_path, "elevator"), key) == ["2026-09-23"]
+
+
+def test_three_day_ignore_streak_buries_it_to_the_tail(tmp_path):
+    """§2.5 / §3.5：连续 3 天被忽略 → **沉底**（留在池子里排到最后）。
+
+    这条是"注释里承诺过但没实现"的那一条：以前 `intel.py` 与 `server.py` 两处
+    都写着"连续 3 天沉底"，而落盘的日期没有任何消费方。现在判据只有一份
+    （`intel.is_buried`），过滤、清单、计数三处都读它。
+    ⚠ 沉底**不是**隐藏：§3.5 的验收写的是「沉底可被"换一批"翻出；恢复即回池」。
+    """
+    I.fetch_pack("elevator", tmp_path, _specs(), seeds=["电梯困人"], keywords=["电梯"],
+                 http=_fake_http())
+    key = I.today(tmp_path, "elevator", _specs())["items"][0]["key"]
+    n_total = len(I.today(tmp_path, "elevator", _specs())["items"])
+    today = I.ignored_today_str()
+    back = lambda n: (datetime.now() - timedelta(days=n)).strftime("%Y-%m-%d")  # noqa: E731
+    for n in (2, 1, 0):
+        I.add_ignored(tmp_path, "elevator", key, today=back(n))
+    assert I.ignore_streak(I.load_ignored(tmp_path, "elevator"), key, today) == 3
+    view = I.today(tmp_path, "elevator", _specs())
+    buried = [it for it in view["items"] if it.get("buried")]
+    assert [it["key"] for it in buried] == [key], "连击 3 天之后这条该被标出来"
+    assert view["items"][-1]["key"] == key, "标出来还不够，必须排在池底"
+    assert len(view["items"]) == n_total, \
+        "沉底是排到最后，不是消失 —— 池子总数必须不变"
+    # 中间成功"没被忽略"过一次（日期不连续）→ 连击断了，回到池子中间
+    I.remove_ignored(tmp_path, "elevator", key)
+    for n in (2, 0):
+        I.add_ignored(tmp_path, "elevator", key, today=back(n))
+    assert I.ignore_streak(I.load_ignored(tmp_path, "elevator"), key, today) == 1
+    assert not any(it.get("buried") for it in I.today(
+        tmp_path, "elevator", _specs())["items"]), "隔天不算连续，不该沉底"
+
+
+def test_ignored_list_is_restorable(tmp_path):
+    """忽略清单（§3.5）：`已忽略 N` 点开要有内容，且每条能恢复。"""
+    I.fetch_pack("elevator", tmp_path, _specs(), seeds=["电梯困人"], keywords=["电梯"],
+                 http=_fake_http())
+    keys = [it["key"] for it in I.today(tmp_path, "elevator", _specs())["items"][:2]]
+    for k in keys:
+        I.add_ignored(tmp_path, "elevator", k)
+    view = I.today(tmp_path, "elevator", _specs())
+    assert len(view["ignored_list"]) == 2
+    assert all(r["title"] for r in view["ignored_list"]), "清单要带标题，不能只给键"
+    assert all(r["ignored_today"] for r in view["ignored_list"])
+    rec = I.remove_ignored(tmp_path, "elevator", keys[0])
+    assert keys[0] not in rec
+    assert len(I.today(tmp_path, "elevator", _specs())["items"]) == \
+        len(view["items"]) + 1, "恢复即回池"
+
 
 
 def test_today_ignore_uses_the_same_key_it_ships(tmp_path):
@@ -720,7 +891,7 @@ def test_pack_declares_sources_and_derives_seeds():
 def test_pack_info_exposes_sources_without_pack_error(tmp_path):
     info = pack_info(ROOT / "packs" / "elevator")
     assert info.pack_error == ""
-    assert len(info.intel_sources) == 8
+    assert len(info.intel_sources) == 10
     assert info.intel_sources[-1].label == "小红书"
     assert info.intel_sources[-1].enabled is False
     # 主动关掉的源**不该**产生审计 note（那是决定不是 bug）
@@ -758,7 +929,7 @@ def test_meta_payload_carries_intel_sources(tmp_path):
     c = _client(_root())
     packs = c.get("/api/meta").json()["packs"]
     elev = next(p for p in packs if p["name"] == "elevator")
-    assert len(elev["intel_sources"]) == 8
+    assert len(elev["intel_sources"]) == 10
     assert {"id", "label", "platform", "role", "cadence", "enabled", "wired"} <= set(
         elev["intel_sources"][0])
 
@@ -819,8 +990,12 @@ def test_ignore_endpoint_records_today():
     c = _client(tmp_path)
     r = c.post("/api/intel/ignore", json={"pack": "elevator", "key": "g1"})
     assert r.status_code == 200 and r.json()["ignored"] == 1
-    assert I.load_ignored(tmp_path, "elevator")["g1"] == \
-        datetime.now().strftime("%Y-%m-%d")
+    assert I.ignored_days(I.load_ignored(tmp_path, "elevator"), "g1") == \
+        [datetime.now().strftime("%Y-%m-%d")]
+    # 撤销 → 记录整条删掉（恢复即回池，不留一个反向标记）
+    r2 = c.post("/api/intel/unignore", json={"pack": "elevator", "key": "g1"})
+    assert r2.status_code == 200 and r2.json()["ignored"] == 0
+    assert I.load_ignored(tmp_path, "elevator") == {}
 
 
 def test_ignore_endpoint_says_so_when_the_record_is_broken():
@@ -859,14 +1034,24 @@ def test_intel_fetch_does_not_consume_model_quota():
     cfg = load_config(tmp_path)
     cfg.mock = True
     pl = Pipeline(tmp_path, cfg)
-    for _ in range(MAX_CONCURRENT_INTEL):
-        pl.start_intel_fetch("elevator", http=_fake_http())
-    assert pl.registry.running_count(INTEL_BUSY_STATES) == MAX_CONCURRENT_INTEL
-    assert pl.registry.running_count() == 0, "情报抓取占了模型额度"
-    # 关键断言：抓取占满自己那档额度时，生成**必须仍然开得起来**。
-    assert pl.start_generate(GenerateRequest(pack="elevator", topic="家用电梯怎么选",
-                                             duration=60, platform="抖音")), \
-        "情报额度被占满不该影响生成"
+    # ⚠ 必须用 `gate` 把作业**钉在 fetching**（与下面那条额度上限测试同一手），
+    #   不钉住就是一条"靠调度慢才过"的竞态：假 HTTP 瞬间跑完、作业变 done、
+    #   名额当场释放，于是 running_count 少算一个 —— 实测这条大约三次里红一次。
+    #   竞态不是"偶尔不稳"，是**门禁在教人忽略它**：同一批改动里只要有一次
+    #   是它红的，就会被当成噪声跳过，真回归反而混在里面看不见了。
+    #   这里量的是"两族额度互不占"，与"作业跑多久"毫无关系，钉住才量得准。
+    gate = threading.Event()
+    try:
+        for _ in range(MAX_CONCURRENT_INTEL):
+            pl.start_intel_fetch("elevator", http=_fake_http(gate=gate))
+        assert pl.registry.running_count(INTEL_BUSY_STATES) == MAX_CONCURRENT_INTEL
+        assert pl.registry.running_count() == 0, "情报抓取占了模型额度"
+        # 关键断言：抓取占满自己那档额度时，生成**必须仍然开得起来**。
+        assert pl.start_generate(GenerateRequest(pack="elevator", topic="家用电梯怎么选",
+                                                 duration=60, platform="抖音")), \
+            "情报额度被占满不该影响生成"
+    finally:
+        gate.set()          # 放行，别让 worker 线程挂在测试之后
 
 
 def test_intel_jobs_do_not_take_the_model_quota_of_a_rewrite():

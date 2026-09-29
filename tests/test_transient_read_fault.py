@@ -21,12 +21,14 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import msvcrt
 import os
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -36,7 +38,7 @@ sys.path.insert(0, str(ROOT))
 
 from app import knowledge, packgen                                  # noqa: E402
 from app.config import load_config                                  # noqa: E402
-from app.fileio import YamlError, read_yaml_file                    # noqa: E402
+from app.fileio import YamlError, read_yaml_file, write_atomic      # noqa: E402
 from app.knowledge import Pack, read_yaml_cached                    # noqa: E402
 from app.pipeline import Pipeline                                   # noqa: E402
 
@@ -279,6 +281,51 @@ def test_utf8_knowledge_file_logs_nothing(tmp_path, caplog):
     with caplog.at_level(logging.WARNING, logger="app.knowledge"):
         assert knowledge.read_text_cached(p).startswith("## 核心术语")
     assert not caplog.records, f"正常文件不该有 warning：{caplog.records}"
+
+
+# ── 写侧：os.replace 撞上瞬时占用必须重试 ───────────────────────
+# 为什么单开：读侧那几条（本文件上半）都有覆盖，写侧 `fileio._replace_with_retry`
+# **一条都没有** —— 变异检验第一次跑 s33-4 时才发现（改掉重试仍全绿）。
+# 它防的是 Windows 上最常见的一种故障：文件刚落盘就被杀软 / 搜索索引按住，
+# 此刻 os.replace 抛 [WinError 5]，而**目标文件从此停在旧版本**。
+# 症状不是报错，是"索引文件 / 配置 / 产物凭空消失" —— 比报错更难查。
+#
+# 这里**用 OSError 而不是 msvcrt 锁**：要验的是"重试了几次、最终有没有换上去"，
+# 而真造 WinError 5 得靠锁住目标文件，那条路验不到"重试了几次"。
+# 锁的真实性由本文件上半那几条负责。
+def test_replace_retries_a_transient_oserror(tmp_path, monkeypatch):
+    calls = {"n": 0}
+
+    def flaky(src, dst, **kw):
+        calls["n"] += 1
+        if calls["n"] < 3:            # 前两次撞上瞬时占用
+            raise OSError(5, "拒绝访问")
+        return real_replace(src, dst, **kw)
+
+    real_replace = os.replace
+    monkeypatch.setattr(os, "replace", flaky)
+    monkeypatch.setattr(time, "sleep", lambda s: None)     # 别真等退避
+    target = tmp_path / "index.json"
+    write_atomic(target, '{"v": 1}')
+    assert json.loads(target.read_text(encoding="utf-8"))["v"] == 1
+    assert calls["n"] == 3, f"重试了 {calls['n']} 次（应为 3：两次失败 + 一次成功）"
+
+
+def test_replace_gives_up_after_the_last_attempt(tmp_path, monkeypatch):
+    """反空转：一直失败时要**真的抛出去**，不能悄悄返回。
+
+    吞掉的话调用方以为写成功了，目标文件停在旧版本 —— 也就是上面那条要防的
+    「产物凭空消失」，只是换了个更安静的形态。
+    """
+    monkeypatch.setattr(os, "replace", lambda *a, **kw: (_ for _ in ()).throw(
+        OSError(5, "拒绝访问")))
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    target = tmp_path / "index.json"
+    target.write_text('{"v": 0}', encoding="utf-8")
+    with pytest.raises(OSError):
+        write_atomic(target, '{"v": 1}')
+    # 目标必须还是旧版本（不能是半截内容）
+    assert json.loads(target.read_text(encoding="utf-8"))["v"] == 0
 
 
 if __name__ == "__main__":

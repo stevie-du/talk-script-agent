@@ -73,6 +73,66 @@ def test_count_chars_used_by_report_is_still_the_checker_one():
     assert count_chars("政府补贴，绝对靠谱。") == 8
 
 
+def test_feedback_only_names_strong_tells_but_still_counts_weak():
+    """A-9 §3.1 #3：回炉**只点名 strong 命中段**，weak 只报总数。
+
+    两个方向都要断言：
+      · strong 的点名句必须在（不然模型不知道改哪）；
+      · weak 的具体段号**不许**出现（"只改标红段"，否则每轮都在动正常的段落，
+        越改越平 —— 朱雀逆向经验与 shuorenhua bounded 档同一条）；
+      · 但 weak 的**总数**要说（把数据藏起来不是收敛噪音，是丢信息）。
+    """
+    from app.ai_tells import AITells
+    tells = AITells({"strong": ["slogan_closing"], "weak": ["filler_stack"],
+                     "lexicon": {"slogan_closing": ["品质保证"],
+                                 "filler_stack": ["其实", "真的"]}})
+    secs = [{"type": "hook", "text": "其实真的很多。其实说真的不少。"},
+            {"type": "cta", "text": "选我们，品质保证。"}]
+    report = check_script(secs, 60, 4.5, BAN, "抖音", Quota({}), tells=tells)
+    ai = report["ai_tells"]
+    assert {h["severity"] for h in ai["hits"]} == {"strong", "weak"}, ai["hits"]
+    fb = Pipeline._violation_feedback(report, secs)
+    assert "品质保证" in fb, fb                      # strong：点名 + 带原文
+    assert "明显" in fb and "轻微" in fb, fb          # 界面/交付物读的是中文档位，不是 strong/weak
+    assert "另有 1 条" in fb and "合计 4 处" in fb, fb   # weak：条数与处数都要说清（扣分按条）
+    assert "其实×" not in fb, fb                     # 不把 weak 的点名句喂给模型
+
+
+def test_feedback_carries_the_negative_list_and_the_two_pass_rule():
+    """A-9 §3.1 #1/#5：回炉块里要带「减法→注入人声」两段指令与「六永不注入」负面清单。
+
+    为什么这两段必须在这里而不是 voice.md：voice.md 与 anti-ai-smell.md 都被
+    `stages.write.anti_ai.levels.strong.files` 整份注入**撰写轮**提示词（预算实测只剩
+    几十字），而 `$feedback_block` 由 pipeline 侧拼接、在 user_template 末尾 ——
+    这是唯一不占撰写轮预算的通道。
+    ⚠ 顺带钉住位置：静态规矩在「上一版全文」之前（动态内容在最后，前缀缓存才稳）。
+    """
+    secs = _sections()
+    report = check_script(secs, 60, 4.5, BAN, "抖音", Quota({}))
+    fb = Pipeline._violation_feedback(report, secs)
+    assert "六条永不注入" in fb and "{{待补}}" in fb, fb
+    assert "分两步做" in fb and "第一步只做减法" in fb and "第二步再把人声补回去" in fb, fb
+    assert fb.index("六条永不注入") < fb.index("上一版全文"), fb[-200:]
+    assert fb.index("分两步做") < fb.index("上一版全文"), fb[-200:]
+    # 只出现一次：多轮回炉不是把规矩抄 N 遍的理由
+    assert fb.count("六条永不注入") == 1, fb
+
+
+def test_feedback_says_why_when_it_can_name_nothing():
+    """什么问题都点不出来时，仍要说"未通过校验"—— 那句兜底不能变成死代码。
+
+    存在理由（A-9 审查 P3）：两条静态规矩（两段指令）是无条件追加的，
+    判空若写在它们后面就永远为假，于是回炉反馈会出现"没有任何问题清单、
+    却教了模型两段改写规矩"的形状 —— 模型收到的信号是"照抄风格"，没人告诉它这版为什么被退。
+    """
+    clean = {"hard_hits": [], "soft_hits": [], "deviation_pct": 0.0, "segments": [],
+             "ai_tells": None, "tolerance_pct": 10.0, "duration_target": 60,
+             "estimated_seconds": 60, "chars_total": 261, "target_total": 261}
+    fb = Pipeline._violation_feedback(clean)
+    assert "未通过校验" in fb, fb
+    assert fb.index("未通过校验") < fb.index("六条永不注入"), fb
+
+
 def test_fake_llm_signatures_cover_every_real_keyword(tmp_path):
     """假 LLM 的 chat_json 必须接得住真客户端的每一个形参。
 

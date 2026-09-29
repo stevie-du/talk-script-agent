@@ -11,6 +11,12 @@
 // 判据统一盯 **DOM 里出了什么**，不盯文本里有没有那几个字符 ——
 // esc 之后文本里照样有 `<img`，但 DOM 里不会有真元素。
 // CSP 只拦网络请求、不拦事件，onerror 照样能跑，必须靠 esc 兜。
+//
+// ⚠ ②（参数胶囊 option）只能当**结果**检查，**不能给它配变异**：`<option>` 的内容
+//   按 HTML 规范只当文本解析，剥掉 esc() 之后既不多出元素、`o.text` 也照样带 `<img`
+//   —— 两种写法判据给同一个答案。实测把 s? 那条变异指向这里，结果是「全绿 !! 漏检」，
+//   于是那条变异已被撤掉（见 mutate.py 里那段注释）。真注入面是 `<p>`/`<span>`
+//   的 innerHTML：①与本文件之外的面板文件名那条。
 module.exports = async function xss({ evalIn, sleep, check }) {
     // ① 搜索无结果提示：往真实搜索框粘 payload
     const xssSearch = await evalIn(`return (function(){

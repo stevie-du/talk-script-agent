@@ -73,7 +73,23 @@ _verify/_*
 # 本地配置：含明文 API Key，绝不入库（模板见 config.example.yaml）
 config.yaml
 # WorkBuddy 会话与记忆数据（非源码，不入库）
-.workbuddy-ai/
+# ⚠ 例外：memory/ 下那几份**规则文档**必须入库（2026-09-27 修）。
+#   `docs/自动更新方案.md` 逐条引用 PACKAGING.md 与 UI-LAYOUT-RULES 的
+#   第〇·五 / 六 / 十一节，而整目录被 ignore 掉 —— 那些引用在**任何一次
+#   干净克隆或 git worktree 里全是死链**（主仓库能点开，是因为本地有）。
+#   一条指向不在版本库里的文件的引用，等于没有：下一个人按它去查，查不到。
+#   会话日志（2026-09-*.md）与 MEMORY/LESSONS 仍不入库 —— 那是运行态。
+#
+# ⚠ 写法上有个坑：不能先写 `.workbuddy-ai/`（整目录排除）再写 `!` 反选 ——
+#   git 明写「父目录被排除时无法重新包含其中的文件」，`!` 会被静默忽略。
+#   所以要排除的是**目录里的内容**（`dir/*`），目录本身留着，后面的 `!` 才生效。
+.workbuddy-ai/*
+!.workbuddy-ai/memory/
+.workbuddy-ai/memory/*
+!.workbuddy-ai/memory/PACKAGING.md
+!.workbuddy-ai/memory/UI-LAYOUT-RULES.md
+!.workbuddy-ai/memory/BACKEND-RULES.md
+!.workbuddy-ai/memory/DEV-TOOLING.md
 
 # 变异检验的崩溃恢复日志（跑 _verify/mutate.py 时产生，是运行态不是源码）
 _verify/.mutate-journal.json

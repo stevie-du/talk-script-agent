@@ -12,6 +12,40 @@
 import { esc, fmtDur } from "./util.js";
 import { state } from "./store.js";
 import { STATE_LABEL } from "./words.js";
+import { JOB_BUDGET_MS } from "./api.js";
+
+const BASE_TITLE = "TalkScript";
+
+/** 窗口标题里那个分母的**默认**取值：一条作业的常见步数上限
+ *  （选题 1 + 撰写 1 + 校验 1~3 + 分镜 1 + 组装 1，取 5）。
+ *  它只是把「(2/5)」这个分母说成一个可读的数 —— 后端没有整体百分比，
+ *  宁可给个粗的也不编一个假的（编假百分比比不给数字更坏）。
+ *  真有 `total_steps` 时用真的。 */
+const TOTAL_STEPS_HINT = 5;
+
+/** 窗口标题：作业在跑时挂上进度，跑完/没跑时还原。
+ *
+ * ⚠ 为什么需要（2026-09-27 修）：生成要几分钟，而用户会切到别的应用
+ *   （剪映、Excel、微信）去看素材 —— 回来之前他唯一能知道「好了没」的办法
+ *   是切回窗口。全仓没有任何 `document.title` 改动、也没有系统通知，
+ *   所以「切走时不知道完成了」是**完全没出口**的。
+ *   改标题是零依赖、零新增权限的最小解：任务栏 / Alt+Tab 那一行会显示
+ *   「(1/3) 家用电梯怎么挑」与「✓ 完成」，不进窗口也看得见。
+ *   进度取 `1/3` 这种粗粒度而不是百分比：后端没有整体百分比，
+ *   而「已完成几步 / 共几步」是它**真有的**信息。
+ */
+export function setDocTitle(topic, step, total, done) {
+  let t = BASE_TITLE;
+  if (done) t = `✓ ${topic || "生成完成"} — ${BASE_TITLE}`;
+  else if (step && total) t = `(${Math.min(step, total)}/${total}) ${topic || ""} — ${BASE_TITLE}`.trim();
+  else if (topic) t = `${topic} — ${BASE_TITLE}`;
+  if (document.title !== t) document.title = t;
+}
+
+/** 没有作业在跑时把标题还原（并清掉我们挂过的前缀）。 */
+export function resetDocTitle() {
+  if (document.title !== BASE_TITLE) document.title = BASE_TITLE;
+}
 
 /** 还在跑的状态集合 —— 「要不要继续轮询」的唯一判据。
  *
@@ -30,7 +64,7 @@ import { STATE_LABEL } from "./words.js";
  *  会让左栏每 3 秒空转刷新一次、永不停止，行上还挂一颗呼吸点。 */
 export const BUSY_STATES = new Set([
   "queued", "selecting", "writing", "checking", "rewriting", "storyboarding", "packing",
-  "fetching",
+  "fetching", "briefing",
 ]);
 
 
@@ -80,6 +114,8 @@ export function placeholderBody() {
       <span class="gs-live" aria-hidden="true"><i></i><i></i><i></i></span>
       <span class="gs-phase" id="gen-phase">正在生成…</span>
       <span class="gs-elapsed" id="gen-elapsed"></span>
+      <span class="gs-budget" id="gen-budget"
+        title="引擎给每条作业的硬上限。到点会把它停掉并说明原因（不是估算）">${fmtBudgetHint()}</span>
     </div>`;
 }
 
@@ -91,6 +127,16 @@ export function renderProgress(body, snap) {
 
   const steps = snap.steps || [];
   const terminal = snap.state === "done" || snap.state === "failed" || snap.state === "cancelled";
+
+  // 窗口标题跟着作业走（2026-09-27）：切到别的应用时，任务栏 / Alt+Tab
+  // 那一行会显示「(2/4) 家用电梯怎么挑」。`TOTAL_STEPS` 是那口**上限**用的
+  // 常见步数（选题 1 + 撰写 1 + 校验 1~3 + 分镜 1 + 组装 1）——
+  // 它只用来把分母说成一个可读的数，真实分母取引擎已经告诉我们的
+  // 「还剩几步」（`snap.steps` 之外的字段没有就退回这个上限），
+  // 宁可粗也不编：编一个假百分比比不给数字更坏。
+  const totalHint = snap.total_steps || TOTAL_STEPS_HINT;
+  setDocTitle(snap.params?.topic || state.sentTopic || "",
+    Math.min(steps.length + (terminal ? 0 : 1), totalHint), totalHint, false);
 
   // 每步耗时 = 本步 ts 与下一步 ts 之差。⚠ 只有**下一步已经出现**才算得出耗时：
   // 在此之前这一步还在跑，给它显示一个每次轮询都变大一点的数字，就是用户报的
@@ -171,6 +217,20 @@ function fmtElapsed(snap) {
   const started = snap?.created_at ? new Date(snap.created_at).getTime() : null;
   if (!started || isNaN(started)) return "";
   return `已用 ${fmtDur(Math.max(0, Date.now() - started))}`;
+}
+
+/** 这一行还差一句话：**最多等到什么时候**。
+ *
+ * ⚠ 为什么必须写出来（2026-09-27 修）：生成要几分钟，而屏幕上原来只有
+ *   「已用 3 分 12 秒」一个数。用户据此判断不了「正常」还是「卡死」——
+ *   3 分钟时没有任何参照，等到引擎那 20 分钟硬闸（`api.JOB_BUDGET_MS`）
+ *   把它强杀，之前也一句预警都没有。
+ *   所以这里把引擎的**同一个**预算上限直接显示出来：它不是估算，是用户
+ *   真能等到的那条线。措辞不给「通常几分钟」这种没有依据的承诺 ——
+ *   那个数随模型、时长档、重写次数变化，说不准就不说。
+ */
+export function fmtBudgetHint() {
+  return `最长 ${fmtDur(JOB_BUDGET_MS)}，到点会停并说明原因`;
 }
 
 /** 流式思考：只显示尾部（后端已截取），并自动滚到底。

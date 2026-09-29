@@ -122,8 +122,8 @@ MUTATIONS = [
     (
         "s9-7 P2-4 模板包丢 $alt_guide（换一版候选在新包里静默消失）",
         TPL_SKILL_F,
-        "      $alt_guide\n",
-        "\n",
+        "      $alt_guide\n\n      【要求】",
+        "\n      【要求】",
         "tests/test_pack_yaml_integrity.py -k elevator_contract",
     ),
     (
@@ -143,19 +143,11 @@ MUTATIONS = [
     (
         "A-1 占位豁免去掉上限（退回「只要有一个 {{}} 就豁免」）",
         AI,
-        """        ph = len(_PLACEHOLDER_RE.findall(full))
-        if 0 < ph <= max(len(sections), 1) and sum(_count(s.get("text", "")) for s in sections) > 0:
-            return []
-        if re.search(r"\\d", full) or _MEASURE_RE.search(full):
-            return []
-        return [TellHit("no_specific", self.sev("no_specific"), max(ph, 1), "全篇",
-                        "通篇无一个具体数字/时间/数量" + (f"（{ph} 处占位，超过段数）" if ph else ""))]""",
-        """        if re.search(r"\\{\\{[^}]*\\}\\}", full):
-            return []
-        if re.search(r"\\d|[一二三四五六七八九十百]+\\s*(天|次|台|元|块|米|层|分钟|小时|起|个|位|%|％)", full):
-            return []
-        return [TellHit("no_specific", self.sev("no_specific"), 1, "全篇",
-                        "通篇无一个具体数字/时间/数量")]""",
+        """        denial = ""
+        if ph:""",
+        """        denial = ""
+        if ph:
+            return []             # MUTATED: 四条边界整段作废，有占位就豁免""",
         "tests/test_ai_tells.py -k placeholder",
     ),
     (
@@ -171,15 +163,17 @@ MUTATIONS = [
     (
         "A-6#1/#2 取词范围退回全文扫描（LEX_SCOPE 清空）",
         AI,
-        'LEX_SCOPE = {"slogan_closing": "cta_only", "opening_ban": "first_sent"}',
+        'LEX_SCOPE = {"slogan_closing": "cta_only", "opening_ban": "first_sent",\n'
+        '             "helper_closing": "cta_strict"}',
         "LEX_SCOPE = {}",
         "tests/test_ai_tells.py -k 'slogan or opening'",
     ),
     (
         "A-6#7 量词退回 11 个白名单（汉字数词写法翻结果）",
         AI,
-        '        if re.search(r"\\d", full) or _MEASURE_RE.search(full):',
-        '        if re.search(r"\\d|[一二三四五六七八九十百]+\\s*(天|次|台|元|块|米|层|分钟|小时|起|个|位|%|％)", full):',
+        '        if re.search(r"\\d", body) or _MEASURE_RE.search(body):',
+        '        if re.search(r"\\d", body) or re.search(r"[一二三四五六七八九十百]+'
+        '\\s*(?:天|次|台|元|块|米|层|分钟|小时|起|个|位)", body):',
         "tests/test_ai_tells.py -k measure",
     ),
     (
@@ -264,7 +258,7 @@ MUTATIONS = [
         "A-3 no_specific 永不报（BORDERLINE 的「钉住现状」必须因此报红）",
         AI,
         """        return [TellHit("no_specific", self.sev("no_specific"), max(ph, 1), "全篇",
-                        "通篇无一个具体数字/时间/数量" + (f"（{ph} 处占位，超过段数）" if ph else ""))]""",
+                        "通篇无一个具体数字/时间/数量" + (f"（{denial}）" if denial else ""))]""",
         "        return []",
         "tests/test_aitells_false_positive.py -k borderline",
     ),
@@ -422,8 +416,8 @@ MUTATIONS = [
     (
         "B 忽略记录只存布尔（算不出「连续几天」）",
         INTEL_F,
-        'rec[str(key)] = today or datetime.now().strftime("%Y-%m-%d")',
-        'rec[str(key)] = "1"',
+        '    rec[str(key)] = {"days": days}',
+        '    rec[str(key)] = "1"',
         "tests/test_intel.py -k ignore_only_affects_today",
     ),
     (
@@ -444,9 +438,11 @@ MUTATIONS = [
         "B add_if_room 无视 states 参数（两族额度合成一族）",
         JOBS_F,
         "                   if same_quota_family(j.kind, job.kind)\n"
-        "                   and j.state in states and not j.stranded) >= limit:",
+        "                   and j.state in states and not j.stranded) >= limit:\n"
+        "                return False\n",
         "                   if same_quota_family(j.kind, job.kind)\n"
-        "                   and j.state in BUSY_STATES and not j.stranded) >= limit:",
+        "                   and j.state in BUSY_STATES and not j.stranded) >= limit:\n"
+        "                return False\n",
         "tests/test_intel.py -k its_own_limit",
     ),
     (
@@ -492,14 +488,14 @@ MUTATIONS = [
     (
         "UI「忽略」不本地摘掉（要等一整轮才消失）",
         TOPICS_F,
-        "    for (const g of data.groups || []) g.items = (g.items || []).filter(it => itemKey(it) !== key);",
+        "    for (const g of data.groups || []) g.items = (g.items || []).filter(it => !dropped.has(itemKey(it)));",
         "",
         "verify:topics",
     ),
     (
         "UI「未接入 N」不渲染（未接入的平台变成界面上不存在）",
         TOPICS_F,
-        '    chips.push(`<span class="m-chip" title="${esc(why.join("；"))}">未接入 ${off.length}</span>`);',
+        '    notes.push(`<span class="src-note" title="${esc(why.join("；"))}">未接入 ${off.length}</span>`);',
         "",
         "verify:topics",
     ),
@@ -550,8 +546,8 @@ MUTATIONS = [
     (
         "s10-5 .src-pill.on 只改字色不改底色（选中态塌回「看不出区别」）",
         CSS_F,
-        ".src-pill.on { background: var(--ink); color: var(--text-inv); }",
-        ".src-pill.on { color: var(--text-inv); }",
+        ".src-pill.on { background: var(--fill); color: var(--text-1); font-weight: 600; }",
+        ".src-pill.on { color: var(--text-1); font-weight: 600; }",
         "verify:topics",
     ),
     (
@@ -564,8 +560,8 @@ MUTATIONS = [
     (
         "s10-7 页签条给满栏内边距（与阅读面差出 --s6，左边界不再重合）",
         CSS_F,
-        "  margin-inline: auto; margin-bottom: 0; padding: 0;",
-        "  margin-inline: auto; margin-bottom: 0; padding: 0 var(--s6);",
+        "  top: 0; padding: var(--s6) 0 0; gap: var(--s6);",
+        "  top: 0; padding: var(--s6) var(--s6) 0; gap: var(--s6);",
         "verify:topics",
     ),
     # ── s11 组（2026-09-27 全方位审查后补的修复）──────────────────────
@@ -585,10 +581,15 @@ MUTATIONS = [
         "verify:topics",
     ),
     (
-        "s11-3 四格指标组间缝退回与组内同宽（「0.30 供给 S」读成一个词组）",
+        # 原来这条指 `.sig-grid > :nth-child(3n)` —— 卡片那四格轨道已被**整段撤掉**
+        # （真实数据是 D=0.136 / S=0 / E=null，四格里三格常年空刻度）。同一个缺陷
+        # 在排行面换了个形状活着：四根条靠"组间缝比组内缝宽"才读成四根，
+        # 缝一equal 就是「0.92 名次」与下一根粘成一个词组。判据见 selState 那组
+        # 同一层的 `sigGaps`（比的是计算值，不写死 px）。
+        "s11-3 四根信号条的组间缝退回与组内同宽（「0.92 名次」与下一根粘成一个词组）",
         CSS_F,
-        ".sig-grid > :nth-child(3n) { margin-right: var(--s4); }",
-        "",
+        ".rank-signals { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--s2); }",
+        ".rank-signals { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--s1); }",
         "verify:topics",
     ),
     (
@@ -674,9 +675,9 @@ MUTATIONS = [
     (
         "s13-3 有人在渲染处写回别名（✓ 合格 / 需人工确认）——静态禁令的正对照",
         RESULT_F,
-        "  const verdict = `${VERDICT[vk].word}${vk !== \"none\" && hardN ? ` · ${hardN} 处硬伤` : \"\"}`;",
+        '  const verdict = `${VERDICT[vk].word}${vk !== "none" ? hardSuffix(hardN) : ""}`;',
         '  const verdict = vk === "ok" ? "✓ 合格" : "✗ 需人工确认";',
-        "verify:",
+        "verify:static",
     ),
     (
         "s13-4 左栏那一行用第二套词（「未测」与表里的「没有校验结论」并存）",
@@ -690,7 +691,7 @@ MUTATIONS = [
         WORDS_F,
         "  cancelled: \"已停止\",",
         "  cancelled: \"已取消\",",
-        "verify:",
+        "verify:static",
     ),
     (
         "s13-6 节奏列不查表直接印机器码（daily / on_demand 上屏）",
@@ -704,8 +705,10 @@ MUTATIONS = [
     (
         "s14-1 卡片把机会分再除以 100 印成 0.72（与同屏图例的「≥ 60」两套刻度）",
         TOPICS_F,
-        "      ${sigRow(\"机会分\", opp, false, true)}",
-        "      ${sigRow(\"机会分\", opp === null || opp === undefined ? null : opp / 100)}",
+        '  const opp = (sc.opportunity === null || sc.opportunity === undefined)\n'
+        '    ? "—" : esc(String(Math.round(sc.opportunity)));',
+        '  const opp = (sc.opportunity === null || sc.opportunity === undefined)\n'
+        '    ? "—" : esc(String(Math.round(sc.opportunity / 100)));',
         "verify:topics",
     ),
     (
@@ -713,21 +716,21 @@ MUTATIONS = [
         HTML_F,
         "            <span><i class=\"hi\"></i>机会分 ≥ 60 · 值得做</span>",
         "            <span><i class=\"hi\"></i>机会分 ≥ 70 · 值得做</span>",
-        "verify:",
+        "verify:static",
     ),
     (
         "s14-3 图例写回代码里不存在的规则（那条「50–59 要换角度」就是这么来的）",
         HTML_F,
         "            <span><i class=\"low\"></i>供给 S ≥ 0.70 · 红海，要换角度</span>",
         "            <span><i class=\"mid\"></i>50–59 · 要换角度</span>",
-        "verify:",
+        "verify:static",
     ),
     (
         "s14-4 渲染层读回条目级 it.warn（引擎从不发这个键的死出口）",
         TOPICS_F,
-        "    <div class=\"topic-quote\">${esc(it.desc || it.ev || \"\")}${from}</div>",
-        "    <div class=\"topic-quote\">${esc(it.desc || it.ev || \"\")}${from}${it.warn || \"\"}</div>",
-        "verify:",
+        '    <div class="t-desc${/^https?:/.test(desc) ? " url" : ""}" title="${esc(prov)}">${esc(desc)}</div>',
+        '    <div class="t-desc${/^https?:/.test(desc) ? " url" : ""}" title="${esc(prov)}">${esc(desc)}${it.warn || ""}</div>',
+        "tests/test_intel_contract.py -k item_level_warn",
     ),
     (
         "s14-5 卡片不再渲染 flags（结论那排标记整条下线：机会分高 / 数据不足 都没了）",
@@ -743,14 +746,14 @@ MUTATIONS = [
         SETTINGS_F,
         "  const ok = await appConfirm(\"卸载行业包\",",
         "  const ok = await appConfirm(\"卸载技能包\",",
-        "verify:",
+        "verify:static",
     ),
     (
         "s15-2 选择器把内部模式名直接印上屏（mock 模式 / 夹具是开发用语）",
         UI_F,
         "  const cur = m.mock ? \"演示模式\"",
         "  const cur = m.mock ? \"mock 模式\"",
-        "verify:",
+        "verify:static",
     ),
     (
         "s15-3 演示模式的悬停说明仍写「当前模型 + 切换后生效」（根本没在调模型）",
@@ -799,8 +802,8 @@ MUTATIONS = [
     (
         "s16-5 渲染层读一个引擎从不发的键（契约扫描的正对照）",
         TOPICS_F,
-        "    <div class=\"topic-quote\">${esc(it.desc || it.ev || \"\")}${from}</div>",
-        "    <div class=\"topic-quote\">${esc(it.desc || it.phantom_note || it.ev || \"\")}${from}</div>",
+        '    <div class="t-desc${/^https?:/.test(desc) ? " url" : ""}" title="${esc(prov)}">${esc(desc)}</div>',
+        '    <div class="t-desc${/^https?:/.test(desc) ? " url" : ""}" title="${esc(prov)}">${esc(it.phantom_note || desc)}</div>',
         "tests/test_intel_contract.py -k reads_only_keys",
     ),
     # ── s17 组（2026-09-27 第 8 轮审查的两条后端 P1：id→label 归并 / 不引用过期快照）──
@@ -810,7 +813,7 @@ MUTATIONS = [
         SESS_F,
         "    const atCap = cap > 0 && (items || []).length >= cap;",
         "    const atCap = cap > 0 && state.meta.history.total > cap;",
-        "verify:",
+        "verify:static",
     ),
     (
         "s17-2 旧产物按 id 存的失败原因不再归并（「没抓到」在界面上变成「今天没货」）",
@@ -843,14 +846,14 @@ MUTATIONS = [
         RESULT_F,
         "${esc(severityLabel(h.severity))}",
         "${esc(h.severity)}",
-        "verify:",
+        "verify:static",
     ),
     (
         "s18-3 失败详情把包目录 slug 印给人看",
         JOBSJS_F,
         "行业包：${failParams.pack ? packLabel(failParams.pack) : \"-\"}",
         "行业包：${failParams.pack || \"-\"}",
-        "verify:",
+        "verify:static",
     ),
     (
         "s18-4 悬停说明又替后端宣布「作业已释放」（从没核过的事实）",
@@ -858,14 +861,14 @@ MUTATIONS = [
         # 锚点跟的是第 15 批改后的那句话（原文案尾巴上的「整体重生成」被收成「换一版」）
         '          : "单段重写只在刚生成的那条上可用；历史记录请用「换一版」"}',
         '          : "历史记录不可局部重写（后台作业已释放），可用「换一版」"}',
-        "verify:",
+        "verify:static",
     ),
     (
         "s18-5 导出的 md 头部写目录 slug（交付物与界面两个名字）",
         RESULT_F,
         "    `- ${meta}（${packLabel(r.pack)}）`, \"\",",
         "    `- ${meta}（${r.pack}）`, \"\",",
-        "verify:",
+        "verify:static",
     ),
     # ── s19 组（2026-09-27 第 8 轮审查 后端 P2/P3：认不出的节奏要留话 / 交付物 repr）──
     # 跑这一组：PYTHONUTF8=1 .venv/Scripts/python.exe _verify/mutate.py -k s19
@@ -897,14 +900,14 @@ MUTATIONS = [
         RESULT_F,
         "    const over = !!(info && info.quota && info.chars > info.quota * QUOTA_OVER_RATIO);",
         "    const over = !!(info && info.quota && info.chars > info.quota * 1.3);",
-        "verify:",
+        "verify:static",
     ),
     (
         "s20-2 节奏条又宣布「各段都不超配额」（超了 20% 的段也被说成合规）",
         RESULT_F,
         "        ${over ? `${over} 段超配额三成以上` : \"各段超配额都不到三成\"}",
         "        ${over ? `${over} 段超配额` : \"各段都不超配额\"}",
-        "verify:",
+        "verify:static",
     ),
     (
         "s20-3 更新被拒的提示又把主进程状态码印给人看（idle / downloaded）",
@@ -1011,8 +1014,11 @@ MUTATIONS = [
     (
         "B7 模板摘掉 $intel_block 引用（接线断：引擎注入了但模板不用）",
         SKILL_F,
-        "      $intel_block\n",
-        "      # 变异：摘掉引用\n",
+        # 电梯包里有两处 `$intel_block`（select 与 write），判据按 stage 分参数逐条查。
+        # 原来这条只写 `      $intel_block\n` —— 全文两处，replace-first 落在 select 那处，
+        # 于是"锚点歧义"侥幸没出事；写全上下文之后，它明确只摘 select 那一处。
+        "      $intel_block\n    # 钩子库不在这里声明",
+        "      # 变异：摘掉引用\n    # 钩子库不在这里声明",
         "tests/test_intel_b7.py -k reference",
     ),
     (
@@ -1066,17 +1072,17 @@ MUTATIONS = [
     (
         "P0-2 搜索提示退回不 esc（用户输入进 innerHTML = XSS）",
         TOPICS_F if False else ROOT / "desktop/renderer/js/sessions.js",
-        '`没有匹配「${esc(query)}」的会话`',
-        '`没有匹配「${query}」的会话`',
+        '没有匹配「${esc(query)}」的会话',
+        '没有匹配「${query}」的会话',
         "verify:xss",
     ),
-    (
-        "P0-2 参数胶囊 option 退回不 esc（pack.yaml 数据进 innerHTML = XSS）",
-        UI_F,
-        'const o = el("option", "", key === "duration" ? `${esc(String(opt))}s` : esc(String(opt)));',
-        'const o = el("option", "", key === "duration" ? `${String(opt)}s` : String(opt));',
-        "verify:xss",
-    ),
+    # （已撤）原「P0-2 参数胶囊 option 退回不 esc」：`<option>` 的内容按 HTML 规范
+    #   只当**文本**解析，剥掉 esc() 之后 DOM 里既不会多出元素、`o.text` 也照样带着
+    #   `<img` —— 判据两种写法都给同一个结果，实测「全绿 !! 漏检」。
+    #   留一条永远不会红的变异比没有更糟（它会让人以为这一路有门禁），所以撤掉；
+    #   `sections/xss.js` 那半边继续当**结果**检查（不注入元素、payload 以文本呈现），
+    #   真正的注入面由另两条守着：搜索无结果提示（`<p>` 的 innerHTML）与
+    #   行业包面板的文件名（`<span>` 的 innerHTML，见下面 P0-2 面板文件名）。
     (
         "P0-2 面板文件名退回不 esc（磁盘路径进 innerHTML = XSS）",
         ROOT / "desktop/renderer/js/settings.js",
@@ -1103,9 +1109,13 @@ MUTATIONS = [
         JOBS_F,
         """            if sum(1 for j in self._jobs.values()
                    if same_quota_family(j.kind, job.kind)
-                   and j.state in states and not j.stranded) >= limit:""",
+                   and j.state in states and not j.stranded) >= limit:
+                return False
+""",
         """            if sum(1 for j in self._jobs.values()
-                   if j.state in states and not j.stranded) >= limit:""",
+                   if j.state in states and not j.stranded) >= limit:
+                return False
+""",
         "tests/test_intel.py -k queued",
     ),
     (
@@ -1202,8 +1212,8 @@ MUTATIONS = [
     (
         "s24-6 建议胶囊把档位写死成 ASCII（30s / 90s 与下拉里的「30 秒」不是一个读法）",
         RESULT_F,
-        "  if (dur > 30) chips.push({ label: `压缩到 ${sec(30)}`, act: \"duration\", value: 30 });",
-        "  if (dur > 30) chips.push({ label: `压缩到 30s`, act: \"duration\", value: 30 });",
+        "  if (shorter) chips.push({ label: `压缩到 ${sec(shorter)}`, act: \"duration\", value: shorter });",
+        "  if (shorter) chips.push({ label: `压缩到 30s`, act: \"duration\", value: shorter });",
         "tests/test_unit_vocabulary.py -k no_site_renders",
     ),
     (
@@ -1239,9 +1249,9 @@ MUTATIONS = [
     (
         "s25-3 草稿的反面又改口叫「精修包」（同一件事第二个名字）",
         RESULT_F,
-        "<span class=\"ok\">✅ 已校对</span>",
-        "<span class=\"ok\">✅ 精修包</span>",
-        "verify:",
+        '<span class="ok">✅ ${PROOF.cleared}</span>',
+        '<span class="ok">✅ 精修包</span>',
+        "verify:static",
     ),
     (
         "s25-4 建包轮询的兜底截止写回裸毫秒数（后端预算一改就在等一个不存在的时限）",
@@ -1380,6 +1390,988 @@ MUTATIONS = [
         "        lines.append(f\"**【{label}】** {_num(tm['start'])}-{_num(tm['end'])} 秒\"",
         "        lines.append(f\"**【{label}】** {tm['start']}-{tm['end']} 秒\"",
         "tests/test_ai_tells.py -k trailing_zeros",
+    ),
+    # ── s33 组（第 25 批：补齐**长期缺席的变异靶子**）────────────────
+    # 为什么补：靶子清单是历次修复轮「顺手加一条」攒出来的，于是
+    # 几个文件**一次都没被改坏过** —— 而「没被变异过」的断言，
+    # 我们并不知道它到底能不能红（本仓反复栽在这上面）。
+    # ⚠ 下面每条都**先跑一遍 selector 确认它选得到东西**，再钉进来：
+    #   写变异时顺手编一个 `-k` 名字是很自然的事，而选不到东西的
+    #   selector 会让这条变异"跑完了、全绿、什么都没验"——
+    #   比不写还坏（它会让人以为这个文件被覆盖过了）。
+    (
+        "s33-1 checker：非法语速不再兜底（除零直接炸，且在烧完 token 之后）",
+        ROOT / "app/checker.py",
+        "    try:\n        r = float(rate)\n    except (TypeError, ValueError):\n        r = DEFAULT_RATE\n    if r <= 0:\n        r = DEFAULT_RATE",
+        "    try:\n        r = float(rate)\n    except (TypeError, ValueError):\n        r = DEFAULT_RATE\n    if r <= 0:\n        r = 0.0",
+        "tests/test_engine_api.py -k split_and_estimate",
+    ),
+    (
+        "s33-2 schemas：主题最小长度从 2 放成 0（空主题不再被拒）",
+        ROOT / "app/schemas.py",
+        '    topic: str = Field(min_length=2, max_length=TOPIC_MAX, description="主题")',
+        '    topic: str = Field(min_length=0, max_length=TOPIC_MAX, description="主题")',
+        "tests/test_server_hardening.py -k validation_errors_are_said_in_chinese",
+    ),
+    (
+        "s33-3 config：环境变量不再过区间夹逼（TALKSCRIPT_MAX_TOKENS=100 曾静默生效）",
+        ROOT / "app/config.py",
+        "    bounds = _ENV_NUM_BOUNDS.get(name)\n    if bounds and not (bounds[0] <= v <= bounds[1]):",
+        "    bounds = None\n    if bounds and not (bounds[0] <= v <= bounds[1]):",
+        "tests/test_env_bounds.py -k clamped",
+    ),
+    (
+        "s33-4 fileio：os.replace 失败不再重试（Windows 上文件被占用就直接炸）",
+        ROOT / "app/fileio.py",
+        "        except OSError:\n            if attempt == _REPLACE_RETRIES - 1:\n                raise\n            time.sleep(_REPLACE_BACKOFF * (attempt + 1))",
+        "        except OSError:\n            raise",
+        "tests/test_transient_read_fault.py -k replace",
+    ),
+    (
+        "s33-5 llm：Authorization 掩码不再吃 Bearer（Key 原样进日志）",
+        LLM_F,
+        'r"""(?ix)(authorization)\\s*["\']?\\s*[:=]\\s*["\']?\\s*(?:bearer\\s+)?\\S+""")',
+        'r"""(?ix)(authorization)\\s*["\']?\\s*[:=]\\s*["\']?\\s*\\S+""")',
+        "tests/test_llm_retry.py -k non_sk_shaped_key_in_authorization_header",
+    ),
+    (
+        "s33-6 rules/*.md：15 秒档配额写回 40/15（与 pack.yaml 对不上，P1-30 那一格）",
+        ROOT / "packs/_template/rules/duration.md",
+        "| 15s | 70 | 15 | 47 | 8 |",
+        "| 15s | 70 | 15 | 40 | 15 |",
+        "tests/test_pack_yaml_integrity.py -k duration_md",
+    ),
+
+    # ── s34 组（2026-09-27 复审轮）：每条对应复审发现的那一处修复 ──────
+    (
+        "s34-1 jobs.js：失败卡退回读全局 meta.model（modelByJob 表被掏空）",
+        JOBSJS_F,
+        "modelByJob.get(jobId) || state.meta?.model || \"-\"",
+        "state.meta?.model || \"-\"",
+        "verify:review",
+    ),
+    (
+        "s34-2 pipeline.py：阶段闸门退回「有 draft 就整段放过」"
+        "（draft 路径仍渲染裸下标 stages.write，复审 P1-1）",
+        PIPE_F,
+        '    required = ["write"] if "draft" in stages else ["select", "write"]',
+        '    required = [] if "draft" in stages else ["select", "write"]',
+        "tests/test_pack_yaml_integrity.py -k with_draft_but_no_write",
+    ),
+    (
+        "s34-3 pipeline.py：阶段闸门挪回作业线程（受理时不再同步验 → 回 200 + job_id，"
+        "用户要等一整轮才看到失败，复审 P1-1 补充）",
+        PIPE_F,
+        "        _assert_stages_usable(pack)\n        jid = new_job_id()",
+        "        jid = new_job_id()",
+        "tests/test_pack_yaml_integrity.py -k missing_write_stage",
+    ),
+    (
+        "s34-4 sessions.js：整组删除不再清屏（fnBody 判据能抓住吗？）",
+        SESS_F,
+        "  if (state.result && ids.includes(state.result.id) && !failed.includes(state.result.id)) {\n"
+        "    setResult(null);\n    T.clearThread();",
+        "  if (state.result && ids.includes(state.result.id) && !failed.includes(state.result.id)) {\n"
+        "    setResult(null);",
+        "verify:review",
+    ),
+    (
+        "s34-5 ui.js：去掉 defaultPrevented 闸门（Ctrl+Enter 双触发）",
+        UI_F,
+        "    if (e.defaultPrevented) return;\n    if (mod && e.key === \"Enter\") {",
+        "    if (mod && e.key === \"Enter\") {",
+        "verify:review",
+    ),
+    (
+        "s34-6 ui.js：停止的空窗反馈整段去掉（键在等后端回话时还写着「停止生成」）",
+        UI_F,
+        "  const stopping = canStop && state.stopping === true;",
+        "  const stopping = false;",
+        "verify:review",
+    ),
+    (
+        "s34-7 settings.js：不可逆确认框里的「没法撤销」提醒去掉",
+        SETTINGS_F,
+        "没法撤销",
+        "注意",
+        "verify:review",
+    ),
+    (
+        "s34-8 result.js：合规页签退回二分（passed 缺失时亮红，与横幅一屏两话）",
+        RESULT_F,
+        "  const ck = verdictKey(passState(ch));\n"
+        "  const comply = VERDICT[ck];",
+        '  const ck = passState(ch) === true ? "ok" : "no";\n'
+        "  const comply = VERDICT[ck];",
+        "verify:review",
+    ),
+    (
+        "s34-9 settings.js：包详情那行又手写一遍「内容需人工校对」"
+        "（PROOF.warn 之外的第二份 —— 这条是上面两条守卫真的报出来的）",
+        SETTINGS_F,
+        "`（草稿包：${PROOF.warn}后投产）`",
+        '"（草稿包：内容需人工校对后投产）"',
+        "verify:review",
+    ),
+    (
+        "s34-10 words.js：STATE_LABEL.checking 又写回「代码校验中」（工程术语回界面）",
+        WORDS_F,
+        'checking: "校验中"',
+        'checking: "代码校验中"',
+        "verify:review",
+    ),
+    (
+        # ⚠ 靶子打在 **index.html 的兜底**上，不是打在 main.js 上。
+        #   把 main.js 的回填换成一个手写字面量，index.html 里那份兜底
+        #   与真值本来就一字不差 —— 屏幕上什么都看不出来，键面与表在
+        #   行为上仍然一致。那是**语义空转**，不是"守卫没守住"：
+        #   变异检验认的是"改坏用户能看见的东西"，而那一改谁都看不见。
+        "s34-11 index.html：兜底键面忘了跟表一起改（脚本没起来时读屏读到旧词）",
+        HTML_F,
+        'id="pi-undraft" title="人工校对完成后，去掉草稿标记">标记为已校对<',
+        'id="pi-undraft" title="人工校对完成后，去掉草稿标记">标记为已校完<',
+        "verify:review",
+    ),
+    (
+        "s34-12 jobs.js：停止流程走完不把 stopping 交还（键永久卡在「正在停止…」）",
+        JOBSJS_F,
+        "  state.stopping = false;\n  if (err) {",
+        "  if (err) {",
+        "verify:review",
+    ),
+    (
+        "s34-13 server.py：zip 上传不再分块判上限（大包会一路读进内存）",
+        SRV_F,
+        "        if len(buf) > MAX_ZIP_BYTES:\n"
+        "                    raise HTTPException(400,\n"
+        "                        f\"zip 太大（上限 {MAX_ZIP_BYTES // 1024 // 1024}MB）\")",
+        "        if False:\n            pass",
+        "tests/test_pack_import_api.py -k oversized_zip",
+    ),
+    (
+        "s34-14 pipeline.py：抓取不再有收工闸门（点了停止，「正在停止…」挂到 8 个源全跑完）",
+        PIPE_F,
+        "                should_stop=lambda: self._stop_check(job))",
+        "                )",
+        "tests/test_intel.py -k cancels_a_fetch_midway",
+    ),
+
+    # ── s35 组（2026-09-27 第二轮复审的修复）─────────────────────────
+    # 这一组全是**第二轮复审**发现的：前一轮的守卫自己也有 bug，
+    # 以及守卫守着的实现自己也有洞。每条都对应那处发现。
+    (
+        "s35-1 sessions.js：删整组不再排除失败的那条（右屏与事实相反）",
+        SESS_F,
+        "  if (state.result && ids.includes(state.result.id) && !failed.includes(state.result.id)) {",
+        "  if (state.result && ids.includes(state.result.id)) {",
+        "tests/test_job_state_vocabulary_consistency.py -k abandoning",
+    ),
+    (
+        "s35-2 sessions.js：删整组不再排除失败的那条（正在跑的那条）",
+        SESS_F,
+        "  if (state.job && ids.includes(state.job.id) && !failed.includes(state.job.id)) {",
+        "  if (state.job && ids.includes(state.job.id)) {",
+        "tests/test_job_state_vocabulary_consistency.py -k abandoning",
+    ),
+    (
+        "s35-3 jobs.js：打开无产物那条时不再清 state.result"
+        "（清屏判据的前提被破坏 → 删别的记录会误清右屏）",
+        JOBSJS_F,
+        "    setResult(null);\n    T.addUserMsg(state.sentTopic, { onEdit: onEditUserMsg });\n"
+        "    const body = T.addAssistantMsg();\n    T.pushVersion(body, { id, state: r.state",
+        "    T.addUserMsg(state.sentTopic, { onEdit: onEditUserMsg });\n"
+        "    const body = T.addAssistantMsg();\n    T.pushVersion(body, { id, state: r.state",
+        "verify:review",
+    ),
+    (
+        "s35-4 pipeline.py：阶段闸门不再查 system/user_template"
+        "（缺一格 → 烧完钱才 KeyError）",
+        PIPE_F,
+        '        gone = [k for k in ("system", "user_template")\n'
+        '                if not str((cfg.get(k) or "")).strip()]',
+        "        gone = []",
+        "tests/test_pack_yaml_integrity.py -k stage_without_its_templates",
+    ),
+    (
+        "s35-5 pipeline.py：_render_stage 不再查那一格能不能渲染"
+        "（rewrite_segment 缺了就 KeyError）",
+        PIPE_F,
+        "        cfg = (pr.skill.get(\"stages\") or {}).get(stage)\n"
+        "        if not isinstance(cfg, dict) or not str(cfg.get(\"system\") or \"\").strip() \\\n"
+        "                or not str(cfg.get(\"user_template\") or \"\").strip():\n"
+        "            raise PackBrokenError(\n"
+        "                f\"行业包 {pr.pack.dir.name} 的「{stage}」阶段配不完整\"\n"
+        "                \"（skill.yaml 的 stages 里这一格要写全 system 与 user_template）\")\n",
+        "",
+        "tests/test_pack_yaml_integrity.py -k stage_without_its_templates",
+    ),
+    (
+        "s35-6 review.js：fnBody 退回定长窗口（两窗重叠 → 单条删除那半静默空转）",
+        ROOT / "_verify/sections/review.js",
+        "    const lines = src.slice(i).split(\"\\n\");\n"
+        "    const out = [lines[0]];\n"
+        "    for (let k = 1; k < lines.length; k++) {\n"
+        "      // 下一个顶层声明 = 这个函数已经结束（两个函数挨着写的情形）\n"
+        "      if (/^(export\\s+)?(async\\s+)?function\\s/.test(lines[k])) break;\n"
+        "      out.push(lines[k]);\n"
+        "    }\n"
+        "    return out.join(\"\\n\");",
+        "    return src.slice(i, i + 1800);",
+        "verify:review",
+    ),
+    (
+        "s35-7 review.js：切函数体那条前置自查被删掉（重叠就没人知道了）",
+        ROOT / "_verify/sections/review.js",
+        "  check(\"（前置）取函数体的切片没有越过下一个函数（否则会替别人交差）\",",
+        "  if (false) check(\"（前置）取函数体的切片没有越过下一个函数（否则会替别人交差）\",",
+        "verify:review",
+    ),
+    (
+        "s35-8 result.js：硬伤后缀又手抄一份（页头与页签两个名字说同一个数）",
+        RESULT_F,
+        "  return n > 0 ? ` · ${n} 处硬伤` : \"\";",
+        "  return n > 0 ? ` · ${n} 硬伤` : \"\";",
+        "verify:review",
+    ),
+    (
+        "s35-9 words.js：会话标题那一格被删（CHAT 的真值消失）",
+        WORDS_F,
+        "export const CHAT = {\n  title: \"新对话\",\n};",
+        "export const CHAT = {\n  title: \"新会话\",\n};",
+        "verify:review",
+    ),
+    # ── s36 组（第 29 批：热点排行 / 选题建议，需求方案三层落地的每一条验收）──
+    # 跑这一组：PYTHONUTF8=1 .venv/Scripts/python.exe _verify/mutate.py -k s36
+    # 阶段一 #1：S 的「没数据 ≠ 零竞争」
+    (
+        "s36-1 该细分没有 B站供给时 S 退回 0.0（把没证据印成零竞争、蓝海）",
+        INTEL_F,
+        "        S = round(sup_n[s] / max_sup, 3) if max_sup and sup_n[s] else None",
+        "        S = round(sup_n[s] / max_sup, 3) if max_sup else None",
+        "tests/test_intel_ranking.py -k S_is_none",
+    ),
+    # 阶段一 #2：归属要吃 seed
+    (
+        "s36-2 seed 不进归属字段表（§1.2 #4②：实盘那批空桶条目又落回空桶）",
+        INTEL_F,
+        'SEGMENT_FIELDS = ("seed", "keyword", "title", "desc")',
+        'SEGMENT_FIELDS = ("keyword", "title", "desc")',
+        "tests/test_intel_ranking.py -k seed",
+    ),
+    # 阶段一 #3：E 用首见兜底
+    (
+        "s36-3 热榜条目没有 published 时 E 不再用事件首见兜底（E 恒 null）",
+        INTEL_F,
+        "            if ev and ev.get(\"seen_before\"):",
+        "            if False:",
+        "tests/test_intel_ranking.py -k E_uses_first_seen",
+    ),
+    # 阶段一 #4：D 按事件数 + 聚类阈值
+    (
+        "s36-4 D 退回按条目数计新收录（跨源重复继续污染 D）",
+        INTEL_F,
+        "    new_n = {s: len([e for e in events",
+        "    new_n = {s: len([it for it in items",
+        "tests/test_intel_ranking.py -k two_platforms_same_event",
+    ),
+    (
+        "s36-5 事件归并阈值调松（同一件事被拆成两条，来源多样性失真）",
+        INTEL_F,
+        "EVENT_JACCARD = 0.6",
+        "EVENT_JACCARD = 0.95",
+        "tests/test_intel_ranking.py -k cluster_regression_set",
+    ),
+    (
+        "s36-6 包含关系那支去掉长度闸（两字词把整包吞成一个事件）",
+        INTEL_F,
+        "    if (len(a) >= EVENT_MIN_CONTAIN and b.endswith(a)) or \\\n"
+        "       (len(b) >= EVENT_MIN_CONTAIN and a.endswith(b)):",
+        "    if b.endswith(a) or a.endswith(b):",
+        "tests/test_intel_ranking.py -k containment_branch_needs",
+    ),
+    # 阶段一 #5/#6：热点分与「hot 有人接」
+    # ⚠ **后端变异的 selector 不许指 verify:topics**：界面那一组跑的是 verify.js 里
+    #   手写的 INTEL_TODAY 桩数据，改 `app/intel.py` 它对不上 —— 实测三条"漏检"
+    #   全是这个形状（s36-8 / s36-16 第一轮就被记成漏检）。后端口径指 pytest，
+    #   只有**渲染层自己的写法**才指 verify:topics。
+    (
+        "s36-7 名次强度不参与打分（§3.2 的四根条只剩三根有数）",
+        INTEL_F,
+        '            "rank": (sum(strength) / len(strength)) if strength else None,',
+        '            "rank": None,',
+        "tests/test_intel_ranking.py -k hot_score_terms",
+    ),
+    (
+        "s36-8 事件行不再带平台真实热度（§1.2 #1「hot 抓了没人接」复现）",
+        INTEL_F,
+        '            "hot": hot_now,',
+        '            "hot": None,',
+        "tests/test_intel_ranking.py -k platform_hot_is_numeric",
+    ),
+    (
+        "s36-9 增速窗口不满也照样算（把 1 天历史当基线，爆发中天天见）",
+        INTEL_F,
+        "    if hot_now is None or len(hot_series) < baseline_days:",
+        "    if hot_now is None:",
+        "tests/test_intel_ranking.py -k velocity_and_breakout",
+    ),
+    (
+        "s36-10 旧产物降级把「算不出」写成 0 分（三态塌回两态）",
+        INTEL_F,
+        '            "decay": 0.0, "growth": None, "hot_score": None, "status": "",',
+        '            "decay": 0.0, "growth": None, "hot_score": 0, "status": "",',
+        "tests/test_intel_ranking.py -k old_latest_json_without_events",
+    ),
+    # 阶段二 #1/#2：新源 + 健壮性
+    (
+        "s36-11 微博不再覆盖 Referer（实测 403，整源今天静默没了）",
+        INTEL_F,
+        "    data = ctx.get_json(WEIBO_URL, headers={\"Referer\": WEIBO_REFERER})",
+        "    data = ctx.get_json(WEIBO_URL)",
+        "tests/test_intel_ranking.py -k weibo_hot_needs_site_referer",
+    ),
+    (
+        "s36-12 知乎退回 401 的死端点（§1.2 #6「401 之后永远失败」）",
+        INTEL_F,
+        '    "zhihu": ("https://api.zhihu.com/topstory/hot-list", "zhihu"),',
+        '    "zhihu": ("https://www.zhihu.com/api/v3/feed/topstory/hot-lists/total", "zhihu"),',
+        "tests/test_intel_ranking.py -k zhihu_board_moved",
+    ),
+    (
+        "s36-13 永久 4xx 也走重试（一次 12 秒变两次，且掩盖「这源坏了」）",
+        INTEL_F,
+        "                if i + 1 >= self.attempts or _is_permanent_http_error(e):",
+        "                if i + 1 >= self.attempts:",
+        "tests/test_intel_ranking.py -k permanent_4xx",
+    ),
+    (
+        "s36-14 重试不等待（退避只是注释里的承诺）",
+        INTEL_F,
+        "                self.sleep(wait)",
+        "                pass",
+        "tests/test_intel_ranking.py -k retries_once_with_backoff",
+    ),
+    (
+        "s36-15 连续失败到闸值仍照常去试（界面说不出「今日跳过」）",
+        INTEL_F,
+        "        if h.get(\"skip\"):",
+        "        if False:",
+        "tests/test_intel_ranking.py -k skips_after_three_fails",
+    ),
+    (
+        "s36-16 today() 不把 cooling 态透出（跳过被说成「已接入，今天没有命中」）",
+        INTEL_F,
+        '        return "cooling" if _cooling(spec.label) else "ok"',
+        '        return "ok"',
+        "tests/test_intel_ranking.py -k marks_a_cooling_source",
+    ),
+    # 阶段二 #5：低粉爆文 / 争议黄标
+    (
+        "s36-17 样本不足也发低粉爆文标记（§3.3 验收：不许恒显示）",
+        INTEL_F,
+        '            ev["underdog"] = False\n            continue',
+        '            ev["underdog"] = True\n            continue',
+        "tests/test_intel_ranking.py -k underdog_never_shows",
+    ),
+    (
+        "s36-18 争议词写成读 banwords.soft 的口径不成立（这里直接不发标）",
+        INTEL_F,
+        "    if hits_contested(it, contested):",
+        "    if False:",
+        "tests/test_intel_ranking.py -k contested_words_mark",
+    ),
+    # 阶段三：额度 / 缓存 / 两道闸
+    (
+        "s36-19 intel_brief 不显式归类（靠默认分支「恰好对」，对账断言失去依据）",
+        JOBS_F,
+        'MODEL_JOB_KINDS = frozenset({"generate", "packgen", "intel_brief"})',
+        'MODEL_JOB_KINDS = frozenset({"generate", "packgen"})',
+        "tests/test_intel_brief.py -k explicitly_in_the_model_family",
+    ),
+    (
+        "s36-20 briefing 不占模型额度（花钱的作业免费跑）",
+        JOBS_F,
+        '                         "storyboarding", "packing", "briefing"})',
+        '                         "storyboarding", "packing"})',
+        "tests/test_intel_brief.py -k briefing_state_is_wired",
+    ),
+    (
+        "s36-21 当日缓存不再命中（重复点一次就再扣一次模型调用）",
+        SRV_F,
+        '        if hit["state"] == "fresh":',
+        "        if False:",
+        "tests/test_intel_brief.py -k returns_cache_without_starting_a_job",
+    ),
+    (
+        "s36-22 事件键不再判形状（请求层的形状闸被摘掉，键直接拼成文件名）",
+        ROOT / "app/schemas.py",
+        "        if not is_event_key(v):",
+        "        if False:",
+        "tests/test_intel_brief.py -k rejects_a_malformed_key",
+    ),
+    (
+        "s36-23 选题卡文件名留着冒号（Windows 非法字符，实测 WinError 87）",
+        INTEL_F,
+        '    return str(key).replace(":", "_") + ".json"',
+        '    return f"{key}.json"',
+        "tests/test_intel_brief.py -k windows_legal",
+    ),
+    (
+        "s36-24 输出侧禁用词闸门退回「只标不摘」（命中 hard 的句子照样上屏）",
+        INTEL_F,
+        '            return "{{待补}}"',
+        "            return t",
+        "tests/test_intel_brief.py -k banword_gate",
+    ),
+    (
+        "s36-25 生命周期阶段听模型的（同屏排行写爆发中、卡片写衰退期）",
+        PIPE_F,
+        '            payload["stage"] = str(event.get("stage") or payload.get("stage") or "")',
+        '            payload["stage"] = str(payload.get("stage") or "")',
+        "tests/test_intel_brief.py -k cannot_redecide",
+    ),
+    (
+        "s36-26 默认面退回按来源（§3.5 定的是排行优先）",
+        TOPICS_F,
+        '  selectTopicsTab("rank", false);',
+        '  selectTopicsTab("topics", false);',
+        "verify:topics",
+    ),
+    (
+        "s36-27 排行的 null 分项画成 0（「没数据」与「零分」在界面上同形）",
+        TOPICS_F,
+        '      + `<em class="sig-val">${has ? w : "—"}</em></span>`;',
+        '      + `<em class="sig-val">${w}</em></span>`;',
+        "verify:topics",
+    ),
+    (
+        "s36-28 忽略事件只记一条成员键（明天另外两条来源又回来）",
+        TOPICS_F,
+        "  const keys = ev ? (ev.item_keys || []).filter(Boolean) : [key];",
+        "  const keys = [key];",
+        "verify:topics",
+    ),
+    (
+        # 这条守的是一个**只有量像素才能发现**的失效：宽度走 CSSOM 写 --w，
+        # 而"写了 sigBars 却忘了在渲染后挂宽度"在 DOM 上完全看不出来
+        # （data-w 还在、title 还在、条子是零长）。内联 style 那条路更早就死了 ——
+        # 本页 CSP（style-src 'self'）会整条丢掉它。
+        "s36-30 渲染后不把宽度挂上 CSSOM（信号条全成零长空轨）",
+        TOPICS_F,
+        "  wireRank();\n  syncSigWidths(root);",
+        "  wireRank();",
+        "verify:topics",
+    ),
+    (
+        "s36-31 推荐位不看象限（低热/没归属的题也被置顶）",
+        INTEL_F,
+        '        ev["featured"] = ev["quadrant"] == "高热高配"',
+        '        ev["featured"] = True',
+        "tests/test_intel_ranking.py -k quadrant_classifies",
+    ),
+    (
+        "s36-29 选题卡输入块不声明「这是数据不是指令」（注入面敞着）",
+        INTEL_F,
+        '    return BRIEF_DATA_HEAD + "\\n" + "\\n".join(body) + "\\n"',
+        '    return "\\n".join(body) + "\\n"',
+        "tests/test_intel_brief.py -k stage_is_echoed",
+    ),
+    (
+        "s36-32 选题卡 same_day 恒真（昨天的卡冒充今天生成过，stale 路径死掉）",
+        INTEL_F,
+        '    return {"state": "fresh" if same_day else "stale",',
+        '    return {"state": "fresh",',
+        "tests/test_intel_brief.py -k fresh_today",
+    ),
+    # ── s37 组（A-9 去AI味补遗落码，调研报告-20260928）──
+    # 词表 schema 与回炉护栏：每条都对应 §七 P0/P1 的一个机制，摘掉任何一条
+    # 都不会报错，只会让判据**静默变宽或变窄** —— 正是这组变异要拦的东西。
+    (
+        "s37-1 无来源归因的出处豁免被摘掉（「市场监管总局数据显示，2025 年…」也照报）",
+        AI,
+        "        window = ATTRIB_WINDOW if tid in ATTRIB_EXEMPT else 0",
+        "        window = 0                        # MUTATED: 出处豁免不再生效",
+        "tests/test_ai_tells.py -k unattributed",
+    ),
+    (
+        "s37-2 cta_strict 被并入第二人称豁免（助手腔收尾恒被豁免、tell 永不响）",
+        AI,
+        '            if scope == "cta_only" and (re.search(r"[你您]", text) or "？" in text or "?" in text):',
+        '            if scope in ("cta_only", "cta_strict") and (re.search(r"[你您]", text) or "？" in text or "?" in text):',
+        "tests/test_ai_tells.py -k helper_closing",
+    ),
+    (
+        "s37-3 `re:` 用在字面量类不再报出来（死词静默）",
+        AI,
+        "            if cat in first_sent_tells:",
+        "            if cat not in first_sent_tells:",
+        "tests/test_ai_tells.py -k regex_entries_outside",
+    ),
+    (
+        "s37-4 弱 tell 门槛的 yaml 覆盖被忽略（包改了口径而分数照旧）",
+        AI,
+        "        min_n = self.thresholds.get(tid, WEAK_MIN)",
+        "        min_n = WEAK_MIN                  # MUTATED: 覆盖值不生效",
+        "tests/test_ai_tells.py -k per_tell_threshold",
+    ),
+    (
+        "s37-5 词义限定的 unless 失效（「维保工单闭环」被当黑话报）",
+        AI,
+        '        for u in ((rules or {}).get(w) or {}).get("unless", ()):',
+        "        for u in ():                    # MUTATED: 豁免短语一条都不看",
+        "tests/test_ai_tells.py -k word_sense_qualifier",
+    ),
+    (
+        "s37-6 对照句式的空档上限放宽成无限（长句里岔出去一句再补的「实则」也被算成对照反转）",
+        AI,
+        '_CONTRAST_GAP = r"[\\s\\S]{0,24}"',
+        '_CONTRAST_GAP = r"[\\s\\S]*"              # MUTATED: 空档不设限',
+        "tests/test_ai_tells.py -k contrast_frame",
+    ),
+    (
+        "s37-7 结构类漏实现不再报（STRUCTURAL 加了名字而算法没写 = 静默不跑）",
+        AI,
+        "        unimplemented = [t for t in self.STRUCTURAL if self._structural_handler(t) is None]",
+        "        unimplemented = []               # MUTATED: 漏实现无人知晓",
+        "tests/test_ai_tells.py -k without_an_implementation",
+    ),
+    (
+        "s37-8 全正则的词表类被误判成死 tell（lexicon_missing 没跟着 schema 改）",
+        AI,
+        "                                and not (self.lexicon.get(t) or self.lex_regex.get(t))]",
+        "                                and not self.lexicon.get(t)]",
+        "tests/test_ai_tells.py -k accepts_regex_frame_entries",
+    ),
+    (
+        "s37-9 「没有词就不扫」又回到 first_sent 分派之前（全正则的开场禁区永不跑）",
+        AI,
+        "        words = self.lexicon.get(tid) or []\n        scope = LEX_SCOPE.get(tid, \"any\")\n        if scope == \"first_sent\":",
+        "        words = self.lexicon.get(tid) or []\n        if not words:\n            return []\n        scope = LEX_SCOPE.get(tid, \"any\")\n        if scope == \"first_sent\":",
+        "tests/test_ai_tells.py -k opening_ban_accepts_regex",
+    ),
+    (
+        "s37-10 fact gate 整条摘掉（改丢了数字/文号没人说）",
+        PIPE_F,
+        "                    if rnd > 1 and prev_sections else [])",
+        "                    if False and prev_sections else [])",
+        "tests/test_fact_gate.py -k loses_a_fact_without_fixing",
+    ),
+    (
+        "s37-11 fact gate 不再让位于合规（为了保一个数字留着硬违规）",
+        PIPE_F,
+        '            if lost and not report["passed"]:',
+        "            if lost:",
+        "tests/test_fact_gate.py -k compliance_beats_fact",
+    ),
+    (
+        "s37-12 回炉块里的「六永不注入」被摘掉（过度矫正没有负面清单）",
+        PIPE_F,
+        "        lines.append(NEGATIVE_INJECTION_RULE)",
+        "        pass                              # MUTATED: 负面清单不进回炉块",
+        "tests/test_refine_feedback.py -k negative_list",
+    ),
+    (
+        "s37-13 回炉点名退回「strong+weak 全点名列」（每轮都在动本来正常的段落）",
+        PIPE_F,
+        '        strong_ai = [h for h in ai if h.get("severity") == STRONG]',
+        "        strong_ai = list(ai)              # MUTATED: weak 也进点名清单",
+        "tests/test_refine_feedback.py -k only_names_strong",
+    ),
+    (
+        "s37-14 成语表没配时那一格拿 0 冒充「一篇都没有」（没测≠很好）",
+        AI,
+        "        if idioms and spoken else None,",
+        "        if spoken else 0,                 # MUTATED: 没配表也报 0",
+        "tests/test_ai_tells.py -k shape_reports_six",
+    ),
+    (
+        "s37-15 idioms 写成字符串不再被拦（会被逐字切成单字去数密度）",
+        AI,
+        "        if not isinstance(raw_idioms, list):",
+        "        if False:                         # MUTATED: 形状检查摘掉",
+        "tests/test_ai_tells.py -k shape_reports_six",
+    ),
+    (
+        "s37-16 老产物缺 shape 时界面照样画表（空表加一排「—」，把没测说成测了）",
+        RESULT_F,
+        '  if (!s) return "";',
+        "  s = s || {};                            // MUTATED: 没数也渲染一块表",
+        "verify:",
+    ),
+    # ── s39 组（A-9 审查修复轮）：每条对应审查报告里的一个 P1/P2/P3 ──
+    (
+        "s39-1 fact gate 末轮拒收不再过一遍候选版（交付物形状崩，钱烧完才炸）",
+        PIPE_F,
+        "                    self._filter_alternatives(job, draft, p, ban, quota, tells, tolerance, rnd)\n"
+        "                    return draft, revisions",
+        "                    return draft, revisions",
+        "tests/test_fact_gate.py -k rejected_last_round",
+    ),
+    (
+        "s39-2 单字 unless 不再被拦（一条笔误就把整类 tell 静默打死）",
+        AI,
+        "                    if short:",
+        "                    if False:             # MUTATED: 短豁免照收不误",
+        "tests/test_ai_tells.py -k short_unless",
+    ),
+    (
+        "s39-3 thresholds 白名单摘掉（no-op 的键被说成「换了口径」）",
+        AI,
+        "            if not eats:",
+        "            if False:                     # MUTATED: 任何 tell 都收下这个覆盖",
+        "tests/test_ai_tells.py -k thresholds_on_classes",
+    ),
+    (
+        "s39-4 门槛的小数被静默截断（配 2.9 跑 2，与 recheck_rounds 的双标）",
+        AI,
+        "            if num != int(num):",
+        "            if False:                     # MUTATED: 截断不留痕",
+        "tests/test_ai_tells.py -k threshold_must_be",
+    ),
+    (
+        "s39-5 出厂词表里「其实」的豁免被删（voice.md 鼓励、引擎扣分，两边又打架）",
+        YAML_F,
+        "    - 其实:\n        note: 堆在一起才算；「其实呢」是口语标记，不罚\n"
+        "        unless: [其实呢]",
+        "    - 其实",
+        "tests/test_ai_tells.py -k do_not_punish_what_the_prompt",
+    ),
+    (
+        "s39-6 交付物汇总行退回「处」（分数按条扣，读者反推不出来）",
+        STORE_F,
+        "{ai.get('strong', 0)} 条 · 轻微",
+        "{ai.get('strong', 0)} 处 · 轻微",
+        "tests/test_ai_tells.py -k script_md_has_no_internal_identifiers",
+    ),
+    (
+        "s39-7 §2.1 表里同一条 tell 写两行不再报错（后一行静默改掉档位）",
+        ROOT / "tests/test_aitells_alignment.py",
+        "        assert tell not in out, (",
+        "        assert True or tell not in out, (",
+        "tests/test_aitells_alignment.py -k duplicate_row",
+    ),
+    (
+        "s39-8 回炉反馈的兜底句又变成死代码（没问题可点时只剩两段改写规矩）",
+        PIPE_F,
+        "        if not lines:\n            lines.append(\"- 未通过校验，请按口语化与合规要求改写\")",
+        "        if False:\n            lines.append(\"- 未通过校验，请按口语化与合规要求改写\")",
+        "tests/test_refine_feedback.py -k says_why_when_it_can_name_nothing",
+    ),
+    # ── s40 组（第 29 轮修复：A-1 剩下的那头 + 两条"现役但没用例"的防线）──
+    # 这一组的共同点：**改回去不会让任何既有断言变红**。前两条是满分通道与恒真命中，
+    # 第三条是"配了正则条目却当字面量扫" —— 全都只在缺证据的那一侧坏。
+    (
+        "s40-1 占位密度的下限摘掉（每段恰好一个空的骨架稿又拿满分）",
+        AI,
+        "PLACEHOLDER_MIN_CHARS = 100",
+        "PLACEHOLDER_MIN_CHARS = 0        # MUTATED: 空不需要正文来撑",
+        'tests/test_ai_tells.py -k "one_placeholder_per_section or density_line"',
+    ),
+    (
+        "s40-2 零宽正则匹配也算命中（re:[0-9]* 这种写宽的条目=每篇都报开场违规）",
+        AI,
+        "                if m and m.group(0):",
+        "                if m:                      # MUTATED: 空匹配也算命中",
+        "tests/test_ai_tells.py -k zero_width_regex",
+    ),
+    (
+        "s40-3 字面量扫描不再跳过 re: 条目（正则被当成一串普通字符去扫正文）",
+        AI,
+        "    ws = sorted({w for w in words if w and len(w) >= 2 and not w.startswith(RE_PREFIX)},",
+        "    ws = sorted({w for w in words if w and len(w) >= 2},  # MUTATED",
+        "tests/test_ai_tells.py -k regex_entry_never_joins",
+    ),
+    # ── s41 组（第 30 轮覆盖率探针查出的"从没被执行过"的守卫，逐条补上证伪）──
+    # 共同点：这些行在 958 条测试下 0 次覆盖 —— 改回去不会有任何断言变红，
+    # 而它们守的都是"报得出来 / 不静默"这一类承诺。
+    (
+        "s41-1 句首重复的门槛从 ≥3 处降到 ≥2（两处同头就报 = 正常中文当套路）",
+        AI,
+        "        if n >= 3 and n / len(sents) > 1 / 3:",
+        "        if n >= 2 and n / len(sents) > 1 / 3:   # MUTATED",
+        "tests/test_ai_tells.py -k repeat_opening_reports",
+    ),
+    (
+        "s41-2 句首重复的占比边界 >1/3 写成 ≥1/3（恰好三分之一也报）",
+        AI,
+        "        if n >= 3 and n / len(sents) > 1 / 3:",
+        "        if n >= 3 and n / len(sents) >= 1 / 3:  # MUTATED",
+        "tests/test_ai_tells.py -k repeat_opening_reports",
+    ),
+    (
+        "s41-3 「声明了词表类却不给词」不再说出口（死 tell 伪装成人味 100 分）",
+        AI,
+        "        if self.lexicon_missing:",
+        "        if False:                             # MUTATED: 空词表不再报",
+        "tests/test_ai_tells.py -k without_words_is_announced",
+    ),
+    (
+        "s41-4 unless 写成裸字符串就不再被接受（指南教的形态静默失效）",
+        AI,
+        "            if isinstance(unless, str):\n                unless = [unless]",
+        "            if False:\n                unless = [unless]   # MUTATED",
+        "tests/test_ai_tells.py -k forms_the_guide",
+    ),
+    (
+        "s41-5 unless 里的空串不再被丢掉（空豁免短语会把所有命中赦了）",
+        AI,
+        "                keep = [str(x).strip() for x in unless if str(x).strip()]",
+        "                keep = [str(x).strip() for x in unless]    # MUTATED",
+        "tests/test_ai_tells.py -k forms_the_guide",
+    ),
+    (
+        "s41-6 编译不了的正则条目被静默丢掉（包作者以为配了框架）",
+        AI,
+        "                        self.bad_entries.append(\n"
+        "                            f\"lexicon.{cat} 的正则条目 {body!r} 编译不了（{e}）—— 已跳过\")",
+        "                        pass                      # MUTATED: 静默丢掉",
+        "tests/test_ai_tells.py -k broken_lexicon",
+    ),
+    (
+        "s41-7 thresholds 写成列表时不再报，且在 .items() 上炸穿整条链",
+        AI,
+        "        if not isinstance(raw_th, dict):",
+        "        if False:                             # MUTATED: 列表也当映射用",
+        "tests/test_ai_tells.py -k broken_lexicon",
+    ),
+    (
+        "s41-8 门槛 0 被收下（0 = 处处都报，而不是退回默认口径）",
+        AI,
+        "            if n < 1:",
+        "            if False:                           # MUTATED: 0 也照收",
+        "tests/test_ai_tells.py -k broken_lexicon",
+    ),
+    (
+        "s41-9 配额插值算子被写死成下界（非表内时长一律拿上一档的字数）",
+        ROOT / "app/checker.py",
+        "        ratio = (duration - lo) / (hi - lo)",
+        "        ratio = 0.0                           # MUTATED: 不外推也不插值",
+        "tests/test_checker_structure.py -k interpolates_between_rows",
+    ),
+    (
+        "s41-10 单行表当成多行表走（`keys[1]` 当场 IndexError，生成整条链失败）",
+        ROOT / "app/checker.py",
+        "        if len(keys) == 1:                      # 单行表：任何时长都取这一行",
+        "        if False:                               # MUTATED",
+        "tests/test_checker_structure.py -k scalar_rows_and_single_row",
+    ),
+    (
+        "s41-11 时长低于最小档不再外推而是去取不存在的下界",
+        ROOT / "app/checker.py",
+        "        if duration <= keys[0]:",
+        "        if False:                               # MUTATED",
+        "tests/test_checker_structure.py -k interpolates_between_rows",
+    ),
+    (
+        "s41-12 限定写成非字符串/非映射时整条词被丢掉（词表少一个词，无声）",
+        AI,
+        "        return word, None",
+        '        return "", None                       # MUTATED: 词也一起丢了',
+        "tests/test_ai_tells.py -k degenerate_inputs",
+    ),
+    (
+        "s41-13 空词表不再早退（`re.compile(\"\")` 处处命中 = 一条 tell 突然每篇满命中）",
+        AI,
+        "    if not ws:",
+        "    if False:                                   # MUTATED",
+        "tests/test_ai_tells.py -k degenerate_inputs",
+    ),
+    (
+        "s41-14 没有首句时不再收住（解包 None → TypeError，作业只留一句看不懂的失败）",
+        AI,
+        "        if not got:",
+        "        if False:                               # MUTATED",
+        "tests/test_ai_tells.py -k degenerate_inputs",
+    ),
+    (
+        "s41-15 词表顶层不是映射时不再报，往下取键直接炸穿加载链",
+        ROOT / "app/checker.py",
+        "    if not isinstance(data, dict):",
+        "    if False:                                   # MUTATED",
+        "tests/test_checker_structure.py -k top_level_and_platform",
+    ),
+    (
+        "s41-16 `platform:` 写成列表不再报（后面 .items() 在加载期抛 AttributeError）",
+        ROOT / "app/checker.py",
+        "    if platforms is not None and not isinstance(platforms, dict):",
+        "    if False:                                   # MUTATED",
+        "tests/test_checker_structure.py -k top_level_and_platform",
+    ),
+    (
+        "s41-17 整张 quota_table 不是映射时不再报（校验函数自己在列表上 .items()）",
+        ROOT / "app/checker.py",
+        "    if not isinstance(table, dict):\n        return [f\"quota_table 必须是映射",
+        "    if False:\n        return [f\"quota_table 必须是映射",
+        "tests/test_checker_structure.py -k non_mapping_and_bad_duration",
+    ),
+    (
+        "s41-18 Quota 对坏表不再早退（装配期崩，而不是把错误汇进 param_audit）",
+        ROOT / "app/checker.py",
+        "        if not isinstance(table, dict):\n            return",
+        "        if False:                               # MUTATED\n            pass",
+        "tests/test_checker_structure.py -k non_mapping_and_bad_duration",
+    ),
+    (
+        "s41-19 时长键非数字不再记账（`六十:` 这种笔误整行静默消失）",
+        ROOT / "app/checker.py",
+        "            except (TypeError, ValueError):",
+        "            except KeyError:                    # MUTATED: 认不下这一行",
+        "tests/test_checker_structure.py -k non_mapping_and_bad_duration",
+    ),
+    (
+        "s41-20 命中定位的每词上限失效（回炉清单与下划线越拉越长）",
+        ROOT / "app/checker.py",
+        "            while len(places) < max_per_word:",
+        "            while True:                         # MUTATED: 上限不管了",
+        "tests/test_checker_structure.py -k locate_hits_caps",
+    ),
+    (
+        "s41-21 清单体不再要求序号连续（「第一…第三…第五…」这种分别举例也被当连排）",
+        AI,
+        "                if ch and (not seq or num[ch] == seq[-1] + 1):",
+        "                if ch:                          # MUTATED: 跳号也累计",
+        "tests/test_ai_tells.py -k consecutive_numbers",
+    ),
+    (
+        "s41-22 平台落空说明不再去重（同一句账每扫一次多记一笔）",
+        ROOT / "app/checker.py",
+        "            if note not in self.errors:",
+        "            if True:                            # MUTATED: 每次都追加",
+        "tests/test_checker_structure.py -k two_platform_notes",
+    ),
+    (
+        "s41-23 任何 `has no attribute` 都被说成行业包配置问题（§9.8 那条错误归因）",
+        PIPE_F,
+        "        if owner in _DATA_TYPES and attr in _DATA_METHODS:",
+        "        if True:                                # MUTATED: 不看形状，一律怪包",
+        "tests/test_engine_audit10.py -k attribute_error_blames",
+    ),
+    # ── s38 组（第 29 轮审查：落码后自查出的 15 条，四条 P1 全在后端读路径）──
+    # 这一组的形状与 s36 不同：不是"少做了一步"，而是**同一句话在两处各说一遍**
+    # （注释与实现、前端与后端、落盘时与读盘时）。这种缺陷不会报错，只会让
+    # 屏幕上出现一个与证据相反的数 —— 所以每条都配一条能证伪它的断言。
+    (
+        "s38-1 增速基线退回「按快照数、含今天」（一天点三次重抓就凑满 7 天窗口）",
+        INTEL_F,
+        "        if hots and day and day != today:\n"
+        "            cur = float(max(hots))\n"
+        "            if day not in hot_by_day or cur > hot_by_day[day]:\n"
+        "                hot_by_day[day] = cur",
+        "        if hots:                          # MUTATED: 每份快照一个点，今天也算\n"
+        "            hot_by_day[iso] = float(max(hots))",
+        "tests/test_intel_ranking.py -k same_day_snapshots",
+    ),
+    (
+        "s38-2 基线分母取全部历史（三周前的水位当上周均值，缓慢涨的题永远到不了档）",
+        INTEL_F,
+        "    window = hot_series[-baseline_days:]",
+        "    window = hot_series                   # MUTATED: 不取最近 7 天",
+        "tests/test_intel_ranking.py -k recent_days_not_the_whole_history",
+    ),
+    (
+        "s38-3 盘上的数值字段不再校验（字符串进排序键 → /api/intel/today 500）",
+        INTEL_F,
+        "    if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float))):",
+        "    if v is None:                         # MUTATED: 认不出来的形状原样留着",
+        "tests/test_intel_ranking.py -k load_latest_survives_bad_numeric_shapes",
+    ),
+    (
+        "s38-4 errors 不再是映射时不兜（today() 的 dict(errors) 抛 ValueError）",
+        INTEL_F,
+        '    if not isinstance(merged.get("errors"), dict):',
+        "    if False:                             # MUTATED: 这一步不做",
+        "tests/test_intel_ranking.py -k load_latest_survives_bad_numeric_shapes",
+    ),
+    (
+        "s38-5 被跳过的那一轮算成一次失败（「连续 4 次抓取失败」而我们只试过 3 次）",
+        INTEL_F,
+        '            if row.get("state") == "cooling":',
+        "            if False:                     # MUTATED: 跳过也计一次失败",
+        "tests/test_intel_ranking.py -k skipped_round_is_not_counted",
+    ),
+    (
+        "s38-6 昨天落盘的 skip 今天继续说「今天先跳过」（今天一次都还没试过）",
+        INTEL_F,
+        "        return bool(last) and _snap_date(last) == today_str",
+        "        return bool(h.get(\"skip\"))        # MUTATED: 读盘时不重新对日期",
+        "tests/test_intel_ranking.py -k yesterdays_cooling",
+    ),
+    (
+        "s38-7 归一化为空的标题仍用 sha1(\"\") 当锚（所有这类事件共用一个选题卡缓存）",
+        INTEL_F,
+        "    if not seed:",
+        "    if False:                             # MUTATED: 空锚不退回 item_key",
+        "tests/test_intel_ranking.py -k normalise_empty_do_not_share",
+    ),
+    (
+        "s38-8 事件成员今天全被忽略仍留在榜首（点忽略、重进视图又回到原位）",
+        INTEL_F,
+        "        if keys and all(k in hidden for k in keys):",
+        "        if False:                         # MUTATED: 排行面不按忽略摘事件",
+        "tests/test_intel_ranking.py -k ignoring_every_member_drops",
+    ),
+    (
+        "s38-9 空药丸的阶段兜成爆发期（还在涨还没爆的题，模型被喂一句「今天就拍」）",
+        INTEL_F,
+        '                   "fading": "fading", "": "rising"}',
+        '                   "fading": "fading", "": "peak"}',
+        "tests/test_intel_ranking.py -k without_a_pill_is_not_called_peak",
+    ),
+    (
+        "s38-10 在飞的选题卡不再复用（同一件事点两次＝两次模型调用）",
+        JOBS_F,
+        "            if same is not None:",
+        "            if False:                     # MUTATED: 不做同键去重",
+        "tests/test_intel_brief.py -k in_flight_does_not_charge_twice",
+    ),
+    (
+        "s38-11 排行面重排时不看沉底（按来源那面沉下去了，默认面仍稳在榜首）",
+        TOPICS_F,
+        "    if (Boolean(a[0].buried) !== Boolean(b[0].buried)) return a[0].buried ? 1 : -1;",
+        "    // MUTATED: 沉底不参与排序",
+        "verify:topics",
+    ),
+    (
+        "s38-12 「已忽略 N」按今天的次数禁用（清单里还有历史条目时入口打不开）",
+        TOPICS_F,
+        "    ign.disabled = !((data && data.ignored_list || []).length);",
+        "    ign.disabled = !today;",
+        "verify:topics",
+    ),
+    (
+        "s38-13 健康列把「一次都没试过」印成 0/1（没数据与零结论同形）",
+        TOPICS_F,
+        "    const tried = (h.ok || 0) + (h.fail || 0);",
+        "    const tried = 1;                      // MUTATED: 永远当试过",
+        "verify:topics",
+    ),
+    (
+        "s38-14 没有出处的条目回退成 href=\"#\"（一颗永远没反应的假链接）",
+        TOPICS_F,
+        '  return /^https?:\\/\\//i.test(s) ? s : "";',
+        '  return /^https?:\\/\\//i.test(s) ? s : "#";',
+        "verify:topics",
+    ),
+    (
+        "s38-15 不随这一屏水合缓存里的选题卡（切走再切回：卡片没了、文案说还没有）",
+        TOPICS_F,
+        "    if (ev.brief_card && !(briefState[ev.key] || {}).payload) {",
+        "    if (false && ev.brief_card) {         // MUTATED: 不水合",
+        "verify:topics",
+    ),
+    (
+        "s38-16 出处的协议白名单放开（平台返回的 javascript: 变成一颗可点的链接）",
+        TOPICS_F,
+        '  return /^https?:\\/\\//i.test(s) ? s : "";',
+        '  return s;                               // MUTATED: 什么形状都当能点',
+        "verify:topics",
+    ),
+    (
+        "s38-17 重渲之后不恢复「收起」那颗按钮的字（内容开着、键上说还没看过）",
+        TOPICS_F,
+        '      if (d) d.textContent = "收起";',
+        "      // MUTATED: 只恢复展开，按钮字留在「看条目」",
+        "verify:topics",
     ),
 ]
 
@@ -1564,6 +2556,25 @@ def _is_green(selector, out, rc):
         return False, why
     return not red, why
 
+
+# ── 启动即预检（第 29 轮加）────────────────────────────────────
+# 表里任何一条锚点腐烂，**跑子集是看不见的**：漂移只有轮到它那一条才会现形，
+# 而那可能要等几轮。22 条就是这么攒起来的（表现是跑到时记一句「旧串没找到 → SKIP」），
+# 其中一条（s14-1）背后还压着一条已经降级成空转的判据。
+# 所以动任何文件之前先把**整张表**扫一遍：有漂移就停在这里，一条都不跑、工作区不动。
+# 判据与 `tests/test_mutation_anchors.py` 共用同一份函数（不另写一套口径）。
+import importlib.util as _ilu
+_spec = _ilu.spec_from_file_location(
+    "_preflight_mutations", ROOT / "_verify" / "_preflight_mutations.py")
+_pf = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(_pf)
+_drift = _pf.drifted(MUTATIONS)
+if _drift:
+    print(f"🔴 变异表有 {len(_drift)} 条锚点漂移 —— 先重指再跑（本次一条都没跑，工作区未动）：")
+    for _line in _drift:
+        print("   " + _line)
+    print("   （只想跳过这道检查：直接看 tests/test_mutation_anchors.py 的判据怎么写的）")
+    sys.exit(2)
 
 bad = skipped = 0
 for name, path, old, new, selector in MUTATIONS:

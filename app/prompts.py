@@ -12,6 +12,7 @@ import json
 import logging
 import re
 from string import Template
+from typing import Sequence
 
 from .intel import select_for_prompt
 from .knowledge import Pack
@@ -141,7 +142,15 @@ class PromptRenderer:
 
     # ── 情报注入（B7 / §2.9 B-3）─────────────────────────────
     #: 本次被**禁用词拦掉**的条目标题（调用方要把它记进作业日志 —— 摘了要看得见）。
-    intel_dropped: list[str] = ()
+    #: ⚠ 这里原来写的是 `list[str] = ()`：类型标着可变、默认值给的是元组。
+    #:   今天是安全的，**只因为** `_intel` 每次进来都先赋一个真 list。
+    #:   但这是本仓最怕的那一类（可变的类属性默认值 + 一次就地 append =
+    #:   污染所有实例，且症状出现在**别的**作业上）。
+    #:   现在给的是**不可变**的空元组当占位：类型不符（真 list 才对）、
+    #:   也不会被就地 append 改坏。`_intel` 进出的第一件事就是换成真 list，
+    #:   真跑到调用方读它的时候它一定已经是 list —— 这一条由
+    #:   test_prompts 的「渲染前后都是真 list」钉住。
+    intel_dropped: Sequence[str] = ()
     #: 本次注入的条目短键（"id|出处"，逗号分隔）。`pipeline._plan_key` 用它当指纹的一部分。
     intel_key: str = ""
 

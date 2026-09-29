@@ -22,16 +22,22 @@ export const POLL_MS = 900;
 
 export class ApiError extends Error {
   /** @param message 服务端 `detail` 里那句**人话**，原样保留（界面直接显示它）
-   *  @param status  HTTP 状态码 —— 只够分「哪一类」，不够分「哪一件事」
+   *  @param status  HTTP 状态码 —— 只够分「哪一类」，不够分「哪一件事」。
+   *                 0 = 没有响应（网络级失败或超时），不是「服务端回了 0」。
    *  @param code    服务端 `code` 里的稳定机器可读码（pack_broken / quota_exceeded / …）。
    *                 ⚠ 判「是什么错」读这个，不读 status、也不读 message：
    *                 两个 409 说的是两件完全不同的事（P1-1），而文案改一个标点
-   *                 就会让按文案匹配的判据失效。老服务不给这个键时它是 undefined。 */
+   *                 就会让按文案匹配的判据失效。老服务不给这个键时它是 undefined。
+   *
+   *  另一个只在客户端产生的标志：`netFail`（见 request()）—— 请求根本没到引擎。
+   *  它**不是** code 的一员：code 的取值表归 app/server.py，而这一条是浏览器给的，
+   *  两边不许混（tests/test_job_state_vocabulary_consistency.py 会拿 code 表去比对服务端）。 */
   constructor(message, status, code) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code || "";
+    this.netFail = false;
   }
 }
 
@@ -98,8 +104,16 @@ async function request(path, { method = "GET", body, form, timeout = TIMEOUT_REA
   try {
     r = await fetch(path, opts);
   } catch (e) {
-    throw new ApiError(
-      e.name === "AbortError" ? "请求超时" : `无法连接本地引擎（${e.message}）`, 0);
+    // 走到这里 = 请求**根本没到引擎**（进程没起 / 端口没绑 / 页面开在别的源上）。
+    // ⚠ 不把浏览器那句原始错串拼进文案：Chromium 给的是 "Failed to fetch"，
+    //   用户读不出任何可照做的信息，而它会把「界面上印的是机器码」这件事
+    //   重新带回交付层（第 28 轮导出线刚清掉一批）。
+    // `netFail` 是给界面的判据：真正的"连不上"由 engine.js 摊成全局横幅。
+    //   超时**不算**失联（引擎可能只是某个 handler 卡住），它只说明这一次请求。
+    const timeout = e.name === "AbortError";
+    const err = new ApiError(timeout ? "请求超时" : "无法连接本地引擎", 0);
+    err.netFail = !timeout;
+    throw err;
   } finally {
     // 响应落地（无论成败）就拆掉超时定时器。不清的话每个请求都留一个要挂到
     // 超时点才自灭的定时器 —— 轮询类接口 900ms 一发，长会话里按分钟累积成
@@ -189,4 +203,10 @@ export const api = {
   intelRefresh: (pack) => request("/api/intel/refresh", { method: "POST", body: { pack } }),
   intelIgnore: (pack, key) =>
     request("/api/intel/ignore", { method: "POST", body: { pack, key } }),
+  intelUnignore: (pack, key) =>
+    request("/api/intel/unignore", { method: "POST", body: { pack, key } }),
+  // 选题卡（§3.4）：**当日重复点击直接回缓存**（响应 state=cached，不起作业），
+  // 只有真的要重做时才返回 job_id —— 一条没有模型调用的作业会白占一个并发额度。
+  intelBrief: (pack, key) =>
+    request("/api/intel/brief", { method: "POST", body: { pack, key } }),
 };

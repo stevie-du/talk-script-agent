@@ -614,7 +614,7 @@ def _renderer_packgen_result_reads():
     """抠出渲染层**读建包产物**时用的字段名（`out.xxx`），不是全文件的 `out.`。
 
     ⚠ 必须按消费点裁剪：`settings.js` 里另有一个 `out = await api.saveModel(...)`，
-    它读的 `out.id` / `out.warnings` 属于模型保存接口 —— 全文件扫会把那两个也拉进
+    它读的 `out.id` 属于模型保存接口 —— 全文件扫会把它也拉进
     建包的对账里，报一条假红（第一版就这样）。
     ⚠ 每个锚点只准出现一次：改名/搬函数会让这里直接 ValueError，而不是安静地
     去比另一处同名代码。

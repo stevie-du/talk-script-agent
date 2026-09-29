@@ -164,6 +164,31 @@ export function joinUrl(base, name) {
 }
 
 /**
+ * 每个安装包文件名对应的 **blockmap** 文件名（差分下载的唯一凭据）。
+ *
+ * ⚠ builder 25 生成的 `latest.yml` 里 **`files[]` 只有 exe 一项，不含 .blockmap**
+ *   （blockmap 是独立产物，见 app-builder-lib 的 `createUpdateInfo`：只写
+ *   `files = [{url, sha512}]`）。而客户端 `differentialDownloadInstaller`
+ *   第一步就是 `getBlockMapFiles()` → `downloadBlockMap(<exe URL>.blockmap)`。
+ *   服务器上没有该文件 → 抛错 → 被 electron-updater 的 catch 吞成
+ *   `Cannot download differentially, fallback to full download`
+ *   → **每次更新都退化成全量下载，且没有任何报错**。
+ *   本函数的作用就是把这一步补回来：上传集按 exe 推出 blockmap 名字。
+ *
+ * @param {string[]} files latest.yml 的 files[]（通常只含安装包）
+ * @returns {string[]} 需要一并上传的 blockmap 文件名（去重，顺序稳定）
+ */
+export function blockmapsOf(files) {
+  const out = [];
+  for (const f of files || []) {
+    if (!/\.exe$/i.test(f)) continue;   // 已经是 blockmap 的条目不再叠一层
+    const bm = f + '.blockmap';
+    if (!out.includes(bm)) out.push(bm);
+  }
+  return out;
+}
+
+/**
  * --keep：挑出该删的文件名。
  *
  * @param {Array<{version: string, names: string[]}>} versions 服务器上现存的版本
@@ -337,6 +362,34 @@ async function main() {
     local.push({ name, size });
   }
 
+  // ── 1b) blockmap：差分下载的凭据，latest.yml 里**没有**它 ──
+  // latest.yml 的 files[] 不列 blockmap（builder 25 的形状），但客户端差分下载
+  // 必须从服务器取到 `<exe URL>.blockmap` 才会走差分。漏了这一步的失败形态最阴：
+  // 更新**照样成功**，只是每次都是全量，且日志里只有一行
+  // `Cannot download differentially, fallback to full download`。
+  // 所以这里按 exe 推出 blockmap 名，并**同样做存在性 + 大小 + sha512 对账**：
+  // 少了就 die（把「这次只传了 exe」的半发布挡在上传之前），对不上同样 die。
+  for (const name of blockmapsOf(local.map((f) => f.name))) {
+    const p = path.join(dist, name);
+    if (!fs.existsSync(p)) {
+      die('校验产物', `差分下载需要 ${name}，但 dist/ 里没有这个文件`,
+        'electron-builder 出包时必须生成 blockmap；确认 build 段没把它排除掉，然后重新 npm run dist');
+    }
+    const size = fs.statSync(p).size;
+    const recordedSha = meta.shas[name];
+    if (recordedSha === undefined) {
+      // builder 有可能把 blockmap 写进 files[]（那是更省事的形态）。没有就是
+      // 「yml 不认它」——这时 sha512 无从对账，只报一句，别拦住发版。
+      ok(`${name}（${(size / 1048576).toFixed(1)} MB，latest.yml 未记 sha512，跳过对账）`);
+    } else if ((await sha512File(p)) !== recordedSha) {
+      die('校验产物', `${name} 的 sha512 与 latest.yml 记录不一致`,
+        'yml 与 blockmap 不是同一次构建的产物：删掉 desktop/dist 重新 npm run dist');
+    } else {
+      ok(`${name}（${(size / 1048576).toFixed(1)} MB，sha512 对上）——差分下载凭据`);
+    }
+    local.push({ name, size });
+  }
+
   // ── 2) 防降级 ────────────────────────────────────────────
   step(2, '防降级（先问线上现在是什么版本）');
   let remoteMeta = null;
@@ -366,12 +419,16 @@ async function main() {
     }
     if (c === 0) {
       // 同一版本：完整就是无需重传；缺文件就是上次传到一半，允许补传（修复）。
+      // 要查的文件是**本次要传的整份清单**（`local`，含 blockmap），而不是线上
+      // yml 的 files[] —— 差分凭据不在 files[] 里，只按它查会漏判：
+      // 「上次传到一半」最常见的形态恰恰是 exe 到了、blockmap 没到，
+      // 而那正是「客户端永远退化成全量」的那一版。
       const missing = [];
-      for (const name of remoteMeta.files) {
+      for (const f of local) {
         try {
-          const h = await httpRequest(joinUrl(url, name), 'HEAD');
-          if (h.status !== 200) missing.push(`${name}（HTTP ${h.status}）`);
-        } catch (e) { missing.push(`${name}（${e.message}）`); }
+          const h = await httpRequest(joinUrl(url, f.name), 'HEAD');
+          if (h.status !== 200) missing.push(`${f.name}（HTTP ${h.status}）`);
+        } catch (e) { missing.push(`${f.name}（${e.message}）`); }
       }
       if (missing.length) {
         console.log(`${TAG} ⚠ 线上已是 ${pkg.version} 但有文件缺失：${missing.join('、')}`);
@@ -400,7 +457,8 @@ async function main() {
     }
     console.log(`${TAG} scp latest.yml …（最后传：它是客户端认版本的开关）`);
     scp([ymlPath], host, dir);
-    ok('三个文件上传完成');
+    ok(`${local.length} 个文件上传完成（${local.map((f) => f.name).join('、')}）`
+      + ' + latest.yml');
   }
 
   // ── 4) 闭环验证 ──────────────────────────────────────────
@@ -479,8 +537,20 @@ async function main() {
     }
     if (!byVer.size) {
       console.log(`${TAG} 服务器上没找到「${prefix}*.exe」，跳过清理（可能目录里还有别的文件，不猜）`);
+    } else if (!nowMeta || !nowMeta.files || !nowMeta.files.length) {
+      // ⚠ 读不出线上 latest.yml 的 files[] 时**一律不删**。「被引用永不删」这条
+      // 防线是靠 referenced 集合生效的，传空集进去等于把整条防线摘掉：
+      // CDN/网关异常时返回 200 + HTML 错误页、或 yml 被人改坏，都会走到这里，
+      // 而后果是删掉线上正在被引用的 exe —— 客户端立刻 404，更新彻底坏掉。
+      // 删错服务器文件比不删严重得多（步骤 5 开头那句话），不猜。
+      console.log(`${TAG} 读不出线上 latest.yml 引用的文件，跳过清理`
+        + '（宁可多留几个旧包，也不要删掉正在用的那个）');
     } else {
-      const referenced = new Set(nowMeta.files || []);
+      // referenced 要含 blockmap：latest.yml 不列它，但上一版客户端照样在用它差分。
+      const referenced = new Set([
+        ...nowMeta.files,
+        ...blockmapsOf(nowMeta.files),
+      ]);
       const doomed = pickStale([...byVer.values()], opt.keep, referenced);
       if (!doomed.length) {
         ok(`现存 ${byVer.size} 个版本，≤ keep=${opt.keep}，无需清理`);

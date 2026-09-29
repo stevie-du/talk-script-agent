@@ -98,6 +98,7 @@ banwords: banwords.yaml
 # `id` 是引擎侧适配器名（app/intel.py 的 ADAPTERS），可用的有：
 #   demand_terms 下拉词（雷达，最有效） · bilibili_search B站同类（供给度量）
 #   hot_board 热榜（破圈触发器，按 params.board 出抖音/头条/知乎多个源）
+#   weibo_hot 微博热搜 · baidu_hot 百度热搜（同样是破圈触发器，只做关键词命中）
 #   policy_library 政策库（口径库，给可引的文号） · manual_import 人工导入
 # 节奏（cadence）各源自己定：daily / weekly / monthly / quarterly / on_demand。
 # 没有公开检索口的平台就 `enabled: false` + 一句 `note` 说明为什么 ——

@@ -2,7 +2,7 @@
 //
 // 跑法：node --test desktop/publish-update.test.mjs
 //
-// 为什么要有它：发布脚本一跑就是「往线上推文件」，错了很难收。这里钉的七件事
+// 为什么要有它：发布脚本一跑就是「往线上推文件」，错了很难收。这里钉的八件事
 // 都是「错了很安静」的规则——
 //   1. parseLatestYml：yml 与安装包必须是同一次构建（size **与 sha512** 对账的前提，
 //      旧 P3：只比 size 拦不住「同长度不同内容」），path: 行不能混进 files[]；
@@ -15,14 +15,17 @@
 //      判定必须各自开红或放行——这些语义活在 main() 里，只能真子进程 + 本地
 //      HTTP 服务器整体验；
 //   6. 场景 F：本地文件内容与 yml 的 sha512 对不上 → 步骤 1 拒传；
-//   7. 场景 G：只连不答的服务器 → 超时报错退出，不无限挂起。
+//   7. 场景 G：只连不答的服务器 → 超时报错退出，不无限挂起；
+//   8. blockmap：latest.yml 的 files[] **没有**它（builder 25 的真实形状），
+//      差分凭据由 blockmapsOf 按 exe 推出来；dist/ 里缺了就拒传——
+//      否则更新照样成功，但每次都是 97 MB 全量且没有任何报错。
 // 变异检验：joinUrl 去掉 encodeURIComponent / pickStale 排序退化成字典序 /
-// cmpVer 字典序化 / 步骤 4 对 dry-run 也要求 200 → 这个文件里必须有断言变红
-// ——守卫自己要能被红。
+// cmpVer 字典序化 / 步骤 4 对 dry-run 也要求 200 / 摘掉 blockmapsOf 或
+// 删掉 main() 的步骤 1b → 这个文件里必须有断言变红 ——守卫自己要能被红。
 import { test } from 'node:test';
 import assert from 'node:assert';
 import crypto from 'node:crypto';
-import { parseLatestYml, cmpVer, joinUrl, pickStale } from './scripts/publish-update.mjs';
+import { parseLatestYml, cmpVer, joinUrl, pickStale, blockmapsOf } from './scripts/publish-update.mjs';
 import { spawn } from 'node:child_process';
 import http from 'node:http';
 import fs from 'node:fs';
@@ -31,15 +34,18 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // 真实形状：electron-builder 25 生成的 latest.yml（旧版 files[] 格式，§12.2）
+//
+// ⚠ `files[]` **只有 exe 一项，不含 .blockmap** —— 这正是 builder 的真实行为
+//   （app-builder-lib 的 `createUpdateInfo` 只写 `files = [{url, sha512}]`），
+//   也是旧夹具骗人的地方：它往 files[] 里塞了 blockmap，于是「上传集只由
+//   files[] 决定」这个洞在单测里完全看不出来，而生产上每次更新都退化成全量
+//   97 MB、且**没有任何报错**。差分凭据现由 `blockmapsOf()` 按 exe 推出来。
 const YML = [
   'version: 0.2.1',
   'files:',
   '  - url: TalkScript Setup 0.2.1.exe',
   '    sha512: 9mIq0Xr0eJ7yFmYhZJ8Zk2v8s9v0u1w2x3y4z5a6b7c8d9e0f1g2h3i4j5k6l7m8n9o0p1q2r3s4t5u6v7w8x9y0zA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q==',
   '    size: 100743424',
-  '  - url: TalkScript Setup 0.2.1.exe.blockmap',
-  '    sha512: aB3cD4eF5gH6iJ7kL8mN9oP0qR1sT2uV3wX4yZ5a6B7c8D9e0F1g2H3i4J5k6L7m8N9oP0qR1sT2uV3wX4yZ5a6B7c8D9e0F1g2H3i4J5k6L7m8N9oP0qR==',
-  '    size: 115343',
   'path: TalkScript Setup 0.2.1.exe',
   'sha512: zZ9yY8xX7wW6vV5uU4tT3sS2rR1qQ0pP9oO8nN7mM6lL5kK4jJ3iI2hH1gG0fF9eE8dD7cC6bB5aA4==',
   'releaseDate: 2026-09-24T08:00:00.000Z',
@@ -50,19 +56,33 @@ const YML = [
 test('真实 latest.yml：version / files[] / sizes 全对，path: 行不混进 files', () => {
   const m = parseLatestYml(YML);
   assert.strictEqual(m.version, '0.2.1');
-  assert.deepStrictEqual(m.files, [
-    'TalkScript Setup 0.2.1.exe',
-    'TalkScript Setup 0.2.1.exe.blockmap',
-  ]);
-  // 每个 size 必须归到它上面那一项的 url 上（顺序回归：记错项 = 校验静默失效）
+  // files[] 只有 exe —— 与 builder 25 的真实输出同形（见上面那段注释）
+  assert.deepStrictEqual(m.files, ['TalkScript Setup 0.2.1.exe']);
+  // size 必须归到它上面那一项的 url 上（顺序回归：记错项 = 校验静默失效）
   assert.strictEqual(m.sizes['TalkScript Setup 0.2.1.exe'], 100743424);
-  assert.strictEqual(m.sizes['TalkScript Setup 0.2.1.exe.blockmap'], 115343);
+});
+
+// ★ 这是「差分下载 100% 失效」那条 P0 的活守卫：夹具改成真实形状后，若哪天
+//   blockmapsOf 被摘掉、或 main() 的步骤 1b 被删，下面这几行会立刻变红。
+//   旧夹具把 blockmap 塞进 files[]，这个洞在单测里根本看不见。
+test('★ 差分凭据不在 latest.yml 的 files[] 里 —— 必须由 blockmapsOf 按 exe 推出来', () => {
+  const m = parseLatestYml(YML);
+  assert.ok(!m.files.some((f) => f.endsWith('.blockmap')),
+    '这条红了说明 builder 换了版本、yml 里开始带 blockmap 了：'
+    + '那时 main() 的步骤 1b 要重新核对是否会重复上传（blockmapsOf 已有去重与 .exe 过滤）');
+  assert.deepStrictEqual(blockmapsOf(m.files), ['TalkScript Setup 0.2.1.exe.blockmap']);
+  // 重复条目不产生 xxx.exe.blockmap.blockmap
+  assert.deepStrictEqual(blockmapsOf(m.files.concat(m.files)), ['TalkScript Setup 0.2.1.exe.blockmap']);
+  // 非 exe 条目不推 blockmap；空 / null 输入不炸
+  assert.deepStrictEqual(blockmapsOf(['latest-mac.yml', 'a.txt']), []);
+  assert.deepStrictEqual(blockmapsOf([]), []);
+  assert.deepStrictEqual(blockmapsOf(null), []);
 });
 
 test('CRLF 换行同样解析（Windows 上被编辑器改过的 yml）', () => {
   const m = parseLatestYml(YML.replace(/\n/g, '\r\n'));
   assert.strictEqual(m.version, '0.2.1');
-  assert.strictEqual(m.files.length, 2);
+  assert.strictEqual(m.files.length, 1);
 });
 
 test('★ sha512 归到所属文件的 url 上（步骤 1 重算对账的依据，旧 P3）', () => {
@@ -70,10 +90,8 @@ test('★ sha512 归到所属文件的 url 上（步骤 1 重算对账的依据�
   const m = parseLatestYml(YML);
   assert.strictEqual(m.shas['TalkScript Setup 0.2.1.exe'],
     '9mIq0Xr0eJ7yFmYhZJ8Zk2v8s9v0u1w2x3y4z5a6b7c8d9e0f1g2h3i4j5k6l7m8n9o0p1q2r3s4t5u6v7w8x9y0zA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q==');
-  assert.strictEqual(m.shas['TalkScript Setup 0.2.1.exe.blockmap'],
-    'aB3cD4eF5gH6iJ7kL8mN9oP0qR1sT2uV3wX4yZ5a6B7c8D9e0F1g2H3i4J5k6L7m8N9oP0qR1sT2uV3wX4yZ5a6B7c8D9e0F1g2H3i4J5k6L7m8N9oP0qR==');
-  // 顶层 sha512（整包元数据）不进 files 的对账表：表里只有 files[] 两条
-  assert.strictEqual(Object.keys(m.shas).length, 2);
+  // 顶层 sha512（整包元数据）不进 files 的对账表：表里只有 files[] 那一条
+  assert.strictEqual(Object.keys(m.shas).length, 1);
 });
 
 test('注释行与空行跳过', () => {
@@ -229,6 +247,8 @@ const BM_SIZE = 512;
 // 造一个「刚 npm run dist 完」的 dist/：yml 与文件同一次构建（size 对得上，
 // sha512 也必须对得上 —— 步骤 1 现在用 yml 里的 sha512 与本地重算比对，旧 P3）。
 // yml 里写的 sha512 一律**真算**：假哈希会被新守卫当「不同源的产物」拒传。
+// yml 的形状与 builder 25 的真实输出一致：**files[] 只有 exe**，blockmap 是
+// dist/ 里的独立文件（所以下面照样要写 BM，只是它不进 yml）。
 function makeDistDir() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'publish-test-dist-'));
   fs.writeFileSync(path.join(dir, EXE), 'x'.repeat(EXE_SIZE));
@@ -240,9 +260,6 @@ function makeDistDir() {
     `  - url: ${EXE}`,
     `    sha512: ${sha('x'.repeat(EXE_SIZE))}`,
     `    size: ${EXE_SIZE}`,
-    `  - url: ${BM}`,
-    `    sha512: ${sha('b'.repeat(BM_SIZE))}`,
-    `    size: ${BM_SIZE}`,
     `path: ${EXE}`,
     `sha512: ${'c'.repeat(86)}==`,
     'releaseDate: 2026-09-24T08:00:00.000Z',
@@ -352,6 +369,21 @@ test('E 线上更旧 → 放行，步骤 4 报线上版本并提示上传后应�
   assert.strictEqual(r.status, 0, `stdout:\n${r.out}\nstderr:\n${r.err}`);
   assert.ok(r.out.includes('允许上传'), r.out);
   assert.ok(r.out.includes(`本次是 ${PKG_VERSION}，上传后这里应变成它`), r.out);
+});
+
+test('★ dist/ 里缺 blockmap → 步骤 1 拒传（差分下载 100% 失效的那条 P0）', async (t) => {
+  const dir = makeDistDir();
+  // latest.yml 不列 blockmap（builder 25 的真实形状），所以「传完了」这个判断
+  // 只能靠 dist/ 里那个独立文件。少了它还照样发版的话，客户端差分必然失败并
+  // 静默回退全量 —— 更新「成功」但每次 97 MB，没有任何报错。
+  fs.rmSync(path.join(dir, BM));
+  const server = await makeServer({ 'GET /latest.yml': () => ({ status: 404 }) });
+  t.after(() => { server.closeAllConnections?.(); server.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+  const r = await dryRun(server.address().port, dir);
+  assert.strictEqual(r.status, 1, `stdout:\n${r.out}\nstderr:\n${r.err}`);
+  assert.ok(r.err.includes('校验产物'), r.err);
+  assert.ok(r.err.includes(BM), `没点名缺的是哪个文件：${r.err}`);
+  assert.ok(r.err.includes('差分'), `没说是差分需要它：${r.err}`);
 });
 
 test('F ★ 本地文件与 latest.yml 的 sha512 对不上 → 步骤 1 拒传（旧 P3：只比 size 拦不住同长度篡改）', async (t) => {

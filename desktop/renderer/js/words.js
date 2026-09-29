@@ -31,10 +31,15 @@ export const STATE_LABEL = {
   selecting: "选题策划中",
   writing: "文案撰写中",
   rewriting: "回炉改写中",
-  checking: "代码校验中",
+  // 以前写「代码校验中」。「代码」是工程侧的叫法 —— 走查的明明是**这篇稿子**
+  // （禁用词、字数、时长、占位符），而用户从头到尾没碰过任何代码。同一块屏幕上
+  // 结论那三态说的是「已通过校验 / 未通过校验 / 没有校验结论」，进度这里却冒出
+  // 一个「代码」，用户会以为界面串到了别的东西上。改成与结论同族的「校验」。
+  checking: "校验中",
   storyboarding: "分镜生成中",
   packing: "行业包生成中",
   fetching: "情报抓取中",
+  briefing: "选题卡生成中",
   done: "已完成",
   failed: "失败",
   cancelled: "已停止",
@@ -45,6 +50,43 @@ export const STATE_LABEL = {
  *  （审查第 8 轮 界面 P1）。认不出来的值原样显示，别编一个词盖住它。 */
 export const SEVERITY_LABEL = { strong: "明显", weak: "轻微" };
 export const severityLabel = s => SEVERITY_LABEL[s] || s || "";
+
+/** 「校对」一族的话。同一件事以前有五种说法：键面「标记为已校对」、
+ *  提示「已标记为校对完成」、包状态「已校对」、列表副标「草稿 · 待校对」、
+ *  结果页「内容需人工校对」。用户据此以为点一次和点两次不一样。
+ * 现在：动作、结果、状态各有一个词，且**都由这里出**。 */
+export const PROOF = {
+  /** 键面 / 确认框标题：这个动作叫什么 */
+  act: "标记为已校对",
+  /** 做成了：toast 说什么 */
+  done: "已标记为校对完成",
+  /** 状态：包已经不是草稿了 */
+  cleared: "已校对",
+  /** 状态：包还是草稿，等着人看 */
+  pending: "待校对",
+  /** 提醒：这份内容还没人看过 */
+  warn: "内容需人工校对",
+};
+
+/** 输入框快捷键的说明。同一件事以前有三份说法：placeholder 写
+ * 「Enter 发送 · Esc 停止」、title 写「Enter 发送 · Shift+Enter 换行 ·
+ *  Esc 停止生成」、发送键 title 写「生成（Ctrl + Enter）」—— 三份都只说了
+ *  一半（真正的提交键有两个、Esc 在忙时才是停止），用户按了 Ctrl+Enter
+ *  才发现第一份没提。三处现在**都从这里取**。
+ * ⚠ index.html 是静态的，那两处由 main.js 起手时回填，别在 HTML 里另写一份。 */
+export const SHORTCUT = {
+  /** 输入框 placeholder / title 里的那一行 */
+  box: "Enter 发送 · Shift+Enter 换行 · Ctrl+Enter 也可发送 · Esc 停止生成",
+  /** 发送键的 title */
+  send: "生成（Enter / Ctrl+Enter）",
+};
+
+/** 会话头部那个标题。修前它有**五份**手写：`index.html` 的 `#rh-title`、
+ *  head.js 的初值、head.js 的 setHead 兜底、main.js 的 newChat、
+ *  sessions.js 的两处删除后收屏。改一处漏一处，同一块屏幕上就两个名。 */
+export const CHAT = {
+  title: "新对话",
+};
 
 /** 情报源的更新节奏 —— 后端存的是机器码（各包 pack.yaml 里 source 的 cadence 字段，
  *  天数口径在 app/intel.py 的 CADENCE_DAYS），上屏必须过这张表：

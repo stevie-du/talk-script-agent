@@ -33,22 +33,24 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from .ai_tells import AITells
-from .checker import Banwords, Quota, check_script, count_chars
+from .ai_tells import STRONG, WEAK, AITells, severity_word
+from .checker import Banwords, Quota, check_script, count_chars, fact_survival
 from .config import AppConfig, load_config
 from .fileio import rmtree_resilient
 from . import jobs as _jobs                              # noqa: F401
-from .intel import PROMPT_HEAD, fetch_pack
+from .intel import (BRIEF_SYSTEM, PROMPT_HEAD, brief_banwords as intel_brief_banwords,
+                    build_brief_user as intel_build_brief_user, fetch_pack,
+                    find_event as intel_find_event, save_brief)
 from .jobs import (INTEL_BUSY_STATES, JOB_BUDGET_SECONDS,  # noqa: F401
                    MAX_CONCURRENT_INTEL, TERMINAL_STATES, Job,
                    JobBudget, JobCancelled, JobRegistry, StateConflict,
                    new_job_id)
-from .knowledge import (DEFAULT_REWRITE_SCOPE, Pack, PackError,  # noqa: F401
-                        param_audit, rewrite_scope_error)
+from .knowledge import (DEFAULT_REWRITE_SCOPE, Pack, PackBrokenError,  # noqa: F401
+                        PackError, param_audit, rewrite_scope_error)
 from .llm import EmptyContentError, LLMClient
 from .packgen import claim_slug, create_pack, preview_slug, release_slug, slug_problem
 from .prompts import PromptRenderer
-from .schemas import (GenerateRequest, RewriteSegmentRequest,
+from .schemas import (GenerateRequest, IntelBrief, RewriteSegmentRequest,
                       ScriptResult, ScriptSection, StoryboardShot, TopicPlan)
 from .store import ArtifactStore
 
@@ -174,6 +176,58 @@ PARAMS_DROPPED: dict[str, str] = {
 #    按 PERSISTED_PARAMS 逐键取的，少一个就静默不进产物（测试有子集断言守着）。
 RUNTIME_PARAMS: tuple[str, ...] = ("model", "max_tokens", "temperature")
 
+
+def _assert_stages_usable(pack: Pack) -> None:
+    """这个包的 skill.yaml 声明能不能走通一条生成路径？不能就抛 PackBrokenError。
+
+    **为什么需要**：阶段齐不齐对导入与列表**不查**（结构合法、YAML 能解析
+    就放过），而生成链路渲染某阶段时是**裸下标**
+    `self.skill["stages"][stage]["system"]`（prompts.render）—— 缺了就 KeyError。
+    第三方导入的包完全能长成缺阶段的样子（`packimport` 只管 zip 层与结构层），
+    于是症状是「跑完一整轮、烧掉一次调用的钱，然后生成失败」。
+
+    - `write` **恒**必需：draft 只省掉 select 那一轮，write 那一段照走
+      （回炉轮渲染的还是它）。另有一处更隐蔽的：`voice_parts` 读
+      `stages.write.anti_ai`，缺了会**静默退成 ("", "")** —— 人味档位整条
+      失效、界面上一个字都不说。
+    - `select` 只在**没有** draft 时必需：draft 路径走 `stage_files("draft")`，
+      不碰 select。
+
+    ⚠ 查的是**能不能渲染**，不只是「名字在不在」（复审实测抓到的漏网）：
+      `skill_shape_error` 对 `stages: {write: {files: {...}}}`（缺
+      `system` / `user_template`）返回**空串** —— 它只查 stages/cfg 是不是
+      dict。于是那种包过得了这道闸门，一路跑到 `prompts.render` 才抛
+      `KeyError: 'system'`，正是这道闸门要消灭的那种「烧完钱才失败」，
+      只是触发点从"缺整格"挪到了"格不完整"。所以每一格都要断言那两个键。
+    """
+    skill = pack.skill()
+    stages = (skill or {}).get("stages") or {}
+    required = ["write"] if "draft" in stages else ["select", "write"]
+    bad: list[str] = []
+    for s in required:
+        cfg = stages.get(s)
+        if not isinstance(cfg, dict):
+            # 写成字符串/列表的也有（`stages: {write: "见文档"}`）——
+            # 那连 `.get` 都用不上，别让这道闸门自己先炸成 TypeError。
+            bad.append(s)
+            continue
+        # 每一格都要能 render：system 与 user_template 是**两个**裸下标，
+        # 少任何一个都是同一个 KeyError。空串同样算坏 —— Template("") 渲染出
+        # 一条空指令，模型那边就是"没说要干什么"，比报错更坏。
+        gone = [k for k in ("system", "user_template")
+                if not str((cfg.get(k) or "")).strip()]
+        if gone:
+            bad.append(f"{s}（缺 {'、'.join(gone)}）")
+    if bad:
+        # 用 PackBrokenError 而不是自己造一个：它的语义正是
+        # 「包存在、YAML 也合法，但它坏在这儿」→ 409 + 界面指去改包，
+        # 与「包选错了」(404) 区分得开（见 knowledge.PackBrokenError）。
+        raise PackBrokenError(
+            f"行业包 {pack.dir.name} 缺少阶段声明：{'、'.join(bad)}"
+            "（skill.yaml 的 stages 里要能选出这一条能走通的路径："
+            "write 必需；没有 draft 合并阶段时 select 也要有；"
+            "每一格都要写全 system 与 user_template）")
+
 #: 回炉改写范围三档各自给模型的那句话（A-2，对标 shuorenhua 的三档）。
 #: 三档都建立在**同一件事**上：把上一版全文附给模型、让它逐处改而不是重掷骰子
 #: （P2-41）。差别只在**允许动多大**：
@@ -196,8 +250,36 @@ SCOPE_INSTRUCTION: dict[str, str] = {
         "文号、数字、引文与 {{待补}} 占位不许动",
     "structural":
         "**可以重排**：允许合并、拆分、调整段落顺序，但上面点名的每条问题都必须解决；"
-        "文号、数字、引文与 {{待补}} 占位照旧不许动",
+        "文号、数字、引文照旧不许动",
 }
+
+#: 回炉轮的**两段指令**（A-9 §3.1 #1，抄 slopbuster 的两遍法）。
+#: 为什么塞进回炉反馈而不是拆成两次调用：拆轮 = 每篇多烧一次钱（回炉轮的
+#: `recheck_rounds` 默认 2，多一次就是 3 次 write）；slopbuster 自己承认"只做减法
+#: 的结果死气沉沉、仍被识破"，而多家来源（great-writer 的"对聪明朋友这么说"测试、
+#: 搜狐实战帖"改完朗读找卡嘴处"）给的都是**同一句话里的两半**：先删掉机器味，
+#: 再把人声补回去。分两段写在同一次调用里，就是把这条路径先跑起来再比。
+HUMAN_VOICE_RULE = (
+    "- 这次改写**分两步做，顺序不能反**：\n"
+    "  第一步只做减法：把上面点名的那几处改掉（删掉套话、拆掉超过 30 字的复合句）；\n"
+    "  第二步再把人声补回去：句子有长有短（别每句都一样长）、观点要有**上一版或素材里"
+    "已经有的**具体名词（型号、部位、金额、日期）、该下判断的地方就下判断"
+    "（「是不是」式的收尾反问比「大家可以了解一下」像人话）。"
+    "只做第一步的稿子会「干净但死」。")
+
+#: 过度矫正的**负面清单**（A-9 §3.1 #5，抄 avoid-ai-writing-cn 的"六永不注入"
+#: + de-slop 的 guardrails 反模式目录）。
+#: 为什么放在回炉反馈块而不是 voice.md：voice.md 与 anti-ai-smell.md 都在
+#: `stages.write.anti_ai.levels.strong.files` 里**整份注入撰写轮提示词**，
+#: 那一轮的预算实测只剩几十字；回炉反馈块由 pipeline 侧拼接、在 user_template
+#: 末尾，**不占撰写轮模板预算**（调研报告-20260928 §3.7 的修正）。
+NEGATIVE_INJECTION_RULE = (
+    "- 改写有**六条永不注入**（只删减、不添加 —— 把稿子洗成另一种 AI 味不算改好）：\n"
+    "  ① 不加原文没有的口头禅与语气词；② 不制造新的排比、对仗或「更重要的是」式收尾；\n"
+    "  ③ 不表演坦率（「说实话」「讲真的」不是人味，是另一种模板）；④ 不制造紧张感"
+    "（「千万别」「后果很严重」）；⑤ **不虚构任何细节**（数字、地名、案例、亲身经历 ——"
+    " 素材里没有就写 {{待补}}，宁可空着也不许编）；⑥ 不把短句拆成断句式戏剧节奏。\n"
+    "  点名清单里没有的段落，一个字都不要动。")
 
 
 class Pipeline:
@@ -272,6 +354,23 @@ class Pipeline:
         # 时那条 `queued` 作业已经插进注册表，没人回收它，额度被永久吃掉一个。
         # （这正是 P0-3 的形态：额度被没人管的作业占住。）
         pack = Pack(self.root, req.pack)
+        # 阶段声明**在受理时就验**（审查 P2 可维护性）：缺 write 的包会
+        # 在回炉轮渲染 `stages.write` 时 KeyError —— 而 prompts.render 是
+        # **裸下标** `self.skill["stages"][stage]`。放到作业线程里验的话，
+        # 受理接口照样回 200 + job_id，界面把作业画成"生成中"，
+        # 用户要等它跑完一整轮才看到失败文案 —— 那一轮的钱已经花掉了。
+        # 阶段声明齐不齐对导入/列表**不查**（结构合法、YAML 能解析就够了），
+        # 所以这道闸门是**生成入口**上唯一一次机会。
+        # ⚠ 不是"全站唯一一次"：单段重写那条入口（`rewrite_segment`）自己
+        #   `Pack(self.root, result["pack"])`、不经这里，它在 `_run_rewrite_segment`
+        #   里渲染 `rewrite_segment` 阶段，另有一道（见那里）。别照着"加了这道
+        #   闸门就到处都安全了"来理解 —— 那个理解已经害过一条路了。
+        #
+        # ⚠ **有 draft 也仍然要求 write 在场**，不是「有 draft 就整段放过」。
+        #   draft 只省掉 select 那一轮，write 那一段照走。另一处更隐蔽：
+        #   voice_parts 读 `stages.write.anti_ai`，缺了会**静默退成 ("", "")**，
+        #   人味档位整条失效且界面毫无提示。
+        _assert_stages_usable(pack)
         jid = new_job_id()
         job = Job(jid, "generate", req.model_dump())
         # 先占额度、后建目录：修复前 `job_dir` 在 `add_if_room` 之前无条件 mkdir，
@@ -465,7 +564,8 @@ class Pipeline:
             # 不重复抄键名（抄第二份的教训见 params 四张表那条注释）。
             for k in RUNTIME_PARAMS:
                 p[k] = getattr(client.cfg, k)
-            if "draft" in (skill.get("stages") or {}):
+            stages = skill.get("stages") or {}
+            if "draft" in stages:
                 # 方案 10：合并包（skill.yaml 声明 stages.draft）选题与正文一次调用，
                 # 不进 selecting —— 省掉 select 单独一轮的思考与往返。
                 # 状态机本就允许 queued → writing，无需新边。
@@ -637,7 +737,16 @@ class Pipeline:
                 pack.dir.name, self.data_dir, sources,
                 seeds=pack.intel_seeds(), keywords=pack.intel_keywords(),
                 topics_map=pack.data.get("topics_map") or {},
-                segment_options=pack.param_options("segment"), http=http)
+                segment_options=pack.param_options("segment"),
+                # 争议词（§3.3 第 5 条的黄标那一半）来自包自己的声明，**不是** banwords
+                # 的 soft 档 —— 那批词是「最 / 第一 / 最新」，拿它标争议会张张卡都黄。
+                contested=pack.intel_contested(), http=http,
+                # 源与源之间的收工闸门（审查 P2 可维护性）：抓取是最慢的一段，
+                # 而没有闸门时用户点了停止，那句「正在停止…」要一直挂到
+                # 8 个源全跑完 —— 停止键在观感上是坏的。抛的是 _stop_check
+                # 认的那两种（JobCancelled / JobBudget），所以走的是与其它
+                # 阶段**同一条**取消通路，不另开一个「抓取专用」的异常。
+                should_stop=lambda: self._stop_check(job))
             # 取消检查放在**写盘之后、落状态之前**：落盘是有用的副作用
             # （下次打开就有数据），但状态必须是 cancelled 而不是 done。
             self._stop_check(job)
@@ -651,6 +760,122 @@ class Pipeline:
                     "pack": out["pack"], "fetched_at": out["fetched_at"],
                     "items": len(out["items"]), "sources": out["sources"],
                     "errors": out["errors"]}):
+                return
+            self.registry.prune()
+        except JobCancelled:
+            self._settle_cancel(job)
+        except Exception as e:                # noqa: BLE001
+            self._fail(job, e)
+
+    # ── 选题卡（§3.4 建议层：手动触发、一次一卡、花钱）──────────
+    def start_intel_brief(self, pack_name: str, key: str) -> tuple[str, bool]:
+        """为**一个事件**生成选题卡。返回 `(job_id, 是不是复用了一条在飞的作业)`。
+
+        为什么走 Job 而不是同步请求：与 `start_packgen` 同一条理由（P1-43）——
+        一次模型调用几十秒、要能取消、关窗之后要能接上。
+        为什么**占模型额度**而不是情报额度（§3.4）：抓取不花钱、这张卡花。
+        `intel_brief` 因此**显式**写进 `jobs.MODEL_JOB_KINDS`，不靠"默认落进模型族"
+        那个巧合 —— 靠巧合的话，额度隔离那条断言就没有被守的对象。
+
+        缓存命中**不进这里**：`/api/intel/brief` 先看今天有没有生成过，
+        有就直接把那份发回去（一条没有模型调用的作业会占着一个并发额度、
+        进度条转一圈、最后说"没花钱"——那是把零成本的事演成昂贵的样子）。
+
+        但缓存只覆盖"已经生成完"的那段：作业在飞的几十秒里盘上还是空的，
+        换窗口或重启后再点一次会起**第二条**作业 —— 两次模型调用、两张一样的卡，
+        而 §5 #2 的验收写的是"当日重复点击不重扣费"。所以这里改成
+        "同一 (pack, key) 有未终态的作业就搭上它"（判+插在 registry 同一把锁内，
+        与 `add_if_room` 拒绝 TOCTOU 的做法一致）。
+        """
+        pack = Pack(self.root, pack_name)     # 不存在 → PackError(404)；坏 → 409
+        event = intel_find_event(self.data_dir, pack.dir.name, key)
+        if event is None:
+            raise StateConflict(
+                "这件事不在今天抓到的热榜里了 —— 请重新抓取后再试"
+                "（选题卡的输入就是今天那份榜单，不能凭空造一个事件）")
+        jid = new_job_id()
+        job = Job(jid, "intel_brief", {"pack": pack.dir.name, "key": key})
+
+        def same(other: Job) -> bool:
+            return (other.kind == "intel_brief"
+                    and other.params.get("pack") == pack.dir.name
+                    and other.params.get("key") == key)
+
+        inserted, reused = self.registry.add_if_room_dedup(job, MAX_CONCURRENT_JOBS,
+                                                           same=same)
+        if reused is not None:
+            return str(reused.id), True
+        if not inserted:
+            raise StateConflict(
+                f"同时进行的生成已达上限（{MAX_CONCURRENT_JOBS} 个），"
+                "选题卡一次要跑一条模型调用，请等其中一条完成后再试")
+        try:
+            self._spawn(job, lambda: self._run_intel_brief(job, pack, event))
+        except BaseException as e:            # noqa: BLE001
+            # P1-46 同款兜底：线程起不来也要把作业落成终态，别泄漏并发额度。
+            if job.state not in TERMINAL_STATES:
+                self._fail(job, e)
+            raise
+        return jid, False
+
+    def _run_intel_brief(self, job: Job, pack: Pack, event: dict) -> None:
+        """选题卡作业主体：拼输入 → 一次 `chat_json` → 过禁用词 → 落 `briefs/`。
+
+        ⚠ 产物**绝不进 `_plan_key`**（§3.4 指纹隔离）：这张卡是用户手动点出来的
+        一次性建议，不是生成的输入。哪天有人把它接进 select 的上下文，
+        同参数重跑会随机换指纹 —— 反向断言在 tests 里钉着。
+        """
+        try:
+            self._stop_check(job)
+            job.transition_or_raise("briefing")
+            client = self.llm
+            self._step(job, "brief_plan",
+                       f"选题卡输入：{str(event.get('title') or '')[:24]}",
+                       {"key": event.get("key"), "status": event.get("status")})
+            user = intel_build_brief_user(
+                event, pack_label=pack.info.display_name or pack.dir.name,
+                segments=pack.param_options("segment"),
+                # 受众给**选项名**而不是 audience_map 那个映射字典：把 dict 直接 str()
+                # 进 prompt，模型看到的是一段 Python 字面量（`{'家用电梯': '业主'}`），
+                # 而它能用的是"这个账号对谁说话"这句话。
+                audience="、".join(str(x) for x in pack.param_options("audience")[:6]))
+            usage: dict = {}
+            brief: IntelBrief = client.chat_json(
+                "intel_brief", BRIEF_SYSTEM, user, IntelBrief,
+                on_retry=self._retry_logger(job),
+                on_delta=self._delta_handler(job, "选题卡"),
+                on_attempt=self._stream_reset(job, "选题卡"),
+                should_abort=self._abort_gate(job),
+                deadline=job.deadline(),
+                usage=usage,
+                # 输入是几行标题、输出是 3-4 个角度 —— 与 write 共用全额预算
+                # 会让思考被预算反向推高（P0-3 同一条），这里给 select 那一档。
+                max_tokens=4000)
+            payload = brief.model_dump()
+            payload["event_key"] = str(event.get("key") or "")
+            # 生命周期阶段以**榜单算出的那个**为准，模型回什么都不采纳（§3.4：
+            # 「LLM 只复述不自己判」）。让它改判，同屏的排行行与选题卡就会
+            # 一个写「爆发中」一个写「衰退期」。
+            payload["stage"] = str(event.get("stage") or payload.get("stage") or "")
+            hard = tuple(str(w) for w in (pack.banwords_data().get("hard") or []) if w)
+            cleaned, hits = intel_brief_banwords(payload, hard)
+            if hits:
+                self._step(job, "brief_banwords",
+                           f"选题卡里有 {len(hits)} 处命中禁用词，已摘标为 {{待补}}",
+                           {"words": list(dict.fromkeys(hits))})
+            cleaned["created_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+            cleaned["event_title"] = str(event.get("title") or "")
+            cleaned["pack"] = pack.dir.name
+            save_brief(self.data_dir, pack.dir.name, str(event.get("key") or ""), cleaned)
+            # usage 记进步骤而不是塞进缓存文件（P3-15 的口径：只记账、不参与判定；
+            # 而 briefs/<key>.json 是"给用户看的那张卡"，多一个没人读的键就是
+            # 那条「信号算了没人接」的老账）。
+            self._step(job, "brief_done", "选题卡已生成",
+                       {"key": cleaned.get("event_key"),
+                        "angles": len(cleaned.get("angles") or []),
+                        **({"usage": usage} if usage else {})})
+            self._stop_check(job)
+            if not job.transition("done", result=cleaned):
                 return
             self.registry.prune()
         except JobCancelled:
@@ -754,7 +979,24 @@ class Pipeline:
         `safe_substitute` 对未知变量保持原样，拼错的占位符不会报错，
         只会让模型收到一段字面量、并静默丢掉本该注入的知识文件。
         这里把残留占位符记进作业日志（界面「日志」页签），包作者一眼能看到。
+
+        ⚠ 这是**所有**阶段渲染的唯一收口（`prompts.render` 那边是裸下标
+          `self.skill["stages"][stage]["system"]`，缺一格就 KeyError）。
+          所以"这一格能不能渲染"在这里查一次，而不是散在各调用点：
+          改了 `storyboard` 那种"缺了就跳过并记一条日志"的路径不会被波及，
+          而 `rewrite_segment` 这种**没有兜底**的路径（改前导入一个少写
+          `rewrite_segment` 的第三方包，生成一切正常，点「重写本段」才炸）
+          会在用户按下那颗键的**那一刻**说清是包的问题。
+          ⚠ 报的是 `PackBrokenError` 而不是让它 KeyError：作业落 failed
+          时会把异常原文印在界面上，"行业包配置缺少字段：'rewrite_segment'"
+          对用户是黑话，而"这个包没配单段重写阶段"是下一步动作。
         """
+        cfg = (pr.skill.get("stages") or {}).get(stage)
+        if not isinstance(cfg, dict) or not str(cfg.get("system") or "").strip() \
+                or not str(cfg.get("user_template") or "").strip():
+            raise PackBrokenError(
+                f"行业包 {pr.pack.dir.name} 的「{stage}」阶段配不完整"
+                "（skill.yaml 的 stages 里这一格要写全 system 与 user_template）")
         missing = pr.unfilled(stage, ctx)
         system, user = pr.render(stage, ctx)
         if missing:
@@ -774,7 +1016,7 @@ class Pipeline:
         temp = (min(1.0, float(client.cfg.temperature) + 0.25)
                 if p.get("reroll") else None)
         key = None if p.get("reroll") else self._plan_key(
-            client, system, user, ctx.get("intel_key", ""))
+            client, system, user, ctx.get("intel_key", ""), ctx)
         if key:
             hit = self._cache_lookup(key)
             if hit is not None:
@@ -873,7 +1115,8 @@ class Pipeline:
     PLAN_CACHE_MAX = 32
 
     @staticmethod
-    def _plan_key(client: LLMClient, system: str, user: str, intel_key: str = "") -> str:
+    def _plan_key(client: LLMClient, system: str, user: str, intel_key: str = "",
+                  ctx: dict | None = None) -> str:
         """选题缓存指纹。
 
         ⚠ 情报块**整块都不进指纹**，只进它的短键（`intel_key` = 选中项 id + 出处）。
@@ -881,13 +1124,38 @@ class Pipeline:
         全部失效（每一次刷新都等于重选题，白花一次 4000 token）；
         而只带短键时，选中的还是那几条 → 指纹不变 → 同一条选题仍可复现。
 
+        ⚠ 去掉情报块**不能靠切字符串**（P1）。原来是
+        `user.split(PROMPT_HEAD, 1)[0]`，那条注释把「块在提示词**末尾**」
+        当成了既定前提，而代码里没有任何地方验证它。`split(…, 1)[0]` 砍掉的是
+        「第一次出现 PROMPT_HEAD 之后的**全部**内容」—— 包作者（尤其是通过
+        `POST /api/packs/import` 导入的第三方包，产品明确支持的入口）把
+        `$intel_block` 放在开头或中间时，被砍掉的不只是情报块，而是
+        **主题 / 时长 / 细分 / 受众**这些决定选题的全部上下文，剩下的 `base`
+        变成一段静态前缀 → 同一包内**任意两次生成都算出同一个指纹** →
+        换主题拿到上个主题的 plan，界面上一切正常。
+        （实测：块在末尾时两主题同键=False；块在开头时=True。仓库自带两个包
+        都放对了，所以测试全绿。）
+
+        现在改成：**把 ctx 里除 `intel_block` 之外的所有键按名排序后序列化**。
+        无论块放在哪，指纹都完整；块的内容仍然只由 `intel_key` 决定要不要进指纹，
+        §2.9 B-3 的原意一点没变。
+
         base_url 必须在指纹里：只算 model 名的话，用户在设置里把同一个模型名
         换到另一家的服务（deepseek 官方 ↔ 第三方中转，实测同名不同质量），
         reload_llm() 之后仍会命中上一家的选题缓存 —— 那是"静默用了另一个模型的产物"。
         """
-        # 块在提示词**末尾**，所以按它的首行标记切一刀就能拿掉（见 intel.PROMPT_HEAD）。
-        base = user.split(PROMPT_HEAD, 1)[0] if intel_key else user
-        raw = (f"{client.cfg.base_url}\n{client.cfg.model}\n{system}\n{base}\n{intel_key}").encode("utf-8")
+        # ctx 为空（老调用方 / 测试直接调本函数）时退回切字符串那条老路，
+        # 但仍按「块在末尾」的假设处理 —— 那是内置两个包的真实形状。
+        if ctx is None:
+            base = user.split(PROMPT_HEAD, 1)[0] if intel_key else user
+            body = base
+        else:
+            # 只序列化**非情报**的上下文。`intel_block` 整个排除（它每次刷新
+            # 内容都变，进指纹等于让缓存永不命中），`intel_key` 单独拼在后面。
+            plain = {k: v for k, v in ctx.items() if k != "intel_block"}
+            body = json.dumps(plain, ensure_ascii=False, sort_keys=True, default=str)
+        raw = (f"{client.cfg.base_url}\n{client.cfg.model}\n{system}\n{body}\n"
+               f"{intel_key}").encode("utf-8")
         return hashlib.sha1(raw).hexdigest()
 
     def _step_intel(self, job: Job, pr) -> None:
@@ -1001,6 +1269,11 @@ class Pipeline:
         revisions: list[dict] = []
         feedback = ""
         draft: dict = {}
+        # fact gate 要比对的"上一版"（只在 rnd>1 才有意义；首轮 `prev_sections` 是空的，
+        # 上面那条 `if rnd > 1 and prev_sections` 就是挡这个的 —— 没有上一版就无所谓丢失）
+        prev_draft: dict = {}
+        prev_report: dict = {}
+        prev_sections: list[dict] = []
         for rnd in range(1, rounds + 1):
             self._stop_check(job)     # 回炉每一轮前先看有没有让停
             if prebuilt is not None and rnd == 1:
@@ -1041,30 +1314,46 @@ class Pipeline:
                                   p["platform"], quota, tells=tells,
                                   tolerance=tolerance)
             self._step(job, f"check_r{rnd}", f"校验·第 {rnd} 轮", {"report": report})
+            # A-9 **fact gate**（调研报告-20260928 §3.1 #2）：回炉改写不许把具体信息改丢了。
+            # `SCOPE_INSTRUCTION` 三档都写着「文号、数字、引文与 {{待补}} 不许动」，但那
+            # 只是给模型的话，**没有本地校验** —— 这一步就是那条本地校验。
+            # 拒收的判据刻意保守：只在"这一版仍然不合格、又把事实改丢了"时作废本轮
+            # （回到上一版继续，下一轮的反馈里点名它改丢了什么）。
+            # ⚠ 反过来"这版合格了但少了一个数字"**照收**并留痕 —— 合规结论优先：
+            #   数字丢了人还能补，留着硬违规（如「政府补贴」）是要出事的。
+            lost = (fact_survival(prev_sections, draft.get("sections") or [])
+                    if rnd > 1 and prev_sections else [])
+            if lost and not report["passed"]:
+                self._step(job, f"fact_gate_r{rnd}",
+                           f"回炉第 {rnd - 1} 轮改丢了 {len(lost)} 处具体信息，且没修好任何问题 —— "
+                           "本轮作废、退回上一版，下一轮按要求把原样放回去",
+                           {"lost": lost[:10]})
+                draft, report = prev_draft, prev_report
+                feedback = self._violation_feedback(
+                    report, prev_sections, p.get("rewrite_scope", DEFAULT_REWRITE_SCOPE),
+                    lost_specific=lost)
+                if rnd == rounds:
+                    draft["check"] = report
+                    # ⚠ 退回上一版也要把候选版过一遍校验：`ScriptResult.alternatives`
+                    #   要的是过滤后的 `[{sections, check}]`（schemas.py:256），而模型给的
+                    #   是 `list[sections]`。这条出口原先漏了这一步，整个作业以 pydantic
+                    #   校验失败收场（烧完全部轮次才炸）—— 形状只能在**一处**被定义。
+                    self._filter_alternatives(job, draft, p, ban, quota, tells, tolerance, rnd)
+                    return draft, revisions
+                continue
+            if lost:
+                self._step(job, f"fact_gate_r{rnd}",
+                           f"回炉第 {rnd - 1} 轮改丢了 {len(lost)} 处具体信息 —— "
+                           "本轮已收下（合规优先），请人工核回",
+                           {"lost": lost[:10], "passed": report["passed"]})
             if report["passed"] or rnd == rounds:
                 draft["check"] = report
-                # P3-42：候选版逐个过校验，过的进候选（附各自 check），
-                # 不过的被拒并在作业日志里说明为什么少了一版。
-                # 默认空 = 单稿路径，这条循环不跑，零额外开销。
-                alts = draft.get("alternatives") or []
-                if alts:
-                    kept = []
-                    for i, cand in enumerate(alts, 1):
-                        crep = check_script(cand, p["duration"], p["rate"], ban,
-                                            p["platform"], quota, tells=tells,
-                                            tolerance=tolerance)
-                        if crep["passed"]:
-                            kept.append({"sections": cand, "check": crep})
-                        else:
-                            self._step(
-                                job, f"alt_reject_r{rnd}",
-                                f"候选版 {i} 未过校验，未进候选（{len({h['word'] for h in crep['hard_hits']})}"
-                                f" 处硬违规 / 时长偏差 {crep.get('deviation_pct', 0):+.1f}%）",
-                                {"i": i, "check": crep})
-                    draft["alternatives"] = kept
+                self._filter_alternatives(job, draft, p, ban, quota, tells, tolerance, rnd)
                 return draft, revisions
             feedback = self._violation_feedback(report, draft.get("sections") or [],
                                                 p.get("rewrite_scope", DEFAULT_REWRITE_SCOPE))
+            # 走到这里 = 本轮收下并还要再改一轮：把"上一版"三件套留给下一轮的 fact gate。
+            prev_draft, prev_report, prev_sections = draft, report, draft.get("sections") or []
             # `action` 是给人看的，`action_code` 才是给界面分流用的。修复前只有
             # `action`，而 result.js 拿中文字面量去筛"哪些版本是全文回炉" ——
             # 改一句中文文案（不改任何行为）就会让那条横幅静默消失，而 UI 桩是
@@ -1074,9 +1363,38 @@ class Pipeline:
                               "action_code": REVISION_CODE_FULL_RECHECK})
         return draft, revisions
 
+    def _filter_alternatives(self, job: Job, draft: dict, p: dict, ban: Banwords,
+                             quota: Quota, tells, tolerance, rnd: int) -> None:
+        """P3-42：候选版逐个过校验，过的进候选（附各自 check），不过的被拒并说明为什么少了一版。
+
+        ⚠ 为什么抽成函数而不是就地写两段：`ScriptResult.alternatives` 的契约是
+        **过滤后**的 `[{sections, check}]`（`app/schemas.py:256`），而模型给的是
+        `list[sections]`。这段过滤原先只在"收下"那条出口里跑，A-9 的 fact gate 多开了一条
+        返回出口（末轮拒收）就漏了它 —— 整个作业以 pydantic 校验失败收场，
+        而且是在钱烧完之后。形状只能在一处被定义。
+        默认空 = 单稿路径，这条循环不跑，零额外开销。
+        """
+        alts = draft.get("alternatives") or []
+        if not alts:
+            return
+        kept = []
+        for i, cand in enumerate(alts, 1):
+            crep = check_script(cand, p["duration"], p["rate"], ban,
+                                p["platform"], quota, tells=tells, tolerance=tolerance)
+            if crep["passed"]:
+                kept.append({"sections": cand, "check": crep})
+            else:
+                self._step(
+                    job, f"alt_reject_r{rnd}",
+                    f"候选版 {i} 未过校验，未进候选（{len({h['word'] for h in crep['hard_hits']})}"
+                    f" 处硬违规 / 时长偏差 {crep.get('deviation_pct', 0):+.1f}%）",
+                    {"i": i, "check": crep})
+        draft["alternatives"] = kept
+
     @staticmethod
     def _violation_feedback(report: dict, prev_sections: list[dict] | None = None,
-                            scope: str = DEFAULT_REWRITE_SCOPE) -> str:
+                            scope: str = DEFAULT_REWRITE_SCOPE,
+                            lost_specific: list[str] | None = None) -> str:
         """回炉反馈（Self-Refine 的 critique）：**可执行的修改清单 + 上一版正文**。
 
         修复前这里只给统计数字（「命中硬禁用词「绝对安全」×1」）且**不带上一版**，
@@ -1084,8 +1402,16 @@ class Pipeline:
         （主报告 §三、P2-41）。现在两处一起补：
           - 命中处带段号与原句（checker.locate_hits），模型知道改哪一句；
           - 附上上一版全文（口播正文实测只有 250~450 字，代价远小于一次白跑的重掷）。
+
+        `lost_specific` = fact gate 抓到"上一轮改丢了什么"（A-9）。点名放在清单**第一行**：
+        它比文风问题优先级高 —— 数字与文号是稿子唯一的事实支撑，改丢了就是编造的另一面。
         """
         lines = []
+        if lost_specific:
+            shown = "、".join(str(x) for x in lost_specific[:12])
+            lines.append(f"- 上一版里有、**你上一轮改丢了**的具体信息：{shown}。"
+                         "把原样放回去（不许换个说法、不许改成约数、不许删掉）—— "
+                         "数字、文号、引文与 {{待补}} 占位是稿子里唯一不能「顺手改」的东西")
         if report["hard_hits"]:
             words = "、".join(f"「{h['word']}」×{h['count']}" for h in report["hard_hits"])
             lines.append(f"- 命中硬禁用词：{words}。必须删除或改成行业里站得住脚的具体说法"
@@ -1118,14 +1444,36 @@ class Pipeline:
                              f"（配额≈{q}），请压缩")
         # 人味（文风）建议：**不影响本次是否合格**，只是这次改写顺手能修的地方。
         # 与 banwords 的分工：那边不合规必须改，这边像不像人说话由人决定。
+        #
+        # ⚠ 只点名 strong 命中（A-9 §3.1 #3）：weak 不进点名清单。理由不是"weak 不重要"，
+        #   而是**回炉的目标函数**——朱雀逆向经验与 shuorenhua 的 bounded 档同一条：
+        #   "只改标红段，自己写的部分一字不动"；把 weak 也塞进点名，等于每轮让模型
+        #   去动那些本来就正常的段落，改出来的稿子越改越平（"强追写得干瘪"）。
+        #   weak 的**总数**照样说，只是不逐条点名 —— 隐藏数据不是收敛噪音。
         ai = (report.get("ai_tells") or {}).get("hits") or []
-        if ai:
-            lines.append("- 以下文风问题不阻塞合格，但这次改写请顺手改自然些：")
-            for h in ai[:6]:
-                lines.append(f"  · [{h['severity']}] {h['id']}（{h['where']}，{h['count']} 处）："
-                             f"{h['detail']}")
+        strong_ai = [h for h in ai if h.get("severity") == STRONG]
+        weak_ai = [h for h in ai if h.get("severity") != STRONG]
+        if strong_ai:
+            lines.append("- 以下文风问题不阻塞合格，但这次改写请顺手改自然些"
+                         f"（只点名「{severity_word(STRONG)}」的那几处，其余段落别动）：")
+            for h in strong_ai[:6]:
+                lines.append(f"  · [{severity_word(h['severity'])}] {h['id']}（{h['where']}，"
+                             f"{h['count']} 处）：{h['detail']}")
+        if weak_ai:
+            # 「条」与「处」是两回事：一条 tell 在一篇里可以命中多处，扣分按**条**
+            # （需求方案 §2.1 的公式）。混着印会让人按 −4×处 反推分数。
+            weak_at = sum(int(h.get("count") or 0) for h in weak_ai)
+            lines.append(f"- 另有 {len(weak_ai)} 条「{severity_word(WEAK)}」文风提示"
+                         f"（合计 {weak_at} 处；扣分按条不按处）"
+                         " —— 未点名的段落**不要动**，改文风改不出人味，改具体才改得出")
+        # 空清单的兜底句必须判在静态规矩**之前**：两条规矩是无条件追加的，
+        # 判空写在它们后面 = 那句"未通过校验，请按…"永远说不出口（A-9 审查 P3）。
         if not lines:
             lines.append("- 未通过校验，请按口语化与合规要求改写")
+        # 两条静态规矩放在**动态内容之后、上一版全文之前**（每轮变的问题清单与正文在最后）：
+        # 与 `$feedback_block` 位于 user_template 末尾的前缀缓存规矩同向（P1-40）。
+        lines.append(HUMAN_VOICE_RULE)
+        lines.append(NEGATIVE_INJECTION_RULE)
         if prev_sections:
             body = "\n".join(f"  第 {i} 段（{s.get('type', '')}）：{s.get('text', '')}"
                              for i, s in enumerate(prev_sections, 1))
@@ -1671,6 +2019,17 @@ def _safe_str(obj, swallow_all: bool = False) -> str:
         raise
 
 
+#: `'str' object has no attribute 'get'` 这一整族消息才谈得上"数据形状"：
+#: 接收者是包 yaml 里写得出来的类型（标量/容器），而被调的那个方法是我们**对着配置数据**
+#: 调的那几个。两个条件缺一就不得把责任推给行业包 —— 见 `_readable_error` 里那条账。
+_NO_ATTR_RE = re.compile(r"'([A-Za-z_][\w]*)' object has no attribute '([^']+)'")
+_DATA_TYPES = {"str", "int", "float", "bool", "list", "tuple", "dict", "set", "frozenset",
+               "NoneType", "bytes"}
+_DATA_METHODS = {"get", "items", "keys", "values", "strip", "lstrip", "rstrip", "startswith",
+                 "endswith", "split", "replace", "format", "join", "append", "extend",
+                 "isdigit", "lower", "upper", "splitlines", "pop", "update", "setdefault"}
+
+
 def _readable_error(e: Exception) -> str:
     """把异常转成用户能看懂的一句话。
 
@@ -1719,9 +2078,17 @@ def _readable_error(e: Exception) -> str:
         return f"行业包配置不完整（{msg}）：请检查 pack.yaml 的 quota_table / params 字段"
     if isinstance(e, KeyError):
         return f"行业包配置缺少字段：{msg}"
-    if "has no attribute" in msg:
-        return (f"行业包配置类型不对（{type(e).__name__}）：某处写成了数字/字符串，"
-                f"期望是映射（如词表条目、audience_map 的值）。原文：{msg[:120]}")
+    # `AttributeError` 的归属必须看**形状**，不能看"消息里有没有 has no attribute"（§9.8 的账）：
+    # 原来那一条把两者一律说成「行业包配置类型不对」，于是测试桩少一个属性（
+    # `'Scripted' object has no attribute 'mock'`）也被指到包作者头上，而根因只是代码内部缺陷。
+    m = _NO_ATTR_RE.search(msg)
+    if m:
+        owner, attr = m.group(1), m.group(2)
+        if owner in _DATA_TYPES and attr in _DATA_METHODS:
+            return (f"行业包配置类型不对（{type(e).__name__}）：某处写成了数字/字符串，"
+                    f"期望是映射（如词表条目、audience_map 的值）。原文：{msg[:120]}")
+        return (f"程序内部错误（{type(e).__name__}）：`{owner}` 上没有 `{attr}` —— "
+                f"这个形状不是行业包能改出来的，请带这句话报 bug。原文：{msg[:120]}")
     if "could not convert string to float" in msg:
         return f"数字参数写成了非数字（如「六十」），请改成纯数字。原文：{msg[:120]}"
     if "as a set element" in msg:

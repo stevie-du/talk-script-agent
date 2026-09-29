@@ -8,6 +8,7 @@
 import { $, $$, el, esc, toast, bindOnce, fmtDur } from "./util.js";
 import { api, POLL_MS, POLL_GRACE_MS } from "./api.js";
 import { state, emit } from "./store.js";
+import { PROOF } from "./words.js";
 import { closeOverlays, appConfirm } from "./overlays.js";
 // ui.js 与 settings.js 互相引用，但引用的都是**函数声明**（会被提升），
 // 所以循环依赖在调用时已解析完毕，安全。
@@ -235,13 +236,16 @@ export function setPane(pane) {
   return pane;
 }
 
-/** 明文地址警告常驻（后端 `warnings` / `base_url_warnings` 字段的消费者）。
+/** 配置里**存着的非法地址**那一行（后端 GET /api/config 的 `base_url_warnings` 的消费者）。
  *
- *  后端每次保存 / 测试都会回一份 `warnings`，GET /api/config 还常驻一份
- *  `base_url_warnings` —— 修复前**没有任何一处读它**：提示只活在一次性 toast 里，
- *  而"这个远端地址走的是明文 http，密钥每次请求都明文发出去"是每天都要成立的事实，
- *  该一直挂在地址那一行下面。写的是 textContent（内容是后端给的地址文本，
- *  不给它进 innerHTML 的机会）。 */
+ *  为什么常驻而不是只在保存那次说一句：这道写闸只拦新写的值，而 config.yaml
+ *  手工改过、老版本写过、环境变量 `TALKSCRIPT_BASE_URL` 覆盖出来的地址都不经过它 ——
+ *  它们不会让引擎起不来，只会在每一次生成时失败，而这行字就是「为什么连不上」。
+ *  写的是 textContent（内容是后端给的地址文本，不给它进 innerHTML 的机会）。
+ *
+ *  ⚠ 这里**不再**显示「明文 http 打到远端」那句（2026-09-28 用户否掉了常驻黄字：
+ *  本机 / 内网 LLM 用的就是明文 http，那是他自己选定的路子，天天说没意义）。
+ *  行内不显示 ≠ 后端拦不住：非法地址走 400，见 app/server.py 的 `check_base_url`。 */
 function setModelWarnings(list) {
   const n = $("md-warn");
   if (!n) return;
@@ -661,7 +665,10 @@ async function saveModelDialog() {
     //   统一报「保存失败」，列表不刷新 —— 模型其实存上了，显示与事实相反。
     await saveAdvancedConfig();
     const out = await api.saveModel(body);
-    setModelWarnings(out && out.warnings);   // 保存成功但地址有合规风险，要说
+    // 保存成功 → 下面 refreshAll() 会重拉 /api/config，地址那一行的说明行跟着换新。
+    // 这里**不再**读响应里的 `warnings`：后端已经不回了（明文 http 那句 2026-09-28 去掉），
+    // 而拿一个不存在的字段去 setModelWarnings(undefined) 会把「配置里存着的非法地址」
+    // 那行刚显示出来的字**抹掉** —— 存着坏地址时恰恰是最不该闭嘴的那一刻。
     // 保存后要**停在刚保存的那条**上，而不是跳回「当前启用」那条 ——
     // 编辑一条非启用模型时跳走，用户会以为没保存上。
     const savedId = (out && out.id) || editingId;
@@ -715,7 +722,9 @@ async function testModelDialog() {
       api_key: $("md-apikey").value,
       model: $("md-model").value.trim(),
     });
-    setModelWarnings(r && r.warnings);
+    // ⚠ 这里不读 `r.warnings` —— 后端已经不回了（见上面 saveModel 那段）。
+    // 地址非法时状态行显示的就是后端那句原话（含「请求地址」与正确写法），
+    // 也就是「说清是哪个字段、怎么改」由状态行承担，不需要再挂一行。
     $("md-status").textContent = r.ok
       ? `连接正常 · ${r.model}${r.detail ? " · " + r.detail : ""}`
       : `连接失败：${r.detail}`;
@@ -1348,8 +1357,12 @@ async function importPackFile(file) {
 /** 卸载导入的包。内置播种包服务端会拒（400）—— 照实显示那句人话，
  *  不在前端预先判断（前端没有 .imported.json 的权威信息，猜就是静默降级）。 */
 async function removeImportedPack(name) {
+  // 删文件同样不可逆，而且比去掉草稿标记更贵：整份包（含私有资料与校对清单）
+  // 一起没了，没有回收站、没有还原入口。以前这句只说「文件会从某目录删除」，
+  // 那句读起来像"挪个窝"。
   const ok = await appConfirm("卸载行业包",
     `确认卸载「${name}」？它的文件会从 ${state.meta && state.meta.packs_dir || "行业包目录"} 删除。\n`
+    + "删掉就找不回来了 —— 这份包的私有资料与校对清单都在里面，没有回收站。\n"
     + "内置行业包不能卸载（删了下一次启动会被重新放回来）。");
   if (!ok) return;
   try {
@@ -1367,12 +1380,23 @@ async function removeImportedPack(name) {
 
 async function undraftPack() {
   const name = piName || $("pack").value;
-  const ok = await appConfirm("标记为已校对",
-    `确认把行业包「${name}」标记为已人工校对完毕？\n草稿标记会被移除，生成结果不再提示“需校对”。`);
+  // 「去掉草稿标记」是**不可逆**的：后端只把 draft 置 false，没有任何地方记下
+  // 「它本来是草稿」，也没有一键改回去的入口。以前这句确认只说「标记会被移除」，
+  // 用户以为那只是一句状态说明 —— 点错了就只能重新生成一个包。
+  // ⚠ 正文里凡是提到「校对」这个词的地方都取自 words.js 的 PROOF ——
+  //   改前这里手写「标记为**已人工校对完毕**」与「不再提示“**需校对**”」，
+  //   而同屏的按钮写 `PROOF.act`「标记为已校对」、toast 写 `PROOF.done`、
+  //   结果页横幅写 `PROOF.warn`「内容需人工校对」：同一个动作五个说法，
+  //   而对话框预告的那句提示与真正上屏的那句**根本不是同一个词**。
+  const ok = await appConfirm(PROOF.act,
+    `确认把行业包「${name}」${PROOF.done}？\n`
+    + `草稿标记会被移除，之后生成结果不再提示“${PROOF.warn}”。\n`
+    + "这一步没法撤销 —— 标记去掉后没有改回去的入口，如果还没逐项核实，"
+    + "可以先取消，等核对完再来。");
   if (!ok) return;
   try {
     await api.undraft(name);
-    toast("已标记为校对完成");
+    toast(PROOF.done);
     // 草稿标记已摘成；刷新失败只补一句，不反悔「已标记」。
     try {
       state.meta = await api.meta();
@@ -1445,7 +1469,7 @@ function packItem(p) {
   // 副标题 = 状态 + **来源**（2026-09-23 技能包导入，方案 §6）。
   // 导入的包必须让用户始终看得见"这是别人做的、许可证是什么" ——
   // 平台中立的前提是不隐藏（方案 §9 红线 4：license 展示但不裁决）。
-  const sub = p.draft ? "草稿 · 待校对" : "已校对";
+  const sub = p.draft ? `草稿 · ${PROOF.pending}` : PROOF.cleared;
   if (p.imported) {
     const bits = ["导入"];
     if (p.import_author) bits.push(esc(p.import_author));
@@ -1484,8 +1508,11 @@ async function openPackInfo(name) {
   piName = name;                        // 「标记为已校对」操作的必须是**这一个**包
   const p = await api.pack(name);
   $("pi-title").textContent = `${p.display_name || name} · 包内容`;
+  // ⚠ 「内容需人工校对」走 words.js 的 PROOF（单一真相源）——
+  //   这里以前手写了一遍「（草稿包：内容需人工校对后投产）」，
+  //   与同屏那颗「标记为已校对」按钮分属两套话术，改表就分家。
   $("pi-desc").textContent = (p.description || "")
-    + (p.draft ? "（草稿包：内容需人工校对后投产）" : "");
+    + (p.draft ? `（草稿包：${PROOF.warn}后投产）` : "");
   $("pi-undraft").classList.toggle("hidden", !p.draft);
   // 导入包的来源行 + 卸载按钮（2026-09-23）。p 来自 /api/packs/{name}——
   // 注意它**不带** imported 字段（那个在 /api/meta 的列表项上），所以从

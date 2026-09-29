@@ -57,6 +57,31 @@ test('privatePackLeak：没有排除规则时报出目录', () => {
   assert.deepStrictEqual(privatePackLeak([], []), []);   // 没打包内容也没私有目录 → 不该拦
 });
 
+// ── before-pack 的执行那半边（过去零覆盖）──────────────────────
+// privatePackLeak 是纯判定，好测；而「真的去构建内嵌运行时」那半边
+// 过去一次没测过 —— 它坏了的后果是**构建照常成功、安装包里没有解释器**，
+// 那句话要等用户装完启动才炸（正是 before-pack.js 开头写的那件事）。
+// 执行器做成了可注入参数（生产传 execFileSync、测试传假货），
+// 于是「有没有真的去调」与「调的是哪个脚本」都能断言，不必真跑一次构建。
+test('★ before-pack 真的会去构建内嵌运行时（这半边过去零覆盖）', async () => {
+  const calls = [];
+  await beforePack(s => calls.push(s));
+  assert.strictEqual(calls.length, 1, `构建运行时被调了 ${calls.length} 次，应恰好 1 次`);
+  assert.ok(calls[0].endsWith('build-python-runtime.mjs'),
+    `调的不是构建运行时的脚本：${calls[0]}`);
+  assert.ok(fs.existsSync(calls[0]),
+    `被调的脚本在磁盘上不存在：${calls[0]} —— 少这一句的话，路径写错也测不出来`);
+});
+
+// 反向：执行器**抛错**必须冒出去，不能被吞掉。吞掉的话
+// 「构建失败」会被当成「钩子跑过了」，等于什么都没说。
+test('★ before-pack 里构建失败必须往上抛（吞掉 = 谎称钩子跑过了）', async () => {
+  await assert.rejects(
+    () => beforePack(() => { throw new Error('运行时构建炸了'); }),
+    /运行时构建炸了/,
+  );
+});
+
 // ── main.js 的每个同级 require 都必须在 build.files 里 ──────────
 // 病灶（2026-09-23 五路审查 P0-1）：engine-dialogs.js 从 main.js 拆出来时
 // 忘了加进 build.files。electron-builder 的 files 是**白名单、替换默认值**，
@@ -114,4 +139,56 @@ test('verify-package 的源码时间戳清单从 build.files 派生，不另抄�
   assert.deepStrictEqual(hardcoded, [],
     `sourceNewest 里又写死了这些文件名：${hardcoded.join(', ')} —— `
     + '它必须从 pkg.build.files 派生（同一信息两份表示必然漂移）');
+});
+
+// ── verify-package 算哈希不许整读 ────────────────────────────
+// walk() 要比的是**内嵌 Python 运行时**（vendor/py → engine/py），那份目录里
+// 全是几十上百 MB 的 .dll / .pyd。原来 `readFileSync(abs)` 让整份运行时同时
+// 驻留：认证脚本自己把机器吃满，内存一紧就可能中途 OOM ——
+// 「认证」于是变成一件看机器脸色的事。
+test('verify-package 逐块读算哈希，不把整个文件读进内存（内嵌运行时是几百 MB 级）', () => {
+  const src = verifyPkgSrc();
+  // 判据：walk 里不许再出现 readFileSync。⚠ 只查 walk 的函数体 ——
+  // verify-package 里别处读小文件（package.json、asar 头）是正常的，
+  // 那是核对元数据，不是把整份运行时搬进内存。
+  const m = src.match(/function walk\(dir, skip\)[\s\S]*?\n\}/);
+  assert.ok(m, '没解析到 walk，本断言会空转');
+  assert.ok(!/readFileSync/.test(m[0]),
+    'walk 里又出现 readFileSync —— 整份内嵌运行时会同时驻留，'
+    + '内存一紧就可能中途 OOM（认证变成看机器脸色的事）');
+});
+
+// 光断言"没有 readFileSync"不够：流式改造最典型的翻车是**块边界算错一个字节**，
+// 而那在真实运行时目录上要等几分钟才看得出来。所以钉住"逐块算 == 整读算"。
+test('逐块读的哈希与整读逐位相同（含块边界尺寸）', () => {
+  const { createHash } = require('node:crypto');
+  const { openSync, readSync, closeSync, writeFileSync, mkdtempSync } = require('node:fs');
+  const os = require('node:os');
+  // 与 verify-package.mjs 的 hashFile 同一份实现（这里复制一份而不是 import：
+  // 那个脚本是**直接跑**的 ESM，import 它会把整套认证逻辑连带执行一遍）。
+  const hashFile = (abs) => {
+    const h = createHash('md5');
+    const fd = openSync(abs, 'r');
+    try {
+      const buf = Buffer.allocUnsafe(1 << 20);
+      for (;;) {
+        const n = readSync(fd, buf, 0, buf.length, null);
+        if (n <= 0) break;
+        h.update(buf.subarray(0, n));
+      }
+    } finally { closeSync(fd); }
+    return h.digest('hex');
+  };
+  const whole = (abs) => createHash('md5').update(fs.readFileSync(abs)).digest('hex');
+  const CH = 1 << 20;
+  // 0 / 1 / 小文件 / 块-1 / 块 / 块+1 / 两块多几字节 —— 每一个都是一种边界。
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'ts-hashcmp-'));
+  for (const size of [0, 1, 100, CH - 1, CH, CH + 1, CH * 2 + 7]) {
+    const f = path.join(d, `f${size}.bin`);
+    const buf = Buffer.allocUnsafe(size);
+    // 非全零：全零时"少算一段"也照样同哈希，测不出偏移错位
+    for (let i = 0; i < size; i++) buf[i] = (i * 7 + 13) & 0xff;
+    fs.writeFileSync(f, buf);
+    assert.strictEqual(hashFile(f), whole(f), `size=${size} 时两种算法不一致`);
+  }
 });

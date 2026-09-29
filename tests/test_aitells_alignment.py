@@ -40,7 +40,7 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app.ai_tells import AITells                      # noqa: E402
+from app.ai_tells import RE_PREFIX, AITells, _lex_entry    # noqa: E402
 
 SPEC = ROOT / "docs" / "需求方案-去AI味与热点情报.md"
 PACK_DIRS = [ROOT / "packs" / "elevator", ROOT / "packs" / "_template"]
@@ -73,8 +73,20 @@ def _spec_table() -> dict[str, tuple[str, str]]:
         if not m:
             continue
         tell, cn, _algo, sev_cell = (x.strip() for x in m.groups())
-        sev = "strong" if "strong" in sev_cell else ("weak" if "weak" in sev_cell else "")
-        assert sev, f"§2.1 的 {tell} 行没有 severity（单元格：{sev_cell!r}）"
+        # ⚠ severity 取的是这一格的**开头**那个档名，不是"格里有没有出现 strong/weak"。
+        # 理由（A-9 落码时实测到）：口径说明写在同一格里（`weak（A-9 拍板：先观察分布，
+        # strong 一扣 12 分代价大）`），按"含哪个词"判会把这行读成 strong ——
+        # 于是**对账自己**成了假红源，而它守的正是"severity 别静默漂"。
+        head = sev_cell.replace("*", "").strip()
+        sev = "strong" if head.startswith("strong") else ("weak" if head.startswith("weak") else "")
+        assert sev, (f"§2.1 的 {tell} 行 severity 不是以 strong / weak 开头"
+                     f"（单元格：{sev_cell!r}）—— 口径说明可以写在档位名后面，不能代替它")
+        # ⚠ 同一条 tell 不许有两行（A-9 审查 P3）：解析器按行覆盖，讨论行/补充表
+        #   会**静默改掉**中文名与 severity，而 yaml 跟着后一行对账 —— 三方对账
+        #   当场变绿，但它对的是错的那一行。
+        assert tell not in out, (
+            f"§2.1 的 tell 表里 `{tell}` 出现了不止一行（先出现的会被后一行静默覆盖）"
+            " —— 讨论/举例请写到本节之外，或改成不含 4 列表头形状的写法")
         out[tell] = (cn, sev)
     assert out, "需求方案 §2.1 的 tell 表一行都没解析出来（表格格式变了？）"
     return out
@@ -86,6 +98,24 @@ def _yaml_of(pack: Path) -> dict:
 
 def _severity_map(data: dict) -> dict[str, str]:
     return {tid: tier for tier in ("strong", "weak") for tid in (data.get(tier) or [])}
+
+
+def test_a_duplicate_row_in_the_spec_table_is_rejected(tmp_path, monkeypatch):
+    """§2.1 表里同一条 tell 出现两行时必须报错，而不是让后一行静默赢。
+
+    为什么这条值得存在：解析是按行覆盖 dict 的，所以"讨论行 / 改名行"一旦混进
+    §2.1，中文名与 severity 都会跟着后一行走 —— 三方对账当场绿，但它对的是
+    **错的那一行**（severity 被改掉而没人知道，正是本文件要防的那类静默漂移）。
+    """
+    lines = SPEC.read_text(encoding="utf-8").splitlines()
+    at = next(i for i, ln in enumerate(lines) if ln.startswith("| `filler_stack`"))
+    # 同一条 tell 再写一行、且档位不同：如果解析器"后者覆盖前者"，对账就会跟着 strong 走
+    lines.insert(at + 1, "| `filler_stack` | 另一种叫法 | 讨论行 | **strong** |")
+    doc = tmp_path / "spec.md"
+    doc.write_text("\n".join(lines), encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "SPEC", doc)
+    with pytest.raises(AssertionError, match="不止一行"):
+        _spec_table()
 
 
 def test_spec_table_and_code_agree_on_tell_set():
@@ -163,11 +193,17 @@ def test_lexicon_words_satisfy_scan_words_preconditions(pack: Path):
       · **互为子串**：扫描是"长词优先、不重叠"，`绝对` 与 `绝对化` 同时存在时，
         短词在长词出现的位置永远取不到，而且**计数会虚高**（一个位置算两处）——
         banwords 已经为这个付过学费。
+
+    ⚠ 词表条目自 A-9 起有三种形态（纯字符串 / `{词: 说明}` / `{词: {note, unless}}`），
+      所以这里必须用引擎自己的 `_lex_entry` 把词取出来再判。直接 `str(item)` 的话，
+      一条 `{闭环: {note: …}}` 会被当成一个"很长的词"：既查不出里面那个词的问题，
+      又可能因为两个 repr 互为前缀而假报子串 —— 守卫看着在跑，其实量的是别的东西。
     """
     lex = _yaml_of(pack).get("lexicon") or {}
     short, nested = [], []
     for cat, words in lex.items():
-        ws = [str(w) for w in (words or [])]
+        ws = [_lex_entry(w)[0] for w in (words or [])]
+        ws = [w for w in ws if w and not w.startswith(RE_PREFIX)]   # 正则条目不走字面量扫描
         short += [f"{cat}:{w}" for w in ws if len(w) < 2]
         for a in ws:
             for b in ws:

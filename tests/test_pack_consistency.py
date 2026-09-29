@@ -148,6 +148,13 @@ def test_rate_table_is_not_reinvented_in_prose():
 
     P2-36 的原始形态就是 `platform.md` 写 5.0~5.5、`duration.md` 写 5.5、
     pack.yaml 封顶 5.0 —— 三处都说自己在定口径。
+
+    ⚠ 两种形态都要读到（2026-09-27 修审查 #31）：只认「数字在 `字/秒` **之前**」
+      的散文写法（`| 语速 | 5.0 字/秒 |`），`compliance/platform.md` 的**表格形态**
+      （`| 语速（字/秒） | 5.0 | 4.5-5.0 | 4.5-5.0 | 4.5 |` —— 列头在左、数字在右）
+      就整行滑过去了。**已用变异实测**：把那四个值全改成 9.9，
+      `pytest tests/test_pack_consistency.py -q` 5 passed 全绿 —— 一条量不到
+      任何东西的守卫比没有更坏：它让人以为这一族被守着。
     """
     import yaml
 
@@ -155,10 +162,13 @@ def test_rate_table_is_not_reinvented_in_prose():
     rates = {round(float(v), 2) for v in (data.get("rate_by_style") or {}).values()}
     assert rates, "pack.yaml 没有 rate_by_style，这条守卫就没有参照物了"
     offenders = []
+    rows_read = 0
     for rel, text in _texts().items():
         for line in text.splitlines():
             if "字/秒" not in line and "每秒" not in line:
                 continue
+            # 形态一：数字在单位之前（散文与「值 + 单位」的表格格）
+            found = False
             for n in re.findall(r"(\d+(?:\.\d+)?)\s*(?:[-~至]\s*(\d+(?:\.\d+)?))?\s*字/秒", line):
                 for part in n:
                     if not part:
@@ -167,4 +177,34 @@ def test_rate_table_is_not_reinvented_in_prose():
                     # 5.0 是折算基准（duration.md 的通用折算式用它），不算档位
                     if v not in rates and v != 5.0:
                         offenders.append(f"{rel}: 语速 {v} 不在 rate_by_style {sorted(rates)} 里")
+                found = True
+            if found:
+                rows_read += 1
+                continue
+            # 形态二：行首那一格是「语速（字/秒）」，数字在**后面的各列**里
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if len(cells) < 3 or not re.search(r"语速", cells[0]):
+                continue
+            nums = []
+            for cell in cells[1:]:
+                for tok in re.split(r"[-~至]", cell):
+                    tok = tok.strip()
+                    if not re.fullmatch(r"\d+(?:\.\d+)?", tok):
+                        continue          # 「中等」「可用悬念式」这类不是数值
+                    nums.append(round(float(tok), 2))
+            if not nums:
+                continue
+            rows_read += 1
+            for v in nums:
+                if v not in rates and v != 5.0:
+                    offenders.append(
+                        f"{rel}: 表格第 {cells[0]} 行的语速 {v} 不在 rate_by_style {sorted(rates)} 里")
     assert not offenders, "文档里的语速与包配置对不上：\n" + "\n".join(sorted(set(offenders)))
+    # 正向对照：上面至少真的读到了**表格形态**那一行 ——
+    # 形态一那条正则还在，所以"一条都没读到"会伪装成全绿。
+    plat = (PACK / "compliance" / "platform.md").read_text(encoding="utf-8")
+    table_row = [ln for ln in plat.splitlines()
+                 if ln.strip().startswith("|") and "语速" in ln.split("|")[1]
+                 and re.search(r"\d", ln)]
+    assert table_row, "夹具前提失真：platform.md 里已经没有那张语速表格行了"
+    assert rows_read >= 1, f"一条语速行都没读到（读了 {rows_read} 行）—— 这条守卫是空转的"

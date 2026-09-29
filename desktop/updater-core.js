@@ -46,9 +46,26 @@ function resolveFeedUrl(raw) {
   const trimmed = raw.trim();
   if (trimmed === '') return null;
   if (!/^https?:\/\//i.test(trimmed)) return null;
+  // ⚠ 前缀过了**不等于**是合法 URL（P0）。`new NsisUpdater({url})` 在构造函数里
+  //   同步 setFeedURL → newBaseUrl → `new URL(url)`，抛的是 `TypeError [ERR_INVALID_URL]`
+  //   ——而 initUpdater() 是在 `app.whenReady().then(...)` 里、**没有 .catch**，
+  //   也没有 uncaughtException 兜底，于是「窗口已经开出来、然后主进程直接死掉」，
+  //   日志里连一行都留不下（写日志的那句在构造函数之后）。
+  //   下面是 README 亲手教的那条命令最常见的手滑形态，全部会走到这里：
+  //     "https://"（漏了域名）· "https://a b/"（复制带进空格）
+  //     "http://[::1"（少一个 ]）· "https://:8080/x/"（冒号前没主机名）
+  //   早退 = 按「没配」处理：零请求、状态行显示未配置，绝不崩。
+  const normalized = trimmed.endsWith('/') ? trimmed : trimmed + '/';
+  try {
+    const u = new URL(normalized);
+    // 主机名不能空（new URL 对 "https://" 这类会直接抛，但 "https://?a=1" 不抛）
+    if (!u.hostname) return null;
+  } catch (_) {
+    return null;
+  }
   // generic provider 会把地址当 baseURL 拼 latest.yml：尾斜杠由这里补，
   // 不让每个调用方各自记得拼。
-  return trimmed.endsWith('/') ? trimmed : trimmed + '/';
+  return normalized;
 }
 
 /**

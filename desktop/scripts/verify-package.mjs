@@ -26,13 +26,37 @@
 // 应用更新后用户数据不被覆盖 —— 那几条要一台真机/虚拟机。
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { readdirSync, statSync, readFileSync, existsSync } from 'node:fs';
+import { readdirSync, statSync, readFileSync, existsSync,
+         openSync, readSync, closeSync } from 'node:fs';
 import path from 'node:path';
 
 const ROOT = path.resolve(import.meta.dirname, '..', '..');
 const UNPACKED = path.join(ROOT, 'desktop', 'dist', 'win-unpacked');
 const ENGINE = path.join(UNPACKED, 'resources', 'engine');
 const PYC = [/__pycache__/, /\.pyc$/];
+
+// 逐块读着算哈希，不把整个文件读进内存。
+// 为什么：这一层比的是**内嵌 Python 运行时**（vendor/py → engine/py），
+// 那份目录里全是 .dll / .pyd，单个几十上百 MB。原来的
+// `readFileSync(abs)` 会让整份运行时同时驻留 —— 认证脚本自己把机器吃满，
+// 内存一紧张就可能中途 OOM，于是「认证」变成一件看机器脸色的事。
+// 哈希结果与整读**完全一致**（同一个 crypto 算法、同样的字节序列），
+// 变的只是内存占用从 O(最大文件) 降到 O(块大小)。
+function hashFile(abs) {
+  const h = createHash('md5');
+  const fd = openSync(abs, 'r');
+  try {
+    const buf = Buffer.allocUnsafe(1 << 20);   // 1MB 一块
+    for (;;) {
+      const n = readSync(fd, buf, 0, buf.length, null);
+      if (n <= 0) break;
+      h.update(buf.subarray(0, n));
+    }
+  } finally {
+    closeSync(fd);
+  }
+  return h.digest('hex');
+}
 
 function walk(dir, skip) {
   const out = new Map();
@@ -42,7 +66,7 @@ function walk(dir, skip) {
     if (!statSync(abs).isFile()) continue;
     const rel = path.relative(dir, abs).split(path.sep).join('/');
     if ((skip || []).concat(PYC).some((re) => re.test(rel))) continue;
-    out.set(rel, createHash('md5').update(readFileSync(abs)).digest('hex'));
+    out.set(rel, hashFile(abs));
   }
   return out;
 }

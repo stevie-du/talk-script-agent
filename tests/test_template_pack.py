@@ -93,6 +93,66 @@ def test_list_packs_skips_the_template_directory():
     assert "elevator" in names
 
 
+# ── 1b. 复制路线也要有护栏（审查 #32）────────────────────────────
+# 向导路线有三层护栏（模板中立性 → _pack_audit → 切片对账），
+# **复制路线一层都没有**：`docs/知识库内容规范.md` 教人「把 packs/elevator/
+# 整个目录复制改名」，而 `private/` 是被 `pack.yaml: files.private` 声明、
+# 引擎**每轮都注入**的电梯私有知识库（机型分类、维保周期、
+# 「后期维护贵不贵 → 维保费、年检费、电费」这类异议应答）。
+# 照着复制，新行业包每生成一条脚本都在念电梯的话术，而且没有任何报错。
+#
+# 判据用**逐字节比对**而不是关键词表：关键词表会随模板更新而漏，
+# 而"复制"这件事的定义就是文件一模一样 —— 哈希撞上就是复制来的，
+# 不需要猜。新包自己写一份同名同空文件（两边都空）也确实哈希相同，
+# 但那种文件里没有任何电梯事实，撞了也无所谓（判据只抓"带着电梯事实的副本"）。
+def _private_dir(pack: Path) -> Path:
+    return pack / "private"
+
+
+def test_no_pack_carries_another_packs_private_facts():
+    """除 elevator 自己外，任何包都不得带着 elevator 的 `private/` 文件副本。"""
+    import hashlib
+
+    src = _private_dir(ROOT / "packs" / "elevator")
+    assert src.is_dir(), "夹具前提失真：elevator 包没有 private/ 了"
+    sigs = {}
+    for f in sorted(src.rglob("*")):
+        if f.is_file():
+            sigs.setdefault(hashlib.sha256(f.read_bytes()).hexdigest(), []).append(
+                str(f.relative_to(src)))
+
+    offenders = []
+    for pack in sorted((ROOT / "packs").iterdir()):
+        if not pack.is_dir() or pack.name.startswith("_") or pack.name == "elevator":
+            continue
+        dst = _private_dir(pack)
+        if not dst.is_dir():
+            continue
+        for f in sorted(dst.rglob("*")):
+            if not f.is_file():
+                continue
+            h = hashlib.sha256(f.read_bytes()).hexdigest()
+            if h in sigs:
+                offenders.append(
+                    f"packs/{pack.name}/private/{f.relative_to(dst)} 与 elevator 的 "
+                    f"{sigs[h][0]} 逐字节相同 —— 复制骨架时把私有知识库一起带过来了，"
+                    f"它会每轮注入新包（docs/知识库内容规范.md 已写明要删掉 private/）")
+    assert not offenders, "复制路线漏了 private/，新行业包会注入别家行业的话术：\n" \
+        + "\n".join(offenders)
+
+
+def test_copy_route_doc_says_to_delete_private():
+    """那句「复制整个目录」旁边必须写着删 `private/` —— 文档本身就是唯一的护栏。"""
+    doc = (ROOT / "docs" / "知识库内容规范.md").read_text(encoding="utf-8")
+    i = doc.find("packs/elevator/")
+    assert i >= 0, "知识库规范里已经找不到复制骨架那一段了"
+    seg = doc[i:i + 700]
+    assert "删掉 `private/`" in seg or "删掉 private/" in seg, \
+        "「复制整个目录」这段没写要删 private/ —— 照着做就会带着电梯话术跑新包"
+    # 还要说清后果，否则用户会当成可选项
+    assert "注入" in seg, "只写了要删，没写不删的后果（每轮注入别的行业的话术）"
+
+
 # ── 2. 模板缺失必须抛，不许回退 ────────────────────────────────
 def test_missing_template_raises_instead_of_falling_back(tmp_path: Path):
     (tmp_path / "packs").mkdir(parents=True)

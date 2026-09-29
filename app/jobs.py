@@ -58,8 +58,10 @@ JOB_BUDGET_SECONDS = 1200.0
 STALE_JOB_MULTIPLIER = 2
 
 # 真正占用模型资源的作业状态 —— **并发额度只看这些**。
+# `briefing`：§3.4 的选题卡。它花钱（一次 `chat_json`），所以进这一族而不是情报族 ——
+# 与 `fetching`（纯 HTTP、不花钱）分开的理由一模一样，只是方向相反。
 BUSY_STATES = frozenset({"queued", "selecting", "writing", "checking", "rewriting",
-                         "storyboarding", "packing"})
+                         "storyboarding", "packing", "briefing"})
 
 # B4：情报抓取**走 Job 管道，但用独立并发额度**。
 # 为什么要独立：抓取是**纯 HTTP**，不花模型的钱，把它塞进 `BUSY_STATES` 会让
@@ -78,11 +80,16 @@ BUSY_STATES = frozenset({"queued", "selecting", "writing", "checking", "rewritin
 INTEL_BUSY_STATES = frozenset({"queued", "fetching"})
 MAX_CONCURRENT_INTEL = 2
 
-#: 模型族的作业 kind（generate / packgen 花模型的钱，共享 MAX_CONCURRENT_JOBS）。
+#: 模型族的作业 kind（generate / packgen / intel_brief 花模型的钱，共享 MAX_CONCURRENT_JOBS）。
 #: 其余 kind（intel）走独立额度。**新 kind 必须在这里归类** —— 忘了归类会
 #: 静默落进模型族（`not in MODEL_JOB_KINDS` 的默认分支），把不花钱的作业
 #: 算成名額占用，或反过来。concurrency_quota 的对账断言守的就是这件事。
-MODEL_JOB_KINDS = frozenset({"generate", "packgen"})
+#:
+#: ⚠ `intel_brief`（§3.4 选题卡）是**显式**写进来的，不是靠那个默认分支：
+#: 它恰好*应该*落在模型族（它一次 `chat_json`，真花钱），但"靠默认分支恰好对"
+#: 意味着对账断言没有依据 —— 默认分支哪天反过来（新 kind 默认走独立额度），
+#: 选题卡就会不占模型额度，用户可以在一次生成跑到一半时再开一张卡。
+MODEL_JOB_KINDS = frozenset({"generate", "packgen", "intel_brief"})
 
 
 def same_quota_family(kind_a: str, kind_b: str) -> bool:
@@ -97,7 +104,7 @@ ALL_BUSY_STATES = BUSY_STATES | INTEL_BUSY_STATES
 # 写成表而不是散落在各方法里的 if，是为了让「谁能到哪儿」一眼可查，
 # 也让非法迁移统一变成 409 而不是静默写坏状态。
 TRANSITIONS: dict[str, frozenset[str]] = {
-    "queued": frozenset({"selecting", "writing", "packing", "fetching",
+    "queued": frozenset({"selecting", "writing", "packing", "fetching", "briefing",
                          "failed", "cancelled"}),
     "selecting": frozenset({"writing", "failed", "cancelled"}),
     "writing": frozenset({"checking", "rewriting", "done", "failed", "cancelled"}),
@@ -114,6 +121,9 @@ TRANSITIONS: dict[str, frozenset[str]] = {
     # fetching：B4 情报抓取。纯 HTTP，**不占模型额度**（见 INTEL_BUSY_STATES）——
     # 但仍然是一条作业：要能取消、要能在关窗后回来接上、失败要有原因。
     "fetching": frozenset({"done", "failed", "cancelled"}),
+    # briefing：§3.4 选题卡（建议层）。与 fetching 同走 Job 管道（要能取消、
+    # 关窗后能接上），但**额度算在模型族**：一张卡就是一次 chat_json，真花钱。
+    "briefing": frozenset({"done", "failed", "cancelled"}),
     "done": frozenset({"rewriting", "cancelled"}),
     # failed → rewriting：done 作业重写失败后，用户还能再点一次「重写本段」。
     # 修复前 failed 只允许 {writing, cancelled}，失败记录在重试原作业之外
@@ -421,6 +431,36 @@ class JobRegistry:
                 return False
             self._jobs[job.id] = job
             return True
+
+    def add_if_room_dedup(self, job: Job, limit: int,
+                          states: frozenset[str] = BUSY_STATES,
+                          same=None) -> tuple[bool, "Job | None"]:
+        """`add_if_room` 的"同一件事只许一条在飞"版本。
+
+        返回 `(插入了没有, 复用的那条既有作业)`。判据与插入**在同一把锁里**做完 ——
+        与 `add_if_room` 拒绝"先数再插"同一条理由：两个请求同时通过检查会双双插入。
+
+        为什么需要它：`/api/intel/brief` 的免费出口只看**落盘缓存**（当天生成过 → `cached`），
+        而作业在飞的那几十秒里缓存还是空的 —— 于是"这一条正在生成"在盘上没有任何痕迹，
+        换窗口 / 重启后再点一次就是**第二次模型调用**，两张都花一次钱、结果一样。
+        重复扣费这件事界面上永远看不见（第二张卡照样出来），只能靠这里堵。
+
+        `same(job) -> bool`：什么算"同一件事"。默认没有（等于 `add_if_room`）。
+        复用只认**未终态**的作业：一条 done 的旧作业不该拦住新的一次生成。
+        """
+        self._reap_stranded()
+        with self._lock:
+            if same is not None:
+                for existing in self._jobs.values():
+                    if (existing.state in states and not existing.stranded
+                            and same(existing)):
+                        return False, existing
+            if sum(1 for j in self._jobs.values()
+                   if same_quota_family(j.kind, job.kind)
+                   and j.state in states and not j.stranded) >= limit:
+                return False, None
+            self._jobs[job.id] = job
+            return True, None
 
     def transition_if_room(self, job: Job, new_state: str, limit: int,
                            states: frozenset[str] = BUSY_STATES) -> bool:

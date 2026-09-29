@@ -75,6 +75,61 @@ class IntelIgnoreRequest(BaseModel):
     key: str = Field(min_length=1, max_length=500)
 
 
+class IntelBriefRequest(BaseModel):
+    """生成选题卡（§3.4）。`key` 是**事件键**（`intel.event_key_of` 的 `ev:<hex>`）。
+
+    ⚠ 形状在这里就判掉，不只是在文件名拼接处判：这个键会被用作**磁盘文件名**
+    （`briefs/<key>.json`），放行 `../` 或绝对路径等于让客户端把文件写到情报目录之外。
+    请求层先拒，错误也就是一句 422，而不是"写到了别人的目录里、下次读不出来"。
+    """
+
+    pack: str = Field(default="elevator", max_length=64)
+    key: str = Field(min_length=4, max_length=64)
+
+    @field_validator("key")
+    @classmethod
+    def _key_shape(cls, v: str) -> str:
+        from .intel import is_event_key
+        if not is_event_key(v):
+            raise ValueError("事件键形状不对（应为 ev: 加 8-40 位十六进制）")
+        return v
+
+
+class BriefTitles(BaseModel):
+    """标题双策略（§2.4：跟热点款保打开率，长尾关键词款保持续流量）——两类都给。"""
+
+    trend: list[str] = Field(default_factory=list, max_length=6)
+    evergreen: list[str] = Field(default_factory=list, max_length=6)
+
+
+class BriefHook(BaseModel):
+    type: str = ""            # 疑问 | 共鸣 | 反常识 | 冲突（口播黄金 3 秒的四类）
+    line: str = Field(default="", max_length=200)
+
+
+class BriefAngle(BaseModel):
+    type: str = ""            # 解读 | 反方 | 故事化 | 盘点
+    titles: BriefTitles = Field(default_factory=BriefTitles)
+    hook: BriefHook = Field(default_factory=BriefHook)
+    audience: str = Field(default="", max_length=200)
+    keywords: list[str] = Field(default_factory=list, max_length=8)
+    risk: str = ""            # 无 | 争议 | 反转风险 | 命中禁用词
+    fit: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+class IntelBrief(BaseModel):
+    """一张选题卡（§3.4 输出 schema，严格 JSON 走现成 `chat_json`）。
+
+    ⚠ `stage` 是**复述**：生命周期由 `intel.STAGE_BY_STATUS` 从榜单数据算出，
+    模型只被要求按这个阶段给打法。让它自己判阶段，等于把 §3.2 那条确定性口径
+    换成一次不可复现的猜测 —— 而同屏的排行行已经印着算出来的那个药丸了。
+    """
+
+    event_key: str = ""
+    stage: str = ""           # rising | peak | fading
+    angles: list[BriefAngle] = Field(default_factory=list, max_length=4)
+
+
 class PackCreateRequest(BaseModel):
     # 下界按**码点**、上界按 **UTF-16 码元**，这不是漂移而是两件事：
     # "至少两个字"是人的计数单位（`'𠀀'` 一个字符不算名字），
@@ -245,6 +300,13 @@ class PackInfo(BaseModel):
     # **不能拿它生成**（`Pack` 会抛 PackBrokenError）。列表里仍要显示这个包，
     # 但要标出来 —— 让它静默消失或静默降级都是更差的处理。
     pack_error: str = ""
+    # 加载期体检的结论（`knowledge.audit_pack`）：「注入回来是空的」这类降级，
+    # 一句人话一条。**不阻断生成**，但包作者在设置页就该看见 ——
+    # 以前这族信号只在 `Pack.warnings` 里算，而全库零消费方（连字段都没有），
+    # 于是「`## 核心术语` 被改名 → `$terms` 注入空串 → 提示词留个光秃秃的小标题」
+    # 这件事除了跑一次生成去翻作业日志之外无处可查。
+    # 与 pack_error 的分工：error 说「读不出来、用不了」，warning 说「能用但少东西」。
+    warnings: list[str] = []
     # 这个包是**用户导入**的吗（方案 `docs/技能包系统方案.md`）？导入的包带
     # `.imported.json` 自包含来源标记。字段只回答"哪来的"，不携带裁决 ——
     # 内置包（播种来的）为 False，导入的为 True。界面据此显示来源徽标，

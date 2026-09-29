@@ -290,7 +290,14 @@ async function waitHealth(timeoutMs = 40000) {
     if (spawnError) throw new Error(spawnError);
     if (!engineProc) throw new Error('引擎进程未运行');
     try {
-      const r = await fetch(`http://127.0.0.1:${enginePort}/api/health`);
+      // ⚠ 单次请求必须**自带超时**：while 的边界只在轮次之间查，而 await fetch()
+      //   本身可以永不返回（端口被「只 accept 不应答」的进程抢到时就是这样 ——
+      //   上面那段 nonce 校验只能识别「回了 200 但不是我们引擎」，识别不了「不回」）。
+      //   没有 signal 时这一层就是无限挂起：主进程不弹框、不写日志、不开窗，
+      //   用户看到的是永远停在启动中的应用，README 承诺的 40 秒兜底在此路径上失效。
+      //   AbortError 当作「这一拍没成，等下一拍」而不是终止（引擎可能只是慢）。
+      const r = await fetch(`http://127.0.0.1:${enginePort}/api/health`,
+        { signal: AbortSignal.timeout(2000) });
       if (r.ok) {
         // ⚠ **不能只看 `r.ok`**：端口在「探测到空闲」与「引擎真正绑定」之间有窗口，
         //   本机别的进程抢到并回一个 200 时，后面的 `loadURL` 会把一次性访问令牌
@@ -481,7 +488,27 @@ function initUpdater() {
     return;
   }
 
-  updater = new NsisUpdater({ provider: 'generic', url: updaterFeedUrl });
+  // ⚠ 构造函数会**同步**解析地址（setFeedURL → newBaseUrl → new URL），
+  //   畸形地址在这里抛 `TypeError [ERR_INVALID_URL]`。initUpdater() 跑在
+  //   `app.whenReady().then(...)` 里、那条链没有 .catch，也没有 uncaughtException
+  //   兜底 —— 一次手滑的 setx 就会让「窗口已经开出来、然后主进程死掉」，
+  //   日志里连一行都留不下（下面写日志那一句在构造函数之后，跑不到）。
+  //   resolveFeedUrl 已经把畸形值挡在门外（早退 = 按「没配」处理），这里是第二道：
+  //   库将来换了 URL 解析口径、或地址里带了它不接受的形态，都不再演成「应用消失」。
+  try {
+    updater = new NsisUpdater({ provider: 'generic', url: updaterFeedUrl });
+  } catch (e) {
+    const why = `更新链路没能启用：${(e && e.message) || e}`;
+    updaterLogLine(`[init] ${why}`);
+    updater = null;
+    pushUpdaterStatus({
+      state: 'error',
+      text: '更新地址不可用，自动更新已关闭',
+      detail: why,
+      warning: `检查环境变量 ${updaterCore.ENV_UPDATE_URL} 的值是否是一个完整的 http(s) 地址`,
+    });
+    return;
+  }
   updater.logger = updaterLogger;
   // 发现新版本就后台下；询问发生在「装」的时候，不是「下」的时候（§4.1）。
   updater.autoDownload = true;
@@ -633,23 +660,40 @@ async function restartEngine() {
   // 重启前把 stderr 缓冲清掉 —— 上次的错不要混进这次
   engineStderrBuf = '';
   spawnError = '';
+  // 界面加载与引擎起动是**两件**事，分开收口：
+  //   · loadURL 的 rejection 必然含整条 engineUrl()（Electron 的报错形如
+  //     `ERR_CONNECTION_REFUSED (-102) loading 'http://127.0.0.1:PORT/?token=…'`），
+  //     裸插进 showErrorBox 就是**第二个不过脱敏的出口**（第一个在 did-fail-load，
+  //     那边专门抽了 engine-dialogs.js 收口）。令牌进了一个能截图、能复制、
+  //     能贴进 issue 的系统对话框，拿到它的本机进程可以改 base_url 把用户
+  //     的 API Key 与 private/ 资料引走。所以它必须走 failLoadDetail。
+  //   · waitHealth 之类抛的是人话（spawn 失败原因），原文照弹即可。
   try {
     enginePort = await findFreePort();
     startEngine();
     await waitHealth();
-    if (win && !win.isDestroyed()) {
-      await win.loadURL(engineUrl());
-      dialog.showMessageBox(win, {
-        type: 'info', title: '引擎已重启',
-        message: '本地引擎已重新启动，界面已重新加载。',
-        detail: '之前正在进行的生成作业已经丢失（引擎重启会释放内存中的作业），'
-              + '已落盘的记录不受影响。',
-        buttons: ['好'],
-      });
-    }
   } catch (e) {
-    dialog.showErrorBox('引擎重启失败', String(e));
+    dialog.showErrorBox('引擎重启失败', String((e && e.message) || e));
     app.quit();
+    return;
+  }
+  if (win && !win.isDestroyed()) {
+    try {
+      await win.loadURL(engineUrl());
+    } catch (e) {
+      dialog.showErrorBox('界面加载失败',
+        failLoadDetail({ desc: (e && e.message) || String(e), code: (e && e.code) || -1,
+          url: engineUrl(), logPath: engineLogPath, token: engineToken }));
+      app.quit();
+      return;
+    }
+    dialog.showMessageBox(win, {
+      type: 'info', title: '引擎已重启',
+      message: '本地引擎已重新启动，界面已重新加载。',
+      detail: '之前正在进行的生成作业已经丢失（引擎重启会释放内存中的作业），'
+            + '已落盘的记录不受影响。',
+      buttons: ['好'],
+    });
   }
 }
 
@@ -825,7 +869,40 @@ app.whenReady().then(async () => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+}).catch((e) => {
+  // 这条链上跑着 createWindow / initUpdater，两处都可能抛。没有 .catch 时
+  // Node 20 / Electron 33 的默认行为是**进程退出**——窗口已经开出来，
+  // 然后应用「闪一下就没了」，日志里连一行都留不下（P0-4 修掉的是它的一个具体来源，
+  // 这里是把这一类失败形态**收口**：任何一处抛，用户至少看到一句人话 + 日志路径）。
+  const why = (e && e.message) || String(e);
+  logLine(`[fatal] 启动阶段未捕获的异常：${(e && e.stack) || why}`);
+  try {
+    if (app.isReady()) {
+      dialog.showErrorBox('TalkScript 启动时遇到内部错误',
+        `${why}\n\n完整日志：${engineLogPath || '（日志文件不可用）'}`);
+    }
+  } catch (_) { /* dialog 尚不可用时就算了，日志已经写了 */ }
+  app.quit();
 });
+
+// ⚠ 全局兜底：没有它的话，任何一处「将来新增的 promise 忘了接」都会让整个
+//   应用静默消失，且 engine.log 里只有「引擎进程已回收」看不出原因
+//   （process 'exit' 只在正常退出路径上跑）。initUpdater 构造失败就是活案例。
+//   ⚠ dialog 在 app ready 之前不可用，所以那之前只记日志不弹框。
+function reportFatal(what, e) {
+  const why = (e && e.message) || String(e || '未知错误');
+  logLine(`[fatal] ${what}：${(e && e.stack) || why}`);
+  try {
+    if (app.isReady()) {
+      dialog.showErrorBox('TalkScript 遇到内部错误',
+        `${why}\n\n完整日志：${engineLogPath || '（日志文件不可用）'}`);
+    }
+  } catch (_) { /* ready 之前弹不了，日志已经写了 */ }
+  try { killEngine(); closeEngineLog(); clearUpdaterTimers(); } catch (_) { /* 尽力而为 */ }
+  app.quit();
+}
+process.on('uncaughtException', (e) => reportFatal('未捕获的异常', e));
+process.on('unhandledRejection', (r) => reportFatal('未处理的 Promise 拒绝', r));
 
 // 退出钩子三处。updater 日志流（同步 append，见 updaterLogLine）**不在这两处关**：
 // electron-updater 的退出安装钩子挂在 app.once('quit')，且实测它晚于 process 'exit'

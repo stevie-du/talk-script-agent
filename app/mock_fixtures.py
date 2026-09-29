@@ -146,6 +146,35 @@ def response_for(task: str, user: str) -> dict:
     if task == "rewrite_segment":
         return {"text": "正确做法就三步。／第一，按轿厢里的警铃，或者对讲按钮。／第二，没人应答，就打电梯里贴的那个救援电话。／第三，说清楚你在哪个小区、哪栋楼、哪部电梯，然后原地等。"}
 
+    if task == "intel_brief":
+        # 选题卡的 mock 夹具**从输入里取标题与阶段**，不写死一份：
+        # 写死了就证明不了"这件事的输入真的进了 prompt"（本仓的老教训 ——
+        # 桩按构造把断言演真的，等于没测）。拿不到就走一个通用形。
+        m = re.search(r"事件标题：(.*)", user)
+        title = (m.group(1).strip() if m else "行业热点")[:40]
+        stage = "rising"
+        ms = re.search(r"生命周期阶段：(上升期|爆发期|衰退期)", user)
+        if ms:
+            stage = {"上升期": "rising", "爆发期": "peak", "衰退期": "fading"}[ms.group(1)]
+        return {
+            "event_key": "", "stage": stage,
+            "angles": [
+                {"type": "解读",
+                 "titles": {"trend": [f"{title}：这条到底在说什么"],
+                            "evergreen": [f"{title} 常见问题一次讲清"]},
+                 "hook": {"type": "疑问", "line": f"{title}，第一反应多半是错的"},
+                 "audience": "关注本行业的普通业主与从业者",
+                 "keywords": ["最新进展", "怎么处理"],
+                 "risk": "无", "fit": 0.8},
+                {"type": "反方",
+                 "titles": {"trend": [f"别急着信：{title} 的另一面"],
+                            "evergreen": [f"{title} 为什么说法不一致"]},
+                 "hook": {"type": "反常识", "line": "同一个事，两家说法正好相反"},
+                 "audience": "已经看过热榜、想听第二句话的人",
+                 "keywords": ["争议", "口径"],
+                 "risk": "争议", "fit": 0.55},
+            ]}
+
     if task == "packgen":
         # 极简装修包夹具（mock 模式下验证 packgen 流程用）
         return {

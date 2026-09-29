@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 
 import yaml
@@ -425,6 +426,49 @@ class Quota:
                 continue
             out[field] = round(a + (b - a) * ratio)
         return out
+
+
+#: ── A-9 fact gate：改写前后「具体信息」的存活比对 ──────────────────
+#: 为什么需要（调研报告-20260928 §3.1 #2）：`SCOPE_INSTRUCTION` 那三档都写着
+#: 「文号、数字、引文与 {{待补}} 不许动」，但那**只是给模型的话** —— 没有任何本地
+#: 校验。回炉轮最常见的坏法不是没改，而是"改顺了手把 15 日改成若干日、把
+#: {{待补：3天}} 删了"。ZeroSlop 把这一步单列为 Fact gate，就是因为它必须在代码里。
+#:
+#: ⚠ 不收"专名表"：本仓没有可信的中文专名词典，让 LLM 认专名等于把 gate 变成
+#:   另一条没有出处的判据。这里只比**可等值比对**的四类。
+_NUM_TOKEN_RE = re.compile(r"\d+(?:[.\-]\d+)*")
+_PLACEHOLDER_TOKEN_RE = re.compile(r"\{\{([^{}]+)\}\}")
+#: 《法规 / 标准 / 书名》—— 整段照抄级别的东西，短到 2 字也算
+_TITLE_TOKEN_RE = re.compile(r"《([^》]{2,40})》")
+#: 「引语」只收长的（≥8 字）：短的「限速器」是术语，改写时换个说法不算丢事实
+_QUOTE_TOKEN_RE = re.compile(r"[「『]([^」』\n]{8,60})[」』]")
+
+
+def specific_tokens(sections) -> list[str]:
+    """一份稿子里**不许被改写掉**的具体信息（按出现次数展开的多重集）。"""
+    out: list[str] = []
+    for s in sections or []:
+        text = str(s.get("text", "") or "")
+        out += [m for m in _NUM_TOKEN_RE.findall(text)]
+        out += [f"{{{{{m.strip()}}}}}" for m in _PLACEHOLDER_TOKEN_RE.findall(text)]
+        out += [f"《{m}》" for m in _TITLE_TOKEN_RE.findall(text)]
+        out += [f"「{m}」" for m in _QUOTE_TOKEN_RE.findall(text)]
+    return out
+
+
+def fact_survival(prev_sections, new_sections) -> list[str]:
+    """回炉改写**改丢了什么**：上一版有、这一版少了的具体信息（空 = 一条没丢）。
+
+    只判"变少"，不判"变多" —— 补了数字不算违规（`in-place` 档不许加句，
+    但 gate 的职责是拦住事实流失，不是复述改写范围）。
+    顺序按首次出现、每个事实只说一次：去重来自 `Counter` 的**键本身唯一**，
+    而"同一处「15 日」删了两下才算丢"靠的是键上的**多重集比较**（`before[t] > after[t]`）。
+    ⚠ 这里原来还套了一层 `seen` 集合去重 —— 覆盖率探针查出那支**永不可达**
+    （迭代 Counter 得到的就是唯一键），已删：留着一支永不执行的分支，
+    下次有人把"去重"改到别处去，测试不会告诉他这里没有证据。
+    """
+    before, after = Counter(specific_tokens(prev_sections)), Counter(specific_tokens(new_sections))
+    return [tok for tok in before if before[tok] > after.get(tok, 0)]
 
 
 def check_script(
