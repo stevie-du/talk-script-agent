@@ -78,10 +78,15 @@ _MEASURE_RE = re.compile(r"[一二三四五六七八九十百千万两]\s*(?:[" 
 #: 占位符 `{{…}}`：作者标出"这里缺事实"。
 _PLACEHOLDER_RE = re.compile(r"\{\{[^}]*\}\}")
 
-#: 「留了个空」与「整篇都是空」的分界（A-1）：**每个占位至少要有这么多念出来的正文来撑**。
-#: 来处是实测而不是拍脑袋（2026-09-29，`generated/*/*/result.json` 102 篇）：本仓产物
-#: 全篇念出字数 min 126 / 中位 240 / max 268，段数 3~5。按 100 字/空，正文零具体的
-#: 一篇中位稿最多容 2 个空；第 3 个空起，稿子的骨架就是空洞本身。
+#: 「留了个空」与「整篇都是空」的分界（A-1）：**全篇均摊每个占位要有这么多念出来的
+#: 正文来撑**（判定式 `spoken ≥ MIN_CHARS × 占位数`）。来处是实测而不是拍脑袋
+#: （2026-09-29，`generated/*/*/result.json` 102 篇）：本仓产物全篇念出字数
+#: min 126 / 中位 240 / max 268，段数 3~5。按 100 字/空，正文零具体的一篇中位稿
+#: 最多容 2 个空；第 3 个空起，稿子的骨架就是空洞本身。
+#: ⚠ 口径是**均摊**不是逐空（审查报告-20260930 M4：注释原先写"每个占位至少"，
+#:   实现给不了逐空承诺）。为什么均摊是对的：这条下限堵的是"整篇被空撑满"，
+#:   与"占位数 > 段数"的上限同族，都是**整篇**形状的判据；逐空判定会把
+#:   "3 个空里 1 个恰好贴着一句引子"误判成骨架稿，误伤面更大。
 #: ⚠ 这条只在**正文一个具体事实都没有**时才会被走到（`_no_specific` 先查正文），
 #:   所以它判的是"这篇稿子除了空之外还剩什么"，不是"这篇稿子有几个空"。
 PLACEHOLDER_MIN_CHARS = 100
@@ -246,8 +251,11 @@ _PARTICLES = ("呢", "吧", "啊", "吗", "嗯", "呀", "哦", "嘛", "你看", 
 #: MATTR 的滑动窗口字数。取 50 是为了在口播段落（250~450 字全文）上
 #: 还有若干个窗口可用；窗口比正文长时退化成一次 TTR。
 _MATTR_WINDOW = 50
-#: 屏蔽虚词时的分句/分隔符
-_SHAPE_SPLIT = re.compile(r"[，。、？！：；…—·～\n\r\t 　]*")
+#: 形态统计的分隔符。⚠ **从 `_PUNCT` 派生**（剥掉外层字符类括号复用）：
+#: 形态流的口径必须与 `_count` 完全一致 —— 以前这里手写了一份更窄的标点表，
+#: 漏了停顿符 `／` 与引号括号，`／` 被当成"字"灌进 mattr/3-gram/虚词熵，
+#: 12 篇真实产物字数 +4.6%（审查报告-20260930 M2）。派生之后两处永不漂。
+_SHAPE_SPLIT = re.compile("[" + _PUNCT[1:-1] + "]*")
 
 
 def _char_stream(text: str) -> str:
@@ -380,6 +388,8 @@ class AITells:
         self.lex_regex: dict[str, list[tuple[str, re.Pattern]]] = {}
         #: 读不出、用错了、编译不了的条目：**说出口而不是静默丢掉**
         self.bad_entries: list[str] = []
+        # `re:` 只有 first_sent 那条路认识（`_scan_words` 是字面量匹配）。
+        first_sent_tells = sorted(k for k, v in LEX_SCOPE.items() if v == "first_sent")
         for cat, raw in (data.get("lexicon") or {}).items():
             words: list[str] = []
             rules: dict[str, dict] = {}
@@ -391,6 +401,12 @@ class AITells:
                         f"lexicon.{cat} 有一条读不出词形（{item!r}）—— 已跳过")
                     continue
                 if w.startswith(RE_PREFIX):
+                    if spec:
+                        # 正则条目带限定 = 限定被静默丢弃（continue 在 spec 处理之前，
+                        # 审查报告-20260930 M5）：说出口，别让包作者以为限定生效了。
+                        self.bad_entries.append(
+                            f"lexicon.{cat} 的正则条目 {w!r} 带 note/unless —— first_sent "
+                            "（句首）路径只做句首匹配、不消费词义限定，这些限定**不生效**")
                     body = w[len(RE_PREFIX):]
                     try:
                         regexes.append((body, re.compile(body)))
@@ -415,6 +431,14 @@ class AITells:
                         spec["unless"] = unless_ok
                 if spec:
                     rules[w] = spec
+                if spec and cat in first_sent_tells:
+                    # first_sent 路径（`_opening_ban`）只做句首匹配，不读 `word_rules`
+                    # —— note 不进 detail、unless 不豁免（审查报告-20260930 M5：
+                    # 实测 `大家好不容易聚齐…` 作首句照报）。限定写在这儿不会生效，
+                    # 必须说出口，别让包作者以为「三种形态引擎都认」。
+                    self.bad_entries.append(
+                        f"lexicon.{cat} 的条目 {w!r} 带 note/unless —— first_sent（句首）"
+                        "路径当前不消费词义限定（句首命中即报），这些限定**不生效**")
             self.lexicon[cat] = words
             if rules:
                 self.word_rules[cat] = rules
@@ -422,7 +446,6 @@ class AITells:
                 self.lex_regex[cat] = regexes
         # `re:` 只有 first_sent 那条路认识（`_scan_words` 是字面量匹配）。
         # 用错类别 = 一条"配了词却永不命中"的死词，必须说出口（A-9 §8.3 #4）。
-        first_sent_tells = sorted(k for k, v in LEX_SCOPE.items() if v == "first_sent")
         for cat in list(self.lex_regex):
             if cat in first_sent_tells:
                 continue
@@ -432,9 +455,9 @@ class AITells:
                 "否则它长得像「配了词」却永远不命中")
             self.lex_regex.pop(cat)
         #: 门槛的按包覆盖（A-9 schema #2）。**只有"段内累计"那一族吃它**：
-        #: weak 的词表类（`_lexical` 的 `WEAK_MIN`）与 `contrast_frame`（同口径）。
-        #: strong 是"单次即报"，与门槛在定义上互斥；其余结构类各有自己的判据
-        #: （≥3 项并列 / 递增 ≥4 句 / cv<0.15 / 句首 >1/3），代码不读 `thresholds`。
+        #: weak 的词表类（`_lexical` 的 `WEAK_MIN`）与 **weak 声明的** `contrast_frame`
+        #: （同口径）。strong 是"单次即报"，与门槛在定义上互斥；其余结构类各有自己的
+        #: 判据（≥3 项并列 / 递增 ≥4 句 / cv<0.15 / 句首 >1/3），代码不读 `thresholds`。
         #: 把这些键写进来是 **no-op**，而包作者会以为换了尺子 —— 所以报出来并不收下
         #: （收下就会在 `config_warnings` 里印"分数与别的包不可比"，那是假话）。
         self.thresholds: dict[str, int] = {}
@@ -445,8 +468,24 @@ class AITells:
                 f" —— 已按默认口径 {WEAK_MIN}")
             raw_th = {}
         for tid, v in raw_th.items():
-            eats = ((tid in self.LEXICAL and self.severity.get(tid) == WEAK)
-                    or tid == "contrast_frame")
+            sev_here = self.severity.get(tid)
+            if tid == "contrast_frame" and sev_here is None:
+                # 门槛配给了**未声明**的 tell：它根本不跑，配了是 no-op ——
+                # 不能照走"记门槛、印非默认口径"那条路（那是把 no-op 说成换了尺子，
+                # 审查报告-20260930 E8）
+                self.bad_entries.append(
+                    f"thresholds.{tid} 配给了**未声明**的 tell（yaml 没在 strong/weak 里"
+                    "声明它，这条 tell 根本不跑）—— 已忽略")
+                continue
+            if tid == "contrast_frame" and sev_here == STRONG:
+                # strong 与门槛在定义上互斥（审查报告-20260930 E6；`_contrast_frame`
+                # 对 strong 单次即报，门槛不参与）
+                self.bad_entries.append(
+                    f"thresholds.{tid} 对 strong 不生效 —— strong 是单次即报，"
+                    "只有 weak 才吃段内门槛 —— 已忽略，别以为尺子换了")
+                continue
+            eats = ((tid in self.LEXICAL and sev_here == WEAK)
+                    or (tid == "contrast_frame" and sev_here == WEAK))
             if not eats:
                 self.bad_entries.append(
                     f"thresholds.{tid} 对这一类不生效 —— 只有 weak 的词表类与 "
@@ -457,12 +496,19 @@ class AITells:
                 self.bad_entries.append(
                     f"thresholds.{tid} 是布尔值（{v!r}），不是次数 —— 已按默认口径 {WEAK_MIN}")
                 continue
+            str_form = isinstance(v, str)
             try:
                 num = float(v)
             except (TypeError, ValueError):
                 self.bad_entries.append(
                     f"thresholds.{tid} 不是整数（{v!r}）—— 已按默认口径 {WEAK_MIN}")
                 continue
+            if str_form:
+                # "2" 会被 float 偷偷收下 —— 值碰巧不错，但形态错了必须说出口
+                # （与「很多」→警告、2.9→警告同一条立场；审查报告-20260930 E7）
+                self.bad_entries.append(
+                    f"thresholds.{tid} 写成了字符串（{v!r}）—— 门槛要的是数字；"
+                    f"值能读（按 {int(num)} 照用），但请改写成数字")
             if num != int(num):
                 # 2.9 静默截成 2 是这条仓里反复治过的"配置者以为配了 A、实际跑的是 B"
                 # （同一条立场见 `pipeline` 对 `limits.recheck_rounds: 2.9` 的处理）
@@ -604,9 +650,10 @@ class AITells:
         有 `{{待补}}` 可以不算命中 —— 那是"知道这里缺事实"，比编一个数字诚实；
         但**豁免有上限**（A-1）：占位数超过段数就不是"留了个空"而是整篇没写。
         光有上限还堵不住"每段恰好一个空"（8 段 8 个 → 8≤8 照样豁免），所以再加下限：
-        **念出来的字数为 0 时不豁免**，以及**每个空要有 `PLACEHOLDER_MIN_CHARS` 字正文
-        撑着才豁免**（实测：8 段各配一句 13 字的引子 + 一个空，正文零具体 →
-        旧判据只看 `spoken > 0`，一句废话就把 strong 买通了，人味分照样 100）。
+        **念出来的字数为 0 时不豁免**，以及**全篇均摊每个空要有 `PLACEHOLDER_MIN_CHARS`
+        字正文撑着才豁免**（`spoken ≥ MIN_CHARS × 占位数`；实测：8 段各配一句 13 字的
+        引子 + 一个空，正文零具体 → 旧判据只看 `spoken > 0`，一句废话就把 strong
+        买通了，人味分照样 100）。
 
         ⚠ 还有第三头（P1）：豁免的前提是占位标的是「**还不知道**的事实」，
           而 `{{待补：3天}}` / `{{待补：2026-09-01}}` 这类**把具体数值写进占位**的
@@ -629,13 +676,15 @@ class AITells:
                 denial = "整篇只有占位、没有念得出口的正文"
             elif spoken < PLACEHOLDER_MIN_CHARS * ph:
                 denial = (f"{ph} 处占位只剩 {spoken} 字正文来撑，"
-                          f"每个空不足 {PLACEHOLDER_MIN_CHARS} 字")
+                          f"均摊每个空不足 {PLACEHOLDER_MIN_CHARS} 字")
             if not denial:
                 return []
-        # 「有没有可数的事实」按**剥掉占位符之后**的正文判。直接扫 `full` 的话
-        # `{{待补：3天}}` 里那个 `3` 会让整篇豁免（P1）；`{{待补：三天}}` 同理。
-        # `tests/test_ai_tells.py` 的旧占位都不含数字与量词，所以一直没测出来。
-        body = _PLACEHOLDER_RE.sub("", full)
+        # 「有没有可数的事实」按**剥掉占位与画面标注之后**的正文判（`_plain` 与
+        # `_count`/`_char_stream` 同一条口径）。直接扫 `full` 的话
+        # `{{待补：3天}}` 里那个 `3` 会让整篇豁免（P1）；`{{待补：三天}}` 同理；
+        # `[画面：字幕 2025 年新规]` 同理 —— 画面提示不进嘴，不该买通豁免
+        # （审查报告-20260930 M3：修复前只剥占位，画面里的数字把 strong 静默豁免）。
+        body = _plain(full)
         if re.search(r"\d", body) or _MEASURE_RE.search(body):
             return []
         return [TellHit("no_specific", self.sev("no_specific"), max(ph, 1), "全篇",
@@ -693,6 +742,10 @@ class AITells:
         `thresholds: {contrast_frame: N}` 可覆盖，但覆盖值会进 config_warnings）。
         """
         hits = []
+        # strong 单次即报（与其余 strong tell 同一口径，审查报告-20260930 E6）；
+        # weak 走段内门槛（默认 `WEAK_MIN`，yaml 的 `thresholds` 可覆盖）。
+        min_n = (1 if self.sev("contrast_frame") == STRONG
+                 else self.thresholds.get("contrast_frame", WEAK_MIN))
         for i, s in enumerate(sections, 1):
             n = 0
             frames: list[str] = []
@@ -702,7 +755,7 @@ class AITells:
                         n += 1
                         frames.append(label)
                         break                      # 一句只算一次，别同一句报两处
-            if n >= self.thresholds.get("contrast_frame", WEAK_MIN):
+            if n >= min_n:
                 shown = "、".join(dict.fromkeys(frames))     # 去重且保序
                 hits.append(TellHit("contrast_frame", self.sev("contrast_frame"),
                                     n, f"第{i}段",

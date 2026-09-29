@@ -210,6 +210,8 @@
           <div class="topics-head">
             <p class="hint" id="rank-meta"></p>
             <span class="topics-grow"></span>
+            <button class="ghost tiny" id="btn-quad" type="button"
+                    aria-expanded="false" aria-controls="quad-panel">四象限图</button>
             <button class="ghost tiny" id="btn-rank-order" type="button"
                     aria-pressed="true">按热点分</button>
             <button class="ghost tiny" id="btn-rank-more">换一批</button>
@@ -218,6 +220,9 @@
           <!-- 忽略清单（§3.5「已忽略 N 点开是列表，可恢复」）：默认藏着，
                点上面那颗才出现 —— 它不是"今天少看了哪几条"的常驻信息。 -->
           <div class="ignored-box hidden" id="topics-ignored"></div>
+          <!-- 四象限散点（§3.3 #6 散点那一半）：与忽略清单同一套开合口径，
+               默认藏着 —— 它是"哪些题值得先看"的第二种读法，不是必经之路。 -->
+          <div class="quad-panel hidden" id="quad-panel"></div>
           <div id="rank-root" class="rank-list"></div>
           <p class="hint" id="rank-note"></p>
         </div>

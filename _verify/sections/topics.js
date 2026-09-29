@@ -1400,4 +1400,105 @@ module.exports = async function topics({ evalIn, sleep, check }) {
       rankPaging.calls === 0
         && (rankPaging.disabled === true || /^第 \d+\/\d+ 批$/.test(rankPaging.text)),
       JSON.stringify(rankPaging));
+  // ── 四象限散点（§3.3 #6 散点那一半）─────────────────────────
+  // 档线的位置量的是"图跟着**后端下发的** hot_quadrant_high 画"（桩里 60）——
+  // 前端抄常数的话，重校准那天图与分档各画各的，而那种漂移不报错。
+  // 点位量的是 getBoundingClientRect（不是 style 属性）：CSP 把内联 style 整条
+  // 丢掉之后，"属性在、值在"与"真的画在那"是两件事 —— 信号条踩过同一道坑。
+  const quad = await evalIn(`return (async () => {
+    // 前面「旧产物降级」那一段恢复开关后**没有重载视图**，屏上还是那份
+    // 8 条空分事件的降级数据 —— 先重进视图拿回正常桩（4 个事件），再量图。
+    document.getElementById('btn-topics').click();
+    await new Promise(function (r) { setTimeout(r, 700); });
+    var btn = document.getElementById('btn-quad');
+    var panel = document.getElementById('quad-panel');
+    var out = { hiddenByDefault: panel.classList.contains('hidden'),
+                expandedByDefault: btn.getAttribute('aria-expanded') };
+    btn.click();
+    await new Promise(function (r) { setTimeout(r, 80); });
+    out.openAfterClick = !panel.classList.contains('hidden');
+    out.ariaOpen = btn.getAttribute('aria-expanded');
+    var dots = [...panel.querySelectorAll('.quad-dot')];
+    var plot = panel.querySelector('.quad-plot');
+    var pr = plot.getBoundingClientRect();
+    out.dotCount = dots.length;
+    out.dotTag = dots[0] ? dots[0].tagName : '';
+    out.hasAria = dots.every(function (d) { return (d.getAttribute('aria-label') || '').length > 0; });
+    out.featCount = dots.filter(function (d) { return d.classList.contains('feat'); }).length;
+    out.bands = dots.map(function (d) { return d.dataset.band; });
+    out.lefts = dots.map(function (d) {
+      var r = d.getBoundingClientRect();
+      return Math.round((r.left + r.width / 2 - pr.left) / pr.width * 1000); });
+    var th = panel.querySelector('.quad-th');
+    out.hasThreshold = !!th;
+    if (th) {
+      var tr = th.getBoundingClientRect();
+      out.thFrac = Math.round((tr.left - pr.left) / pr.width * 1000);
+    }
+    out.cap = (panel.querySelector('.quad-cap') || {}).textContent || '';
+    btn.click();
+    await new Promise(function (r) { setTimeout(r, 30); });
+    out.closedAgain = panel.classList.contains('hidden');
+    out.ariaClosed = btn.getAttribute('aria-expanded');
+    return out;
+  })()`);
+  check("四象限图默认收起，点开/收起与 aria-expanded 跟着走",
+    quad.hiddenByDefault && quad.expandedByDefault === "false"
+      && quad.openAfterClick && quad.ariaOpen === "true"
+      && quad.closedAgain && quad.ariaClosed === "false",
+    JSON.stringify(quad));
+  check("桩里 4 个事件：算不出分的那个不进图（画进去就是把「—」冒充 0 分），"
+      + "点是可聚焦的 button、带人话 aria-label，三颗有分的都在高配带（segment 都命中），"
+      + "高热高配的两颗用推荐位同色",
+    quad.dotCount === 3 && quad.dotTag === "BUTTON" && quad.hasAria
+      && quad.featCount === 2 && quad.bands.join("|") === "hi|hi|hi",
+    JSON.stringify({ n: quad.dotCount, tag: quad.dotTag, feat: quad.featCount, bands: quad.bands }));
+  check("点位跟着分走（82 > 71 > 12 从左到右单调），档线(60)落在 12 与 71 之间",
+    quad.lefts.length === 3 && quad.lefts[0] > quad.lefts[1] && quad.lefts[1] > quad.lefts[2]
+      && quad.hasThreshold && quad.thFrac > quad.lefts[2] && quad.thFrac < quad.lefts[1],
+    JSON.stringify({ l: quad.lefts, th: quad.thFrac }));
+  check("算不出分的事件有交代：计数行明说「不进图」，不是悄悄消失",
+    quad.cap.indexOf("1 个事件算不出热点分") >= 0 && quad.cap.indexOf("不进图") >= 0,
+    quad.cap);
+  // 点图上那颗点 → 定位到那一行：目标行在**另一页**时必须翻页。PAGE_SIZE=5，
+  // 桩默认 4 个事件永远单页，跨页那一支要用 __quadMore 撑出 7 个事件才走得到
+  //（8 分那颗排在第 6 位 → 第二页；不翻页的话它根本不在屏上）。
+  const quadJump = await evalIn(`return (async () => {
+    window.__quadMore = true;
+    document.getElementById('btn-topics').click();
+    await new Promise(function (r) { setTimeout(r, 700); });
+    var panel = document.getElementById('quad-panel');
+    var out = { rows0: document.querySelectorAll('#rank-root .rank-row').length };
+    if (panel.classList.contains('hidden')) document.getElementById('btn-quad').click();
+    await new Promise(function (r) { setTimeout(r, 80); });
+    var dots = [...panel.querySelectorAll('.quad-dot')];
+    out.dotCount = dots.length;
+    var target = dots.find(function (d) { return d.dataset.key === 'ev:bbbb0000quad2'; });
+    if (!target) return { err: 'no-dot', n: dots.length };
+    // 起始页不假设：先用第一页里那颗点（82 分）把视图翻回第 1 页，
+    // 再点 8 分那颗（第 6 位 → 第 2 页）—— 两次都是真翻页，方向相反。
+    var first = dots.find(function (d) { return d.dataset.key === 'ev:0a1b2c3d4e5f'; });
+    first.click();
+    await new Promise(function (r) { setTimeout(r, 120); });
+    out.rowsMid = document.querySelectorAll('#rank-root .rank-row').length;
+    target.click();
+    await new Promise(function (r) { setTimeout(r, 120); });
+    var rows = [...document.querySelectorAll('#rank-root .rank-row')];
+    out.rows1 = rows.length;
+    out.keys = rows.map(function (r) { return r.dataset.key; });
+    var tr = rows.find(function (r) { return r.dataset.key === 'ev:bbbb0000quad2'; });
+    out.found = !!tr;
+    out.flash = tr ? tr.classList.contains('flash') : false;
+    window.__quadMore = false;
+    document.getElementById('btn-topics').click();
+    await new Promise(function (r) { setTimeout(r, 700); });
+    out.rowsRestored = document.querySelectorAll('#rank-root .rank-row').length;
+    return out;
+  })()`);
+  check("点图上那颗点定位到那一行：同页的那颗原地闪烁指认，第二页的那颗先翻页（5 行 → 2 行），收场后行数复原",
+    quadJump.rows0 === 5 && quadJump.dotCount === 6 && quadJump.rowsMid === 5
+      && quadJump.rows1 === 2
+      && quadJump.keys[0] === "ev:bbbb0000quad2" && quadJump.flash
+      && quadJump.rowsRestored === 4,
+    JSON.stringify(quadJump));
 };

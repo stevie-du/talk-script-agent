@@ -395,6 +395,10 @@ INTEL_TODAY.groups[2].items = INTEL_TODAY.items.filter(i => i.source_label === "
     });
   }
   INTEL_TODAY.events = evs;
+  // 四象限的「高热」档位（§3.3 #6）：引擎的 today() 随数据下发 HOT_QUADRANT_HIGH，
+  // 桩也必须带 —— 档线这一条断言量的就是"图跟着下发的常数画"，桩里没有它，
+  // 那条断言只能在"字段缺失就不画线"的空转里永远绿。
+  INTEL_TODAY.hot_quadrant_high = 60;
   // 源健康（§3.1）：近 7 天的 成/败。政策库那一条同时是"抓取失败"的活样本；
   // 微博热搜演的是**今日跳过**（连续失败到闸值，这一轮没去试）。
   INTEL_TODAY.groups[0].health = { ok: 6, fail: 0, hits: 24, consecutive_fails: 0 };
@@ -916,6 +920,38 @@ window.__addCount = 0;
       // 入口恰好在这时打不开。
       if (window.__noIgnoredToday) {
         return mk(Object.assign({}, INTEL, { ignored_today: 0 }));
+      }
+      // window.__quadMore：再给三个**未归属**的事件（热点分 45/30/8），把排行撑到
+      // 两页 —— 四象限图「点图上那颗点 → 定位到那一行」里，跨页翻页那一支只有在
+      // 目标行不在当前页时才走（PAGE_SIZE=5，桩默认 4 个事件永远单页）。
+      // ⚠ 不敢直接加进共享桩：排行断言写死了行序 [82,71,12,—]，加事件全组要重写；
+      //   也不加进那些事件的 item_keys（rows 从 items 现算，挂空数组就行 ——
+      //   这三个事件只为"有点可点、有页可翻"而存在，没有断言去看它们的详情）。
+      if (window.__quadMore) {
+        var quadExtra = [
+          { key: "ev:aaaa0000quad1", title: "老楼加装补贴常见问答", segment: "",
+            platforms: ["下拉词"], source_count: 1, item_keys: [],
+            first_seen: "2026-09-25T08:00:00+08:00", seen_before: true, days_on_board: 2,
+            signals: { diversity: 0.25, rank: 0.4, velocity: 0.8, persistence: 0.3 },
+            growth: 1.2, decay: 0, hot_score: 45, status: "new", status_label: "新上榜",
+            stage: "rising", weak_signal: false, contested: false, underdog: false,
+            featured: false, quadrant: "低热低配", opportunity: 32, brief: "absent" },
+          { key: "ev:cccc0000quad3", title: "电梯维保低价中标乱象", segment: "",
+            platforms: ["抖音热榜"], source_count: 1, item_keys: [],
+            first_seen: "2026-09-26T08:00:00+08:00", seen_before: false, days_on_board: 1,
+            signals: { diversity: 0.25, rank: 0.3, velocity: 0.9, persistence: 0.2 },
+            growth: 1.1, decay: 0, hot_score: 30, status: "new", status_label: "新上榜",
+            stage: "rising", weak_signal: false, contested: false, underdog: false,
+            featured: false, quadrant: "低热低配", opportunity: 21, brief: "absent" },
+          { key: "ev:bbbb0000quad2", title: "电梯层门改造招标公告", segment: "",
+            platforms: ["微博热搜"], source_count: 1, item_keys: [],
+            first_seen: "2026-09-27T08:00:00+08:00", seen_before: false, days_on_board: 1,
+            signals: { diversity: 0.25, rank: 0.1, velocity: 0.2, persistence: 0.1 },
+            growth: 0.3, decay: 0, hot_score: 8, status: "fading", status_label: "衰退中",
+            stage: "fading", weak_signal: false, contested: false, underdog: false,
+            featured: false, quadrant: "低热低配", opportunity: 6, brief: "absent" },
+        ];
+        return mk(Object.assign({}, INTEL, { events: INTEL.events.concat(quadExtra) }));
       }
       return mk(INTEL);
     }

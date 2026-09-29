@@ -118,6 +118,48 @@ def test_feedback_carries_the_negative_list_and_the_two_pass_rule():
     assert fb.count("六条永不注入") == 1, fb
 
 
+def test_negative_tail_follows_the_rewrite_scope():
+    """审查报告-20260930 M1：负面清单的收尾句**按档分**。
+
+    in-place / bounded 的护栏是"未点名段落别动"；structural 的许可是"可以重排"——
+    修复前那句"点名清单里没有的段落，一个字都不要动"无条件追加，
+    structural 档的反馈里同时出现"可以重排"与"一个字都不要动"（实测坐实），
+    模型只能猜，structural 被静默降级成 bounded。
+    """
+    clean = {"hard_hits": [], "soft_hits": [], "deviation_pct": 0.0, "segments": [],
+             "ai_tells": None, "tolerance_pct": 10.0, "duration_target": 60,
+             "estimated_seconds": 60, "chars_total": 261, "target_total": 261}
+    prev = [{"type": "point", "text": "上一版正文。"}]
+    fb_inplace = Pipeline._violation_feedback(clean, prev, "in-place")
+    fb_bounded = Pipeline._violation_feedback(clean, prev, "bounded")
+    fb_structural = Pipeline._violation_feedback(clean, prev, "structural")
+    # 收紧的两档：护栏句在，重排许可不在
+    assert "一个字都不要动" in fb_inplace and "一个字都不要动" in fb_bounded
+    assert "可以重排" not in fb_inplace and "可以重排" not in fb_bounded
+    # structural：上一版全文标签带着"可以重排"（SCOPE_INSTRUCTION），负面清单的
+    # 收尾句必须**不是**"一个字都不要动" —— 两句同现就是自相矛盾
+    assert "可以重排" in fb_structural, fb_structural
+    assert "一个字都不要动" not in fb_structural, fb_structural
+    assert "不趁机改写没点名的句子" in fb_structural, fb_structural
+
+
+def test_two_pass_rule_is_reined_in_for_in_place_scope():
+    """审查报告-20260930 M3'：in-place 档"不许加句"与"第二步补回人声"的张力要说破。
+
+    两段指令照常在（那是 slopbuster 两遍法的本体），但 in-place 档要多一句
+    "人声补回也只在句内"—— 否则模型按第二步的字面意思去加句子，越过本档边界。
+    bounded / structural 允许动句子结构，不加这句。
+    """
+    clean = {"hard_hits": [], "soft_hits": [], "deviation_pct": 0.0, "segments": [],
+             "ai_tells": None, "tolerance_pct": 10.0, "duration_target": 60,
+             "estimated_seconds": 60, "chars_total": 261, "target_total": 261}
+    fb_inplace = Pipeline._violation_feedback(clean, scope="in-place")
+    assert "分两步做" in fb_inplace, fb_inplace                       # 两段指令本体不动
+    assert "本档只做句内清理" in fb_inplace, fb_inplace
+    fb_structural = Pipeline._violation_feedback(clean, scope="structural")
+    assert "本档只做句内清理" not in fb_structural, fb_structural
+
+
 def test_feedback_says_why_when_it_can_name_nothing():
     """什么问题都点不出来时，仍要说"未通过校验"—— 那句兜底不能变成死代码。
 

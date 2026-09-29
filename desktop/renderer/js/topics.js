@@ -85,6 +85,10 @@ let curSeg = "";
 let rankPage = 0;
 /** 排序轴（§5 #1 拍板"两轴都保留为可切换"）：默认热点分。 */
 let rankAxis = "score";
+/** 四象限散点（§3.3 #6 散点那一半）开合状态。开合随每次 renderRank 重新落到
+ *  按钮与面板上 —— 只在点击处改的话，重渲/重进视图后键上写"收起"、内容却藏着，
+ *  与「看条目」那颗按钮踩过的是同一个坑。 */
+let quadOpen = false;
 /** 展开过详情的事件键。记在模块变量里，换一批/翻页不该把已经看开的行收回去。 */
 const openKeys = new Set();
 /** 每个事件的选题卡状态：`{running, payload, cached}`。
@@ -470,8 +474,84 @@ function renderRank() {
     order.textContent = rankAxis === "opp" ? "按机会分" : "按热点分";
     order.setAttribute("aria-pressed", rankAxis === "score" ? "true" : "false");
   }
+  // 四象限开合只有一处真相（quadOpen），每次重渲都把按钮与面板拨到它上面。
+  const qbtn = $("btn-quad");
+  const qpanel = $("quad-panel");
+  if (qbtn) qbtn.setAttribute("aria-expanded", quadOpen ? "true" : "false");
+  if (qpanel) {
+    qpanel.classList.toggle("hidden", !quadOpen);
+    if (quadOpen) renderQuad(all, qpanel);
+  }
   wireRank();
   syncSigWidths(root);
+}
+
+/** 四象限散点（§3.3 #6 散点那一半）：横轴热点分，上带 = 归得上本包细分、
+ *  下带 = 未归属 —— 纵轴就是分档用的那个**布尔**，画成两根横带，不假装有
+ *  一根 0-100 的相关度轴（那是分档落码时明说不做的假精度）。
+ *  「高热」档线的位置用**后端下发的** `hot_quadrant_high`，前端不抄常数；
+ *  算不出热点分的不进图 —— 画进去就是把「—」冒充 0 分。
+ *  ⚠ 点位与档线的坐标**不写在 HTML 里**（CSP `style-src 'self'` 会把内联
+ *  style 整条丢掉，信号条踩过同一道坑）：渲染后走 CSSOM 写 `--x` / `--jy`。 */
+function renderQuad(all, panel) {
+  if (!panel) return;
+  const th = data ? data.hot_quadrant_high : undefined;
+  const scored = all.filter(e => e.hot_score !== null && e.hot_score !== undefined);
+  const noScore = all.length - scored.length;
+  let hi = 0, lo = 0;
+  const dots = scored.map(e => {
+    const band = e.segment ? "hi" : "lo";
+    const j = (band === "hi" ? hi++ : lo++) % 3 - 1;
+    const tip = `${e.title} · ${e.quadrant || ""} · 热点分 ${e.hot_score}`;
+    return `<button type="button" class="quad-dot${e.featured ? " feat" : ""}"`
+      + ` data-key="${esc(e.key)}" data-band="${band}" data-j="${j}"`
+      + ` data-score="${e.hot_score}" title="${esc(tip)}" aria-label="${esc(tip)}"></button>`;
+  }).join("");
+  panel.innerHTML = `<div class="quad-plot" role="img"
+      aria-label="四象限分布：横轴热点分 0 到 100，上带是归得上本包细分的事件，下带是未归属的">
+      <i class="quad-band hi"></i><i class="quad-band lo"></i>
+      <i class="quad-band-lbl t">归得上本包细分</i><i class="quad-band-lbl b">未归属 / 别的赛道</i>
+      ${(th === null || th === undefined) ? ""
+        : `<i class="quad-th" data-th="${th}" title="热点分 ≥ ${th} 记高热（与机会分同一档常数）"></i>`}
+      ${dots}
+      <span class="quad-x0">0</span><span class="quad-x100">100</span>
+    </div>
+    <p class="hint quad-cap">${noScore ? `另有 ${noScore} 个事件算不出热点分，不进图 —— 「—」不是 0。` : ""}</p>`;
+  syncQuadDots(panel);
+  panel.querySelectorAll(".quad-dot").forEach(d => {
+    d.onclick = () => showEventFromQuad(d.dataset.key);
+  });
+}
+
+/** 渲染之后走 CSSOM 把坐标挂上（理由见 renderQuad 的 CSP 那条）。
+ *  横轴留 2% 内边距防边缘裁切：0 分与满分那颗点不被裁掉一半，
+ *  判据量的是 getBoundingClientRect，坐标错了一眼就看得见。 */
+function syncQuadDots(panel) {
+  panel.querySelectorAll(".quad-dot").forEach(d => {
+    const s = Math.max(0, Math.min(100, Number(d.dataset.score) || 0));
+    d.style.setProperty("--x", String(s));
+    d.style.setProperty("--jy", String(Number(d.dataset.j) || 0));
+  });
+  const th = panel.querySelector(".quad-th");
+  if (th) th.style.setProperty("--x", String(Math.max(0, Math.min(100, Number(th.dataset.th) || 0))));
+}
+
+/** 点图上那颗点 → 定位到排行里那一行：目标行在另一页时**先翻页**
+ * （PAGE_SIZE=5，事件一多行就不在当前页）；找不到（赛道切换后键没了）就安静返回。 */
+function showEventFromQuad(key) {
+  const all = rankEvents();
+  const idx = all.findIndex(e => e.key === key);
+  if (idx < 0) return;
+  rankPage = Math.floor(idx / PAGE_SIZE);
+  renderRank();
+  requestAnimationFrame(() => {
+    const row = document.querySelector(`#rank-root .rank-row[data-key="${key}"]`);
+    if (!row) return;
+    row.scrollIntoView({ behavior: "smooth", block: "center" });
+    row.classList.remove("flash");
+    void row.offsetWidth;
+    row.classList.add("flash");
+  });
 }
 
 /** 排行行的三个动作 + 「看条目」的展开。整块在重渲染后要重新挂，
@@ -1036,6 +1116,9 @@ export const bindTopics = bindOnce(function bindTopics() {
     rankPage = 0;
     renderRank();
   };
+  // 四象限散点（§3.3 #6）：只翻 quadOpen 这一个开关，开合与重渲的落位
+  // 全在 renderRank 里做（那里是唯一能同时看到按钮、面板与数据的地方）。
+  $("btn-quad").onclick = () => { quadOpen = !quadOpen; renderRank(); };
   // 「已忽略 N」点开是**一张能恢复的清单**（§3.5）。以前它只 toast 一句话 ——
   // 那等于告诉用户"有些东西被你藏起来了，但没有任何地方能看到它们"。
   $("btn-ignored").onclick = () => {

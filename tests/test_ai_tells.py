@@ -395,6 +395,13 @@ def test_unattributed_fires_only_without_a_source_in_the_tail():
     assert _ids(win.scan(far)) == ["unattributed"], win.scan(far)
     near = [{"type": "point", "text": "数据显示，2025 年这类问题集中爆发。"}]
     assert win.scan(near) == [], win.scan(near)
+    # 量词支（审查报告-20260930 E9）：`_MEASURE_RE` 的「汉字数词+量词」同样买通豁免 ——
+    # 修复前后行为一致，但这条支路原来没有用例，变异 s37-1 只会走到数字支
+    hanzi = AITells({"strong": ["unattributed"],
+                     "lexicon": {"unattributed": ["业内一致认可"]}})
+    assert hanzi.scan([{"type": "point",
+                        "text": "业内一致认可，全城只有两家公司接这种单。"}]) == [], \
+        hanzi.scan([{"type": "point", "text": "业内一致认可，全城只有两家公司接这种单。"}])
 
 
 def test_cliche_hook_needs_two_in_one_section():
@@ -717,6 +724,108 @@ def test_threshold_must_be_an_integer_number_of_hits():
                      "thresholds": {"cliche_hook": bad}})
         assert any("cliche_hook" in x for x in w.warnings()), (bad, w.warnings())
         assert "cliche_hook" not in w.thresholds, bad     # 按默认口径跑，不静默截断
+
+
+# ── 审查报告-20260930 的修复（M2/M3/M5/E6/E7/E8）──────────────────
+
+def test_no_specific_ignores_picture_annotations():
+    """M3：`[画面：…]` 不进嘴，画面里的数字不许买通 strong 的豁免。
+
+    修复前豁免判据只剥占位符、不剥画面标注（`_count`/`_char_stream` 都剥画面），
+    「正文零具体 + [画面：字幕 2025 年新规]」→ scan() 零命中（实测漏报）。
+    """
+    t = AITells({"strong": ["no_specific"]})
+    pics = [{"type": "point",
+             "text": "这事儿你得重视，别等出了事才后悔。[画面：字幕 2025 年新规]"}]
+    assert "no_specific" in _ids(t.scan(pics)), t.scan(pics)
+    # 对照：正文里真有数字 → 豁免照常（剥画面不影响正文那条判）
+    ok = [{"type": "point",
+           "text": "上个月 3 号楼那台梯停了半天。[画面：字幕 2025 年新规]"}]
+    assert t.scan(ok) == [], t.scan(ok)
+
+
+def test_shape_stream_matches_the_count_caliber():
+    """M2：形态流的口径必须与 `_count` 一致 —— `／` 是停顿符，不是字。
+
+    修复前 `_SHAPE_SPLIT` 手写了一份更窄的标点表，`／` 被当成"字"灌进
+    mattr/实词 3-gram/虚词熵（12 篇真实产物字数 +4.6%）。现在 `_SHAPE_SPLIT`
+    从 `_PUNCT` 派生，两处永不漂 —— 本条断言钉的就是这个不变量。
+    """
+    from app.ai_tells import _count, shape_metrics
+    secs = [{"type": "hook", "text": "哎，我跟你说／真事儿（上礼拜的事）"},
+            {"type": "point", "text": "那天／电梯停在七楼／人被困了半小时，你说急不急。"}]
+    assert shape_metrics(secs)["chars"] == sum(_count(s["text"]) for s in secs), \
+        (shape_metrics(secs)["chars"], sum(_count(s["text"]) for s in secs))
+
+
+def test_first_sent_qualifiers_are_announced_as_unused():
+    """M5：first_sent 路径不消费 note/unless —— 加载时必须说出口。
+
+    `_opening_ban` 只做句首匹配、不读 `word_rules`：note 不进 detail、unless 不豁免
+    （实测「大家好不容易聚齐…」作首句照报）。正则条目同理：`continue` 在 spec
+    处理之前，带 note/unless 一样是被静默丢掉 —— 两处都要喊。
+    """
+    t = AITells({"strong": ["opening_ban"],
+                 "lexicon": {"opening_ban": [
+                     {"大家好": {"note": "问候", "unless": ["大家好不容易"]}},
+                     {"re:在当今[\\s\\S]{0,6}时代": {"note": "框架开场"}},
+                 ]}})
+    warns = t.warnings()
+    assert any("大家好" in w and "不生效" in w for w in warns), warns
+    assert any("正则条目" in w and "不生效" in w for w in warns), warns
+    # 行为不变：句首命中照报（这条修的是"说出口"，不是改判据）
+    hit = t.scan([{"type": "hook",
+                   "text": "大家好不容易聚齐了业委会，今天把这事说透。"}])
+    assert "opening_ban" in _ids(hit), hit
+
+
+def test_contrast_frame_strong_reports_a_single_hit():
+    """E6：strong 的 contrast_frame 单次即报（与其余 strong 同一口径）。
+
+    修复前门槛与 severity 无关：声明成 strong 时单次命中也不报 —— strong 成了
+    比 weak 更迟钝的怪档。门槛只在 weak 声明下参与（见下一条）。
+    """
+    t = AITells({"strong": ["contrast_frame"]})
+    one = [{"type": "point", "text": "这不是运气，而是保养的结果。"}]
+    hit = t.scan(one)
+    assert _ids(hit) == ["contrast_frame"] and hit[0].count == 1, hit
+
+
+def test_thresholds_for_contrast_frame_follow_the_severity():
+    """E6/E8：门槛 × contrast_frame 的三态。
+
+    weak：照常生效（非默认值进"非默认口径"警告）；strong：门槛不生效（说出口，
+    不许印"非默认口径"—— strong 是单次即报，门槛压根不参与）；未声明：tell 根本
+    不跑，门槛是 no-op —— 更不能印"非默认口径"（那是把没换尺子说成换了）。
+    """
+    weak_t = AITells({"weak": ["contrast_frame"], "thresholds": {"contrast_frame": 3}})
+    assert weak_t.thresholds == {"contrast_frame": 3}
+    assert any("非默认口径" in w for w in weak_t.warnings()), weak_t.warnings()
+
+    strong_t = AITells({"strong": ["contrast_frame"],
+                        "thresholds": {"contrast_frame": 3}})
+    assert "contrast_frame" not in strong_t.thresholds, strong_t.thresholds
+    assert any("contrast_frame" in w and "不生效" in w for w in strong_t.warnings())
+    assert not any("非默认口径" in w for w in strong_t.warnings())
+
+    off_t = AITells({"weak": ["cliche_hook"],
+                     "lexicon": {"cliche_hook": ["看到最后", "建议收藏"]},
+                     "thresholds": {"contrast_frame": 3}})
+    assert "contrast_frame" not in off_t.thresholds, off_t.thresholds
+    assert any("未声明" in w for w in off_t.warnings()), off_t.warnings()
+    assert not any("非默认口径" in w for w in off_t.warnings())
+
+
+def test_thresholds_string_form_is_announced_but_still_used():
+    """E7：`thresholds: {cliche_hook: "2"}` 必须说出口（修复前被 float 静默收下）。
+
+    与「很多」→警告、2.9→警告同一条立场：配置写错形态必须出声。值本身能读、
+    没有漂移 —— 所以照用（warn-and-use），不是 warn-and-default。
+    """
+    t = AITells({"weak": ["cliche_hook"], "lexicon": {"cliche_hook": ["看到最后", "建议收藏"]},
+                 "thresholds": {"cliche_hook": "2"}})
+    assert t.thresholds == {"cliche_hook": 2}, t.thresholds
+    assert any("字符串" in w and "cliche_hook" in w for w in t.warnings()), t.warnings()
 
 
 def test_shipped_packs_do_not_punish_what_the_prompt_encourages():

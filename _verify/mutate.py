@@ -2373,6 +2373,43 @@ MUTATIONS = [
         "      // MUTATED: 只恢复展开，按钮字留在「看条目」",
         "verify:topics",
     ),
+    # ── s39 组（四象限散点，方案 §3.3 #6 散点那一半）──
+    # 档线/点位/跨页/不进图四条判据各配一条变异；档位的"一份口径"在后端，那条指 pytest。
+    (
+        "s39-1 today() 不再下发四象限档位（前端档线只能抄常数，重校准那天图与分档各画各的）",
+        INTEL_F,
+        '            "hot_quadrant_high": HOT_QUADRANT_HIGH,',
+        '            "hot_quadrant_high": None,  # MUTATED: 档位不下发',
+        "tests/test_intel_ranking.py -k quadrant_threshold",
+    ),
+    (
+        "s39-2 点位不走 CSSOM（--x 没人写，点全叠回兜底位置 —— 属性在、位置是假的）",
+        TOPICS_F,
+        '    d.style.setProperty("--x", String(s));',
+        "    // MUTATED: 坐标没人写",
+        "verify:topics",
+    ),
+    (
+        "s39-3 点图定位不翻页（目标行在另一页时永远找不到，图上的点点了没反应）",
+        TOPICS_F,
+        "  rankPage = Math.floor(idx / PAGE_SIZE);",
+        "  rankPage = 0;  // MUTATED: 永远停在当前页",
+        "verify:topics",
+    ),
+    (
+        "s39-4 算不出分的事件照画（「—」冒充 0 分落在最左，图在撒谎）",
+        TOPICS_F,
+        "  const scored = all.filter(e => e.hot_score !== null && e.hot_score !== undefined);",
+        "  const scored = all.slice();  // MUTATED: 空分也画进去",
+        "verify:topics",
+    ),
+    (
+        "s39-5 「高热」档线不画（四象限没了分界，高热低热看不出来）",
+        TOPICS_F,
+        "      ${(th === null || th === undefined) ? \"\"",
+        "      ${true ? \"\"",
+        "verify:topics",
+    ),
 ]
 
 # 子集运行：`python _verify/mutate.py -k UI` 只跑名字里含 UI 的那几条。

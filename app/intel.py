@@ -2292,6 +2292,10 @@ def today(data_dir: Path, pack: str, sources: list[IntelSource]) -> dict:
     # `ignored` 留作累计（清单与沉底都读它）。
     return {"pack": pack, "fetched_at": data.get("fetched_at", ""),
             "groups": groups, "items": items, "events": events,
+            # 四象限图的「高热」档线画在哪，得用**后端下发的**常数（§3.3 #6）：
+            # 前端再抄一份就是"同一句话两处各说一遍" —— 重校准那天图与分档各画各的，
+            # 而那种漂移不报错，档线只会停在一个没人复查的位置。
+            "hot_quadrant_high": HOT_QUADRANT_HIGH,
             "errors": errors,
             "stale": is_stale(data, sources), "ignored": len(ignored),
             "ignored_today": count_ignored_today(ignored),

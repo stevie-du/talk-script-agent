@@ -3172,3 +3172,49 @@ input:not([type]) {
   color: var(--text-2); background: var(--fill); border-radius: var(--r-ctl);
   cursor: pointer; }
 .alt-tab.on { color: var(--ink); background: var(--fill-strong); font-weight: 600; }
+
+/* ══════════════ 四象限散点（§3.3 #6 散点那一半）══════════════
+   纵轴就是分档用的那个**布尔**（归得上细分 / 未归属），所以是两根横带、
+   不是一根连续的轴 —— 不假装有一根不存在的 0-100 相关度刻度（那是分档
+   落码时明说不做的假精度）。点位与档线的坐标由渲染层走 CSSOM 写
+   `--x` / `--jy`：本页 CSP 是 style-src 'self'，内联 style 会被整条丢掉，
+   而属性在、值在、屏幕上全叠在原点 —— 与 .sig-fill 同一条规矩。
+   横轴整体留 2% 内边距，0 分与满分那颗点不被裁掉一半。 */
+.quad-panel { padding-top: var(--s3); }
+.quad-plot { position: relative; height: 172px; margin: 0 var(--s8) 0;
+  border-bottom: 0.5px solid var(--line); }
+.quad-band { position: absolute; left: 0; right: 0; border-radius: var(--r-sm);
+  background: var(--fill-strong); }
+.quad-band.hi { top: 7%; height: 38%; }
+.quad-band.lo { top: 57%; height: 38%; }
+.quad-band-lbl { position: absolute; right: 0; transform: translateY(-50%);
+  font-size: var(--f-2xs); font-style: normal; color: var(--text-3); pointer-events: none; }
+.quad-band-lbl.t { top: 26%; }
+.quad-band-lbl.b { top: 76%; }
+/* 档线位置 = 后端下发的 hot_quadrant_high（§3.3 #6：前端不抄常数）；
+   线上顺带把档位数值印出来，让"这条线为什么在这"不用悬停才知道。 */
+.quad-th { position: absolute; top: 0; bottom: 0;
+  left: calc(2% + var(--x, 0) * 0.96%); border-left: 1px dashed var(--line-strong); }
+.quad-th::after { content: attr(data-th); position: absolute; top: -2px;
+  left: 3px; font-size: var(--f-2xs); font-family: var(--mono); color: var(--text-3); }
+.quad-dot { position: absolute; width: 13px; height: 13px; padding: 0;
+  border-radius: 50%; border: 0; cursor: pointer;
+  left: calc(2% + var(--x, 0) * 0.96%);
+  top: calc(var(--base, 50) * 1% + var(--jy, 0) * 11px);
+  transform: translate(-50%, -50%);
+  background: var(--text-2); box-shadow: var(--e1); }
+.quad-dot:hover { background: var(--text-1); }
+/* 「高热高配」那几颗用 --ok：与行上的 good chip 同一个语义同一份色，
+   图与行互相指认时不引入第二种颜色语言。 */
+.quad-dot.feat { background: var(--ok); }
+.quad-dot[data-band="hi"] { --base: 26; }
+.quad-dot[data-band="lo"] { --base: 76; }
+.quad-dot:focus-visible { outline: none; box-shadow: var(--shadow-focus); }
+.quad-x0, .quad-x100 { position: absolute; bottom: -1.4em; font-size: var(--f-2xs);
+  font-family: var(--mono); color: var(--text-3); }
+.quad-x0 { left: 0; }
+.quad-x100 { right: 0; }
+.quad-cap { margin-top: var(--s3); }
+/* 图上点到的行与「占位事实跳转」用同一段闪烁（.card-text .over.flash 那条）：
+   同一种"给你指到这"的手势不该有两种画法。 */
+.rank-row.flash { animation: flashHit 1.1s var(--ease) 2; }

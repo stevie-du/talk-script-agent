@@ -868,3 +868,17 @@ def test_titles_that_normalise_empty_do_not_share_an_event_key():
     assert all(I.is_event_key(e["key"]) for e in evs)
     # 同一条目跨快照仍要给出同一个键（否则"这题昨天看过"与选题卡缓存都会失效）
     assert I.event_key_of([a]) == I.event_key_of([a])
+
+
+def test_today_publishes_the_quadrant_threshold(tmp_path):
+    """§3.3 #6：四象限图的「高热」档线用**后端下发的常数**画，前端不许再抄一份。
+
+    阈值就是 `HOT_QUADRANT_HIGH`（与机会分同一个未校准常数，§5 #2 拍板重校准前
+    不动它）。前端写死 60 的话，重校准那天图与分档各画各的 —— 那种漂移不报错，
+    只让档线停在一个没人复查的位置，所以档位随 `today()` 下发、图只照着画。
+    """
+    I.fetch_pack("elevator", tmp_path, _specs(), seeds=["电梯困人"],
+                 keywords=["电梯"], http=_fake_http())
+    view = I.today(tmp_path, "elevator", _specs())
+    assert view["hot_quadrant_high"] == I.HOT_QUADRANT_HIGH, \
+        "档位不下发，前端的档线就只能抄常数 —— 两处口径迟早漂"

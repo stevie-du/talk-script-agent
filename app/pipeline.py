@@ -273,13 +273,38 @@ HUMAN_VOICE_RULE = (
 #: `stages.write.anti_ai.levels.strong.files` 里**整份注入撰写轮提示词**，
 #: 那一轮的预算实测只剩几十字；回炉反馈块由 pipeline 侧拼接、在 user_template
 #: 末尾，**不占撰写轮模板预算**（调研报告-20260928 §3.7 的修正）。
+#: ⚠ 收尾句**不在这里**：它按档分（见 `NEGATIVE_TAIL`）—— 原先把"点名清单里
+#:   没有的段落一个字都不要动"无条件追加，与 `SCOPE_INSTRUCTION["structural"]`
+#:   的"可以重排"自相矛盾，structural 档被自己的负面清单静默降级成 bounded
+#:   （审查报告-20260930 M1，实测两句话同现于一份反馈）。
 NEGATIVE_INJECTION_RULE = (
     "- 改写有**六条永不注入**（只删减、不添加 —— 把稿子洗成另一种 AI 味不算改好）：\n"
     "  ① 不加原文没有的口头禅与语气词；② 不制造新的排比、对仗或「更重要的是」式收尾；\n"
     "  ③ 不表演坦率（「说实话」「讲真的」不是人味，是另一种模板）；④ 不制造紧张感"
     "（「千万别」「后果很严重」）；⑤ **不虚构任何细节**（数字、地名、案例、亲身经历 ——"
-    " 素材里没有就写 {{待补}}，宁可空着也不许编）；⑥ 不把短句拆成断句式戏剧节奏。\n"
-    "  点名清单里没有的段落，一个字都不要动。")
+    " 素材里没有就写 {{待补}}，宁可空着也不许编）；⑥ 不把短句拆成断句式戏剧节奏。")
+
+#: 负面清单的**收尾句按档分**（审查报告-20260930 M1）：
+#:   in-place / bounded —— 护栏是"未点名的段落别动"（与各自 SCOPE_INSTRUCTION 同向）；
+#:   structural —— 许可是"可以重排"，同一句"都不要动"会让模型收到自相矛盾的指令。
+#:   重排的边界改成"只为准点名的问题重排"，而不是"不许动"。
+#: 未知档位按最严的 default 走（rewrite_scope_error 在参数层已拦，这里是兜底）。
+NEGATIVE_TAIL = {
+    "structural":
+        "  重排只为准上面点名的每一条问题服务 —— 不是为了把稿子换个写法；"
+        "段落挪动时内容照旧，不趁机改写没点名的句子。",
+    "default":
+        "  点名清单里没有的段落，一个字都不要动。",
+}
+
+#: 两段指令的**按档补充**（审查报告-20260930 M3'）：in-place 档"不许删句、加句"，
+#: 而"第二步把人声补回去"有诱导加句的张力 —— 补一句"在本档允许的动作内做"。
+#: bounded/structural 允许动句子结构，不需要这句。
+VOICE_SCOPE_NOTE = {
+    "in-place":
+        "  （本档只做句内清理：人声的补回也只能换词、改语序、加标点，"
+        "不加句、不删句、不并句。）",
+}
 
 
 class Pipeline:
@@ -1473,7 +1498,13 @@ class Pipeline:
         # 两条静态规矩放在**动态内容之后、上一版全文之前**（每轮变的问题清单与正文在最后）：
         # 与 `$feedback_block` 位于 user_template 末尾的前缀缓存规矩同向（P1-40）。
         lines.append(HUMAN_VOICE_RULE)
+        # in-place 档的"人声补回"要与"不许加句"对齐（审查报告-20260930 M3'）
+        if scope in VOICE_SCOPE_NOTE:
+            lines.append(VOICE_SCOPE_NOTE[scope])
         lines.append(NEGATIVE_INJECTION_RULE)
+        # 收尾句按档分：structural 的"可以重排"不能与"一个字都不要动"同现
+        # （审查报告-20260930 M1）
+        lines.append(NEGATIVE_TAIL.get(scope, NEGATIVE_TAIL["default"]))
         if prev_sections:
             body = "\n".join(f"  第 {i} 段（{s.get('type', '')}）：{s.get('text', '')}"
                              for i, s in enumerate(prev_sections, 1))
