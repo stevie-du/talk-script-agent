@@ -117,6 +117,11 @@ class AppConfig:
     # 只是没坏、只是没配**：不下发的话，界面会把内置默认值当用户配置显示出来
     # （设置页模型名写着 glm-4.7、输入区右侧也写着 glm-4.7），用户以为已经配好了。
     llm_defaulted: list[str] = field(default_factory=list)
+    # TALKSCRIPT_API_KEY 是否**实际参与**了本次生效的配置（合成条目、或补了空
+    # key 条目）。与「变量存不存在」是两回事 —— /api/config 的 env_override
+    # 认这个字段：条目自己填了 Key 时 env 只是「在场」，界面却挂着「当前由
+    # 环境变量 TALKSCRIPT_API_KEY 覆盖」就是说谎（修复记录-20261012 遗留①）。
+    env_key_used: bool = False
 
 
 def config_path(root: Path, config_dir: Path | None = None) -> Path:
@@ -526,6 +531,9 @@ def load_config(root: Path, config_dir: Path | None = None) -> AppConfig:
     # ⚠ 判据是「三件套至少一个非空」：全新安装（一个 env 都没有）必须仍是空列表
     # （2026-09-17 产品决定：不再预置模型）—— 无条件合成等于把那条「内置默认
     # 空壳」从后门请回来，未配置与已配置又长得一样了。
+    # env_key_used：env key 有没有**实际参与**本次配置（遗留①）——合成条目且
+    # key 非空才算；只拿 BASE_URL/MODEL 合成时 key 是空的，env key 没参与。
+    env_key_used = False
     if not raw_models:
         env_key = os.environ.get("TALKSCRIPT_API_KEY") or ""
         env_url = os.environ.get("TALKSCRIPT_BASE_URL") or ""
@@ -534,6 +542,7 @@ def load_config(root: Path, config_dir: Path | None = None) -> AppConfig:
             raw_models = [{"id": "m1", "name": "", "base_url": env_url,
                            "api_key": env_key, "model": env_model}]
             active = "m1"
+            env_key_used = bool(env_key)
     models = [_effective(r) for r in raw_models]
     # 一条模型都没有（全新安装，或用户把模型删光了）：给一个**空模型**占位。
     # 三个连接字段都是空串 —— 生成会被明确拒绝（见 server 的 api_key 检查），
@@ -579,6 +588,9 @@ def load_config(root: Path, config_dir: Path | None = None) -> AppConfig:
     # 文档化通道。以前是无条件覆盖：用户在界面里填的 Key 会被 env 悄悄压掉，
     # 界面上看着是 A、实际请求用的是 B。
     if not cfg.api_key:
+        # 条目 key 空着才轮到 env（补空不是覆盖）—— 补上了就是 env 真的参与了
+        # 配置；条目自己有 Key 时这句根本不执行，env 只算「在场」。
+        env_key_used = env_key_used or bool(os.environ.get("TALKSCRIPT_API_KEY"))
         cfg.api_key = _env("TALKSCRIPT_API_KEY", "")
     for key, env_name in _LLM_ENV.items():
         if key in ("base_url", "model"):
@@ -611,6 +623,7 @@ def load_config(root: Path, config_dir: Path | None = None) -> AppConfig:
         root=root,
         config_error=config_error,
         llm_defaulted=defaulted,
+        env_key_used=env_key_used,
     )
     app.mock = (_truthy(os.environ.get("TALKSCRIPT_MOCK"))
                 or _truthy(llm.get("mock"))

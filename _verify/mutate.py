@@ -2841,6 +2841,14 @@ MUTATIONS = [
         "        return f\"{tm['start']}-{tm['end']} 秒\"   # MUTATED: 尾零回来了",
         'tests/test_unit_vocabulary.py -k "trailing_zeros"',
     ),
+    (
+        "s47-4 server：env_override 退回「变量在场即 true」（条目 key 非空时界面仍挂"
+        "「当前由环境变量 TALKSCRIPT_API_KEY 覆盖」的说谎注释 —— 修复记录-20261012 遗留①）",
+        SRV_F,
+        '                "env_override": cfg.env_key_used}',
+        '                "env_override": True                           # MUTATED: 恒 true',
+        'tests/test_models_list.py -k env_override',
+    ),
 ]
 
 # 子集运行：`python _verify/mutate.py -k UI` 只跑名字里含 UI 的那几条。

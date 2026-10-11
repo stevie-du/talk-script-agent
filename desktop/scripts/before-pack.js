@@ -56,9 +56,16 @@ function assertPrivateExcluded() {
 //   写的那件事）。所以把执行器做成**可注入**的参数：生产传真的、
 //   测试传一个记录调用的假货 —— 于是「有没有真的去构建运行时」
 //   与「命令行长什么样」都能在单测里断言，不必真跑一次构建。
-async function beforePack(run = defaultRunner) {
+//
+// ⚠ 首参形状分两路（2026-10-12 打包线复跑抓到的真雷）：electron-builder v25
+//   调钩子传的是 **context 对象** —— 老写法 `beforePack(run = defaultRunner)`
+//   会把 context 当 run 用，`run is not a function` 在 assertPrivateExcluded
+//   之后炸（历轮跳过打包线，这雷一直没见天日）。所以：首参是函数 = 测试注入，
+//   否则 = electron-builder 的 context，走可替换的 defaultRunner。
+async function beforePack(context) {
+  const run = typeof context === "function" ? context : module.exports.defaultRunner;
   assertPrivateExcluded();
-  run(path.join(__dirname, 'build-python-runtime.mjs'));
+  return run(path.join(__dirname, 'build-python-runtime.mjs'));
 }
 
 function defaultRunner(script) {
@@ -67,5 +74,6 @@ function defaultRunner(script) {
 
 module.exports = beforePack;
 module.exports.default = beforePack;   // electron-builder 两种取法都兼容
+module.exports.defaultRunner = defaultRunner;   // 测试可替换（不打真构建）
 module.exports.privatePackLeak = privatePackLeak;
 module.exports.PRIVATE_GLOB = PRIVATE_GLOB;

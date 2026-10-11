@@ -787,6 +787,62 @@ def test_env_key_fills_an_empty_entry(tmp_path, monkeypatch):
         "补齐是本次生效，不是落盘"
 
 
+# ── 5.1 env_override：报「参与」不报「在场」（遗留①）──────────
+#
+# 修复记录-20261012 遗留①：新语义下（条目 key 非空时 env 不侵入），
+# `/api/config` 的 env_override 仍按「TALKSCRIPT_API_KEY 存不存在」报 true ——
+# 条目自己填了 Key 的用户会在界面上看到「当前由环境变量 TALKSCRIPT_API_KEY
+# 覆盖」，而那个变量什么都没覆盖。现在只认「env key 实际参与了配置」：
+# 合成条目（key 随条目进配置）或补了空 key 条目，两种参与路之外一律 false。
+# settings.js 两处消费（renderStatus 的尾巴、模型行的「未配置 Key」判断）读的
+# 都是这一个字段，字段如实了它们自然如实 —— 前端不用改。
+
+def test_env_override_true_when_env_key_synthesizes_the_entry(tmp_path, monkeypatch):
+    """true 的形态：models 为空 + env 三件套 → 合成条目，key 来自 env。"""
+    monkeypatch.setenv("TALKSCRIPT_API_KEY", "sk-env")
+    c = _client(tmp_path, seed=False)
+    body = c.get("/api/config").json()
+    assert body["env_override"] is True, body
+    assert [m["id"] for m in body["models"]] == ["m1"], "前提变了：这条不再是合成路径"
+
+
+def test_env_override_false_when_entry_has_its_own_key(tmp_path, monkeypatch):
+    """false 的关键形态：条目自己填了 Key，env 也在场 —— 但 env 只是「在场」。
+
+    补空不是覆盖（P2-1/P2-2）：条目有 Key 轮不到 env，旧判据在这里说谎。
+    """
+    _seed_models(tmp_path, {"id": "a", "base_url": "https://a/v1",
+                            "api_key": SECRET, "model": "a"}, active="a")
+    monkeypatch.setenv("TALKSCRIPT_API_KEY", "sk-env")
+    c = _client(tmp_path, seed=False)
+    body = c.get("/api/config").json()
+    assert body["env_override"] is False, body
+    assert body["models"][0]["api_key_set"] is True
+
+
+def test_env_override_false_without_env(tmp_path):
+    """false 的形态：env 不在场 —— 哪怕条目 key 空着，也没有人补过。"""
+    _seed_models(tmp_path, {"id": "a", "base_url": "https://a/v1",
+                            "api_key": "", "model": "a"}, active="a")
+    c = _client(tmp_path, seed=False)          # `_clean_env` 已把三个变量摘掉
+    body = c.get("/api/config").json()
+    assert body["env_override"] is False, body
+
+
+def test_env_override_false_when_synthesis_used_only_base_url(tmp_path, monkeypatch):
+    """合成条目但只给了 BASE_URL（env key 没设）→ false。
+
+    「合成条目 → true」只对「key 来自 env」成立：这条钉住判据的门是 **env key
+    本身**，不是「发生过合成」—— 地址参与配置不代表 Key 被覆盖了。
+    """
+    monkeypatch.delenv("TALKSCRIPT_API_KEY", raising=False)
+    monkeypatch.setenv("TALKSCRIPT_BASE_URL", "https://env.example/v4")
+    c = _client(tmp_path, seed=False)
+    body = c.get("/api/config").json()
+    assert body["env_override"] is False, body
+    assert [m["id"] for m in body["models"]] == ["m1"], "前提变了：这条不再是合成路径"
+
+
 def test_base_url_with_surrounding_spaces_is_refused_not_saved(tmp_path):
     """P2-7（2026-10-05）：check_base_url 里的 `url != raw.strip()` 恒假——url
     本身就是 raw.strip()，首尾带空格的地址放行并原样落盘（落盘侧只 rstrip("/")），

@@ -82,6 +82,25 @@ test('★ before-pack 里构建失败必须往上抛（吞掉 = 谎称钩子跑�
   );
 });
 
+// ⚠ electron-builder v25 调钩子传的是 **context 对象**，不是执行器 ——
+// 老写法 `beforePack(run = defaultRunner)` 会把 context 当 run 用，
+// 真实构建在 assertPrivateExcluded 之后炸 `run is not a function`
+// （2026-10-12 打包线复跑抓到；历轮跳过打包线，这雷一直没见天日）。
+// 这条钉住「首参是 context 时走可替换的 defaultRunner」那条路，
+// 用替换法断言而不真打构建。
+test('★ before-pack 在 electron-builder 的 context 调用形态下也会构建运行时', async () => {
+  const calls = [];
+  const real = beforePack.defaultRunner;
+  beforePack.defaultRunner = (s) => calls.push(s);
+  try {
+    await beforePack({ electronPlatformName: 'win32', appOutDir: 'dist/win-unpacked' });
+  } finally {
+    beforePack.defaultRunner = real;
+  }
+  assert.strictEqual(calls.length, 1, `context 形态下构建运行时被调了 ${calls.length} 次，应恰好 1 次`);
+  assert.ok(calls[0].endsWith('build-python-runtime.mjs'), `调的不是构建脚本：${calls[0]}`);
+});
+
 // ── main.js 的每个同级 require 都必须在 build.files 里 ──────────
 // 病灶（2026-09-23 五路审查 P0-1）：engine-dialogs.js 从 main.js 拆出来时
 // 忘了加进 build.files。electron-builder 的 files 是**白名单、替换默认值**，

@@ -1264,7 +1264,11 @@ def create_app(root: Path, token: str | None = None,
                 # 配置里**存着的非法地址**（手工改过 / 老版本写过 / 环境变量覆盖出来的）。
                 # 常驻下发而不是只在保存那次回一句：见 `_link_warnings`。
                 "base_url_warnings": _link_warnings(cfg),
-                "env_override": bool(os.environ.get("TALKSCRIPT_API_KEY"))}
+                # env key 是否**实际参与**了配置（合成条目 / 补了空 key 条目），
+                # 不是「变量存不存在」—— 条目自己填了 Key 时 env 只是「在场」，
+                # 这里若报 true，界面就挂着「当前由环境变量 TALKSCRIPT_API_KEY
+                # 覆盖」的说谎注释（修复记录-20261012 遗留①）。
+                "env_override": cfg.env_key_used}
 
     @app.post("/api/config")
     def set_config(body: ConfigIn):
