@@ -198,6 +198,77 @@ def test_two_platforms_same_event_count_once_for_D_but_stay_two_items():
     assert again["困人"]["D"] is None, "今天没有新事件 → None，不是 0"
 
 
+# ── 同日重抓的 D 沿用（2026-10-12 A-2）───────────────────────
+def test_same_day_refetch_gets_d_carried_and_e_recomputed(tmp_path):
+    """同一天点两次「重抓」，第二次没有新事件 → D 沿用**今日最近一次**算出的值。
+
+    修前实测 168/168 条全体 None：上午还算得出的机会分，重抓一次就被抹成「—」。
+    只沿用 D —— S / E / is_new 全部按本轮现算（沿用 E 会把"3 天前的旧闻"说成
+    今天一样新鲜，自相矛盾）。
+    """
+    out1 = I.fetch_pack("elevator", tmp_path, _specs(), seeds=["电梯困人"],
+                        keywords=["电梯"], http=_fake_http())
+    out2 = I.fetch_pack("elevator", tmp_path, _specs(), seeds=["电梯困人"],
+                        keywords=["电梯"], http=_fake_http())
+    # 同词同桩的二抓没有新事件：旧口径这里全体 None，新口径沿用今日算出的 D
+    for it1 in out1["items"]:
+        it2 = next(x for x in out2["items"] if x["title"] == it1["title"])
+        assert it2["score"]["D"] == it1["score"]["D"] is not None, it1["title"]
+        assert it2["score"]["opportunity"] == it1["score"]["opportunity"]
+        # 沿用只管 D：is_new / S 按本轮现算
+        assert it2["score"]["is_new"] is False, "二抓的同一条不再是「本周新出」"
+        # E 现算的活证据：抖音条目没有 published，首抓连首见都没有 → None；
+        # 二抓有首见了 → 必须算得出。沿用的话它会跟着 D 一起停留在 None。
+        if it1["source_id"] == "hot_board":
+            assert it1["score"]["E"] is None
+            assert it2["score"]["E"] is not None, "E 必须现算，不许跟着 D 一起沿用"
+
+
+def test_cross_day_refetch_does_not_borrow_yesterdays_d(tmp_path):
+    """沿用**只在同日**：latest.json 的 fetched_at 改成昨天再抓 → 仍 None。
+
+    正对照同笔做（先证明同日二抓真的沿用）—— 否则"跨日不沿用"也可能是
+    "沿用机制压根没接上"伪装出来的绿。跨日不借数的理由：今天还没见过新题，
+    昨天的 D 说着"高需求"、E 却是 None，两句话互相打架。
+    """
+    out1 = I.fetch_pack("elevator", tmp_path, _specs(), seeds=["电梯困人"],
+                        keywords=["电梯"], http=_fake_http())
+    first_d = out1["items"][0]["score"]["D"]
+    assert first_d is not None
+    out2 = I.fetch_pack("elevator", tmp_path, _specs(), seeds=["电梯困人"],
+                        keywords=["电梯"], http=_fake_http())
+    got = next(x for x in out2["items"] if x["title"] == out1["items"][0]["title"])
+    assert got["score"]["D"] == first_d, "正对照：同日二抓必须沿用（否则这条在空转）"
+    # 把盘上那份 fetched_at 拨回昨天再抓：一条都不许拿到昨天的数
+    d = I.intel_dir(tmp_path, "elevator")
+    data = json.loads((d / "latest.json").read_text(encoding="utf-8"))
+    data["fetched_at"] = (_now() - timedelta(days=1)).isoformat(timespec="seconds")
+    (d / "latest.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    out3 = I.fetch_pack("elevator", tmp_path, _specs(), seeds=["电梯困人"],
+                        keywords=["电梯"], http=_fake_http())
+    assert out3["items"], "跨日首抓也要有排行行（量的是 D，不是整页没了）"
+    for it in out3["items"]:
+        sc = it["score"]
+        assert sc["D"] is None, (it["title"], sc)
+        assert sc["opportunity"] is None
+        assert sc["is_new"] is False, "is_new 照现算：同一条目今天不是新出的"
+
+
+def test_a_segment_outside_the_carried_map_stays_none():
+    """沿用表按细分各管各的：表里没有的段落 None；有新事件的段照本轮算。"""
+    a = _item("电梯维保新规出台", label="微博热搜", source_id="weibo_hot", segment="维保")
+    b = _item("加梯补贴新政", label="微博热搜", source_id="weibo_hot", segment="加梯")
+    out = I.score_topics([a, b], set(), events=[], carry_d={"维保": 0.4})
+    assert out["维保"]["D"] == 0.4, "表里有的段沿用今日算出的 D"
+    assert out["加梯"]["D"] is None and out["加梯"]["opportunity"] is None, \
+        "沿用表里没有的段不许凭空借数"
+    # 有新事件的那一路照本轮重算：沿用值不许掺进算得出来的那一半
+    ev = {"key": "ev:0a1b2c3d4e5f", "segment": "加梯", "item_keys": []}
+    out2 = I.score_topics([a, b], set(), events=[ev], carry_d={"维保": 0.4, "加梯": 0.9})
+    assert out2["加梯"]["D"] == 1.0, "本轮算得出就用本轮的，沿用值让位"
+    assert out2["维保"]["D"] == 0.0, "别的段有新事件 → 本段按 0 计，不拿沿用值顶"
+
+
 # ── 阶段一 #5 / 阶段二 #3：热点分与四根分项 ──────────────────
 def test_hot_score_terms_and_their_weights():
     """§3.2 的 40/30/20/10 摊开显示：总分 = 各项加权和 − 衰减，缺项不计入。"""

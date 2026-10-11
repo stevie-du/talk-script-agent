@@ -188,6 +188,10 @@ const META = {
         style: { "口播科普": "rate_by_style 无该风格：语速按默认 4.5 字/秒，字数配额随之变化" },
         ai_tells: { "ai_tells.yaml": "ai_tells.yaml 的 weak 段结构写坏：本次不做文风检查（只报不拦）" },
       },
+      // B-1（2026-10-12）：audit_pack 的包体警告随 PackInfo.warnings 下发 ——
+      // 以前全前端零消费（anti_ai 整块缺失、人味档位整条失效时界面一字不说）。
+      // 桩里给一条真消息形态的警告，判据钉它上屏（见「包体警告」那条 check）。
+      warnings: ["stages.write.anti_ai 缺失：人味档位（strong/standard）不会注入任何去AI味提示词——界面上选了也不生效"],
       // 情报源声明（B 线，§2.2）：选题页的分区 / 筛选行 chip / 计数 /
       // 情报源表**四处都由它渲染**，所以桩也必须带上 —— 少了它，那四条断言
       // 会退化成"渲染了空列表"而照样绿（空转）。
@@ -4705,6 +4709,16 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     // 没有这行，它们就是"算了、也算对了、却到不了消费者手里"。
     auditPts.paudHidden === false && /ai_tells/.test(auditPts.paudText),
     JSON.stringify(auditPts));
+  // B-1（2026-10-12）：audit_pack 的包体警告（PackInfo.warnings）以前全前端
+  // 零消费 —— 后端算了、随 /api/packs 下发了，界面一个字不显示。anti_ai 整块
+  // 缺失（人味档位整条失效、界面上选了也不生效）就是它的真实触发面。
+  // 判据钉桩里那条 warnings 的两个特征：专属前缀「包体警告」（与上面的
+  // 「配置没生效」类分开）+ 消息正文里的 anti_ai。
+  check("包体警告（pack.warnings）并进 #pack-audit 上屏（不再只写不读）",
+    auditPts.paudHidden === false
+      && /包体警告/.test(auditPts.paudText)
+      && /anti_ai 缺失/.test(auditPts.paudText),
+    auditPts.paudText);
 
   // 切回默认（行业包），与 UI 一致
   await evalIn(`window.__ts.setPane('gen');
@@ -5396,14 +5410,15 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       dur: [u.fmtDur(500), u.fmtDur(45000), u.fmtDur(59999), u.fmtDur(60000), u.fmtDur(90000)],
       sec: [u.sec(2.5), u.sec(60), u.sec(90.4), u.sec(null)],
       shot: [u.shotTime("0-4s", null), u.shotTime("3-8 s", null), u.shotTime("开场", null),
-             u.shotTime("", { start: 0, end: 5 }), u.shotTime("0.5-2s", null)],
+             u.shotTime("", { start: 0, end: 5 }), u.shotTime("0.5-2s", null),
+             u.shotTime("0.0-9.2", null), u.shotTime("0.0-9.6", null)],
     }))`);
   check("时长读法三档：毫秒 / 秒 / 分，整分不补「0 秒」",
     units.dur.join("|") === "500 毫秒|45 秒|1 分|1 分|1 分 30 秒", JSON.stringify(units.dur));
   check("秒数入参走同一档位（60 → 「1 分」，不是 60s 也不是「1 分 0 秒」）",
     units.sec.join("|") === "2.5 秒|1 分|1 分 30 秒|", JSON.stringify(units.sec));
-  check("分镜「时间」列只换单位不改数，认不出形状原样留、没有才兜底",
-    units.shot.join("|") === "0–4 秒|3–8 秒|开场|0–5 秒|0.5–2 秒", JSON.stringify(units.shot));
+  check("分镜「时间」列只换单位不改数，认不出形状原样留、没有才兜底（无 s 后缀的真模型实态同归一，与 _shot_time 透传分支同口径）",
+    units.shot.join("|") === "0–4 秒|3–8 秒|开场|0–5 秒|0.5–2 秒|0–9.2 秒|0–9.6 秒", JSON.stringify(units.shot));
 
   // 记号三档：ok 无记号 / no 红点 / run 灰点呼吸。
   // 色弱可用性靠「有没有记号」而不是「红还是绿」—— 这一栏只有异常才落东西。

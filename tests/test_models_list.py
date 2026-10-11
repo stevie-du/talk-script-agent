@@ -656,13 +656,105 @@ def test_editing_unknown_id_is_404(tmp_path):
     assert len(c.get("/api/config").json()["models"]) == 1
 
 
-# ── 5. 环境变量仍作用于当前模型 ──────────────────────────────
+# ── 5. 环境变量：合成空列表的第一条，其余只补空 ────────────────
+#
+# 2026-10-12 语义收紧（P2-1/P2-2，真模型实测）：env 的 base_url / model 原来是
+# **无条件覆盖**当前生效条目，后果是 ① 界面加了模型并启用、实际生成仍走 env 的
+# 那家（两份值并存、静默失效）；② env-only 配置时 /api/config/test 通而
+# /api/generate 400「还没有配置模型」（_require_model 看的是 cfg.models）——
+# 三条接口对「配置好了没有」互相矛盾。现在：
+#   · 一条模型都没有 + env 三件套至少一个非空 → 合成第一条条目（m1）；
+#   · 已有条目 → base_url / model 以条目为准，env 不再覆盖；
+#   · TALKSCRIPT_API_KEY 是**补空**不是覆盖：条目 key 非空 → env 不侵入。
+# 旧契约「env 优先级最高」（原 test_env_key_override_beats_the_stored_one）
+# 钉的就是被修掉的行为，随语义一起改写（见那条的 docstring）。
 
-def test_env_key_override_beats_the_stored_one(tmp_path, monkeypatch):
-    """环境变量优先级最高（密钥不落盘的用法）—— 且要作用在**当前**那条上。
+def test_env_only_config_synthesizes_the_first_model(tmp_path, monkeypatch):
+    """env-only 配置（models 为空）→ 用 env 三件套合成第一条条目 m1。
 
-    改成列表之后最容易漏的就是这一层：覆盖逻辑原来读 `llm.api_key`，
-    现在那个字段是「当前模型展开出来的」，顺序错一步就会盖到别的模型上。
+    这是 P2-1/P2-2 的主断言：合成的是**条目**而不是只填 cfg.llm ——
+    `_require_model` 的前置条件（models 非空、active 非空、key 非空）必须
+    全部满足，模型选择器与实际生效才是同一份。文件保持不动（合成本次生效，
+    不是落盘）。
+    """
+    monkeypatch.setenv("TALKSCRIPT_API_KEY", "sk-env")
+    monkeypatch.setenv("TALKSCRIPT_BASE_URL", "https://env.example/v4")
+    monkeypatch.setenv("TALKSCRIPT_MODEL", "env-model")
+    cfg = load_config(tmp_path)
+    assert [m.id for m in cfg.models] == ["m1"]
+    assert cfg.active_model == "m1", "合成的那条必须是当前生效的"
+    m = cfg.models[0]
+    assert (m.base_url, m.model, m.api_key) == ("https://env.example/v4",
+                                                "env-model", "sk-env")
+    # 生效配置跟着条目走 —— /api/config/test 与 /api/generate 从此说同一句话
+    assert cfg.llm.base_url == "https://env.example/v4"
+    assert cfg.llm.model == "env-model"
+    assert cfg.llm.api_key == "sk-env"
+    # 合成条目的连接两项来自 env，不算「内置默认」；数值四项没人配，照旧报
+    assert sorted(cfg.llm_defaulted) == ["max_tokens", "retries",
+                                         "temperature", "timeout"]
+    # 合成只在读取时发生：config.yaml 依然不存在，env 不是落盘的借口
+    assert not (tmp_path / "config.yaml").exists()
+
+
+def test_env_key_alone_also_synthesizes(tmp_path, monkeypatch):
+    """只设 TALKSCRIPT_API_KEY（不设地址/模型名）也合成 —— 那是打包版
+    「不落盘密钥」的最小配置：以前它能让 /api/config/test 通、却拦着
+    /api/generate，同一个「配好了没有」两个接口两种答案。地址与模型名
+    空着就落内置默认，models_defaulted 如实标注。"""
+    monkeypatch.setenv("TALKSCRIPT_API_KEY", "sk-env")
+    cfg = load_config(tmp_path)
+    assert [m.id for m in cfg.models] == ["m1"]
+    assert cfg.models[0].api_key == "sk-env"
+    assert cfg.active_model == "m1"
+    assert cfg.llm.model == DEFAULT_MODEL["model"]
+    assert sorted(cfg.models_defaulted["m1"]) == ["base_url", "model"]
+
+
+def test_fresh_install_without_env_stays_empty(tmp_path, monkeypatch):
+    """判据的反向对照：一个 env 都没有 → 仍是空列表（2026-09-17 产品决定）。
+
+    合成是「env 三件套至少一个非空」才发生 —— 无条件合成会把「内置默认空壳」
+    从后门请回来，未配置与已配置又长得一样。
+    """
+    for k in ("TALKSCRIPT_API_KEY", "TALKSCRIPT_BASE_URL", "TALKSCRIPT_MODEL"):
+        monkeypatch.delenv(k, raising=False)
+    cfg = load_config(tmp_path)
+    assert cfg.models == [] and cfg.active_model == ""
+    assert cfg.llm.api_key == "" and cfg.llm.model == ""
+
+
+def test_env_trio_never_overrides_a_configured_entry(tmp_path, monkeypatch):
+    """已有条目时 env 三件套**全部让位**：base_url / model 以条目为准，
+    条目空着的 key 才由 env 补齐。
+
+    以前 base_url / model 被无条件覆盖 —— 用户在界面加的 Qwen 启用后，
+    实际生成仍走 env 的 GLM，界面上看不出任何异常（P2-1 的现场）。
+    """
+    _seed_models(tmp_path, {"id": "a", "name": "", "base_url": "https://file/v1",
+                            "api_key": "", "model": "file-model"}, active="a")
+    monkeypatch.setenv("TALKSCRIPT_API_KEY", "sk-env")
+    monkeypatch.setenv("TALKSCRIPT_BASE_URL", "https://env.example/v4")
+    monkeypatch.setenv("TALKSCRIPT_MODEL", "env-model")
+    cfg = load_config(tmp_path)
+    assert cfg.llm.base_url == "https://file/v1", "env 压过了界面里配的地址"
+    assert cfg.llm.model == "file-model", "env 压过了界面里配的模型名"
+    assert cfg.llm.api_key == "sk-env", "条目 key 空着 → env 补齐（文档化通道）"
+    # 条目列表本身不被 env 动过 —— 选择器与实际生效是同一份
+    assert [(m.base_url, m.model, m.api_key) for m in cfg.models] \
+        == [("https://file/v1", "file-model", "")]
+
+
+def test_env_key_yields_to_the_stored_one(tmp_path, monkeypatch):
+    """条目自己填了 Key → env 的 Key **不侵入**（2026-10-12 改契约）。
+
+    ⚠ 本条原名 `test_env_key_override_beats_the_stored_one`，钉的是旧契约
+    「env 优先级最高」。那次语义收紧（P2-1/P2-2）把 TALKSCRIPT_API_KEY 定为
+    **补空**：条目有 Key 用条目的，条目空着才用 env 的 —— 否则用户在界面里
+    填的 Key 会被 env 悄悄压掉（界面上看着是 A、实际请求用的是 B，与本次要修
+    的 base_url/model 覆盖是同一族静默失效）。env 仍是「不落盘密钥」的正规
+    通道：见 test_env_key_fills_an_empty_entry。env 是「本次生效」，
+    不落盘的断言原样保留。
     """
     c = _client(tmp_path)
     c.post("/api/models", json={"id": "", "base_url": "https://a/v1", "model": "a",
@@ -672,12 +764,27 @@ def test_env_key_override_beats_the_stored_one(tmp_path, monkeypatch):
     monkeypatch.setenv("TALKSCRIPT_MODEL", "env-model")
 
     cfg = load_config(tmp_path)
-    assert cfg.llm.api_key == "sk-from-env"
-    assert cfg.llm.model == "env-model"
+    assert cfg.llm.api_key == "sk-from-file", "env Key 侵入了一条已配好的条目"
+    assert cfg.llm.model == "a", "env 模型名压过了条目自己的"
     assert cfg.llm.base_url == "https://a/v1", "没被覆盖的字段不该受影响"
-    # 文件里的原值不能被环境变量改写 —— 覆盖是「本次生效」，不是「落盘」。
+    # 文件里的原值不能被环境变量改写 —— env 是「本次生效」，不是「落盘」。
     raw, _ = load_raw_models(tmp_path)
     assert next(x for x in raw if x["id"] == "m1")["api_key"] == "sk-from-file"
+
+
+def test_env_key_fills_an_empty_entry(tmp_path, monkeypatch):
+    """条目 key 空着 + env 有 Key → 补齐生效，但**不写回文件**。
+
+    这是打包版不落盘密钥的文档化通道（P2-1/P2-2 保留的另一半语义）。
+    """
+    _seed_models(tmp_path, {"id": "a", "base_url": "https://a/v1",
+                            "api_key": "", "model": "a"}, active="a")
+    monkeypatch.setenv("TALKSCRIPT_API_KEY", "sk-from-env")
+    cfg = load_config(tmp_path)
+    assert cfg.llm.api_key == "sk-from-env"
+    raw, _ = load_raw_models(tmp_path)
+    assert next(x for x in raw if x["id"] == "a")["api_key"] == "", \
+        "补齐是本次生效，不是落盘"
 
 
 def test_base_url_with_surrounding_spaces_is_refused_not_saved(tmp_path):

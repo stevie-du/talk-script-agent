@@ -161,11 +161,13 @@ export function sec(v) {
 
 /** 分镜表「时间」列：只换单位、不改数（与 app/store.py 的 `_shot_time` 同口径）。
  *  模型自己排的 `time` 形如 `0-3s`（`rules/output-template.md` 就是这么教的），
- *  原样上屏就与段落标题的「0-5 秒」分成两种读法；认不出这个形状就原样保留，不猜。 */
+ *  真模型实测（2026-10-12）还见过不带单位的 `0.0-9.2` —— 同样归一，否则导出线
+ *  清了尾零、界面还是「0.0」两种读法。原样上屏就与段落标题的「0-5 秒」分成
+ *  两种读法；认不出这个形状就原样保留，不猜。 */
 export function shotTime(raw, tm) {
   const s = String(raw == null ? "" : raw).trim();
   if (!s) return tm ? `${tm.start}–${tm.end} 秒` : "";
-  const m = s.match(/^(\d+(?:\.\d+)?)[-–~](\d+(?:\.\d+)?)\s*s$/);
+  const m = s.match(/^(\d+(?:\.\d+)?)[-–~](\d+(?:\.\d+)?)(?:\s*s)?$/);
   if (m) {
     const num = (x) => String(Number(x));
     return `${num(m[1])}–${num(m[2])} 秒`;

@@ -95,11 +95,34 @@ class IntelBriefRequest(BaseModel):
         return v
 
 
+def _brief_str_list(v: object) -> object:
+    """选题卡数组字段的**入参归一**：`None→[]`、非空 `str→[str]`，其余原样。
+
+    ⚠ 只做形状归一，不做**类型放宽**：归一之后照走 `list[str]` 的严格校验
+    （`max_length` 照常生效），非字符串元素照样被拒。真实触发面是
+    GLM-5.3-Flash 实测把 `titles.trend / evergreen` 输出成**单个字符串**
+    （4/4 次调用全折）—— 这种形状漂移靠「校验失败带错误重发一次」治不了
+    （模型会再犯同一个错），在入口处收下来才是修法。
+    ⚠ **不做** `str | list[str]` 的 union 放宽：union 会把 str 漏进
+    `brief_banwords` 被逐字符迭代，一个禁用词就等于把整卡标成命中。
+    """
+    if v is None:
+        return []
+    if isinstance(v, str) and v.strip():
+        return [v]
+    return v
+
+
 class BriefTitles(BaseModel):
     """标题双策略（§2.4：跟热点款保打开率，长尾关键词款保持续流量）——两类都给。"""
 
     trend: list[str] = Field(default_factory=list, max_length=6)
     evergreen: list[str] = Field(default_factory=list, max_length=6)
+
+    @field_validator("trend", "evergreen", mode="before")
+    @classmethod
+    def _tolerate_scalar(cls, v: object) -> object:
+        return _brief_str_list(v)
 
 
 class BriefHook(BaseModel):
@@ -115,6 +138,11 @@ class BriefAngle(BaseModel):
     keywords: list[str] = Field(default_factory=list, max_length=8)
     risk: str = ""            # 无 | 争议 | 反转风险 | 命中禁用词
     fit: float = Field(default=0.0, ge=0.0, le=1.0)
+
+    @field_validator("keywords", mode="before")
+    @classmethod
+    def _tolerate_scalar(cls, v: object) -> object:
+        return _brief_str_list(v)
 
 
 class IntelBrief(BaseModel):

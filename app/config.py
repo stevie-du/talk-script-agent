@@ -13,6 +13,14 @@
     TALKSCRIPT_MAX_TOKENS   单次输出预算
     TALKSCRIPT_MOCK=1       跑夹具，不调模型
     TALKSCRIPT_DEFAULT_PACK 默认行业包
+
+2026-10-12 起连接三项语义收紧（真模型实测 P2-1/P2-2）：
+
+    BASE_URL / MODEL  只在**一条模型都没有**时参与 —— 引擎用三件套合成第一条
+                      模型条目；已经建了条目就以条目为准（env 不再压过界面里
+                      配的那份，否则界面选择器与实际生效各一份值）。
+    API_KEY           始终是「补空」：条目自己的 Key 优先，条目空着才用 env 的
+                      （打包版不落盘密钥的文档化通道）。
 """
 from __future__ import annotations
 
@@ -147,6 +155,10 @@ CONFIG_TEMPLATE = """# TalkScript 配置
 #   1. 环境变量（密钥不落盘时用）
 #   2. 本文件
 #   3. 内置默认值
+#
+# ⚠ 连接两项（base_url 与 model）的环境变量只在**一条模型都没有**时参与：
+#   引擎会用它们合成第一条模型；已经建了条目就以条目为准，env 不会压过它。
+#   API_KEY 例外：条目没填 Key 时始终用环境变量补上（密钥不落盘的正规通道）。
 #
 # ⚠ 数值项在**三条路上都过同一道区间闸**（app/config.py 的 NUMERIC_BOUNDS）：
 #   环境变量与本文件的越界值都会**被夹回合法区间**，并在设置页标成
@@ -501,6 +513,27 @@ def load_config(root: Path, config_dir: Path | None = None) -> AppConfig:
         llm = {}
 
     raw_models, active, _ = _parse_models(data, llm)
+    # P2-1/P2-2（2026-10-12）：env 的连接信息只在**一条模型都没有**时参与 ——
+    # 用三件套（API_KEY / BASE_URL / MODEL）合成第一条条目，而不是去覆盖生效条目
+    # 的字段。旧行为是无条件覆盖当前条目的 base_url / model，真模型实测两个后果：
+    #   ① 用户在界面加了模型并启用，实际生成仍走 env 的那家 —— active_model 与
+    #      /api/config.model 两份值并存、静默失效；
+    #   ② env-only 配置时 /api/config/test 通（它看 cfg.llm）而 /api/generate 400
+    #      「还没有配置模型」（server 的 _require_model 看 cfg.models 非空）——
+    #      三条接口对「配置好了没有」互相矛盾。
+    # 合成**条目**而不是直接塞 cfg.llm：_require_model、模型选择器、models 列表
+    # 看的都是条目，只有条目非空这三处才说得上同一句话。
+    # ⚠ 判据是「三件套至少一个非空」：全新安装（一个 env 都没有）必须仍是空列表
+    # （2026-09-17 产品决定：不再预置模型）—— 无条件合成等于把那条「内置默认
+    # 空壳」从后门请回来，未配置与已配置又长得一样了。
+    if not raw_models:
+        env_key = os.environ.get("TALKSCRIPT_API_KEY") or ""
+        env_url = os.environ.get("TALKSCRIPT_BASE_URL") or ""
+        env_model = os.environ.get("TALKSCRIPT_MODEL") or ""
+        if env_key or env_url or env_model:
+            raw_models = [{"id": "m1", "name": "", "base_url": env_url,
+                           "api_key": env_key, "model": env_model}]
+            active = "m1"
     models = [_effective(r) for r in raw_models]
     # 一条模型都没有（全新安装，或用户把模型删光了）：给一个**空模型**占位。
     # 三个连接字段都是空串 —— 生成会被明确拒绝（见 server 的 api_key 检查），
@@ -541,8 +574,19 @@ def load_config(root: Path, config_dir: Path | None = None) -> AppConfig:
     # 请求地址仍然是内置默认，一刀切会把默认值说成「你配的」。
     # 用 .get：一条模型都没有时 active 是空串，不在这个表里。
     defaulted += models_defaulted.get(active, [])
-    cfg.api_key = _env("TALKSCRIPT_API_KEY", cfg.api_key)
+    # TALKSCRIPT_API_KEY 是**补空**不是覆盖（P2-1/P2-2，2026-10-12）：条目自己
+    # 填了 Key 就用条目的，条目空着才用 env 的 —— 那是打包版不落盘密钥的
+    # 文档化通道。以前是无条件覆盖：用户在界面里填的 Key 会被 env 悄悄压掉，
+    # 界面上看着是 A、实际请求用的是 B。
+    if not cfg.api_key:
+        cfg.api_key = _env("TALKSCRIPT_API_KEY", "")
     for key, env_name in _LLM_ENV.items():
+        if key in ("base_url", "model"):
+            # 连接两项**不再被 env 覆盖**（P2-1/P2-2）：它们住在模型条目里，
+            # env-only 的情形已经在上面合成了条目；有条目时 env 压过条目就是
+            # 「界面选择器显示 A、实际生成走 B」。数值四项照旧覆盖 —— 那是
+            # 「怎么调模型」，跟连到哪家无关，打包版靠它们不落盘调参。
+            continue
         cur_v = getattr(cfg, key)
         raw = os.environ.get(env_name)
         if key in _LLM_CAST:

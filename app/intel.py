@@ -1164,7 +1164,8 @@ def build_events(items: list[dict], *, ranks: dict[str, tuple[int, int]] | None 
 
 def score_topics(items: list[dict], prev_keys: set[str], *, now: datetime | None = None,
                  events: list[dict] | None = None,
-                 prev_event_keys: set[str] | None = None) -> dict:
+                 prev_event_keys: set[str] | None = None,
+                 carry_d: dict | None = None) -> dict:
     """算 D / S / E / 机会分 —— 评估层，**逐项可验算**（§3.3）。
 
     B-1 的原话：「首版公式只留『现在就算得出来』的项。**公式可算性优先于公式完整。**」
@@ -1186,7 +1187,12 @@ def score_topics(items: list[dict], prev_keys: set[str], *, now: datetime | None
     有个它其实没有的刻度）。领域粒度至少真的在比较。单条粒度等 A4 校准后再说。
 
     三种"没有"必须长得不一样（本项目的老规矩：`null` 显示「—」，`0` 才是结论）：
-      · 本次一个新事件都没有（第二次抓取没有新题）→ `D = None`
+      · 本次一个新事件都没有（第二次抓取没有新题）→ `D = None`。**同日重抓是
+        唯一的例外**（2026-10-12）：`carry_d` 给了就沿用**今天最近一次**算出的
+        D —— 界面上同一天点两次「重抓」，不该把上午还算得出的机会分抹成「—」
+        （实测 168/168 条全体 None 就是这么来的）。**跨日首抓无新事件仍 None**
+        （今天还没见过新题，不借昨天的数）；且只沿用 D，S / E / is_new 全部
+        现算 —— 跨日沿用会让高需求挂着旧信号、与 E=None 自相矛盾。
       · **该细分自己一条 B站供给都没有**（本包没配 B站源、该源失败、或它今天
         真的没搜到）→ `S = None`。修前只有"全局无 B站数据"才 None，该细分自己
         没条目时给 `0.0` —— 那是把"没证据"印成"零竞争、蓝海"，方向正好相反。
@@ -1219,7 +1225,10 @@ def score_topics(items: list[dict], prev_keys: set[str], *, now: datetime | None
 
     out: dict[str, dict] = {}
     for s in segs:
-        D = round(new_n[s] / max_new, 3) if max_new else None
+        # 同日重抓沿用（2026-10-12）：`carry_d` 里存的是今天最近一次算出的 D
+        # （见 fetch_pack 的收集），只在"本次没有新事件"时兜底 —— 有新事件
+        # 照常按本轮重算，沿用值永远不掺进算得出来的那一路。
+        D = round(new_n[s] / max_new, 3) if max_new else (carry_d or {}).get(s)
         S = round(sup_n[s] / max_sup, 3) if max_sup and sup_n[s] else None
         # ⚠ **不写没人消费的字段**（P2-21）：`demand_new` / `supply_n` / `total_n`
         #   是算 D/S 用的**中间量**，`fact_density`（原注释称它是"两条线的共用
@@ -1450,6 +1459,27 @@ def fetch_pack(pack: str, data_dir: Path, sources: list[IntelSource], *,
     prev_event_keys = {str(e.get("key") or "") for e in (prev.get("events") or [])
                        if isinstance(e, dict)}
     now = datetime.now(timezone.utc).astimezone()
+    # 同日重抓沿用（2026-10-12 A-2）：上一份 latest 是**今天**抓的，就把它算出的
+    # D 按细分收集起来（同段取第一个非 None）传给 score_topics —— 本次没有新
+    # 事件时沿用，而不是把上午的机会分抹成「—」（实测 168/168 条全体 None）。
+    # ⚠ 跨日不沿用：昨天算的数今天是不能再拿来说事的（E=None 的自相矛盾见
+    # score_topics 的 docstring）。这里只收集，门控行就是 `same_day` 那一行。
+    prev_fetched = str(prev.get("fetched_at") or "")
+    same_day = bool(prev_fetched) and \
+        _snap_date(prev_fetched) == _snap_date(now.isoformat(timespec="seconds"))
+    carry_d: dict[str, float] = {}
+    if same_day:
+        for it in prev.get("items") or []:
+            if not isinstance(it, dict):
+                continue
+            # ⚠ 空段（没归上任何细分的条目）也是一个**真实参与打分**的段键 ——
+            #   这里把它过滤掉，空桶里的条目就永远沿用不上（实测第一版就栽在这）。
+            seg = str(it.get("segment") or "")
+            sc = it.get("score") if isinstance(it.get("score"), dict) else {}
+            d_val = sc.get("D")
+            if isinstance(d_val, (int, float)) and not isinstance(d_val, bool) \
+                    and seg not in carry_d:
+                carry_d[seg] = float(d_val)
     # history 在**写这份新快照之前**读：读到的必然是"今天之前"的轨迹。
     history = load_history(data_dir, pack)
     health = source_health(history, now=now)
@@ -1528,8 +1558,11 @@ def fetch_pack(pack: str, data_dir: Path, sources: list[IntelSource], *,
     # 四象限分档 + 「高热高配」推荐位（判据只有一份，见 `_quadrant`）。
     _quadrant(events)
     # 打分**逐条**写进 `item["score"]`（原型里每张选题卡就带 D/S/E 三根信号条）。
+    # carry_d 只在**同日**重抓时给（收集门控行见上面 `same_day`）：跨日传 None，
+    # score_topics 那头就退回「没有新事件 → D=None」的旧口径。
     score_topics(items, prev_keys, now=now, events=events,
-                 prev_event_keys=prev_event_keys)
+                 prev_event_keys=prev_event_keys,
+                 carry_d=carry_d if same_day else None)
     for it in items:
         it["flags"] = _flags(it, contested)
         it["ev"] = ("本周新出" if (it.get("score") or {}).get("is_new")
@@ -2389,7 +2422,13 @@ BRIEF_SYSTEM = (
     "5. `stage` 照我给你的那个填，**不要自己改判** —— 那是按榜单算出来的。\n"
     "6. 只给角度与标题，**不要写正文**；事实一律以给你的标题与摘要为限，"
     "不要补我没给你的数字、时间、机构名。宁可少写，不要编。\n"
-    "7. 严格输出 JSON，形状照给定的 schema，不加解释文字。")
+    "7. 严格输出 JSON，形状照给定的 schema，不加解释文字。\n"
+    # 2026-10-12 A-1：GLM-5.3-Flash 实测把 titles.trend/evergreen 写成**单个字符串**
+    # （4/4 次调用校验全折）。形状漂移靠「校验失败带错误重发」治不了 —— 模型会
+    # 原样再犯 —— 所以在提示词里钉一份形状骨架，把「字符串数组」四个字说死。
+    '8. 输出形状骨架：{"angles": [{"type": "解读", "titles": {"trend": ["跟热点款标题"], "evergreen": ["长尾款标题"]}, "hook": {"type": "疑问", "line": "能开口的第一句"}, "keywords": ["关键词"], "risk": "无", "fit": 0.5}]}'
+    " —— `titles` 的 trend / evergreen 各是**字符串数组**（可多条），不是单个字符串；"
+    "hook 与 risk 是单个值。")
 
 
 def find_event(data_dir: Path, pack: str, key: str) -> dict | None:

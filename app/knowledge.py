@@ -1415,6 +1415,37 @@ def audit_pack(pack: Pack) -> list[str]:
                          "不退回整份，越界取值会把选题带偏）")
     _, tells_notes = pack._resolve_ai_tells()
     notes.extend(tells_notes)
+    # 2026-10-12（B-1）：`prompts.voice_parts` 对 anti_ai 缺失**静默返回 ("", "")**
+    # —— 人味档位整条失效、界面一字不说（pipeline._assert_stages_usable 的
+    # docstring 记了多年的账：那道闸只查 system / user_template）。体检在这里
+    # 把话说出来，随 PackInfo.warnings 上屏（设置页 #pack-audit 那行）。
+    # ⚠ 只在 stages.write **存在**时查：skill.yaml 坏掉是 pack_error 的事，
+    #   体检不重复说（_AuditView.skill 的分工）；write 整格缺失同样是生成期
+    #   409 的事，不是这里的题目。
+    write_cfg = ((pack.skill() or {}).get("stages") or {}).get("write")
+    if isinstance(write_cfg, dict) and write_cfg:
+        anti = write_cfg.get("anti_ai")
+        anti = anti if isinstance(anti, dict) else {}
+        rule = str(anti.get("rule") or "").strip()
+        levels = anti.get("levels") if isinstance(anti.get("levels"), dict) else {}
+        # 档位"有内容"按 **voice_parts 实际注入得出东西**算：files 切片非空
+        # （文件在、切片拿得到字）或 heading 非空 —— 只数声明出来的键名，
+        # "声明了、文件没了"这种静默降级就漏了。off 档永远不注入，不在账上。
+        alive: dict[str, bool] = {}
+        for level in ("strong", "standard"):
+            lv = levels.get(level) if isinstance(levels.get(level), dict) else {}
+            parts = [rel for rel in (lv.get("files") or [])
+                     if str(pack.file_slice(str(rel))).strip()]
+            alive[level] = bool(parts) or bool(str(lv.get("heading") or "").strip())
+        dead = [lv for lv in ("strong", "standard") if not alive[lv]]
+        if not rule and len(dead) == 2:
+            notes.append("stages.write.anti_ai 缺失：人味档位（strong/standard）"
+                         "不会注入任何去AI味提示词——界面上选了也不生效")
+        else:
+            for lv in dead:
+                notes.append(f"stages.write.anti_ai 的 {lv} 档没有内容"
+                             "（files 切片与 heading 全空）：界面上选了这一档"
+                             "也注入不了去AI味提示词")
     return list(dict.fromkeys(notes))
 
 

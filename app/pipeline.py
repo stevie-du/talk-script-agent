@@ -188,10 +188,12 @@ def _assert_stages_usable(pack: Pack) -> None:
 
     - `write` **恒**必需：draft 只省掉 select 那一轮，write 那一段照走
       （回炉轮渲染的还是它）。⚠ 本闸**只查 system / user_template 两个键**，
-      不查 `stages.write.anti_ai` —— anti_ai 整块缺失时 `voice_parts` 依旧
-      **静默退成 ("", "")**（人味档位整条失效、界面一字不说）。这是审查
-      2026-10-05 P3 点名的"docstring 承诺了闸门没守的隐患"：本段只记账，
-      守卫未落码；要不要把 anti_ai 纳入闸门等误报/收益数据拍板。
+      不查 `stages.write.anti_ai` —— anti_ai 整块缺失时 `voice_parts` 会
+      **静默退成 ("", "")**（人味档位整条失效）。2026-10-12 落账（B-1）：
+      这一形态改由 `knowledge.audit_pack` 在**加载期**报「stages.write.anti_ai
+      缺失…」，随 `PackInfo.warnings` 上屏（设置页 #pack-audit 那行）；
+      闸门本身不加 —— 软警告拍板：为一段人味提示词把整单生成拦死，
+      不是这条缺陷该有的代价，让包作者在界面上看见就够了。
     - `select` 只在**没有** draft 时必需：draft 路径走 `stage_files("draft")`，
       不碰 select。
 
@@ -885,6 +887,10 @@ class Pipeline:
                 should_abort=self._abort_gate(job),
                 deadline=job.deadline(),
                 usage=usage,
+                # 结构性任务降形状漂移（2026-10-12 A-1）：默认温度下模型会把
+                # titles 的数组写成单个字符串，错误提示重发也治不了 —— 低温
+                # 让它更贴 schema。chat_json 本就支持该参数（llm.py 的签名）。
+                temperature=0.2,
                 # 输入是几行标题、输出是 3-4 个角度 —— 与 write 共用全额预算
                 # 会让思考被预算反向推高（P0-3 同一条），这里给 select 那一档。
                 max_tokens=4000)

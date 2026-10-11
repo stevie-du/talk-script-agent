@@ -157,11 +157,21 @@ def test_env_override_removes_field_from_defaulted(tmp_path, monkeypatch, field,
 
     ⚠ 这条同时守住**判定顺序**：如果先做覆盖、再拿「值等不等于默认」去猜，
     就把「用户显式配成默认值」误判成「没配」。所以判定必须在覆盖**之前**记名单。
+
+    ⚠ 2026-10-12 语义收紧（P2-1/P2-2）后，连接两项与数值四项走的是**不同的
+    补配通道**：数值四项仍是「覆盖生效条目」（有条目也补）；base_url / model
+    只在**一条模型都没有**时参与 —— 引擎用它们合成第一条条目（m1），有条目时
+    env 压过条目就是「界面显示 A、实际生成走 B」（P2-1 的现场）。所以连接两项
+    这里**不造条目**、走 env-only 合成路径：合成条目的这两个字段来自 env，
+    自然不在「内置默认」名单里。
     """
     monkeypatch.setenv(env_name, _VALID[field])
-    # 连接两项（base_url / model）只在**存在一条模型**时才进名单 —— 显式造一条。
-    _seed_placeholder_model(tmp_path)
-    cfg = load_config(tmp_path)
+    if field in ("base_url", "model"):
+        cfg = load_config(tmp_path)
+    else:
+        # 数值四项照旧：只在**存在一条模型**时才进名单 —— 显式造一条。
+        _seed_placeholder_model(tmp_path)
+        cfg = load_config(tmp_path)
     assert field not in cfg.llm_defaulted, f"{env_name} 已覆盖，不该还在名单里"
     # 别的字段照旧 —— 不能因为配了一个就整体放行。
     assert len(cfg.llm_defaulted) == len(ALL_KEYS) - 1

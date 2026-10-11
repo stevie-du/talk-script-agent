@@ -75,7 +75,7 @@ def test_secs_does_not_use_bankers_rounding():
 
 
 def test_shot_time_only_swaps_the_unit():
-    """模型给的 `time` 可以比段落轴更细，所以内容不许动，只把 `s` 换成「秒」。"""
+    """模型给的 `time` 可以比段落更细，所以内容不许动，只把 `s` 换成「秒」。"""
     assert _shot_time("0-4s", {}) == "0-4 秒"
     assert _shot_time("3-8 s", {}) == "3-8 秒"
     assert _shot_time("0.5-2s", {}) == "0.5-2 秒"
@@ -83,6 +83,30 @@ def test_shot_time_only_swaps_the_unit():
     assert _shot_time("开场到第 3 秒", {}) == "开场到第 3 秒"  # 认不出就原样留
     assert _shot_time("", {"start": 0, "end": 5}) == "0-5 秒"  # 没有才兜底
     assert _shot_time(None, {}) == ""
+
+
+def test_shot_time_strips_trailing_zeros_on_both_entries():
+    """第 47 轮 P3-1：分镜表「时间」列的**两条入口**守同一套清尾零。
+
+    段落标题那条线第 28 轮就接上了 `_num`，分镜表这里漏了两条（兄弟路径
+    不同权）：① 模型给的无后缀字符串（`0.0-9.2`，模板教的 `s` 后缀经常丢）
+    原样放行；② 回退分支裸插值 float，交付「0.0-9.6 秒」。同一份交付物里
+    段落标题写「0-9.2 秒」、分镜表写「0.0-9.2」，尾零是机器的、不是给人读的。
+    透传字符串先解析成数再清，解析不了原样放行 —— 非数字表达不弄坏。
+    """
+    # ① 透传：无 s 后缀的数字区间，两端都清
+    assert _shot_time("0.0-9.2", {}) == "0-9.2 秒"
+    assert _shot_time("0.0-9.20", {}) == "0-9.2 秒"    # 9.20 的小数尾零也清
+    assert _shot_time("3-8", {}) == "3-8 秒"           # 整数区间照常换单位
+    assert _shot_time("0.0–9.2", {}) == "0-9.2 秒"     # 界面同款的 en dash 也认
+    assert _shot_time("0.0~9.2", {}) == "0-9.2 秒"     # 波浪号分隔照旧
+    # ② 回退：引擎算的段落轴是 float（0.0 / 9.6），裸插值曾带尾零
+    assert _shot_time("", {"start": 0.0, "end": 9.6}) == "0-9.6 秒"
+    assert _shot_time("", {"start": 0.0, "end": 12.0}) == "0-12 秒"
+    # 非数字表达原样保留 —— 不能把模型的自由发挥弄坏
+    assert _shot_time("开场到第 3 秒", {}) == "开场到第 3 秒"
+    # 带 s 后缀的旧路（第 16 批修的那条）不回退
+    assert _shot_time("0.0-3.0s", {}) == "0-3 秒"
 
 
 # ── 2. 端到端：整份 脚本.md 不许出现 ASCII 秒 ────────────────
@@ -104,6 +128,23 @@ def test_exported_md_storyboard_time_column_is_not_two_accounts():
     md = render_script_md(r)
     assert "| 0-4 秒 |" in md, md
     assert "0-4s" not in md
+
+
+def test_exported_md_storyboard_time_column_has_no_trailing_zeros():
+    """端到端：导出的 脚本.md 分镜表「时间」列不许带机器尾零（第 47 轮 P3-1）。
+
+    两条入口各演一遍：透传的无后缀字符串、回退的段落轴 float ——
+    与段落标题的「0-3 秒」必须同一写法。
+    """
+    r = TA._md_result(None)
+    r["timings"] = [{"start": 0.0, "end": 9.6}, {"start": 9.6, "end": 12.0}]
+    r["storyboard"] = [{"shot": "轿厢·近景", "time": "0.0-9.2"},   # 透传
+                       {"shot": "机房·全景"}]                       # 回退段落轴
+    md = render_script_md(r)
+    assert "| 0-9.2 秒 |" in md, md
+    assert "| 9.6-12 秒 |" in md, md
+    hits = [ln for ln in md.splitlines() if re.search(r"\b0\.0-|\d+\.0-", ln)]
+    assert not hits, f"交付物里还有机器尾零：{hits}"
 
 
 # ── 3. 静态扫描：句子只有一本账 ──────────────────────────────

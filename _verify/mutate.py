@@ -24,6 +24,7 @@ MUTATE_F = ROOT / "_verify/mutate.py"
 PACKGEN_F = ROOT / "app/packgen.py"
 PKIMP_F = ROOT / "app/packimport.py"
 PACKSEED_F = ROOT / "app/packseed.py"
+CONFIG_F = ROOT / "app/config.py"
 PACK = ROOT / "packs/elevator"
 YAML_F = PACK / "ai_tells.yaml"
 TOPICS_F = ROOT / "desktop/renderer/js/topics.js"
@@ -47,6 +48,7 @@ TPL_SKILL_F = ROOT / "packs/_template/skill.yaml"
 LLM_F = ROOT / "app/llm.py"
 SEED_F = ROOT / "app/packseed.py"
 IMPORT_F = ROOT / "app/packimport.py"
+SCHEMAS_F = ROOT / "app/schemas.py"
 
 
 def _find_node() -> str:
@@ -2765,6 +2767,79 @@ MUTATIONS = [
         '            limit = report.get("tolerance_pct")',
         '        limit = report.get("tolerance_pct")   # MUTATED: 退回只读舍入键',
         "tests/test_refine_feedback.py -k unrounded_tolerance",
+    ),
+    # ── s46 组（2026-10-12 修复轮）：A-1 输出形状兼容 / A-2 同日沿用 / B-1 可见化 ──
+    # 跑这一组：PYTHONUTF8=1 .venv/Scripts/python.exe _verify/mutate.py -k s46
+    # ⚠ 预案文档里写的组号是 s43 —— s43 已被 2026-09-30 复审轮占用，以 s46 为准。
+    (
+        "s46-1 schemas：标量不再归一（titles/keywords 收到单个字符串时整卡校验报废，真模型 4/4 复现）",
+        SCHEMAS_F,
+        "    if isinstance(v, str) and v.strip():\n"
+        "        return [v]",
+        "    if False:                             # MUTATED: 标量不再归一\n"
+        "        return [v]",
+        "tests/test_intel_brief.py -k tolerant",
+    ),
+    (
+        "s46-2 intel：形状骨架从提示词里摘除（校验归一成兜底，治本的那一半没了）",
+        INTEL_F,
+        """    '8. 输出形状骨架：{"angles": [{"type": "解读", "titles": {"trend": ["跟热点款标题"], "evergreen": ["长尾款标题"]}, "hook": {"type": "疑问", "line": "能开口的第一句"}, "keywords": ["关键词"], "risk": "无", "fit": 0.5}]}'""",
+        '    ""',
+        "tests/test_intel_brief.py -k shape_hint",
+    ),
+    (
+        "s46-3 score_topics：同日沿用被摘（重抓一次把上午还算得出的机会分全体抹成「—」，实测 168/168）",
+        INTEL_F,
+        "        D = round(new_n[s] / max_new, 3) if max_new else (carry_d or {}).get(s)",
+        "        D = round(new_n[s] / max_new, 3) if max_new else None"
+        "  # MUTATED: 同日沿用被摘",
+        "tests/test_intel_ranking.py -k carried",
+    ),
+    (
+        "s46-4 fetch_pack：同日门控行摘掉（永远不沿用 —— 正对照证明沿用真的接上了）",
+        INTEL_F,
+        '    same_day = bool(prev_fetched) and \\\n'
+        '        _snap_date(prev_fetched) == _snap_date(now.isoformat(timespec="seconds"))',
+        "    same_day = False   # MUTATED: 同日门控行摘掉（永远不沿用）",
+        "tests/test_intel_ranking.py -k cross_day",
+    ),
+    (
+        "s46-5 audit_pack：anti_ai 判据块摘掉（静默空注入回到「界面一字不说」）",
+        KN_F,
+        "        if not rule and len(dead) == 2:",
+        "        if False:                             # MUTATED: 判据摘了",
+        "tests/test_pack_layer_audit10.py -k anti_ai",
+    ),
+    (
+        "s46-6 ui.js：包体警告不渲染（pack.warnings 回到全前端零消费）—— 断言在整网，指 verify:",
+        UI_F,
+        "    notes.push(...(pack.warnings || []).map(w => `包体警告：${w}`));",
+        "    // MUTATED: 包体警告不渲染（pack.warnings 回到零消费）",
+        "verify:",
+    ),
+    # ── s47 组（2026-10-12 真模型全链路实测的修复：env 覆盖语义 + 分镜尾零）──
+    # 跑这一组：PYTHONUTF8=1 .venv/Scripts/python.exe _verify/mutate.py -k s47
+    (
+        "s47-1 config：env-only 合成条目摘除（models 为空时不再用 env 三件套合成第一条 ——"
+        " 回到「测试连接 pong、生成 400 还没配置模型」的自相矛盾）",
+        CONFIG_F,
+        "        if env_key or env_url or env_model:",
+        "        if False:                             # MUTATED: 合成条目摘了",
+        'tests/test_models_list.py -k "synthesizes"',
+    ),
+    (
+        "s47-2 config：恢复 base_url/model 的 env 无条件覆盖（界面切模型静默失效的原始病灶）",
+        CONFIG_F,
+        '        if key in ("base_url", "model"):',
+        "        if False:                             # MUTATED: 守卫摘了，env 重新压过生效条目",
+        'tests/test_models_list.py -k "never_overrides or yields_to"',
+    ),
+    (
+        "s47-3 store：分镜表回退分支清尾零摘除（「0.0-9.6 秒」回到导出的 脚本.md）",
+        STORE_F,
+        "        return f\"{_num(tm['start'])}-{_num(tm['end'])} 秒\"",
+        "        return f\"{tm['start']}-{tm['end']} 秒\"   # MUTATED: 尾零回来了",
+        'tests/test_unit_vocabulary.py -k "trailing_zeros"',
     ),
 ]
 

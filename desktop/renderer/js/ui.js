@@ -321,6 +321,12 @@ export function renderPackParams() {
     // 包声明了、但请求体带不走的参数键：同一个落点、同一句话。
     // 不写进这里它们就只是"界面上少了一个下拉"，谁也不会知道为什么少。
     notes.push(...unsendable.map(k => `参数 ${k}：不显示（请求体带不走，引擎也不读）`));
+    // B-1（2026-10-12）：audit_pack 的包体警告随 PackInfo.warnings 一起下发 ——
+    // 以前全前端零消费：anti_ai 整块缺失（人味档位整条失效、选了也不生效）
+    // 时界面一个字不说，包作者只能跑一次生成再翻作业日志。前缀用「包体警告」
+    // 与上面的「配置没生效」类分开：那是参数/切片级降级，这是包文件内容级的
+    // 问题，要改的地方不一样。
+    notes.push(...(pack.warnings || []).map(w => `包体警告：${w}`));
     paud.textContent = notes.length ? "⚠ 这个包有配置没生效：" + notes.join("；") : "";
     paud.classList.toggle("hidden", !notes.length);
   }

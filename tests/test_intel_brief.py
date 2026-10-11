@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -364,6 +365,63 @@ def test_stage_is_echoed_from_the_board_not_decided_by_the_model():
     assert "生命周期阶段" in user and ev["status_label"] in user
     # 输入里带出处（§3.4：标题集合 + desc + 出处 + 阶段 + 领域/受众）
     assert "各平台原始条目" in user and "本账号覆盖的细分领域" in user
+
+
+# ── 输出形状兼容（2026-10-12 A-1）────────────────────────────
+# 真模型实测（GLM-5.3-Flash）：`titles.trend / evergreen` 被输出成**单个字符串**
+# 而不是字符串数组，4/4 次调用在校验层全折 —— 而校验失败带错误重发治不了形状
+# 漂移（模型会原样再犯）。修法是入口归一（schemas._brief_str_list）+ 提示词钉
+# 形状骨架 + 低温。这里的归一**不是** union 放宽：str 漏进 brief_banwords 会被
+# 逐字符迭代（预案已论证），归一之后走的仍是严格的 `list[str]` 校验。
+def test_brief_titles_are_tolerant_of_a_bare_string():
+    """str → [str]：模型把「标题数组」写成单个字符串时收下来，不整卡报废。"""
+    brief = IntelBrief.model_validate({"angles": [{
+        "type": "解读",
+        "titles": {"trend": "跟热点款标题", "evergreen": "长尾款标题"},
+        "keywords": "维保", "hook": {"type": "疑问", "line": "丙"}, "risk": "无"}]})
+    a = brief.angles[0]
+    assert a.titles.trend == ["跟热点款标题"]
+    assert a.titles.evergreen == ["长尾款标题"]
+    assert a.keywords == ["维保"], "keywords 是同一个形状漂移，同款归一"
+
+
+def test_brief_titles_are_tolerant_of_none():
+    """None → []：模型省略字段时落「没有」，不是校验失败。"""
+    brief = IntelBrief.model_validate({"angles": [{
+        "titles": {"trend": None, "evergreen": None}, "keywords": None}]})
+    a = brief.angles[0]
+    assert a.titles.trend == [] and a.titles.evergreen == [] and a.keywords == []
+
+
+def test_brief_titles_keep_a_valid_list_untouched():
+    """反向对照：形状本来就对的东西**一个字都不动**（不许把干净卡也洗一遍）。"""
+    titles = ["甲", "乙", "丙"]
+    brief = IntelBrief.model_validate({"angles": [{
+        "titles": {"trend": titles, "evergreen": ["长尾"]}, "keywords": ["词一", "词二"]}]})
+    a = brief.angles[0]
+    assert a.titles.trend == titles and a.titles.evergreen == ["长尾"]
+    assert a.keywords == ["词一", "词二"]
+
+
+def test_brief_titles_still_cap_after_normalisation():
+    """归一之后仍走严格校验：第 7 条标题 / 第 9 个关键词照样拦（不放宽上限）。"""
+    seven = {"angles": [{"titles": {"trend": [f"标题{i}" for i in range(7)]}}]}
+    with pytest.raises(ValidationError):
+        IntelBrief.model_validate(seven)
+    nine = {"angles": [{"keywords": [f"词{i}" for i in range(9)]}]}
+    with pytest.raises(ValidationError):
+        IntelBrief.model_validate(nine)
+
+
+def test_brief_system_pins_the_shape_hint_for_string_arrays():
+    """提示词里钉形状骨架：`trend / evergreen` 是字符串数组，不是单个字符串。
+
+    照 `test_stage_is_echoed…` 的写法钉 `BRIEF_SYSTEM` 的原文 —— 校验层归一是
+    兜底，提示词才是治本的那一半；骨架被人摘掉时这里必须红。
+    """
+    assert '"trend": ["' in I.BRIEF_SYSTEM
+    assert '"evergreen": ["' in I.BRIEF_SYSTEM
+    assert "字符串数组" in I.BRIEF_SYSTEM and "不是单个字符串" in I.BRIEF_SYSTEM
 
 
 def test_no_model_configured_leaves_the_board_readable(tmp_path):

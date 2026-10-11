@@ -312,6 +312,68 @@ def test_pack_info_warnings_is_empty_for_a_healthy_pack():
     assert info.warnings == [], info.warnings
 
 
+# ── B-1（2026-10-12）：anti_ai 静默空注入可见化 ─────────────────
+# 现场旧账：`pipeline._assert_stages_usable` 只查 system/user_template，
+# `prompts.voice_parts` 对 anti_ai 缺失**静默返回 ("", "")** —— 人味档位整条
+# 失效、界面一字不说。修法是加载期体检（audit_pack）说一句人话，随
+# PackInfo.warnings 上屏；闸门不加（软警告拍板，见 pipeline 的 docstring）。
+_SKILL_NO_ANTI_AI = (
+    "stages:\n"
+    "  write:\n"
+    "    system: 写口播稿。\n"
+    "    user_template: \"$topic\"\n")
+
+
+def test_a_pack_without_anti_ai_gets_a_voice_warning(tmp_path):
+    """stages.write 存在而 anti_ai 缺失 → 体检必须说出来，且两个出口同账。"""
+    d = _pack_with(tmp_path, _base_pack_yaml(), {
+        "knowledge/topics.md": "# 库\n\n## 维保\n\n周期。\n\n## 维保合同\n\n坑。\n",
+        "knowledge/audience.md": "# 受众\n\n## 业主\n\n怕。\n",
+        "skill.yaml": _SKILL_NO_ANTI_AI})
+    p = Pack(tmp_path, "probe")
+    assert any(w.startswith("stages.write.anti_ai 缺失") for w in p.warnings), p.warnings
+    info = pack_info(tmp_path / "packs" / "probe")
+    assert info.warnings == p.warnings, "Pack 与 pack_info 是同一份 audit_pack 的两个出口"
+
+
+def test_builtin_packs_gain_no_anti_ai_noise():
+    """反向守卫：内置包不许被新检查点出噪声（误报会让这行警告失去可信度）。"""
+    p = Pack(ROOT, "elevator")
+    assert p.warnings == [], f"电梯包被 anti_ai 检查点到了：{p.warnings}"
+    tpl = Pack(ROOT, "_template")
+    # 模板包天生带着 7 条骨架空注警告（$ideas 等占位没填，不是本检查的账）——
+    # 这里钉的是**新增**那一半闭嘴：两个内置包的 anti_ai 都配齐了。
+    assert not any("anti_ai" in w for w in tpl.warnings), tpl.warnings
+
+
+def test_an_anti_ai_level_with_no_content_gets_its_own_warning(tmp_path):
+    """块活着、某一档 files+heading 全空 → 只点名那一档，不冤枉整块。"""
+    d = _pack_with(tmp_path, _base_pack_yaml(), {
+        "knowledge/topics.md": "# 库\n\n## 维保\n\n周期。\n\n## 维保合同\n\n坑。\n",
+        "knowledge/audience.md": "# 受众\n\n## 业主\n\n怕。\n",
+        "knowledge/voice.md": "多说人话，少说套话。\n",
+        "skill.yaml": (
+            "stages:\n"
+            "  write:\n"
+            "    system: 写口播稿。\n"
+            "    user_template: \"$topic\"\n"
+            "    anti_ai:\n"
+            "      rule: |\n"
+            "        8. 反 AI 味：像念说明书就重写腔调\n"
+            "      levels:\n"
+            "        strong:\n"
+            "          heading: 【人味自检】\n"
+            "          files: [knowledge/voice.md]\n"
+            "        standard:\n"
+            "          heading: \"\"\n"
+            "          files: []\n")})
+    p = Pack(tmp_path, "probe")
+    assert any("standard 档没有内容" in w for w in p.warnings), p.warnings
+    assert not any("strong 档没有内容" in w for w in p.warnings), p.warnings
+    assert not any(w.startswith("stages.write.anti_ai 缺失") for w in p.warnings), \
+        "rule 与 strong 档都活着，不许报整块缺失"
+
+
 def test_pack_info_warnings_survives_a_broken_pack(tmp_path):
     """体检不能被包自己的坏处打断（它要说的就是「哪里坏」）。
 
