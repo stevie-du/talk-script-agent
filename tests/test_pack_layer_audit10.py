@@ -178,6 +178,24 @@ def test_segment_without_a_map_entry_is_reported_and_injects_nothing(tmp_path):
     assert "pack.yaml" not in p.topics_slice("不存在的细分")   # 整份文件绝不外泄
 
 
+def test_audience_mapped_but_section_missing_injects_nothing(tmp_path):
+    """P1-2：映射**命中**但 audience.md 里没有那一节（作者改名/写错）——
+    旧写法走 `slice_heading`，两轮标题失配后退回**整份文件**，把别的受众话术
+    灌进 select/write 两轮，而 param_audit 对同一形态承诺的是"不会退回整份"。
+    P1-22 只修了"映射键缺失"那一半。修复后与 topics_slice 同口径：逐字标题
+    取节，找不到就是空串。"""
+    d = _pack_with(
+        tmp_path,
+        _base_pack_yaml(audience_map={"业主": "业主", "商户": "商户访谈"}),
+        {"knowledge/audience.md":
+         "# 受众\n\n## 业主\n\n怕被质疑。\n\n## 业委会\n\n要开业主大会。\n"})
+    p = Pack(tmp_path, "probe")
+    assert p.audience_slice("商户") == ""                 # 命中映射、缺节 → 空串
+    assert "要开业主大会" not in p.audience_slice("商户")  # 别的受众章节绝不外泄
+    assert p.audience_slice("商户") != p.file_text("knowledge/audience.md")  # 不退整份
+    assert "怕被质疑" in p.audience_slice("业主")          # 命中的那节照常切片
+
+
 def test_heading_present_but_empty_counts_as_missing(tmp_path):
     """P2-7：只有标题、正文删空 —— 对注入来说与"没有这一节"是同一件事。"""
     d = _pack_with(tmp_path, _base_pack_yaml(), {

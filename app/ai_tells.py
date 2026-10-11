@@ -23,9 +23,13 @@ import statistics
 from dataclasses import dataclass
 
 # 与 checker.count_chars 同一口径：数字串按 1 字计、剥掉格式符号。
-# 这里**不 import checker**：checker 依赖本模块的方向是"校验调用文风检测"，
-# 反向 import 会绕成循环；两处口径靠 tests/test_ai_tells.py 的一致性断言钉住。
-_PUNCT = r'[\s，。、？！：；：\u201c\u201d\u2018\u2019（）《》〈〉【】…—·～*#|＿_／/,.!?;:-]'
+# ⚠ 剥离类**从 checker.PUNCT 派生**，这里不再有第二份字符表（2026-10-05 P1-1：
+# 两处手抄已经真实漂移过一次——checker 那份的字面弯引号被吞成定界符、四个引号
+# 字符静默消失，而对账测试样本里一个引号都没有）。checker 并不 import 本模块
+# （tells 是参数注入的），这里的反向 import 不成环——旧注释"会绕成循环"
+# 写的是早已不成立的历史顾虑，一并更正。
+from app.checker import PUNCT as _CHECKER_PUNCT
+_PUNCT = "[" + _CHECKER_PUNCT[1:-1] + "]"
 
 # 强 tell：单次命中即报（结构上一眼可读出来，误伤空间小）
 # 弱 tell：需 ≥2 处才报（语境相关，单次命中容易误伤，与 banwords 的 soft 同理）
@@ -252,6 +256,10 @@ _PARTICLES = ("呢", "吧", "啊", "吗", "嗯", "呀", "哦", "嘛", "你看", 
 #: 还有若干个窗口可用；窗口比正文长时退化成一次 TTR。
 _MATTR_WINDOW = 50
 #: 形态统计的分隔符。⚠ **从 `_PUNCT` 派生**（剥掉外层字符类括号复用）：
+#: ⚠ 已知口径边界（2026-10-05 P3 记账）：`_count` 把多位阿拉伯数字折叠成 1 字
+#: （rules/duration.md 的念出口径），本分隔符**不折叠**——`shape.chars` 与
+#: `Σ_count` 的不变量在含 2025/123 这类稿子上不成立，是 L2 展示层的两种
+#: 近似分母，不是同一本账；别在不知情时拿它们互相推算。
 #: 形态流的口径必须与 `_count` 完全一致 —— 以前这里手写了一份更窄的标点表，
 #: 漏了停顿符 `／` 与引号括号，`／` 被当成"字"灌进 mattr/3-gram/虚词熵，
 #: 12 篇真实产物字数 +4.6%（审查报告-20260930 M2）。派生之后两处永不漂。
@@ -469,10 +477,12 @@ class AITells:
             raw_th = {}
         for tid, v in raw_th.items():
             sev_here = self.severity.get(tid)
-            if tid == "contrast_frame" and sev_here is None:
+            if sev_here is None:
                 # 门槛配给了**未声明**的 tell：它根本不跑，配了是 no-op ——
                 # 不能照走"记门槛、印非默认口径"那条路（那是把 no-op 说成换了尺子，
-                # 审查报告-20260930 E8）
+                # 审查报告-20260930 E8；2026-10-05 P3 把判据从 contrast_frame
+                # 单类泛化到**所有**未声明 tell —— 词表类同样该被告知
+                # "这条 tell 整个没在跑"，那比"门槛没吃上"更重要）
                 self.bad_entries.append(
                     f"thresholds.{tid} 配给了**未声明**的 tell（yaml 没在 strong/weak 里"
                     "声明它，这条 tell 根本不跑）—— 已忽略")
@@ -502,6 +512,18 @@ class AITells:
             except (TypeError, ValueError):
                 self.bad_entries.append(
                     f"thresholds.{tid} 不是整数（{v!r}）—— 已按默认口径 {WEAK_MIN}")
+                continue
+            if not math.isfinite(num):
+                # P2-10（2026-10-05）：`.nan`/`.inf` 能被 float() 收下，却会在下面的
+                # `int(num)` 处炸 ValueError/OverflowError —— 触发点在 `_load_tells`
+                # （select/draft 的模型钱花掉之后作业 failed），且 `_readable_error`
+                # 对这两种英文消息没有翻译规则，界面收原文。与 true/"2"/2.9/-1
+                # 同一条立场：警告 + 默认口径 ——「读坏不静默」不该变成「读坏就炸」。
+                # 2026-10-11 P2-1：这道闸必须排在 `if str_form:` **之前** ——
+                # "nan"/"inf"/"1e999" 这类字符串形态同样被 float() 收成 nan/inf，
+                # str_form 文案里的 `int(num)` 只对有限数求值才不炸。
+                self.bad_entries.append(
+                    f"thresholds.{tid} 是 {v!r}（不是有限的数）—— 已按默认口径 {WEAK_MIN}")
                 continue
             if str_form:
                 # "2" 会被 float 偷偷收下 —— 值碰巧不错，但形态错了必须说出口

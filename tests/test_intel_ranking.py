@@ -882,3 +882,105 @@ def test_today_publishes_the_quadrant_threshold(tmp_path):
     view = I.today(tmp_path, "elevator", _specs())
     assert view["hot_quadrant_high"] == I.HOT_QUADRANT_HIGH, \
         "档位不下发，前端的档线就只能抄常数 —— 两处口径迟早漂"
+
+
+def test_verify_stub_hot_quadrant_high_matches_engine():
+    """P2-17（2026-10-05）：verify.js 桩里的 `hot_quadrant_high` 是引擎常量的
+    第二份手抄，此前没有任何对账——哪天重校准只改 `HOT_QUADRANT_HIGH`，后端
+    测试照绿（view==常量），桩仍发旧值，排行面的档线断言量的就是一个引擎
+    不再发的世界（桩 stage:"peak" 漂移的同族病）。跨语言对账照
+    test_js_busy_states_match_backend 的范式：从 verify.js 里抽出数字对。"""
+    import re
+    src = (ROOT / "_verify" / "verify.js").read_text(encoding="utf-8")
+    m = re.search(r"INTEL_TODAY\.hot_quadrant_high\s*=\s*([0-9.]+)", src)
+    assert m, "verify.js 桩里找不到 hot_quadrant_high（桩改版了？重指本测试）"
+    assert float(m.group(1)) == I.HOT_QUADRANT_HIGH, \
+        "verify.js 桩的档线常量与引擎 HOT_QUADRANT_HIGH 漂移了 —— 改桩或改常量，只能一起改"
+
+
+def test_off_and_unwired_sources_are_never_counted_as_tried(tmp_path):
+    """P2-8（2026-10-05）：off（用户关掉的源）与 unwired（引擎没有适配器的源）
+    从未发过请求，source_health 却把 off 记成"成功"、unwired 记成"失败"并涨
+    连击——关掉的源每天白捡一次成功，骗过前端 tried=ok+fail 的「近 7 天」判据
+    （"一次没试过的行必须印「—」"失效成"5/5 像试了一周全成"）；没适配器的源
+    3 个快照后被标成"今日跳过"永久 warn。与 cooling 同一条规矩：没发过请求
+    就不是一次尝试，这些 label 根本不进健康表（前端自然印「—」）。"""
+    t = _now()
+    rows = [
+        {"label": "关掉的源", "count": 0, "error": "", "state": "off"},
+        {"label": "没适配的源", "count": 0,
+         "error": "引擎没有 id='nope' 的适配器", "state": "unwired"},
+    ]
+    _write_history(tmp_path, [
+        {"fetched_at": (t - timedelta(days=d)).isoformat(timespec="seconds"),
+         "items": [], "sources": rows, "events": []} for d in (3, 2, 1)
+    ])
+    h = I.source_health(I.load_history(tmp_path, "elevator"), now=t)
+    assert "关掉的源" not in h, "off 行记成了成功：" + json.dumps(h, ensure_ascii=False)
+    assert "没适配的源" not in h, "unwired 行记成了失败并涨连击：" + json.dumps(h, ensure_ascii=False)
+
+
+def test_bilibili_business_error_code_fails_the_source(tmp_path):
+    """P2-9（2026-10-05）：B站的风控以 HTTP 200 + 业务错误码出现（实测
+    code=-412 时 data=None）。只看 HTTP 层的话，"被风控"安静地演成
+    "ok，0 条"——重试与连续失败跳过两道闸都挂在异常上，这种失败形态
+    一道也触发不了。code 非 0 必须让源记 error。"""
+    def http(url, params=None, **_kw):
+        if "bilibili" in url:
+            return {"code": -412, "message": "请求被拦截", "data": None}
+        if "sugrec" in url:
+            return {"g": []}
+        return {}
+    out = I.fetch_pack("elevator", tmp_path, _specs(), seeds=["电梯困人"],
+                       keywords=["电梯"], http=http)
+    bili = next(r for r in out["sources"] if r["label"] == "B站同类")
+    assert bili["state"] == "error" and "code=-412" in (bili["error"] or ""), bili
+
+
+def test_weibo_ok_zero_fails_the_source(tmp_path):
+    """P2-9：微博的 `ok` 业务位为 0（风控/未登录的常见形态）时不许演成
+    "ok，0 条"——那与"今天真的没货"是下一步动作相反的两件事。"""
+    def http(url, params=None, **_kw):
+        if "weibo.com" in url:
+            return {"ok": 0, "data": None}
+        if "sugrec" in url:
+            return {"g": []}
+        return {}
+    out = I.fetch_pack("elevator", tmp_path, _specs(), seeds=["电梯困人"],
+                       keywords=["电梯"], http=http)
+    wb = next(r for r in out["sources"] if r["label"] == "微博热搜")
+    assert wb["state"] == "error" and "ok=0" in (wb["error"] or ""), wb
+
+
+def test_rank_table_keeps_the_first_sources_rank_for_duplicate_keys(tmp_path):
+    """P3（2026-10-05）：跨源重复 guid 时，条目保的是**先到源**的内容（全局
+    dedup），名次表却曾让后到源把名次顶掉 —— 事件里 per-source 的名次记录
+    与条目对不上。现实触发面主要是 manual 复用政策库 URL（两边 guid 都是
+    url）。setdefault 之后名次跟随条目，都认先到的那份。"""
+    specs, _ = I.parse_sources([
+        {"id": "manual_import", "label": "甲", "cadence": "on_demand"},
+        {"id": "bilibili_search", "label": "乙", "platform": "B站",
+         "cadence": "on_demand"},
+    ])
+    man = I.intel_dir(tmp_path, "p") / "manual"
+    man.mkdir(parents=True)
+    (man / "a.json").write_text(json.dumps(
+        [{"guid": "bili:shared", "title": "同一条事件"}]), encoding="utf-8")
+
+    def http(url, params=None, **_kw):
+        if "bilibili" in url:
+            # 同 guid 排在第二个：旧写法它的 (2,2) 会把甲的 (1,1) 顶掉
+            return {"data": {"result": [{"data": [
+                {"title": "别的视频", "bvid": "other", "play": 1},
+                {"title": "同一条事件", "bvid": "shared", "play": 2},
+            ]}]}}
+        return {}
+
+    out = I.fetch_pack("p", tmp_path, specs, seeds=["电梯"],
+                       keywords=["电梯"], http=http)
+    ev = next(e for e in out["events"]
+              if any(r["key"] == "bili:shared" for r in e["sources"]))
+    ranks = {r["label"]: r["rank"] for r in ev["sources"]}
+    # 乙的重复条目被全局 dedup 拿掉，事件里只有甲的名次记录 —— 旧写法它读到的
+    # 是被乙顶掉的 (2,2)，"乙排第二、甲排第一"在事件里对不上条目事实。
+    assert ranks == {"甲": 1}, f"名次表被后到源污染：{ranks}"

@@ -503,6 +503,11 @@ SHAPE_BROKEN = {
     "banwords 写成映射": {"banwords": {"hard": ["自留词"]}},
     "params.segment.options 写成字符串": {
         "params": {"segment": {"label": "细分", "options": "AB", "default": "A"}}},
+    # P2-13（2026-10-05）：选项重复会让 Pack() 抛 PackBrokenError（生成 409），
+    # pack_info 却看不见——违反它自己"凡 Pack() 会因此抛的都要能看见"的判据。
+    "params.segment.options 选项重复": {
+        "params": {"segment": {"label": "细分", "options": ["维保", "维保", "维保合同"],
+                               "default": "维保"}}},
 }
 
 
@@ -855,5 +860,20 @@ def test_skill_stages_shape_error_is_seen_by_pack_info(tmp_path):
                  encoding="utf-8")
     info = pack_info(root / "packs" / "elevator")
     assert info.pack_error and "stages" in info.pack_error, info.pack_error
+    with pytest.raises(PackBrokenError):
+        Pack(root, "elevator")
+
+
+def test_pack_info_sees_duplicate_options_before_generation(tmp_path):
+    """P2-13（2026-10-05）：选项重复 = Pack() 会抛的坏，pack_info 必须当场看见
+    —— 列表/设置页全绿、点生成才 409，正是它 docstring 里"凡 Pack() 会因此抛
+    的都要能看见"反对的形态（param_audit 用 dict 键收录还会把重复值合并隐藏）。"""
+    root = _with_pack_yaml(tmp_path, {"params": {
+        "segment": {"label": "细分",
+                    "options": ["家用电梯", "家用电梯", "旧梯改造"],
+                    "default": "家用电梯"}}})
+    info = pack_info(root / "packs" / "elevator")
+    assert "重复出现" in info.pack_error and "不符合约定" in info.pack_error, info.pack_error
+    # 生成那一路同样拒（PackBrokenError），且报的是同一份判据
     with pytest.raises(PackBrokenError):
         Pack(root, "elevator")

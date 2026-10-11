@@ -111,8 +111,10 @@ PERSIST_PILL_DAYS = 3
 #: 热点分权重（§3.2 的 40/30/20/10）。**初值，待校准** —— 与 A4 同一句话：
 #: 校准前不要把它当成"我们算出来的数"，界面上的分项条也只解释总分，不解释权重。
 HOT_WEIGHTS = {"diversity": 40.0, "rank": 30.0, "velocity": 20.0, "persistence": 10.0}
-#: 四象限里"高热"那一档的分数线。**与机会分的 `opp >= 60` 是同一类未校准常数**
-#: （§5 #2 的建议就是"先跑一周实盘分布再定"，本轮沿用 60 不另起一个数）。
+#: 四象限里"高热"那一档的分数线，**也是 `_flags` 里"机会分高"黄标的同一条线**
+#: （2026-10-05 P3 归一：原来 `_flags` 裸写 60，重校准只改这份常量的话黄标与
+#: 档线各画各的）。§5 #2 的建议是"先跑一周实盘分布再定"，本轮沿用 60；
+#: 重校准时这一条线**一起动**。
 HOT_QUADRANT_HIGH = 60.0
 #: 连续失败这么多次的源，**当天跳过**（§3.1 健壮性：知乎 401「永远失败」那条病灶）。
 #: 跳过之后**不设"隔几小时再试"的时间闸**：抓取节奏本来就按天，`source_health` 的
@@ -387,6 +389,16 @@ def fetch_bilibili_search(spec: IntelSource, ctx: FetchCtx) -> list[dict]:
     for kw in kws[:10]:
         data = ctx.get_json("https://api.bilibili.com/x/web-interface/search/all/v2",
                             params={"keyword": str(kw), "page": 1})
+        # P2-9（2026-10-05）：B站的风控以 **HTTP 200 + 业务错误码** 的形态出现
+        # （实测 code=-412/-352 反爬，-412 时 data=None）。只看 HTTP 层的话，
+        # "请求被风控"会安静地演成"ok，0 条"——而重试与"连续失败跳过"两道闸
+        # 都挂在异常上，这种失败形态一道也触发不了。code 非 0 抛出去，让该记
+        # 失败的记失败（"算不出"而不是 0）。没有 code 键的桩/老形状照常放行。
+        code = data.get("code") if isinstance(data, dict) else None
+        if code not in (None, 0):
+            raise RuntimeError(
+                f"B站搜索返回业务错误码 code={code}（message={(data or {}).get('message') or ''}）"
+                "—— 多半是风控，交给重试与连败跳过处理")
         for blk in ((data or {}).get("data") or {}).get("result") or []:
             for it in (blk or {}).get("data") or []:
                 title = re.sub(r"<[^>]+>", "", str(it.get("title") or ""))
@@ -500,6 +512,12 @@ def fetch_weibo_hot(spec: IntelSource, ctx: FetchCtx) -> list[dict]:
     按本仓的 Python + httpx 重写，不引 Node 子进程。
     """
     data = ctx.get_json(WEIBO_URL, headers={"Referer": WEIBO_REFERER})
+    # P2-9（2026-10-05）：微博的响应带 `ok` 业务位（0 = 请求没成，风控/未登录的
+    # 常见形态）。只看 HTTP 层的话，这种 payload 会安静地演成"ok，0 条"——
+    # 重试与连败跳过两道闸一道也触发不了。ok **明确为 0** 时抛出去；键缺失的
+    # 形状（别的桩/老响应）照常放行，不替上游发明合同。
+    if isinstance(data, dict) and data.get("ok") == 0:
+        raise RuntimeError("微博热搜返回 ok=0（业务层失败）—— 交给重试与连败跳过处理")
     rows: list[dict] = []
     for it in ((data or {}).get("data") or {}).get("band_list") or []:
         word = str(it.get("word") or "").strip()
@@ -745,10 +763,14 @@ def _bigrams(s: str) -> set[str]:
 
 
 def same_event(a: str, b: str) -> bool:
-    """两条归一化标题是不是**同一个事件**（§3.1：Jaccard ≥ 阈值，或一方包含另一方）。
+    """两条归一化标题是不是**同一个事件**（§3.1：Jaccard ≥ 阈值，或一方是
+    另一方的**尾部**）。
 
     包含那一支必须带长度闸（`EVENT_MIN_CONTAIN`）：「电梯」是包里几乎所有标题的
     子串，不设闸整包会并成一个事件 —— 那是把"去重"做成了"清空"。
+    ⚠ 2026-10-05 P3 改口：实现只认 `endswith`（尾部包含），旧 docstring 与
+    设计文档 §3.1 写的"一方包含另一方"过宽 —— 头部插入的长标题（政策库的
+    「关于印发…的通知」包裹）这里认不出，交给 Jaccard 那一支兜底；文档照实。
     """
     if not a or not b:
         return False
@@ -1246,7 +1268,10 @@ def _flags(it: dict, contested: tuple[str, ...] = ()) -> list[list[str]]:
     opp, S = sc.get("opportunity"), sc.get("S")
     if opp is None:
         out.append(["warn", "数据不足 · 算不出机会分"])
-    elif opp >= 60:
+    elif opp >= HOT_QUADRANT_HIGH:
+        # 与四象限横轴是**同一条 60 分线**（2026-10-05 P3 归一：原来是两份裸
+        # 字面量，§5 #2 重校准只改常量的话，"机会分高"黄标与四象限档线就
+        # 各画各的 —— 不报错的漂移）。机会分与热点分共享"多高算高"的拍板数。
         out.append(["good", "机会分高"])
     elif S is not None and S >= 0.7:
         out.append(["bad", "红海 · 需换角度"])
@@ -1337,15 +1362,22 @@ def source_health(history: list[dict], *, now: datetime | None = None,
             label = str(row.get("label") or "")
             if not label:
                 continue
-            st = out.setdefault(label, {"ok": 0, "fail": 0, "hits": 0,
-                                        "consecutive_fails": 0, "last_fail": "",
-                                        "skip": False, "_broken": False})
-            if row.get("state") == "cooling":
-                # 被跳过的那一轮**不是一次尝试**：它没有发过请求，也就没有"失败"这件事。
+            if row.get("state") in ("cooling", "off", "unwired"):
+                # 这三种行都**没有发过请求**，所以不是一次尝试（P2-8，2026-10-05）：
+                # cooling = 连败到闸值今天故意不试；off = 用户关掉的源；unwired =
+                # 引擎没有适配器的源。旧写法只豁免 cooling —— off 落进"成功"分支
+                # （每天白捡一次成功，骗过前端 tried=ok+fail 的「近 7 天」判据，
+                # "一次没试过的行必须印「—」"失效），unwired 落进"失败"分支且涨
+                # 连击（3 个快照后被标成"今日跳过"永久 warn）。三者同一条规矩：
+                # 没发请求就没有成败；这些 label 根本不进健康表（⚠ 连全零的
+                # 条目都不建，setdefault 必须在这之后），前端自然印「—」。
                 # 算进失败的话，跳过一次就把连击加一次，界面接着说"连续 4 次抓取失败"
                 # —— 而实际只试过 3 次，第 4 次是我们自己不试的。
                 # 也不断连击：连击的语义是"我们试了并且都没成"。
                 continue
+            st = out.setdefault(label, {"ok": 0, "fail": 0, "hits": 0,
+                                        "consecutive_fails": 0, "last_fail": "",
+                                        "skip": False, "_broken": False})
             failed = bool(row.get("error")) or row.get("state") == "error"
             if failed:
                 st["fail"] += 1
@@ -1474,7 +1506,11 @@ def fetch_pack(pack: str, data_dir: Path, sources: list[IntelSource], *,
         # 它们的排名，我们要的是"在这张榜上排第几"，全局重排之后再数就变成
         # 拿池子里的位置冒充平台排名。
         for i, r in enumerate(rows, 1):
-            ranks[item_key(r)] = (i, len(rows))
+            # P3（2026-10-05）：首写不覆盖 —— 全局 dedup 保的是**先到源**的条目，
+            # 名次表却曾让**后到源**的同键条目把名次顶掉（跨源重复 guid 时
+            # 条目用 A 源的内容、名次用 B 源的排名，两张表对不上）。现实触发
+            # 面主要是 manual 复用政策库 URL（两边 guid 都是 url）。
+            ranks.setdefault(item_key(r), (i, len(rows)))
         items += rows
         per_source.append({**_source_row(spec), "count": len(rows), "error": "",
                            "state": "ok"})
@@ -2313,10 +2349,13 @@ def today(data_dir: Path, pack: str, sources: list[IntelSource]) -> dict:
 STATUS_LABEL = {"new": "新上榜", "breakout": "爆发中", "persistent": "持续在榜",
                 "fading": "衰退中", "": ""}
 #: 生命周期阶段的中文名（进模型输入用，与状态药丸**同源**：§3.4「LLM 只复述不自己判」）。
-#: ⚠ 空药丸 → `rising` 不是随手挑的默认值：`_hot_status` 只在**还在涨（增速 >1）
-#: 但没到爆发档、且入榜不足 3 天**时才返回空 —— 那正是"上升期"的定义。
-#: 兜到 `peak` 会把"刚起步"的题在模型输入里说成"正在爆发"，而模型照这句写出的
-#: 钩子会催"今天就拍"，用户拿到的是一张与证据相反的建议卡。
+#: ⚠ 空药丸 → `rising` 是**方向可辩护的默认值**，不是精确判据（2026-10-05 P3 改口）：
+#: `_hot_status` 除了"还在涨（增速 >1）但没到爆发档、且入榜不足 3 天"，**增速未知**
+#: （新装第一周没有 7 天基线时 `growth=None` 是全体事件的常态）且首见 24~48h、
+#: 在榜不足 3 天的形状同样落空 —— 旧注释"走到空值的唯一形状就是还在涨"被复跑证伪。
+#: 兜成 rising 把这类"证据不足"说成"上升期"，比兜成 peak 的"正在爆发"保守，
+#: 但没有消除"与证据相反的建议卡"这一类；要不要给"增速未知"单开一档，等
+#: §6.4b 的误报数据再拍板。
 STAGE_BY_STATUS = {"new": "rising", "breakout": "rising", "persistent": "peak",
                    "fading": "fading", "": "rising"}
 BRIEF_STAGE_LABEL = {"rising": "上升期", "peak": "爆发期", "fading": "衰退期"}

@@ -1042,8 +1042,12 @@ def test_intel_fetch_does_not_consume_model_quota():
     #   这里量的是"两族额度互不占"，与"作业跑多久"毫无关系，钉住才量得准。
     gate = threading.Event()
     try:
-        for _ in range(MAX_CONCURRENT_INTEL):
-            pl.start_intel_fetch("elevator", http=_fake_http(gate=gate))
+        # 2026-10-05 P3：同包重抓改为**搭车**（add_if_room_dedup，见
+        # test_same_pack_refetch_rides_the_running_job）—— 要占满 2 个名额得用
+        # 两个不同的包；"占满自己那档额度时生成照常"的判据不变。
+        shutil.copytree(tmp_path / "packs" / "elevator", tmp_path / "packs" / "elevator2")
+        for name in ("elevator", "elevator2"):
+            pl.start_intel_fetch(name, http=_fake_http(gate=gate))
         assert pl.registry.running_count(INTEL_BUSY_STATES) == MAX_CONCURRENT_INTEL
         assert pl.registry.running_count() == 0, "情报抓取占了模型额度"
         # 关键断言：抓取占满自己那档额度时，生成**必须仍然开得起来**。
@@ -1096,10 +1100,18 @@ def test_intel_fetch_has_its_own_limit():
     pl = Pipeline(tmp_path, load_config(tmp_path))
     gate = threading.Event()
     try:
-        for _ in range(MAX_CONCURRENT_INTEL):
-            pl.start_intel_fetch("elevator", http=_fake_http(gate=gate))
+        # 2026-10-05 P3：额度互斥的量法随"同包搭车"的语义更新 —— 两个**不同的包**
+        # 各占一个名额，第三条（再换一个包）才撞上限；同包在飞的第三次调用
+        # 是**搭车**（返回同一个 job_id，不占名额、不抛）。
+        for name in ("elevator2", "elevator3"):
+            shutil.copytree(tmp_path / "packs" / "elevator", tmp_path / "packs" / name)
+        jid1 = pl.start_intel_fetch("elevator", http=_fake_http(gate=gate))
+        jid2 = pl.start_intel_fetch("elevator2", http=_fake_http(gate=gate))
+        assert jid1 != jid2
+        assert pl.start_intel_fetch("elevator", http=_fake_http(gate=gate)) == jid1, \
+            "同包在飞时该搭车（P3：同秒快照会互相覆盖），不该再起一条"
         with pytest.raises(StateConflict):
-            pl.start_intel_fetch("elevator", http=_fake_http(gate=gate))
+            pl.start_intel_fetch("elevator3", http=_fake_http(gate=gate))
         assert pl.registry.running_count(INTEL_BUSY_STATES) == MAX_CONCURRENT_INTEL
     finally:
         gate.set()          # 放行，别让 worker 线程挂在测试之后
@@ -1325,3 +1337,29 @@ def test_load_latest_defends_against_bad_element_shapes(tmp_path):
         json.dumps({"items": [{"title": "t", "score": []}]}), encoding="utf-8")
     got2 = I.today(tmp_path, "p", _specs())
     assert got2["items"][0]["score"] is None, "score 形状坏要按「算不出」处理"
+
+
+def test_same_pack_refetch_rides_the_running_job(tmp_path):
+    """P3（2026-10-05）：同一包的重抓去重——与 brief 的 add_if_room_dedup 同权。
+    旧写法用 add_if_room，两条同包抓取可以在飞（MAX_CONCURRENT_INTEL=2），
+    history 的同秒快照文件名互相覆盖、source_health 少记一轮。在飞时第二条
+    **搭车**（返回同一个 job_id），不发起第二次抓取。"""
+    import threading
+    root = _root()
+    pl = Pipeline(root, load_config(root))
+    release = threading.Event()
+    started = threading.Event()
+
+    def http(url, params=None, **_kw):
+        started.set()
+        release.wait(timeout=15)          # 挂住第一条抓取，制造「在飞」窗口
+        if "sugrec" in url:
+            return {"g": []}
+        return {}
+
+    jid1 = pl.start_intel_fetch("elevator", http=http)
+    assert started.wait(timeout=15), "第一条抓取没跑到 HTTP 层"
+    jid2 = pl.start_intel_fetch("elevator", http=http)
+    assert jid2 == jid1, "同包在飞时第二条该搭车，不是又起一条（快照会互相覆盖）"
+    release.set()
+    wait_job(pl, jid1, timeout=60)

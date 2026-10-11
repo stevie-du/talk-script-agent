@@ -174,7 +174,14 @@ def slugify(industry: str) -> str:
     而报错说的是「行业包已存在」（实测过的形态，主报告 §15）。
     判空由调用方负责：入口 `pipeline.start_packgen` 在花钱之前就拒掉。
     """
-    return re.sub(r"[^\w一-鿿]+", "-", industry).strip("-")
+    s = re.sub(r"[^\w一-鿿]+", "-", industry).strip("-")
+    # P2-12（2026-10-05）：`_`/`.` 开头的目录名是引擎内部的保留形状 ——
+    # `list_packs` 把 `_template` 这类当内部骨架过滤掉。旧写法会把首部的
+    # 下划线/点原样保留（`\w` 含下划线），建出三层都够不着的"隐形包"：
+    # 界面永不显示、重试同名 409、delete_pack 谎称"内置行业包"拒删，而
+    # token 已经花掉。首部这类字符折掉（目录名在预览里可见，显示名仍保留
+    # 用户输入的那串字）。
+    return s.lstrip("_.")
 
 
 
@@ -360,7 +367,7 @@ def create_pack(root: Path, llm: LLMClient, industry: str, description: str, *,
     out.display_name = " ".join(str(out.display_name or "").split()) or industry.strip()
 
     # 空数组兜底：模型偶尔会返回 []，直接下标访问会 IndexError → 500
-    def _dedupe(vals, field):
+    def _dedupe(vals):
         """选项列表去重（P3-13）：重复项不是"多一个选项"，而是**第二份永远命中不到**。
 
         `params.<field>.options` 是下拉框的取值域，`topics_map` / `audience_map`
@@ -377,9 +384,9 @@ def create_pack(root: Path, llm: LLMClient, industry: str, description: str, *,
             out.append(v)
         return out, dup
 
-    segments, seg_dupes = _dedupe([s for s in (out.segments or []) if str(s).strip()], "segment")
-    audiences, aud_dupes = _dedupe([a for a in (out.audiences or []) if str(a).strip()], "audience")
-    personas, per_dupes = _dedupe([p for p in (out.personas or []) if str(p).strip()], "persona")
+    segments, seg_dupes = _dedupe([s for s in (out.segments or []) if str(s).strip()])
+    audiences, aud_dupes = _dedupe([a for a in (out.audiences or []) if str(a).strip()])
+    personas, per_dupes = _dedupe([p for p in (out.personas or []) if str(p).strip()])
     dupes = [f"选项「{k}」在 {f} 里重复出现，已合并成一个（重复项在界面上同名，"
              f"第二份的规则永远命中不到）" for f, vals in
              (("segments", seg_dupes), ("audiences", aud_dupes), ("personas", per_dupes)) for k in vals]

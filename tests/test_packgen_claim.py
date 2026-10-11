@@ -949,3 +949,15 @@ def test_request_cancel_refuses_terminal_states():
     j.request_cancel()
     assert j.state == "done", "终态作业被 request_cancel 翻成了 cancelled"
     assert not j.is_cancelled(), "终态作业不该被置取消标志"
+
+
+def test_slugify_never_produces_the_hidden_pack_shape(tmp_path):
+    """P2-12（2026-10-05）：`_`/`.` 开头的目录名会被 `list_packs` 当内部骨架
+    过滤掉——slugify 保留它们（`\w` 含下划线）就建出三层都够不着的"隐形包"：
+    界面永不显示、重试同名 409、delete_pack 谎称"内置行业包"拒删，而 token
+    已经花掉。首部的 `_`/`.` 必须折掉；折完一个可用字符都不剩就落回空串
+    （由入口的判空拒掉）。"""
+    assert packgen.slugify("_测试") == "测试"
+    assert packgen.slugify("...hidden") == "hidden"
+    assert packgen.slugify("__包__名") == "包__名", "中部的下划线不是保留形状，不动"
+    assert packgen.slugify("___") == "", "全是保留字符时落回空串（入口判空拒）"

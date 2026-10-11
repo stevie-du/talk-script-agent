@@ -51,6 +51,26 @@ def test_feedback_uses_report_tolerance_not_a_hardcoded_ten():
     assert "时长偏差" not in fb
 
 
+def test_feedback_rejudges_with_the_unrounded_tolerance_not_the_rounded_one():
+    """P3-3（2026-10-11）：checker 判合格用**未舍入**的容差，复判处必须用同一
+    个数 —— 只外发舍入的 tolerance_pct 时，|dev| 落在 (round(limit,1), limit]
+    窗口（<0.05pp）内 checker 判合格、反馈拿舍入容差复判成超，「报告说合格、
+    反馈催你改」换侧复活（P2-27 修的是写死 10%，这一条修的是舍入错位）。
+
+    构造：600 秒目标 / 单段 3176 字 / 4.5 字每秒 → dev = 17.6296…%；容差给
+    17.647（舍入后 17.6）—— checker 判合格（17.6296 ≤ 17.647），退回只读
+    舍入键的复判则 17.6296 > 17.6 会催改长度。"""
+    sections = [{"type": "point", "text": "字" * 3176}]
+    report = check_script(sections, 600.0, 4.5, Banwords({}), tolerance=17.647)
+    assert report["passed"] is True, report["blockers"]
+    # 窗口前提自证：|dev| 真的落在 (round(limit,1), limit] 里，且两个键同发
+    assert 17.6 < abs(report["deviation_pct_exact"]) <= 17.647, \
+        report["deviation_pct_exact"]
+    assert report["tolerance_pct"] == 17.6 and report["tolerance_pct_exact"] == 17.647
+    fb = Pipeline._violation_feedback(report, sections)
+    assert "时长偏差" not in fb, fb
+
+
 def test_feedback_quotes_the_previous_draft():
     """Self-Refine： critique 之外还要把上一版喂回去改（主报告 §三第 2 行）。"""
     sections = _sections()
@@ -245,3 +265,19 @@ def test_soft_hits_are_named_as_ad_law_words_not_colloquialism():
     fb = Pipeline._violation_feedback(report, sections)
     assert "广告法软禁用词" in fb and "口语化" not in fb, fb
     assert "第 1 段" in fb, fb
+
+
+def test_feedback_recheck_uses_the_unrounded_deviation():
+    """P3（2026-10-05）：反馈块按 checker 判合格的**同一个未舍入数**复判。
+    构造偏差贴边的现场：未舍入 dev = 10.04（> 容差 10，checker 判不合格），
+    舍入后 = 10.0（<= 10，旧写法在这里复判成"没超"）——时长条目必须进反馈块。"""
+    report = {
+        "hard_hits": [], "soft_hits": [], "segments": [], "points": 0,
+        "chars_total": 210, "target_total": 300, "duration_target": 60,
+        "estimated_seconds": 60.1, "deviation_pct": round(10.04, 1),
+        "deviation_pct_exact": 10.04, "tolerance_pct": 10,
+        "ai_tells": None, "passed": False,
+        "blockers": ["时长偏差超过容差"],
+    }
+    fb = Pipeline._violation_feedback(report)
+    assert "时长偏差" in fb, fb

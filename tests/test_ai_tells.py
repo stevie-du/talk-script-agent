@@ -21,7 +21,7 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app.ai_tells import AITells, score_of            # noqa: E402
+from app.ai_tells import AITells, WEAK, score_of     # noqa: E402
 from app.checker import Banwords, Quota, check_script, count_chars  # noqa: E402
 from app.config import load_config                    # noqa: E402
 from app.knowledge import Pack                        # noqa: E402
@@ -91,7 +91,11 @@ def test_count_chars_agrees_with_the_module_private_one():
     """ai_tells._count 与 checker.count_chars 必须同一口径（模块注释的承诺）。"""
     from app.ai_tells import _count
     for t in ["困了 23 分钟", "**加粗**一句话，带标点。", "{{待补：小区}}那台用了 8 年",
-              "电梯、扶梯、别墅梯都算"]:
+              "电梯、扶梯、别墅梯都算",
+              # P1-1：引号曾是两本口径的分裂点——checker 的字面弯引号被吞成
+              # 字符串定界符（四个字符静默消失、引号按口播字计），本模块又漏了
+              # ASCII 引号。这两个方向都要有样本钉住，缺一类漂移就回来。
+              "他说“这个好”。", "数字\"直角引号\"测试。", "单引号‘这样’与'这样'混排。"]:
         assert _count(t) == count_chars(t), t
 
 
@@ -704,8 +708,12 @@ def test_thresholds_on_classes_that_do_not_read_it_are_announced():
             "lexicon": {"cliche_hook": ["看到最后", "建议收藏"], "helper_closing": ["希望本文"]}}
     t = AITells({**base, "thresholds": {"no_specific": 3, "helper_closing": 5,
                                         "parallel_triple": 1, "uniform_para_len": 9}})
+    # 2026-10-05 P3：未声明判据从 contrast_frame 泛化到所有 tell ——
+    # uniform_para_len（未声明）现在得到"配给了未声明的 tell"的专属文案，
+    # 不再混在"对这一类不生效"的泛化警告里。
     bad = [w for w in t.warnings() if "不生效" in w]
-    assert len(bad) == 4, t.warnings()
+    assert len(bad) == 3, t.warnings()
+    assert any("uniform_para_len" in w and "未声明" in w for w in t.warnings()), t.warnings()
     assert not any("非默认口径" in w for w in t.warnings()), \
         "no-op 的键不该被说成「换了口径」（那是假话：实际什么都没变）"
     # ⚠ 这份稿子刻意不写"一次/两家"这类**数词+量词**：那会让 `no_specific` 走豁免
@@ -805,7 +813,9 @@ def test_thresholds_for_contrast_frame_follow_the_severity():
     strong_t = AITells({"strong": ["contrast_frame"],
                         "thresholds": {"contrast_frame": 3}})
     assert "contrast_frame" not in strong_t.thresholds, strong_t.thresholds
-    assert any("contrast_frame" in w and "不生效" in w for w in strong_t.warnings())
+    # ⚠ 必须点名 strong 分支的专属理由（"对 strong 不生效"）：泛化的 no-op 兜底
+    #   也说"不生效"——不钉措辞的话，把整个 strong 分支拆了照样绿（s42-9 实测漏检）。
+    assert any("对 strong 不生效" in w for w in strong_t.warnings()), strong_t.warnings()
     assert not any("非默认口径" in w for w in strong_t.warnings())
 
     off_t = AITells({"weak": ["cliche_hook"],
@@ -1203,3 +1213,43 @@ def test_ai_tells_wrong_type_is_announced_not_silent(tmp_path):
     # 正对照：键为 None（写了但空）= 没配，照旧静默
     data2, notes2 = resolve_ai_tells(tmp_path, {"ai_tells": None})
     assert data2 is None and notes2 == []
+
+
+def test_thresholds_nan_and_inf_fall_back_with_a_word_not_a_crash():
+    """P2-10（2026-10-05）：`.nan`/`.inf` 能被 float() 收下，却在 int() 处炸
+    ValueError/OverflowError——触发点在 `_load_tells`（select/draft 的模型钱
+    花掉之后作业 failed），且 `_readable_error` 对这两种英文消息没有翻译规则。
+    与 true/"2"/2.9/-1 同一条立场：警告 + 默认口径，「读坏不静默」不该变成
+    「读坏就炸」。
+
+    P2-2（2026-10-11）把样本按两条腿钉全：
+    - float() 不收的字符串形态（.nan/.inf）—— 本来就走「不是整数」警告，从未炸过；
+    - float() 收得下的字符串形态（"nan"/"inf"/"1e999" → nan/inf）—— P2-1 修复前
+      会在 str_form 文案的 `int(num)` 处炸，现由 isfinite 闸兜住（闸已排在
+      str_form 之前），走「不是有限的数——已按默认口径」路径，tell 照常按默认
+      门槛跑。"""
+    # 数值形态（YAML 的 `.nan`/`.inf` 落成 float）：修复前在 int() 处炸
+    for v in (float("nan"), float("inf"), float("-inf")):
+        t = AITells({"weak": ["cliche_hook"], "thresholds": {"cliche_hook": v}})
+        assert "cliche_hook" not in t.thresholds, (v, t.thresholds)
+        assert any("不是有限的数" in w and "cliche_hook" in w for w in t.warnings()), \
+            (v, t.warnings())
+    # 字符串形态 · float() 不收的（.nan/.inf）：走既有的「不是整数」警告（同样不炸）
+    for v in (".nan", ".inf"):
+        t = AITells({"weak": ["cliche_hook"], "thresholds": {"cliche_hook": v}})
+        assert "cliche_hook" not in t.thresholds, (v, t.thresholds)
+        assert any("thresholds.cliche_hook" in w and "默认口径" in w for w in t.warnings()), \
+            (v, t.warnings())
+    # 字符串形态 · float() 收得下的（"nan"/"1e999" → nan/inf）：P2-1 修复前在
+    # str_form 文案的 int(num) 处炸；现在走 isfinite 闸的「不是有限的数」警告，
+    # 门槛按默认口径回落，tell 本身照常声明、照常跑 —— 与完全没配 thresholds
+    # 的实例逐项等价（thresholds 表、tell 声明、警告差一条「不是有限的数」）。
+    for v in ("nan", "1e999"):
+        t = AITells({"weak": ["cliche_hook"], "thresholds": {"cliche_hook": v}})
+        t_default = AITells({"weak": ["cliche_hook"]})
+        assert t.thresholds == t_default.thresholds, (v, t.thresholds)
+        assert t.severity.get("cliche_hook") == WEAK, (v, t.severity)
+        assert any("不是有限的数" in w and "cliche_hook" in w and "默认口径" in w
+                   for w in t.warnings()), (v, t.warnings())
+        extra = [w for w in t.warnings() if w not in t_default.warnings()]
+        assert extra and all("不是有限的数" in w for w in extra), (v, extra)

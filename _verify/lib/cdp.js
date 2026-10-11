@@ -186,6 +186,13 @@ function serve(rendererDir, port, { inject = "", csp = "" } = {}) {
         rq.end(txt);
       });
     });
+    s.on("error", (e) => {
+      // P3（2026-10-05）：端口被抢占时原来是 unhandled error 直接崩栈；
+      // 这里给一句人话再退出（响亮失败，但别甩一脸堆栈）。
+      console.error("桩服务端口错误（" + e.code + "）：端口 " + port + " 被占用或不可绑 —— "
+                    + "多半有另一个 verify/服务在跑");
+      process.exit(3);
+    });
     s.listen(port, "127.0.0.1", () => res(s));
   });
 }

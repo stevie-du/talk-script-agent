@@ -187,9 +187,11 @@ def _assert_stages_usable(pack: Pack) -> None:
     于是症状是「跑完一整轮、烧掉一次调用的钱，然后生成失败」。
 
     - `write` **恒**必需：draft 只省掉 select 那一轮，write 那一段照走
-      （回炉轮渲染的还是它）。另有一处更隐蔽的：`voice_parts` 读
-      `stages.write.anti_ai`，缺了会**静默退成 ("", "")** —— 人味档位整条
-      失效、界面上一个字都不说。
+      （回炉轮渲染的还是它）。⚠ 本闸**只查 system / user_template 两个键**，
+      不查 `stages.write.anti_ai` —— anti_ai 整块缺失时 `voice_parts` 依旧
+      **静默退成 ("", "")**（人味档位整条失效、界面一字不说）。这是审查
+      2026-10-05 P3 点名的"docstring 承诺了闸门没守的隐患"：本段只记账，
+      守卫未落码；要不要把 anti_ai 纳入闸门等误报/收益数据拍板。
     - `select` 只在**没有** draft 时必需：draft 路径走 `stage_files("draft")`，
       不碰 select。
 
@@ -727,7 +729,17 @@ class Pipeline:
         pack = Pack(self.root, pack_name)     # 不存在 → PackError(404)；坏 → 409
         jid = new_job_id()
         job = Job(jid, "intel", {"pack": pack.dir.name})   # 目录 slug，与落点同把键
-        if not self.registry.add_if_room(job, MAX_CONCURRENT_INTEL, INTEL_BUSY_STATES):
+        # P3（2026-10-05）：同一包的重抓去重 —— 与 brief 的 add_if_room_dedup 同权。
+        # 旧写法用 add_if_room，两条同包抓取可以在飞（MAX_CONCURRENT_INTEL=2），
+        # history 的同秒快照文件名互相覆盖、source_health 少记一轮。改用
+        # "同一件事只许一条在飞"的闸：在飞时第二条**搭车**（返回同一个 job_id，
+        # 这次请求不白花，进度看同一条作业），不同包之间仍受额度约束。
+        inserted, existing = self.registry.add_if_room_dedup(
+            job, MAX_CONCURRENT_INTEL, INTEL_BUSY_STATES,
+            same=lambda j: j.kind == "intel" and j.params.get("pack") == pack.dir.name)
+        if not inserted:
+            if existing is not None:
+                return existing.id
             raise StateConflict(
                 f"同时进行的情报抓取已达上限（{MAX_CONCURRENT_INTEL} 个），"
                 "请等其中一次完成后再试")
@@ -948,6 +960,12 @@ class Pipeline:
         return notes
 
     def _normalize(self, pack: Pack, params: dict) -> dict:
+        # P3-4（2026-10-11）：voice/format 的合法档位与默认值**只在这里手抄一份**，
+        # 下面守卫与 `out` 字典两行共用同一组常量 —— 将来放行新档位只改这里；
+        # 不再出现「守卫放行了、`out` 行的清单没跟上 → 静默换成默认」的复活病灶。
+        voice_legal, voice_default = ("strong", "standard", "off"), "strong"
+        format_legal, format_default = ("both", "voice"), "both"
+
         def pick(key, fallback=None):
             v = params.get(key)
             return v if v not in (None, "", []) else pack.param_default(key, fallback)
@@ -964,6 +982,16 @@ class Pipeline:
         if bad_scope:
             raise ValueError(bad_scope)
         scope = str(scope) if scope not in (None, "") else (pack.rewrite_scope() or DEFAULT_REWRITE_SCOPE)
+        # P3（2026-10-05）：voice / format 与 rewrite_scope 同一条立场 —— 显式给了
+        # 非法值**抛错而不是回落**。旧写法把非法值静默换成默认并落盘成 params：
+        # 用户输入被顶替、无任何作业日志。请求层 Literal 挡住了正常路径（422），
+        # 这里兜的是绕过请求模型直调 `_normalize` 的路径；None/空串 = 没填，
+        # 不是非法，照走下面的默认。
+        for _key, _legal in (("voice", voice_legal),
+                              ("format", format_legal)):
+            _v = params.get(_key)
+            if _v not in (None, "") and _v not in _legal:
+                raise ValueError(f"{_key} 取值不合法：{_v!r}")
         quota = Quota.from_pack(pack.data)
         points = pack.points_limit(duration)
         target = quota.target(duration, float(rate)) if quota.available else {}
@@ -985,8 +1013,8 @@ class Pipeline:
             "platform": pick("platform"), "persona": pick("persona"),
             "cta": pick("cta"), "facts": params.get("facts") or "",
             "rate": float(rate),
-            "voice": params.get("voice") if params.get("voice") in ("strong", "standard", "off") else "strong",
-            "format": params.get("format") if params.get("format") in ("both", "voice") else "both",
+            "voice": params.get("voice") if params.get("voice") in voice_legal else voice_default,
+            "format": params.get("format") if params.get("format") in format_legal else format_default,
             "rewrite_scope": scope,
             "reroll": bool(params.get("reroll")),
             "points": points,
@@ -1451,11 +1479,24 @@ class Pipeline:
             for h in report["soft_hits"][:4]:
                 for at in h.get("at") or []:
                     lines.append(f"  · 第 {at['segment']} 段：…{at['line']}…")
-        # 容差取本次校验真正用的那个值（checker 的 tolerance_pct）。
-        # 写死 10% 会让 15 秒档出现「报告说合格、反馈却催你改长度」的自相矛盾。
-        limit = report.get("tolerance_pct")
+        # 容差取本次校验真正用的那个值 —— P3-3（2026-10-11）：优先**未舍入**的
+        # `tolerance_pct_exact`（checker 判合格用的同一个数，deviation_pct_exact
+        # 的对称键）；旧产物/桩没有这个键时回落舍入的 `tolerance_pct`。
+        # 写死 10% 会让 15 秒档出现「报告说合格、反馈却催你改长度」的自相矛盾；
+        # 退回只读舍入键则 |dev| 落在 (round(limit,1), limit] 窗口（<0.05pp）时
+        # checker 判合格、这里复判成超 —— 同一句自相矛盾换侧复活。
+        limit = report.get("tolerance_pct_exact")
+        if limit is None:
+            limit = report.get("tolerance_pct")
         limit = 10.0 if limit is None else float(limit)
-        if abs(report["deviation_pct"]) > limit:
+        # P3（2026-10-05）：复判用 checker 判合格时的**同一个未舍入数**
+        # （`deviation_pct_exact`，checker 现在随报告外发）。旧写法拿舍入后的
+        # deviation_pct 复判 —— 偏差贴着容差边界（±0.05pp）时 checker 判
+        # 不合格、这里复判成"没超"，时长条目不进反馈块，模型只收到兜底句。
+        dev_exact = report.get("deviation_pct_exact")
+        if dev_exact is None:
+            dev_exact = abs(report["deviation_pct"])   # 旧产物/桩没有 exact 键
+        if abs(dev_exact) > limit:
             lines.append(f"- 时长偏差 {report['deviation_pct']:+.1f}%（容差 ±{limit:g}%）："
                          f"目标 {report['duration_target']} 秒，"
                          f"当前约 {report['estimated_seconds']} 秒（{report['chars_total']} 字，"

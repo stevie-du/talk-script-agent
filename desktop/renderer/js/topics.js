@@ -244,7 +244,11 @@ function statusPill(ev) {
   return `<span class="m-chip ${cls || ""} rank-pill">${esc(label)}</span>`;
 }
 
-/** 一行排行（§3.5 的格子顺序：排名 / 标题 / 来源数 / 药丸 / 信号条 / 机会标签）。 */
+/** 一行排行（§3.5 的格子顺序：排名 / 标题 / 来源数 / 药丸 / 信号条 / 机会标签）。
+ *  2026-09-30 重排：内容左栏（标题 / 信号条 / 机会分与说明 / 标签）+
+ *  「热点分 / 三颗动作」右栏 —— 原来三段全宽堆叠，底行在 780 列里必然换行、
+ *  按钮被拆成竖排字。右栏收走分数与动作之后内容行不再和按钮抢宽度
+ *  （`.rank-side` 窄窗退回底行，见 styles.css 的媒体查询）。 */
 function rankRow(ev, idx) {
   const sc = ev.hot_score;
   const score = (sc === null || sc === undefined) ? "—" : String(sc);
@@ -267,25 +271,30 @@ function rankRow(ev, idx) {
     ev.first_seen ? `首见 ${String(ev.first_seen).slice(5, 10)}` : "",
     ev.weak_signal ? "信号不足" : ""].filter(Boolean).join(" · ");
   return `<div class="page-card rank-row${ev.featured ? " feat" : ""}" data-key="${esc(ev.key)}">
-    <div class="res-top rank-head">
-      <span class="rank-no">${idx + 1}</span>
-      <b class="card-title">${esc(ev.title)}</b>
-      <span class="m-chip rank-src" title="这件事在 ${ev.source_count} 个来源上同时出现">`
-      + `${ev.source_count} 源</span>${statusPill(ev)}
+    <div class="rank-main">
+      <div class="res-top rank-head">
+        <span class="rank-no">${idx + 1}</span>
+        <b class="card-title">${esc(ev.title)}</b>
+        <span class="m-chip rank-src" title="这件事在 ${esc(ev.source_count)} 个来源上同时出现">`
+        + `${ev.source_count} 源</span>${statusPill(ev)}
+      </div>
+      <div class="rank-signals">${sigBars(ev)}</div>
+      <div class="rank-sub">
+        <span class="t-opp">机会分 <b>${opp}</b></span>
+        <span class="t-minor">${esc(minor)}</span>
+      </div>
+      ${tags.length ? `<div class="res-metric-list">${tags.join("")}</div>` : ""}
+      <div class="rank-detail hidden">${rankDetail(ev)}</div>
+      <div class="rank-brief hidden">${rankBrief(ev)}</div>
+    </div>
+    <div class="rank-side">
       <span class="rank-score">热点分 <b>${score}</b></span>
+      <div class="rank-ops">
+        <button class="ghost tiny" data-act="detail">看条目</button>
+        <button class="ghost tiny" data-act="ignore">忽略</button>
+        <button class="primary tiny" data-act="brief">生成选题卡</button>
+      </div>
     </div>
-    <div class="rank-signals">${sigBars(ev)}</div>
-    <div class="topic-foot">
-      <span class="t-opp">机会分 <b>${opp}</b></span>
-      <span class="t-minor">${esc(minor)}</span>
-      <span class="res-metric-list">${tags.join("")}</span>
-      <span class="topics-grow"></span>
-      <button class="ghost tiny" data-act="detail">看条目</button>
-      <button class="ghost tiny" data-act="ignore">忽略</button>
-      <button class="primary tiny" data-act="brief">生成选题卡</button>
-    </div>
-    <div class="rank-detail hidden">${rankDetail(ev)}</div>
-    <div class="rank-brief hidden">${rankBrief(ev)}</div>
   </div>`;
 }
 
@@ -507,7 +516,10 @@ function renderQuad(all, panel) {
       + ` data-key="${esc(e.key)}" data-band="${band}" data-j="${j}"`
       + ` data-score="${e.hot_score}" title="${esc(tip)}" aria-label="${esc(tip)}"></button>`;
   }).join("");
-  panel.innerHTML = `<div class="quad-plot" role="img"
+  // role 从 img 改为 group（2026-10-05 P3）：role=img 让全部后代对辅助技术
+  // presentational —— 每颗点的 aria-label 作废，却仍在 Tab 序里（可聚焦、无名）。
+  // group 保留容器的可命名性，点位的 label 才读得出来。
+  panel.innerHTML = `<div class="quad-plot" role="group"
       aria-label="四象限分布：横轴热点分 0 到 100，上带是归得上本包细分的事件，下带是未归属的">
       <i class="quad-band hi"></i><i class="quad-band lo"></i>
       <i class="quad-band-lbl t">归得上本包细分</i><i class="quad-band-lbl b">未归属 / 别的赛道</i>
@@ -545,7 +557,11 @@ function showEventFromQuad(key) {
   rankPage = Math.floor(idx / PAGE_SIZE);
   renderRank();
   requestAnimationFrame(() => {
-    const row = document.querySelector(`#rank-root .rank-row[data-key="${key}"]`);
+    // CSS.escape 与 refreshBrief 同一条账（2026-10-05 P3）：key 含引号/反斜杠时
+    // 裸拼选择器直接抛 DOMException，四象限"定位到行"静默失败。降级路径的
+    // key 是 "ev:" + 标题，热榜标题带引号并不罕见。
+    const row = document.querySelector(
+      `#rank-root .rank-row[data-key="${CSS.escape(key)}"]`);
     if (!row) return;
     row.scrollIntoView({ behavior: "smooth", block: "center" });
     row.classList.remove("flash");
@@ -693,9 +709,18 @@ function refreshBrief(key) {
   box.querySelectorAll("[data-act]").forEach(btn => {
     btn.onclick = () => useAngle(key, Number(btn.dataset.i || 0));
   });
-  if ((briefState[key] || {}).payload) box.classList.remove("hidden");
+  // 生成中（payload 未到）也要露出来（2026-10-05 P2）：rankBrief 在 running 时
+  // 渲染的就是"选题卡生成中…"，只认 payload 的话这句话写进 hidden 盒 ——
+  // 首次生成几十秒里行内没有任何 in-flight 形态、按钮也不禁用。
+  const st = briefState[key] || {};
+  if (st.payload || st.running) box.classList.remove("hidden");
   row.querySelector(".rank-detail")?.classList.remove("hidden");
   openKeys.add(key);
+  // 与 wireRank 同一条账（2026-10-05 P2）：内容开着，键上就不能还写「看条目」——
+  // wireRank 只管整屏重渲路径，这里是绕过它的直接 DOM 写路径，同一不变量
+  // 两个入口必须同权，否则就是"同一行两个说法"的复发。
+  const d = row.querySelector('[data-act="detail"]');
+  if (d) d.textContent = "收起";
 }
 
 // ── 按来源视图：筛选行 ──────────────────────────────────────
@@ -956,14 +981,20 @@ async function awaitJob(id) {
   for (;;) {
     if (Date.now() - t0 > POLL_GRACE_MS) {
       say("");
-      toast(`抓取状态未知（已等待 ${Math.round(POLL_GRACE_MS / 60000)} 分钟），请手动刷新或重试`, 5000);
+      toast(`作业状态未知（已等待 ${Math.round(POLL_GRACE_MS / 60000)} 分钟），请手动刷新或重试`, 5000);
       return null;
     }
     let snap;
     try {
       snap = await api.job(id);
-    } catch {
+    } catch (e) {
+      // P3（2026-10-05）：吞掉错误等于"重抓失败零感知"——btn-refetch /
+      // kickoffIfStale 拿到 null 只默默 load()，说明行被清空、按钮复原，
+      // 用户以为一切正常。在这里把话说掉，三个调用方都受益。
+      // 文案对调用方中性，说「作业」不说「抓取」（P3-6，2026-10-11）：
+      // doBrief 的选题卡作业也走这条轮询，卡片生成挂了不能把人引去查抓取。
       say("");
+      toast(`作业状态查询失败：${e?.message || "引擎无响应"} —— 请稍后重试`, 3600);
       return null;
     }
     const live = BUSY_STATES.has(snap.state);

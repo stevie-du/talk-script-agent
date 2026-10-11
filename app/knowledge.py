@@ -660,6 +660,20 @@ def pack_shape_error(data: dict) -> str:
             if opts is not None and not isinstance(opts, list):
                 return (f"pack.yaml 的 params.{key}.options 不符合约定：应是列表，"
                         f"实际是 {type(opts).__name__}")
+            # P2-13（2026-10-05）：`Pack.__init__` 会因选项重复抛 PackBrokenError
+            # （生成时 409），而 pack_info 自己声明的判据是"凡 Pack() 会因此抛的
+            # 都要能看见"——这里原来只查类型，重复选项漏到点生成才炸；param_audit
+            # 用 dict 键收录反而把重复值合并隐藏。在这里数一遍，列表与设置页
+            # 当场就能看见。
+            if isinstance(opts, list):
+                seen_opts: set[str] = set()
+                for o in opts:
+                    one = str(o.get("name", "") if isinstance(o, dict) else o).strip()
+                    if one and one in seen_opts:
+                        return (f"pack.yaml 的 params.{key}.options 不符合约定："
+                                f"选项「{one}」重复出现——重复的取值在界面上同名，"
+                                "第二份的规则永远命中不到")
+                    seen_opts.add(one)
     banwords = data.get("banwords")
     if banwords is not None and not isinstance(banwords, str):
         return (f"pack.yaml 的 banwords 不符合约定：应是文件路径字符串"
@@ -1062,7 +1076,15 @@ class Pack:
             # 正常切片 181~392）。param_audit 已在设置页标出「未配 audience_map」
             # 的降级，这里把伤害降到零：宁缺毋滥，比误导强。
             return ""
-        return self.slice_heading("knowledge/audience.md", key)
+        # P1-2（2026-10-05）：映射**命中**但 audience.md 里没有那一节（作者改名/
+        # 写错）时同样返回空串。旧写法走 `slice_heading`，它两轮标题匹配都失配
+        # 时退回**整份文件**——别的受众话术照样灌进 select/write 两轮，而
+        # param_audit 对同一形态的降级文案承诺的是"切片为空，不会退回整份"。
+        # P1-22 只修了"映射键缺失"那一半，这一半是同族病的残余。与
+        # `topics_slice` 同口径：逐字标题取节、找不到就是空串，缺节由
+        # param_audit 标出（上文的 `_section_has_body` 分支），不靠这里兜底。
+        text = self.file_text("knowledge/audience.md")
+        return self._heading_body(text, _pick_heading_line(text, key))
 
     def file_slice(self, spec: str) -> str:
         """按 `stages.<阶段>.files` 的取值取文件：`路径` 或 `路径#章节关键词`。

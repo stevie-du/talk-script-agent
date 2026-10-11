@@ -26,6 +26,7 @@ import re
 import shutil
 import tempfile
 import zipfile
+import zlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -233,6 +234,23 @@ def _user_modified(packs_dir: Path, name: str) -> bool | None:
         raise _ledger_broken(name, '结构不对（顶层应为 {"app_version": …, "packs": {…}}）')
     stored = rec.get(name)
     if not isinstance(stored, dict):
+        # P3（2026-10-05）：NTFS **不区分大小写** —— 目录 `elevator` 与台账键
+        # `Elevator` 是同一份文件。导入包把 name 写成大小写变体时，按字面量查
+        # 台账查不到 → 返回 None → "用户改过内置包拒导入"的保护被绕过，用户
+        # 改动被覆盖（数据丢失类）。这里按**大小写折叠**再对一遍：折叠命中就
+        # 视为同一条台账（packgen 侧的 `_table_key` 早已做过同款归一，兄弟
+        # 路径不同权的残留）。
+        # P3-2（2026-10-11）：折叠搜索必须**对称** —— 原来的 `if lk != name:`
+        # 守卫只修了「导入名含大写、台账键全小写」一个方向；反过来「台账键含
+        # 大写、导入名全小写」时守卫把折叠搜索整个跳过 → 返回 None → 同一个
+        # 保护照样被绕过。出厂键当前全小写所以暂不可达，但 `_NAME_RE` 本就
+        # 允许大写，台账是用户数据不能赌形态 —— 凡字面量查不到就做折叠搜索。
+        lk = name.lower()
+        for k, v in rec.items():
+            if isinstance(v, dict) and k.lower() == lk:
+                stored = v
+                break
+    if not isinstance(stored, dict):
         return None
     return stored.get("local") != tree_hash(dst, skip_private=True)
 
@@ -244,7 +262,24 @@ def _swap_in(tmp_pack: Path, dst: Path) -> bool:
     "导了个包结果旧的没了新的没进"比导入失败糟糕得多。
     """
     if not dst.exists():
-        shutil.move(str(tmp_pack), str(dst))
+        # P2-14（2026-10-05）：首次导入同样要兜"搬入失败"——tmp 在 %TEMP%（通常
+        # C:），packs 在另一块盘时 `shutil.move` 退化为 copytree+删除，中途失败
+        # （磁盘满/杀软）会留下**半截包目录**进 list_packs。模块头"失败整体回滚"
+        # 的承诺原来只对替换路径成立（P2-3 修过它的兄弟，兄弟路径不同权）。
+        # 首次导入没有旧包可还原，能做的是清掉残骸、说实话。
+        try:
+            shutil.move(str(tmp_pack), str(dst))
+        except Exception:
+            if dst.is_dir():
+                shutil.rmtree(dst, ignore_errors=True)
+            elif dst.exists():
+                dst.unlink()
+            if dst.exists():
+                raise PackImportError(
+                    "导入落盘失败，且未能清干净残骸 —— 请手工删除 "
+                    f"{dst.name} 后重试（残骸会被当成一个坏包）")
+            raise PackImportError("导入落盘失败（残骸已清掉，未留下半截包）—— 请重试；"
+                                  "反复失败时检查目标磁盘空间与杀毒软件")
         return False
     backup = dst.parent / f".import-backup-{dst.name}"
     if backup.exists():
@@ -314,8 +349,26 @@ def validate_zip(zip_bytes: bytes, tmp: Path) -> tuple[ImportResult, Path]:
         for rel, zi in rels:
             dest = tmp / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(zi) as src, open(dest, "wb") as out:
-                shutil.copyfileobj(src, out, length=1024 * 64)
+            # P2-16（2026-10-05）：中央目录**说谎/数据损坏**的 zip 在这一步才炸
+            # （CRC 校验发生在读数据时；加密条目抛 RuntimeError）——原来只接
+            # 构造处的 BadZipFile，这两种形态原样逃逸：服务端导入 500"内部错误"
+            # 而非 400 人话，`python -m app.packcheck` 给包作者看的是裸 traceback。
+            # 这里统一折成 PackImportError（人话），与 zip 层其余防线同一条出口。
+            try:
+                with zf.open(zi) as src, open(dest, "wb") as out:
+                    shutil.copyfileobj(src, out, length=1024 * 64)
+            except (zipfile.BadZipFile, RuntimeError, NotImplementedError,
+                    zlib.error, OSError) as e:
+                # 2026-10-05 复审补口：这道闸原来只接 BadZipFile/RuntimeError，
+                # 复审实测 **deflate 流损坏抛 zlib.error**（60 个翻转点位里 30 个
+                # 逃逸）、**压缩法 99（WinZip AES 等）抛 NotImplementedError** ——
+                # 两类都原样逃逸成 500 / 裸 traceback，与没修一样。解压阶段的
+                # OSError（磁盘满等）一并折成人话：这一步的任何异常都意味着
+                # "这个 zip 没法安全读出"，统一走 400。
+                raise PackImportError(
+                    f"zip 里的 {rel} 读不出来（{type(e).__name__}: {e}）—— "
+                    "文件可能在传输中损坏、打包时设了密码或用了不支持的压缩方式；"
+                    "请重新打包后再导入") from e
             if dest.stat().st_size > MAX_FILE_BYTES:   # 声明的size可能说谎
                 # 与上面解压前的 file_size 预检是**同一上限的两道**
                 # （预检防"声明超大"，这道防"元数据说谎"——恶意 zip 才有）。

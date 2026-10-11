@@ -100,7 +100,9 @@ _AUTH_MASK = re.compile(
 # pipeline 传入的 task 只有这几种。
 _STAGE_NAME = {
     # `draft` 是**合并路径**（选题+撰写一次调用），也是现在绝大多数包走的那条
-    # —— skill.stages 里有 draft 就走它（见 pipeline._plan_and_draft）。
+    # —— skill.stages 里有 draft 就走它（见 pipeline._run_generate 的
+    #    `_draft_once` / `_continue_write`；旧注释写的 `_plan_and_draft`
+    #    是个不存在的符号，照着找会扑空 —— 2026-10-05 P3 修正）。
     # 它原来漏在这一张表外，于是空内容/截断的报错只说「本次调用」，
     # 眼前就这一次调用，读者根本不知道是哪件事出的问题（2026-09-27 修）。
     # 注意它**不是**写死的阶段预算（走 cfg.max_tokens），所以 `_ensure_content`

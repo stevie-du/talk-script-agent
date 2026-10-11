@@ -21,7 +21,8 @@ import {
   bindShell, renderSamples, refreshGate, gotoView, fillPackSelect, setCfgHint,
   renderModelPicker, setLanding, applyPackSwitch,
 } from "./ui.js";
-import { BUSY_STATES } from "./progress.js";
+import { BUSY_STATES, resetDocTitle } from "./progress.js";
+import { closeOverlays } from "./overlays.js";
 import { bindTopics } from "./topics.js";
 // 「关于我们」面板（设置页第 4 个导航项）。加载上它靠的是 settings.js 里
 // `import { refreshAbout, bindAbout } from "./about.js"` 那条（settings.js 在
@@ -109,6 +110,12 @@ function newChat() {
   // 生成中点「新建对话」也要解锁，否则发送键永久变灰。
   // 但**不取消后端作业**：它照常跑，左栏「生成中」里留着入口，点回去即可接着看。
   if (state.busy) detachJob();
+  // P3（2026-10-05）：新建对话与「切历史 / 开设置」同一条收口账（overlays.js
+  // 顶部注释声称的三处口径，至今只落了两处）。当前浮层全屏挡鼠标、没有新建
+  // 快捷键所以不可达 —— 但守卫先于事故，加快捷键的那天不会现形。
+  closeOverlays();
+  // 窗口标题跟着上一条生成走（「✓ 主题」）—— 新开一屏就不该再说旧主题的事
+  resetDocTitle();
   T.clearThread();
   setLanding(true);
   $("stale-banner").classList.add("hidden");

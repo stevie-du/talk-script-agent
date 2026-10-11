@@ -187,6 +187,16 @@
          但**共用 `#view-topics` 这一个滚动上下文** —— 与会话视图同一形状
          （`#chat-stream` + 吸顶页签条），也免得居中列之间差半个滚动条槽位。 -->
     <div id="view-topics" class="view hidden">
+      <!-- 页级标题区（2026-09-30，参考 Qoder 页头范式）：顶栏那格 15px 小字
+           只负责"我在哪一页"，页面自己的身份由这里给 —— 大标题 + 一句副标题。
+           与页签条同一条对齐账（同档限宽居中 + 16 内边距），h2 左沿 =
+           页签文字左沿 = 筛选胶囊左沿；切到「情报源」随 data-face 一起放宽。 -->
+      <header class="topics-hero">
+        <div class="th-titles">
+          <h2>今日选题</h2>
+          <p class="hint">热点按分排好 —— 排行看今天该做什么，按来源看某个平台抓到了什么，情报源看数据从哪来。</p>
+        </div>
+      </header>
       <nav class="res-tabs topics-tabs" id="topics-tabs" role="tablist" aria-label="今日选题">
         <!-- 三视图（需求方案 §3.5）：**排行**（默认，事件粒度·热点分）/
              **按来源**（原来那屏卡片，保留）/ **情报源**。
@@ -496,12 +506,12 @@
                   <label class="lbl">文件分组</label>
                   <div id="pi-groups" class="kb-groups"></div>
                 </div>
-                <div class="kb-view" id="pi-file-view">
+                <div class="kb-view is-empty" id="pi-file-view">
                   <div class="kb-view-head">
                     <span id="pi-file-title" class="lbl">未选择文件</span>
                     <span id="pi-file-size" class="hint"></span>
                   </div>
-                  <pre id="pi-file-body" class="kb-body">从左侧选择一个文件查看内容。</pre>
+                  <pre id="pi-file-body" class="kb-body">从左侧文件分组选择一个文件查看内容。</pre>
                 </div>
               </div>
             </div>

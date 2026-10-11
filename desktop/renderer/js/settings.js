@@ -1029,7 +1029,7 @@ const ROLE_ICON = {
   patterns: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><path d="M6 8v3a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8"/></svg>`,
   compliance: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4v6a8 8 0 0 1-8 8 8 8 0 0 1-8-8V7z"/><path d="M9 12l2 2 4-4"/></svg>`,
   knowledge: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H10a2 2 0 0 1 2 2v13a1.5 1.5 0 0 0-1.5-1.5H4z"/><path d="M20 5.5A1.5 1.5 0 0 0 18.5 4H14a2 2 0 0 0-2 2v13a1.5 1.5 0 0 1 1.5-1.5H20z"/></svg>`,
-  banwords: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></svg>`,
+  banwords: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></svg>`,
   checklist: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 11l3 3 8-8"/><path d="M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/></svg>`,
   private: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>`,
   package: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></svg>`,
@@ -1099,6 +1099,8 @@ function renderPackGroups(name, p, container) {
 async function showPackFile(name, rel, row) {
   document.querySelectorAll("#pi-groups .kb-item").forEach(n => n.classList.remove("on"));
   if (row) row.classList.add("on");
+  // 选中了文件 → 摘掉空态（占位居中那套排版只属于「未选择文件」）
+  $("pi-file-view")?.classList.remove("is-empty");
   $("pi-file-title").textContent = rel;
   $("pi-file-size").textContent = "";
   $("pi-file-body").textContent = "载入中…";
@@ -1447,8 +1449,11 @@ function renderPackList() {
   }
   for (const p of packs) list.appendChild(packItem(p));
   renderPacksDir();
-  // 恢复右列当前查看的那条的 .sel（列表重建会丢选中态）
-  const cur = $("pack").value;
+  // 恢复右列当前查看的那条的 .sel（列表重建会丢选中态）。
+  // P3（2026-10-05）：判据从 `#pack` 下拉的值改成 `piName`（openPackInfo 记下的
+  // "右列正在看谁"）—— 导入路径上右列打开的是新导入的包，而下拉还停在旧包，
+  // 中列高亮与右列详情各说各话，违反本函数注释自己定的不变量。
+  const cur = (typeof piName !== "undefined" && piName) || $("pack").value;
   if (cur) {
     const it = list.querySelector(`.pl-item[data-id="${CSS.escape(cur)}"]`);
     if (it) it.classList.add("sel");
@@ -1544,9 +1549,12 @@ async function openPackInfo(name) {
   // 切包 / 刷新：把文件查看器复位到「未选择文件」占位态。
   // 不复位的话，上个包选中的行还亮着、右列还在显示上一个包的内容 —
   // 用户切到 fitment 包会以为 elevator 还在生效。
+  // 空态类跟着挂上（styles.css 的 .kb-view.is-empty 把占位文字整块居中）；
+  // 点开任何一个文件时由 showPackFile 摘掉。
   $("pi-file-title").textContent = "未选择文件";
   $("pi-file-size").textContent = "";
   $("pi-file-body").textContent = "从左侧文件分组选择一个文件查看内容。";
+  $("pi-file-view").classList.add("is-empty");
   // 2026-09-17 合并：原 #pi-files 的扁平表格换成与原知识/技能面板同型的
   // 角色分组列表（.kb-groups）。一个行业一份知识+技能+合规+私有，
   // 整个组的视觉语言见 styles.css 的 .kb-group 系列。

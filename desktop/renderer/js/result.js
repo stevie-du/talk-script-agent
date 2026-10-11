@@ -98,6 +98,12 @@ export function renderResult(r, body, opts = {}) {
 }
 
 // ── 1) 头部：主题 + 指标 + 操作 ─────────────────────────────
+/** 头部重排（2026-09-30）：标题 → 指标 → 操作，三行左对齐一条纵列。
+ *  原来 7 颗操作钮与标题抢同一行（`.res-title` 的 margin-right:auto 把中间
+ *  撑成一条大缝），指标行又横贯全宽 —— 三个层次挤在一行半里。阅读面只有
+ *  780，操作行横排放不下就换行，落点随内容漂；收成纵列后每一行是确定的：
+ *  身份（标题）、读数（4 颗指标）、动作（导出类 ｜ 重生成类，中间发丝竖线）。
+ *  ⚠ 指标必须仍是 `.res-metric-list` 里的 4 颗 `.m-chip`（verify 数着）。 */
 function renderHeader(r, ch, dev, hardN, opts) {
   // 容差是引擎随报告下发的数（app/checker.py 的 tolerance_pct，pack.yaml 可配，
   // 短时长档物理上装不下绝对容差）。以前这里写死 ±10%：于是「偏差 12%」画红，
@@ -108,23 +114,22 @@ function renderHeader(r, ch, dev, hardN, opts) {
     : (Math.abs(dev) <= tol ? "good" : "bad");
   const head = el("div", "res-head");
   head.innerHTML = `
-    <div class="res-top">
-      <div class="res-title">${esc(r.params?.topic || "")}</div>
-      <div class="res-tools">
-        <button class="ghost" data-act="copy-voice" title="复制口播文案">复制口播</button>
-        <button class="ghost" data-act="save-srt" title="导出 SRT 字幕（可直接导入剪映 / PR）">导出 SRT</button>
-        <button class="ghost" data-act="save-md" title="另存为 Markdown 文件">另存 MD</button>
-        <button class="ghost" data-act="reveal" title="在文件管理器中打开产物目录">打开文件夹</button>
-        <button class="ghost" data-act="copy-json" title="复制结构化 JSON">JSON</button>
-        <button class="ghost" data-act="rerun" title="用当前参数重新生成（结果基本一致）">重跑</button>
-        <button class="ghost" data-act="revary" title="换一版：同主题同参数再生成一次，换一种表达，保留本次为上一个版本">换一版</button>
-      </div>
-    </div>
+    <div class="res-title">${esc(r.params?.topic || "")}</div>
     <div class="res-metric-list">
       <span class="m-chip">${ch.chars_total ?? "-"}/${ch.target_total ?? "-"} 字</span>
       <span class="m-chip">预计 ${sec(ch.estimated_seconds) || "-"} / 目标 ${sec(ch.duration_target) || "-"}</span>
       <span class="m-chip ${devCls}">偏差 ${dev > 0 ? "+" : ""}${dev}%</span>
       <span class="m-chip ${hardN === 0 ? "good" : "bad"}">禁用词 ${hardN} 硬 · ${(ch.soft_hits || []).length} 待确认</span>
+    </div>
+    <div class="res-tools">
+      <button class="ghost" data-act="copy-voice" title="复制口播文案">复制口播</button>
+      <button class="ghost" data-act="save-srt" title="导出 SRT 字幕（可直接导入剪映 / PR）">导出 SRT</button>
+      <button class="ghost" data-act="save-md" title="另存为 Markdown 文件">另存 MD</button>
+      <button class="ghost" data-act="reveal" title="在文件管理器中打开产物目录">打开文件夹</button>
+      <button class="ghost" data-act="copy-json" title="复制结构化 JSON">JSON</button>
+      <span class="res-tools-sep" aria-hidden="true"></span>
+      <button class="ghost" data-act="rerun" title="用当前参数重新生成（结果基本一致）">重跑</button>
+      <button class="ghost" data-act="revary" title="换一版：同主题同参数再生成一次，换一种表达，保留本次为上一个版本">换一版</button>
     </div>`;
   return head;
 }
@@ -920,8 +925,12 @@ export function renderVersionNoResult(body, v, hasIndex, onSwitch) {
 
 // ── 操作绑定 ────────────────────────────────────────────────
 function bindActions(body, r, opts) {
-  const q = s => body.querySelector(s);
-  const on = (sel, fn) => { const n = q(sel); if (n) n.onclick = fn; };
+  const on = (sel, fn) => {
+    // P2-5（2026-10-05）：**全部**命中都要绑。字幕页签里也有一颗「导出 SRT」，
+    // 旧写法 body.querySelector 恒命中结果头那颗（DOM 序在前）——页内按钮成了
+    // "点了没反应"的死按钮，而字幕页存在的意义就是导出前能预览。
+    body.querySelectorAll(sel).forEach(n => { n.onclick = fn; });
+  };
 
   on('[data-act="copy-voice"]', () =>
     copyText(voicePlainText(r), "口播已复制"));

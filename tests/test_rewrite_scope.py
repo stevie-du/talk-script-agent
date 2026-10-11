@@ -186,3 +186,17 @@ def test_generation_persists_the_requested_scope(tmp_path):
     assert snap["result"]["params"]["rewrite_scope"] == "in-place"
     disk = next(tmp_path.glob("generated/*/*/result.json"))
     assert json.loads(disk.read_text(encoding="utf-8"))["params"]["rewrite_scope"] == "in-place"
+
+
+def test_normalize_rejects_illegal_voice_and_format_like_the_scope(tmp_path):
+    """P3（2026-10-05）：voice / format 显式给了非法值与 rewrite_scope 同一条
+    立场 —— 抛错而不是静默回落默认并落盘。None/空串 = 没填，照走默认。"""
+    pl = Pipeline(tmp_path, load_config(tmp_path))
+    _pack_copy(tmp_path, rewrite_scope="in-place")
+    pack = Pack(tmp_path, "elevator")
+    with pytest.raises(ValueError, match="voice"):
+        pl._normalize(pack, {"topic": "t", "duration": 60, "voice": "haha"})
+    with pytest.raises(ValueError, match="format"):
+        pl._normalize(pack, {"topic": "t", "duration": 60, "format": "audio"})
+    got = pl._normalize(pack, {"topic": "t", "duration": 60})
+    assert got["voice"] and got["format"], "没填时照走默认"

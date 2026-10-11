@@ -479,6 +479,31 @@ b, strong { font-weight: 600; }
 #pane-packinfo .pi-cols { flex: 1; }
 #pane-packinfo .pane-detail > .page-actions { flex: 0 0 auto; }
 
+/* 包详情卡收紧（2026-09-30）：标题 / 描述 / 目录与文件区之间原来一律 24 缝，
+   meta 与文件两段混成一片。收成 16 缝 + 文件区上方一根发丝线 ——
+   「包是什么」与「包里有什么」之间从此有边界（§3：分隔线表堆叠分隔），
+   卡的纵向体量也小一档。 */
+#pane-packinfo .pane-detail .page-card { gap: var(--s4); }
+#pane-packinfo .pane-detail .page-card > .pi-cols {
+  border-top: 0.5px solid var(--line); padding-top: var(--s4);
+}
+/* 文件查看器（2026-09-30）：头部一行给一道发丝线，文件名区与内容区分开；
+   空态（未选择文件）整块居中，不再是贴顶的一行字压着一大片灰（参考 Qoder
+   各页空态的居中范式）。`.is-empty` 由 settings.js 在复位 / 选中文件时切换 ——
+   复位（未选择）= 空态居中；点开任何一个文件 = 常态阅读排版。 */
+#pi-file-view .kb-view-head { border-bottom: 0.5px solid var(--line); padding-bottom: var(--s2); }
+.kb-view.is-empty .kb-body { display: grid; place-items: center; align-content: center;
+  text-align: center; color: var(--text-2); }
+/* 空态图标：文件-icon 一枚灰线字形（img-src 允许 data:，与下拉箭头同一通道）。
+   display:grid 下 ::before 是独立的网格项，正好落在占位文字上方 ——
+   与 Qoder 各页空态的「图标 + 一句话」同构。图标是装饰（aria 无关），灰色取
+   两主题都可读的一档。 */
+.kb-view.is-empty .kb-body::before {
+  content: ""; display: block; width: 40px; height: 40px; margin-bottom: var(--s3);
+  background: center / contain no-repeat
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2398959a' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'><path d='M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z'/><path d='M14 3v5h5'/><path d='M9 13h6M9 17h4'/></svg>");
+}
+
 /* .detail-title 已删（2026-09-17）：packinfo 右列 h3 改用 .card-title，
    与 llm / gen 同 16px / 600。 */
 
@@ -2087,14 +2112,26 @@ button.ghost.danger:hover { background: var(--bad-soft); color: var(--bad); }
 .m-chip.good, .acc-badge.ok { color: var(--ok); }
 .acc-badge.info { color: var(--ink); background: var(--sel-bg); }
 
-/* 结果头部 */
-.res-head { margin-bottom: var(--s3); }
+/* 结果头部（2026-09-30 重排）：标题 → 指标 → 操作，三行一条左对齐纵列。
+   原来标题与 7 颗操作钮挤同一行、指标行横贯全宽 —— 三个层次挤一行半，
+   窄窗里按钮折到标题下面、落点随内容漂。纵列的每一行是确定的：
+   身份（标题）、读数（4 颗指标）、动作（导出类 ｜ 重生成类）。 */
+.res-head { margin-bottom: var(--s3); display: flex; flex-direction: column; gap: var(--s2); }
 .res-top { display: flex; align-items: flex-start; gap: var(--s4); flex-wrap: wrap; }
-.res-title { font-size: var(--f-display); font-weight: 600; letter-spacing: -.02em; min-width: 0; margin-right: auto; }
-.res-tools { display: flex; gap: var(--s2); flex-wrap: wrap; }
+/* margin-right:auto 已删（2026-09-30）：那是「标题 + 右侧操作」同行布局的
+   撑缝手法；头部改成纵列后标题整行独占，auto 边距什么都不做 —— 留着会让人
+   以为还有一个右邻在等它让位。 */
+.res-title { font-size: var(--f-display); font-weight: 600; letter-spacing: -.02em; min-width: 0; }
+.res-head .res-metric-list { margin-top: 0; }
+.res-tools { display: flex; gap: var(--s2); flex-wrap: wrap; align-items: center; }
 .res-tools button { height: var(--h-sm); font-size: var(--f-sm); padding: 0 var(--s2); }
+/* 操作组分隔线：导出类（复制/导出/另存/文件夹/JSON）与重生成类（重跑/换一版）
+   之间立一根发丝竖线 —— 两组动作的语义不同，缝分不开就读成同一排七个。 */
+.res-tools-sep { flex: 0 0 auto; width: 0.5px; height: var(--h-sm); margin: 0; background: var(--line); }
+/* ⚠ 用固定高而不是 align-self:stretch（2026-10-05 P3）：宿主 flex-wrap
+   换行时，折行点落在分隔线上它会独占一行、stretch 拉成整行高的竖线；
+   固定高与按钮同档（--h-sm），换行后只是一根 22px 的短线。 */
 .res-metric-list { display: flex; gap: var(--s2); flex-wrap: wrap; margin-top: var(--s3); }
-.res-banners { margin-bottom: var(--s2); }
 
 /* 横幅：默认中性，warn/info 只换文字与底色 */
 .banner {
@@ -2113,6 +2150,31 @@ button.ghost.danger:hover { background: var(--bad-soft); color: var(--bad); }
    （复用 .hint.cfg-err）—— 而那一族的定义原话是「配置读坏不是错误状态，
    引擎照常起来」。全局故障借一个"还能用"的颜色说，用户读到的就是"只是个提醒"。 */
 .banner.bad { background: var(--bad-soft); color: var(--bad); }
+/* 结果页的横幅收成一张「说明卡」（2026-09-30，参考 Qoder「已编辑 N 个文件」
+   摘要卡的形态）：几条横幅原来各自一块圆角条，四条叠起来就是一面墙（截图实测
+   顶掉正文 200px）。收进同一张白卡后按行分隔（发丝线），状态只落在字色上
+   （§7.4），不再一块一色。⚠ 引擎横幅（#engine-banner）不在此列 —— 它是全局
+   阻断故障，必须保持整块红底；失败/回炉的解释卡（.banner.why）是行内 details，
+   展开体自己带底色，不受去底影响。 */
+.res-banners {
+  background: var(--surface); border-radius: var(--r-card); box-shadow: var(--e1);
+  padding: 0 var(--s3); margin-bottom: var(--s2);
+}
+.res-banners .banner { margin-bottom: 0; border-radius: 0; background: transparent; padding: var(--s2) 0; }
+.res-banners .banner + .banner { border-top: 0.5px solid var(--line); }
+/* 可跳的横幅（占位事实）hover 用底色表态（§2·5.4）—— 原来的 brightness
+   滤镜在透明底上什么都照不出来。
+   ⚠ 这里**不用** overflow:hidden 裁首末行的 hover 底色角：它会连
+   `.banner.jumpable` 的键盘焦点环一起裁掉（环是 4px 外扩的 box-shadow，
+   首末行贴着卡边）。改给首末行补同卡圆角 —— 底色跟着卡角走，环照常外扩。 */
+.res-banners .banner.jumpable:hover { filter: none; background: var(--fill); }
+/* 圆角用**长手**写：`:first-child` 与 `:last-child` 会同时命中"只有一行"的卡，
+   短手第二份会把第一份的四个角整组盖掉（上角变方角）。长手各管两个角，
+   两条同时成立。 */
+.res-banners .banner.jumpable:first-child {
+  border-top-left-radius: var(--r-card); border-top-right-radius: var(--r-card); }
+.res-banners .banner.jumpable:last-child {
+  border-bottom-left-radius: var(--r-card); border-bottom-right-radius: var(--r-card); }
 /* 引擎失联横幅（#right 的直接子节点，不是 .view —— 见 index.html 那处注释）。
    横向吃这一列的通用内边距（--s6，与 .right-head 同一条），否则它会顶到窗口两边；
    下方留 .banner 那一族自己的 --s2（选题页签条就贴在它下面，缝给 0 会粘成一块）。 */
@@ -2549,11 +2611,17 @@ td.warn { color: var(--warn); font-weight: 500; }
 
 /* ══════════════ 响应式 ══════════════ */
 @media (max-width: 1120px) {
+  /* ⚠ 2026-10-05 P3 认领：这两条在首页（landing）视图会被 `.view.is-landing
+     #composer / #chat-stream` 的高特异性规则**部分盖掉**（顶距/底距不吃降档，
+     只有左右生效）—— 与 s23-3"只认了水平方向"同类的"失效没人认领"。
+     landing 有自己的节奏账，判为有意保留；哪天要动 landing 的窄窗节奏，
+     从这两条与那两条的交互查起。 */
   #chat-stream { padding: var(--s4) var(--s4) var(--s3); }
   #composer { padding: var(--s2) var(--s4) var(--s3); }
-  /* 选题视图必须跟着降：§2.8 量到「窄窗再差 8px」的根因就是新视图没跟这条
-     媒体查询一起降内边距 —— 1440 窗下两列对齐、1000 窗下差 8px，越窄差越多。 */
-  .topics-inner, .topics-src-inner { padding: var(--s4) var(--s4) var(--s3); }
+  /* `.topics-inner` 那行已搬走（2026-09-30）：它在这条头部媒体块里是**死声明**
+     —— 基础规则在文件更后面，同特异性源码顺序后者胜，声明的 12px 从未生效
+     （s23-3 的注释只认了水平方向是虚的，纵向 24 vs 12 的失效没人认领）。
+     搬活后的规则与断言见 .topics-src-inner 基础规则之后的那一块。 */
   .nav-item kbd { display: none; }
 
   /* ⚠ 左栏宽度降档**必须与内边距同一个窗宽**（2026-09-27 修）。
@@ -2721,7 +2789,12 @@ td.warn { color: var(--warn); font-weight: 500; }
 
 /* 决策解释：把「为什么回炉 / 为什么忽略这些词」摊开，而不是一句「未通过校验」 */
 .banner.why { cursor: default; }
-.banner.why > summary { cursor: pointer; list-style: none; }
+/* P2-11（2026-10-05）：display:flex 是全站另外五个折叠块（.st-adv/.pg-more/
+   .think-stream/.acc/.log-block）都写了的，唯独这条漏了 —— summary 保持 UA 的
+   list-item，::after 落在**行内**格式化上下文：width/height 无效、align-self
+   无效、transform 对非原子行内盒**不生效**（展开后箭头永不旋转，2026-10-05
+   无头 Chrome 字节级实测；verify 字节探针对照组为 flex 版）。补齐同款。 */
+.banner.why > summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: var(--s2); }
 .banner.why > summary::-webkit-details-marker { display: none; }
 /* 折叠箭头用既有的「边框拼出来的三角」（同 .st-adv / .pg-more），不再由 CSS 注入字形：
    规范 §4 禁把 ▾ / ▴ 这类字符当图标 —— 换字体就换一副长相，读屏还会把它念出来。 */
@@ -2945,6 +3018,21 @@ input:not([type]) {
      读起来像页签条坏了。条跟面走，才永远盖得住它下面那一面。
      `data-face` 由 topics.js 的页签回调写（与 `data-view` 同一族做法）。 */
 #view-topics[data-face="sources"] .topics-tabs { max-width: var(--w-stg-3col); }
+
+/* ── 页级标题区（2026-09-30，参考 Qoder 页头范式）────────────
+   选题视图原来只有顶栏 48px 那一格小字标题，页面自身没有"这是一页"的身份；
+   Qoder 的页面（自动化 / 知识中心）都在内容列顶部给一个大标题 + 一句副标题。
+   对齐吃的是同一条账：max-width 与页签条同档居中、padding-inline 16
+   与 .res-tab / .topics-inner 的 16 相等 —— h2 的左沿正好落在页签文字左沿上。
+   切到「情报源」时跟页签条一起放宽（同一属性选择器，同一理由）。 */
+.topics-hero {
+  flex: 0 0 auto; width: 100%; max-width: var(--w-stream); margin-inline: auto;
+  padding: var(--s6) var(--s4) 0;
+  display: flex; align-items: flex-start; justify-content: space-between; gap: var(--s4);
+}
+#view-topics[data-face="sources"] .topics-hero { max-width: var(--w-stg-3col); }
+.topics-hero .th-titles { display: flex; flex-direction: column; gap: var(--s1); min-width: 0; }
+.topics-hero h2 { font-size: var(--f-display); font-weight: 600; letter-spacing: -.02em; }
 .topics, .topics-src { flex: 0 0 auto; }
 .topics-inner {
   max-width: var(--w-stream); width: 100%; margin-inline: auto;
@@ -2955,6 +3043,15 @@ input:not([type]) {
   max-width: var(--w-stg-3col); width: 100%; margin-inline: auto;
   padding: var(--s4) var(--s4) var(--s6);
   display: flex; flex-direction: column; gap: var(--s4);
+}
+/* 窄窗底边距降档（2026-09-30 从头部媒体块搬活）：这条规则的水平值与基础规则
+   相同（16=16），活的只有底部 24→12 —— 与窄窗下 #chat-stream 的
+   padding-bottom(--s3) 同档（§2.8：两条滚动列是一族）；水平内边距基础规则
+   已是 16，无需重复。
+   ⚠ 必须放在基础规则**之后**：同特异性靠源码顺序决胜。verify 窄窗段的
+   「底边距降到 --s3」断言守的就是这一课（变异 s43-1 把它改回 24 必须红）。 */
+@media (max-width: 1120px) {
+  .topics-inner, .topics-src-inner { padding-bottom: var(--s3); }
 }
 .topics-head { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; }
 /* `.hint` 的 `margin-top: --s1` 是给"标签下面堆着的块"写的；落进这条 flex 行里
@@ -2971,7 +3068,6 @@ input:not([type]) {
 /* 分组直接落在页面底色上，不再套一层白卡 —— 卡中卡会吃掉层级（规范 §3）。
    组与组之间那一档由 `#topics-root` 挂的 `.kb-groups`（gap --s4）负责，
    与知识库页同一族，不另写第二条 gap。 */
-.topics-inner .page-card > .res-metric-list { margin-top: 0; }
 /* 选题卡：与正文同列后改单列堆叠（780 放两列会把 D/S/E 的数值列挤掉） */
 .topic-grid { display: grid; gap: var(--s4); grid-template-columns: 1fr; }
 
@@ -2988,7 +3084,12 @@ input:not([type]) {
    现在 `.sig-track` / `.sig-fill` 这两个名字**又在排行面里活了一次**（`.rank-signals`
    那一段，见本文件下面的排行视图块）—— 但**不是把四格恢复回来**：那四格量的是
    D/S/E 的相对值（三格常年空刻度），这四根量的是热点分的构成，每一根都直接解释总分。 */
-.topic-card { gap: var(--s2); }
+/* 按来源卡收紧（2026-09-30）：原来吃 .page-card 的 24 内边距 + 24 块间缝，
+   两行内容的卡撑到 ~135px 高、一屏放不下几张（截图实测），内容与卡面的
+   体量倒挂。收成 16/24 内边距 + 12 块间缝，卡高落回 ~110px。
+   ⚠ 卡的**可见块**仍是三块（res-top / t-desc / topic-foot，verify 数着），
+     这里只动节奏，不动结构。 */
+.topic-card { gap: var(--s3); padding: var(--s4) var(--s6); }
 .t-desc { font-size: var(--f-sm); color: var(--text-2); line-height: 1.6;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* 证据是 URL 时吃等宽小字（与源表「上次抓取」那类机器串同一族），
@@ -3000,16 +3101,17 @@ input:not([type]) {
 .t-minor { font-size: var(--f-2xs); color: var(--text-3); }
 /* 卡脚：原来 `margin-top: auto` 是给"两列等高卡"对齐底部按钮用的，改单列之后
    它只剩一个后果 —— 把标签行与按钮之间那段空白拉到整卡剩余高度。
-   现在归 0：卡本身是 `.page-card`（`gap: --s6`），24 已经是这一档呼吸；
-   再叠一个 margin 就变成 36 —— 刻度外的值，而且同一张卡里会出现两种节奏
-   （这正是 `.lbl` 那条账本反对的形态）。 */
+   现在归 0（2026-10-05 P3 改口：`.topic-card` 的块间缝已收成 --s3=12，旧注释
+   引用的"gap: --s6=24"过期了；十行之下那条注释写的就是 12）。归 0 之后线上
+   下各留同一档 12，不再靠 margin 叠出第二种节奏。 */
 .topic-foot { margin-top: 0; display: flex; gap: var(--s2); align-items: center; }
 /* 底行与上面两行之间那道发丝线 = 参考图里模板卡那条分隔（它画的是虚线，
    规范 §2 描边只允许 0.5px 发丝实线，所以这里用实线）。
-   `margin-top: var(--s2)` 补回被 `.topic-card { gap: --s2 }` 收掉的那一档呼吸，
-   让"分隔线之上是内容、之下是动作"这一段比行内 gap 明显。 */
+   卡的块间缝已是 12，线上下各留同一档 12 —— 「分隔线之上是内容、之下是
+   动作」这一段不再靠 margin 叠出来（改前 gap 8 + margin 8 = 线上 16、线下 12，
+   两个数谁也不解释谁）。 */
 .topic-card .topic-foot { border-top: 0.5px solid var(--line);
-  padding-top: var(--s3); margin-top: var(--s2); }
+  padding-top: var(--s3); margin-top: 0; }
 .topic-card .topic-foot .res-metric-list { margin-top: 0; }
 .topics-empty { font-size: var(--f-sm); color: var(--text-2); line-height: 1.7; }
 
@@ -3036,17 +3138,55 @@ input:not([type]) {
    同一条约定）。四根信号条**不是**被撤掉的那条 D/S/E 轨道：那条是"三格里两格常年
    空刻度"，这四根是热点分的构成，每一根都直接解释总分。 */
 .rank-list { display: flex; flex-direction: column; gap: var(--s4); }
-.rank-row { display: flex; flex-direction: column; gap: var(--s2); }
+/* 排行行：内容左栏 + 「分数 / 动作」右栏（2026-09-30，参考 Qoder 列表行的
+   右缘动作柱）。原来三段全宽堆叠，底行「机会分 + 说明 + 标签 + 三颗按钮」
+   在 780 列里必然换行，按钮被拆成竖排字（截图实测）。右栏把分数与三颗动作
+   收进一条竖柱，左栏的内容行从此不再和按钮抢宽度。
+   ⚠ 它同时是 .page-card（白卡 + 发丝边），这里的 grid 只接管排布，
+     卡面语言不在这里重复定义。 */
+.rank-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--s6); }
+.rank-main { min-width: 0; display: flex; flex-direction: column; gap: var(--s2); }
+.rank-side { display: flex; flex-direction: column; align-items: flex-end; gap: var(--s3); }
+.rank-side .rank-score { white-space: nowrap; }
+/* 动作竖柱：三颗同宽（--h-sm 档不变，只把宽度对齐），主动作（生成选题卡）
+   靠实心底自明。竖排顺序 = 阅读顺序：看条目 → 忽略 → 生成。 */
+.rank-ops { display: flex; flex-direction: column; align-items: stretch; gap: var(--s1); }
+.rank-ops button { width: 100%; justify-content: center; }
+/* 窄窗（≤1120）右栏收成底行。⚠ 必须放在基础规则**之后**：同特异性靠源码
+   顺序决胜，塞进文件头部那个 1120 媒体块会被这里的基础规则整组盖掉
+   （那个块在 .rank-row 基础规则之前，是文件里同病的老块）。 */
+@media (max-width: 1120px) {
+  .rank-row { grid-template-columns: 1fr; }
+  .rank-side { flex-direction: row; align-items: center; justify-content: space-between; width: 100%; }
+  .rank-ops { flex-direction: row; }
+  .rank-ops button { width: auto; }
+}
+/* 机会分 + 一句说明：底行的左簇。说明文字长（热度/在榜/首见）允许换行。 */
+.rank-sub { display: flex; align-items: baseline; gap: var(--s2); flex-wrap: wrap; }
+/* 标签行：res-metric-list 全局那条 margin-top 是给"标题下面堆着的块"写的，
+   落在 rank-main 的 gap 容器里只做一件事 —— 比别的行多出 12px。归零。 */
+.rank-main .res-metric-list { margin-top: 0; }
 .rank-head { display: flex; align-items: center; gap: var(--s2); }
+/* ⚠ 本条与结果头段的 .res-top 同特异性，靠**写在后面**赢下 align-items 与
+   gap（排行行产出 <div class="res-top rank-head">）—— 与 .src-pill.on 那条
+   同一性质：重排文件把本条挪到 .res-top 之前会静默改掉排行行头的对齐
+   （2026-10-05 P3 认领）。 */
 .rank-no { font-family: var(--mono); font-size: var(--f-sm); color: var(--text-2);
   min-width: var(--s6); text-align: right; }
 /* 「高热高配」推荐位（§3.3 第 6 条）只加一层描边，不加底色：整张卡变色会让
-   一屏里"推荐"这两字变成"这一堆不一样"，而读者分不清是哪一项在说话。 */
-.rank-row.feat { box-shadow: 0 0 0 0.5px var(--line-strong) inset; }
+   一屏里"推荐"这两字变成"这一堆不一样"，而读者分不清是哪一项在说话。
+   ⚠ 2026-10-05 P3：写成**叠加**（e2 在前、描边在后）—— 单值会整组替换掉
+   .page-card 的 e2（外发丝线 + 微抬升），推荐卡反而丢了与同屏其余卡一致的
+   层次；"加一层"就得真是一层。 */
+.rank-row.feat { box-shadow: var(--e2), 0 0 0 0.5px var(--line-strong) inset; }
 .rank-src { font-family: var(--mono); }
 .rank-score { font-size: var(--f-2xs); color: var(--text-2); white-space: nowrap; }
 .rank-score b { font-size: var(--f-sm); color: var(--text-1); font-weight: 600; }
-.rank-signals { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--s2); }
+/* 四根信号条改 2×2：左栏被右栏让出宽度后，一行四根的轨道只剩 ~90px，
+   读不出长短；两行两根每根轨道 ~250px，长度才当"条"看。
+   列缝(16) 必须大于条内缝(4)，四根才读得出是四根（verify 比计算值）。 */
+.rank-signals { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s2) var(--s4); }
 .sig { display: flex; align-items: center; gap: var(--s1);
   font-size: var(--f-2xs); color: var(--text-2); min-width: 0; }
 .sig-lbl { font-style: normal; white-space: nowrap; }
@@ -3197,7 +3337,7 @@ input:not([type]) {
   left: calc(2% + var(--x, 0) * 0.96%); border-left: 1px dashed var(--line-strong); }
 .quad-th::after { content: attr(data-th); position: absolute; top: -2px;
   left: 3px; font-size: var(--f-2xs); font-family: var(--mono); color: var(--text-3); }
-.quad-dot { position: absolute; width: 13px; height: 13px; padding: 0;
+.quad-dot { position: absolute; width: var(--s3); height: var(--s3); padding: 0;
   border-radius: 50%; border: 0; cursor: pointer;
   left: calc(2% + var(--x, 0) * 0.96%);
   top: calc(var(--base, 50) * 1% + var(--jy, 0) * 11px);

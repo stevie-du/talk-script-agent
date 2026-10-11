@@ -229,3 +229,31 @@ def test_manifest_broken_never_overwrites(tmp_path):
 
 if __name__ == "__main__":
     raise SystemExit("用 pytest 跑：pytest tests/test_packseed.py")
+
+
+def test_adopted_user_pack_is_never_overwritten_by_bundled_update(tmp_path):
+    """P2-15（2026-10-05）：`adopted` 标记曾经零消费方——收编那次承诺
+    "保留你的那份，出厂版本没有并进来"，但出厂更新一到，更新分支不看它：
+    台账缺席时收编的用户包（local 未变）被整个换成出厂版，日志还写
+    "你没改过它"。收编 ≠ 同意被覆盖：用户没动它也不换；动了走冲突路，
+    同样不覆盖。"""
+    bundled = _make_bundled(tmp_path)
+    packs = tmp_path / "packs"
+    # 用户目录里先有一个同名包（老数据 / 自己拷进来的），台账不存在
+    packs.mkdir(parents=True)
+    (packs / "p").mkdir()
+    (packs / "p" / "pack.yaml").write_text("name: p\ndisplay_name: 用户自己的\n",
+                                           encoding="utf-8")
+    (packs / "p" / "a.md").write_text("用户版 A\n", encoding="utf-8")
+
+    out1 = packseed.seed_bundled_packs(bundled, packs, app_version="1")
+    assert out1["kept"] == ["p"], out1
+    assert _read(packs / "p" / "a.md") == "用户版 A\n"
+
+    # 出厂更新（bundled 变了），用户包一个字节没动
+    (bundled / "p" / "a.md").write_text("出厂版 A 改\n", encoding="utf-8")
+    out2 = packseed.seed_bundled_packs(bundled, packs, app_version="2")
+    assert "p" not in out2["updated"], out2
+    assert "p" in out2["kept"], out2
+    assert _read(packs / "p" / "a.md") == "用户版 A\n", "收编的包被出厂更新覆盖了"
+    assert _read(packs / "p" / "pack.yaml").find("用户自己的") >= 0

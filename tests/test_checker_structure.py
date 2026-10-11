@@ -392,3 +392,14 @@ def test_real_pack_audit_stays_clean():
     data = yaml.safe_load((ELEVATOR / "pack.yaml").read_text(encoding="utf-8"))
     assert param_audit(ELEVATOR, data) == {}
     assert pack_info(ELEVATOR).pack_error == ""
+
+# ── P1-1（2026-10-05）：引号不是口播字 ─────────────────────────
+def test_quotes_are_not_speech_chars():
+    """checker.PUNCT 的字面弯引号曾被转成 ASCII、那对 '' 恰好成了相邻字符串
+    拼接的定界符——四个引号字符静默消失，TTS 不念的引号被按口播字计（字数
+    虚高），而对账测试的样本里一个引号都没有，钉不住。这里把两类引号逐个
+    钉住：count_chars 对弯引号与 ASCII 引号都必须剥掉。"""
+    from app.checker import count_chars
+    assert count_chars("他说“这个好”。") == 5, "弯引号（U+201C/201D）必须不算口播字"
+    assert count_chars("数字\"直角引号\"测试。") == 8, "ASCII 双引号必须不算口播字"
+    assert count_chars("单引号‘这样’与'这样'混排。") == 10, "弯单引号与 ASCII 单引号都必须剥掉"

@@ -41,8 +41,11 @@ LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 def allowed_hostnames(bind_host: str | None = None) -> frozenset[str]:
     """允许出现在 Host 里的主机名：回环名 + 显式绑定的那个地址。
 
-    绑定 0.0.0.0 / 局域网 IP 是使用者的显式选择（`--host`），此时把该地址
-    也加进来，否则从局域网访问会连界面都打不开。
+    ⚠ 2026-10-05 P3 改口 —— 旧注释暗示"绑 0.0.0.0 局域网也能用"，与实现
+    不符：`0.0.0.0` / `::` 被**显式排除**（防 Host 头伪造），局域网 IP 也无法
+    推知。所以绑 0.0.0.0 时局域网浏览器发出的 `Origin: http://<局域网IP>:port`
+    会被 `origin_allowed` 拒掉（同源 GET 能开页面、POST 会挂）。要给局域网用，
+    请绑**具体**地址 —— 那个 IP 会进这份白名单，实现与意图一致。
     """
     hosts = set(LOOPBACK_HOSTS)
     if bind_host:

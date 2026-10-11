@@ -14,11 +14,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 AI = ROOT / "app/ai_tells.py"
+CHECK_F = ROOT / "app/checker.py"
 KN_F = ROOT / "app/knowledge.py"
 PIPE_F = ROOT / "app/pipeline.py"
 INTEL_F = ROOT / "app/intel.py"
 JOBS_F = ROOT / "app/jobs.py"
 SRV_F = ROOT / "app/server.py"
+MUTATE_F = ROOT / "_verify/mutate.py"
+PACKGEN_F = ROOT / "app/packgen.py"
+PKIMP_F = ROOT / "app/packimport.py"
+PACKSEED_F = ROOT / "app/packseed.py"
 PACK = ROOT / "packs/elevator"
 YAML_F = PACK / "ai_tells.yaml"
 TOPICS_F = ROOT / "desktop/renderer/js/topics.js"
@@ -586,10 +591,13 @@ MUTATIONS = [
         # 在排行面换了个形状活着：四根条靠"组间缝比组内缝宽"才读成四根，
         # 缝一equal 就是「0.92 名次」与下一根粘成一个词组。判据见 selState 那组
         # 同一层的 `sigGaps`（比的是计算值，不写死 px）。
+        # 2026-09-30 重指：信号条 4 列改 2×2（gap 变成「行 s2 列 s4」两值形态），
+        # 旧锚点（repeat(4,1fr) + gap: var(--s2)）随实现一起失效 —— 变异改打列缝
+        # （--s4 → --s1），列缝一塌，四根条照样粘成词组，判据语义不变。
         "s11-3 四根信号条的组间缝退回与组内同宽（「0.92 名次」与下一根粘成一个词组）",
         CSS_F,
-        ".rank-signals { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--s2); }",
-        ".rank-signals { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--s1); }",
+        "  gap: var(--s2) var(--s4); }",
+        "  gap: var(--s1); }",
         "verify:topics",
     ),
     (
@@ -1261,10 +1269,10 @@ MUTATIONS = [
         "tests/test_unit_vocabulary.py -k job_timing_numbers",
     ),
     (
-        "s25-5 抓取超时的话把分钟数写死（「30 分钟」与算出来的那份分叉）",
+        "s25-5 作业轮询超时的话把分钟数写死（「30 分钟」与算出来的那份分叉；2026-10-11 P3-6 随 awaitJob 错误文案一并改口「作业」，三个调用方共用这条轮询）",
         TOPICS_F,
-        "      toast(`抓取状态未知（已等待 ${Math.round(POLL_GRACE_MS / 60000)} 分钟），请手动刷新或重试`, 5000);",
-        "      toast(\"抓取状态未知（已等待 30 分钟），请手动刷新或重试\", 5000);",
+        "      toast(`作业状态未知（已等待 ${Math.round(POLL_GRACE_MS / 60000)} 分钟），请手动刷新或重试`, 5000);",
+        "      toast(\"作业状态未知（已等待 30 分钟），请手动刷新或重试\", 5000);",
         "tests/test_unit_vocabulary.py -k job_timing_numbers",
     ),
     # ── s26 组（第 18 批：幽灵 token、缺档的 warn、CSS 注入的字形）────────
@@ -2285,8 +2293,12 @@ MUTATIONS = [
     (
         "s38-5 被跳过的那一轮算成一次失败（「连续 4 次抓取失败」而我们只试过 3 次）",
         INTEL_F,
-        '            if row.get("state") == "cooling":',
-        "            if False:                     # MUTATED: 跳过也计一次失败",
+        # 2026-10-05 重指：P2-8 修复把豁免从 cooling 单值扩成 cooling/off/unwired
+        # 三态（三种行都没发过请求），本条变异随之改为"豁免收窄到只剩 off/unwired"
+        # —— cooling 重新被当成一次失败，判据语义不变。
+        '            if row.get("state") in ("cooling", "off", "unwired"):',
+        '            if row.get("state") in ("off", "unwired"):'
+        '   # MUTATED: 跳过也计一次失败',
         "tests/test_intel_ranking.py -k skipped_round_is_not_counted",
     ),
     (
@@ -2373,42 +2385,386 @@ MUTATIONS = [
         "      // MUTATED: 只恢复展开，按钮字留在「看条目」",
         "verify:topics",
     ),
-    # ── s39 组（四象限散点，方案 §3.3 #6 散点那一半）──
+    # ── s39q 组（四象限散点，方案 §3.3 #6 散点那一半）──
+    # 2026-10-05 P3：原来与上面的 s39 组（A-9 审查修复轮）整段撞号
+    # （s39-1..5 各出现两次），「s39-3 红了」指不出是哪条 —— 重编号为 s39q-N；
+    # `-k s39` 的子串匹配仍然两组全跑，行为不变。
     # 档线/点位/跨页/不进图四条判据各配一条变异；档位的"一份口径"在后端，那条指 pytest。
     (
-        "s39-1 today() 不再下发四象限档位（前端档线只能抄常数，重校准那天图与分档各画各的）",
+        "s39q-1 today() 不再下发四象限档位（前端档线只能抄常数，重校准那天图与分档各画各的）",
         INTEL_F,
         '            "hot_quadrant_high": HOT_QUADRANT_HIGH,',
         '            "hot_quadrant_high": None,  # MUTATED: 档位不下发',
         "tests/test_intel_ranking.py -k quadrant_threshold",
     ),
     (
-        "s39-2 点位不走 CSSOM（--x 没人写，点全叠回兜底位置 —— 属性在、位置是假的）",
+        "s39q-2 点位不走 CSSOM（--x 没人写，点全叠回兜底位置 —— 属性在、位置是假的）",
         TOPICS_F,
         '    d.style.setProperty("--x", String(s));',
         "    // MUTATED: 坐标没人写",
         "verify:topics",
     ),
     (
-        "s39-3 点图定位不翻页（目标行在另一页时永远找不到，图上的点点了没反应）",
+        "s39q-3 点图定位不翻页（目标行在另一页时永远找不到，图上的点点了没反应）",
         TOPICS_F,
         "  rankPage = Math.floor(idx / PAGE_SIZE);",
         "  rankPage = 0;  // MUTATED: 永远停在当前页",
         "verify:topics",
     ),
     (
-        "s39-4 算不出分的事件照画（「—」冒充 0 分落在最左，图在撒谎）",
+        "s39q-4 算不出分的事件照画（「—」冒充 0 分落在最左，图在撒谎）",
         TOPICS_F,
         "  const scored = all.filter(e => e.hot_score !== null && e.hot_score !== undefined);",
         "  const scored = all.slice();  // MUTATED: 空分也画进去",
         "verify:topics",
     ),
     (
-        "s39-5 「高热」档线不画（四象限没了分界，高热低热看不出来）",
+        "s39q-5 「高热」档线不画（四象限没了分界，高热低热看不出来）",
         TOPICS_F,
         "      ${(th === null || th === undefined) ? \"\"",
         "      ${true ? \"\"",
         "verify:topics",
+    ),
+    # ── s42 组（审查报告-20260930 的修复：5 条 P2 + thresholds 边角）──
+    (
+        "s42-1 M1 structural 档收尾句退回「一个字都不要动」（与「可以重排」自相矛盾复活）",
+        PIPE_F,
+        '        lines.append(NEGATIVE_TAIL.get(scope, NEGATIVE_TAIL["default"]))',
+        '        lines.append(NEGATIVE_TAIL["default"])   # MUTATED: 不分档',
+        "tests/test_refine_feedback.py -k negative_tail_follows",
+    ),
+    (
+        "s42-2 M3' in-place 的人声注消失（「补回人声」重新诱导加句）",
+        PIPE_F,
+        "        if scope in VOICE_SCOPE_NOTE:\n"
+        "            lines.append(VOICE_SCOPE_NOTE[scope])",
+        "        if False:\n"
+        "            lines.append(VOICE_SCOPE_NOTE[scope])   # MUTATED: 按档注消失",
+        "tests/test_refine_feedback.py -k reined_in_for_in_place",
+    ),
+    (
+        "s42-3 M3 no_specific 的正文判据退回只剥占位（画面里的数字重新买通 strong 豁免）",
+        AI,
+        "        body = _plain(full)",
+        "        body = _PLACEHOLDER_RE.sub(\"\", full)   # MUTATED: 画面不剥",
+        "tests/test_ai_tells.py -k ignores_picture_annotations",
+    ),
+    (
+        "s42-4 M2 形态流退回手写窄标点表（`／` 重新被当成字灌进 mattr/3-gram）",
+        AI,
+        '_SHAPE_SPLIT = re.compile("[" + _PUNCT[1:-1] + "]*")',
+        '_SHAPE_SPLIT = re.compile(r"[，。、？！：；…—·～\\n\\r\\t 　]*")   # MUTATED: 窄表',
+        "tests/test_ai_tells.py -k matches_the_count_caliber",
+    ),
+    (
+        "s42-5 M5 first_sent 字面条目带 note/unless 不再报「不生效」",
+        AI,
+        "                if spec and cat in first_sent_tells:",
+        "                if False and cat in first_sent_tells:   # MUTATED: 不喊",
+        "tests/test_ai_tells.py -k qualifiers_are_announced",
+    ),
+    (
+        "s42-6 M5 re: 条目带限定不再报「不生效」（静默丢弃复活）",
+        AI,
+        "                if w.startswith(RE_PREFIX):\n"
+        "                    if spec:",
+        "                if w.startswith(RE_PREFIX):\n"
+        "                    if False:   # MUTATED: 不喊",
+        "tests/test_ai_tells.py -k qualifiers_are_announced",
+    ),
+    (
+        "s42-7 E6 strong 的 contrast_frame 退回门槛口径（单次命中不报，strong 比弱 tell 更钝）",
+        AI,
+        "        min_n = (1 if self.sev(\"contrast_frame\") == STRONG",
+        "        min_n = (WEAK_MIN if self.sev(\"contrast_frame\") == STRONG   # MUTATED",
+        "tests/test_ai_tells.py -k strong_reports_a_single_hit",
+    ),
+    (
+        "s42-8 E8 未声明 tell 的门槛重新「记门槛+印非默认口径」（no-op 被谎称换尺）",
+        AI,
+        # 2026-10-05 重指：E8 的判据从 contrast_frame 单类泛化到所有未声明 tell
+        # （词表类同样该被告知"这条 tell 整个没跑"），锚点随实现更新。
+        "            if sev_here is None:",
+        "            if False and sev_here is None:   # MUTATED",
+        "tests/test_ai_tells.py -k follow_the_severity",
+    ),
+    (
+        "s42-9 E6 strong contrast_frame 的门槛照收（「不生效」不再说出口）",
+        AI,
+        "            if tid == \"contrast_frame\" and sev_here == STRONG:",
+        "            if False and tid == \"contrast_frame\" and sev_here == STRONG:   # MUTATED",
+        "tests/test_ai_tells.py -k follow_the_severity",
+    ),
+    (
+        "s42-10 E7 thresholds 字符串形态退回被 float 静默收下（写错形态不说出口）",
+        AI,
+        "            if str_form:",
+        "            if False:   # MUTATED: 不喊",
+        "tests/test_ai_tells.py -k string_form_is_announced",
+    ),
+    # ── s43 组（审查报告-20260930 遗留 8：窄窗底边距死声明搬活）────────
+    # 那条媒体规则曾在头部媒体块里死于源码顺序（基础规则在后，同特异性后者胜），
+    # 声明的 12px 从未生效（computed 恒 24px）。2026-09-30 搬到基础规则之后才活，
+    # verify 主流程窄窗段的「底边距降到 --s3」断言守它 —— 本变异把它改回 24，
+    # 断言必须红。目标只能全量 verify：断言在主流程（无分组入口）。
+    (
+        "s43-1 选题两面窄窗底边距退回 24（死回源码顺序病：断言必须红）",
+        CSS_F,
+        "@media (max-width: 1120px) {\n"
+        "  .topics-inner, .topics-src-inner { padding-bottom: var(--s3); }\n"
+        "}",
+        "@media (max-width: 1120px) {\n"
+        "  .topics-inner, .topics-src-inner { padding-bottom: var(--s6); }\n"
+        "}",
+        "verify:",
+    ),
+    # s43-2/s43-3：改版新增的两条断言（四条左边界重合、排行右栏动作柱）。
+    # 断言在 sections/topics.js，目标走 verify:topics。
+    (
+        "s43-2 页级标题区左沿离开页签文字（四条左边界重合必须红）",
+        CSS_F,
+        "  padding: var(--s6) var(--s4) 0;",
+        "  padding: var(--s6) var(--s6) 0;",
+        "verify:topics",
+    ),
+    (
+        "s43-3 排行行右栏动作柱塌回全宽堆叠（分数与按钮回到内容行里）",
+        CSS_F,
+        ".rank-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--s6); }",
+        ".rank-row { display: grid; grid-template-columns: 1fr; column-gap: var(--s6); }",
+        "verify:topics",
+    ),
+    # ── s44 组（审查报告-20261005 六路全方位审查的修复轮）──
+    (
+        "s44-1 P1-1 checker.PUNCT 的弯引号被吞复发（四字符静默消失，字数虚高回潮）",
+        CHECK_F,
+        'PUNCT = "[\\\\s，。、？！：；：\\u201c\\u201d\\u2018\\u2019\\u0022\\u0027（）《》〈〉【】…—·～*#|＿_／/,.!?;:-]"',
+        'PUNCT = "[\\\\s，。、？！：；：\\u0022\\u0027（）《》〈〉【】…—·～*#|＿_／/,.!?;:-]"   # MUTATED: 弯引号消失',
+        "tests/test_checker_structure.py -k quotes_are_not_speech",
+    ),
+    (
+        "s44-2 P1-2 audience_slice 缺节退回整份复发（别的受众话术灌进 select/write）",
+        KN_F,
+        '        text = self.file_text("knowledge/audience.md")\n'
+        '        return self._heading_body(text, _pick_heading_line(text, key))',
+        '        return self.slice_heading("knowledge/audience.md", key)   # MUTATED: 退回整份',
+        "tests/test_pack_layer_audit10.py -k mapped_but_section_missing",
+    ),
+    (
+        "s44-3 P2-14 mutate 的 -k 0 匹配守卫拆掉（0 条跑过照样印全绿 + exit 0）",
+        MUTATE_F,
+        '    print(f"🔴 -k {_only!r} 一条都没匹配上（全表 {len(MUTATIONS)} 条）——"\n'
+        '          "「0 条跑过、0 条不合格」的全绿是假的，直接退出")\n'
+        '    sys.exit(2)',
+        '    print(f"🔴 -k {_only!r} 一条都没匹配上（全表 {len(MUTATIONS)} 条）——"'
+        '\n          "「0 条跑过、0 条不合格」的全绿是假的，直接退出")   # MUTATED: 守卫拆了',
+        "tests/test_mutate_tool.py -k zero_match",
+    ),
+    (
+        "s44-4 P2-15 子进程总闸超时拆掉（挂死占死整轮变异与锁）",
+        MUTATE_F,
+        '        return subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT,\n'
+        '                              timeout=timeout)',
+        '        return subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)'
+        '   # MUTATED: 没有总闸',
+        "tests/test_mutate_tool.py -k kills_hung_commands",
+    ),
+    (
+        "s44-5 P2-16 锁占坑退回非原子（O_EXCL 拆掉，双开都能过检）",
+        MUTATE_F,
+        "        try:\n"
+        "            fd = os.open(LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)\n"
+        "        except FileExistsError:",
+        "        try:\n"
+        "            fd = os.open(LOCK, os.O_CREAT | os.O_WRONLY)   # MUTATED: 非原子\n"
+        "        except FileExistsError:",
+        "tests/test_mutate_tool.py -k acquisition_is_atomic",
+    ),
+    (
+        "s44-6 P2-17 verify 桩的档线常量漂移（重校准只改引擎侧时门禁量旧世界）",
+        VERIFY_F,
+        "INTEL_TODAY.hot_quadrant_high = 60;",
+        "INTEL_TODAY.hot_quadrant_high = 61;   // MUTATED: 桩与引擎漂移",
+        "tests/test_intel_ranking.py -k stub_hot_quadrant",
+    ),
+    (
+        "s44-7 P2 doBrief 生成中退回 hidden 盒（首次生成几十秒零反馈）",
+        TOPICS_F,
+        '  const st = briefState[key] || {};\n'
+        '  if (st.payload || st.running) box.classList.remove("hidden");',
+        '  const st = briefState[key] || {};\n'
+        '  if (st.payload) box.classList.remove("hidden");   // MUTATED: 生成中不露面',
+        "verify:topics",
+    ),
+    (
+        "s44-8 P2 refreshBrief 的「看条目→收起」同步拆掉（同一行两个说法复发）",
+        TOPICS_F,
+        '  const d = row.querySelector(\'[data-act="detail"]\');\n'
+        '  if (d) d.textContent = "收起";\n}',
+        '  const d = row.querySelector(\'[data-act="detail"]\');\n'
+        '  if (false && d) d.textContent = "收起";   // MUTATED: 不同步\n}',
+        "verify:topics",
+    ),
+    (
+        "s44-9 P2-5 bindActions 退回只绑第一颗（字幕面板的导出 SRT 回到死按钮）",
+        RESULT_F,
+        '    body.querySelectorAll(sel).forEach(n => { n.onclick = fn; });',
+        '    var n = body.querySelector(sel); if (n) n.onclick = fn;   // MUTATED: 只绑第一颗',
+        "verify:",
+    ),
+    (
+        "s44-10 P2-4 closeOverlays 不再收口确认框（Promise 挂死 + 监听残留）",
+        OVER_F,
+        '    if (o.id === "confirm-dialog" && _activeConfirmDone) {\n'
+        '      const d = _activeConfirmDone;\n'
+        '      _activeConfirmDone = null;\n'
+        '      d(false);          // 被外部收口 = 用户没确认 = 取消语义\n'
+        '    }',
+        '      if (false) {}   // MUTATED: 外部收口不说完',
+        "verify:",
+    ),
+    (
+        "s44-11 P2-7 check_base_url 恒假子句回潮（首尾空格放行并原样落盘）",
+        SRV_F,
+        '    if re.search(r"\\s", url) or url != (raw or ""):',
+        '    if re.search(r"\\s", url) or False:   # MUTATED: 恒假子句回潮',
+        "tests/test_models_list.py -k surrounding_spaces",
+    ),
+    (
+        "s44-12 P2-8 source_health 记账错位回潮（off 记成功、unwired 记失败涨连击）",
+        INTEL_F,
+        '            if row.get("state") in ("cooling", "off", "unwired"):',
+        '            if row.get("state") == "cooling":   # MUTATED: off/unwired 回到错位记账',
+        "tests/test_intel_ranking.py -k never_counted_as_tried",
+    ),
+    (
+        "s44-13 P2-9 B站业务码闸拆掉（HTTP 200 + code=-412 风控演成 ok，0 条）",
+        INTEL_F,
+        '        if code not in (None, 0):',
+        '        if False:   # MUTATED: 业务码闸拆掉',
+        "tests/test_intel_ranking.py -k business_error_code_fails",
+    ),
+    (
+        "s44-14 P2-10 nan/inf 有限数闸拆掉（thresholds 配 .nan 在 int() 处炸作业）",
+        AI,
+        "            if not math.isfinite(num):",
+        "            if False:   # MUTATED: 非有限浮点直通 int()",
+        "tests/test_ai_tells.py -k nan_and_inf",
+    ),
+    (
+        "s44-15 P2-11 summary 的 display:flex 拆掉（折叠箭头回到永不旋转）",
+        CSS_F,
+        ".banner.why > summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: var(--s2); }",
+        ".banner.why > summary { cursor: pointer; list-style: none; }   /* MUTATED: flex 拆掉 */",
+        "verify:",
+    ),
+    (
+        "s44-16 P2-12 slugify 首部保留符回潮（下划线行业名建出隐形包）",
+        PACKGEN_F,
+        '    return s.lstrip("_.")',
+        '    return s   # MUTATED: 首部 _/. 回潮',
+        "tests/test_packgen_claim.py -k never_produces_the_hidden",
+    ),
+    (
+        "s44-17 P2-13 pack_shape_error 的选项重复闸拆掉（列表全绿、点生成才 409）",
+        KN_F,
+        "            if isinstance(opts, list):\n"
+        "                seen_opts: set[str] = set()",
+        "            if False and isinstance(opts, list):   # MUTATED: 重复闸拆掉\n"
+        "                seen_opts: set[str] = set()",
+        "tests/test_pack_yaml_integrity.py -k sees_duplicate_options",
+    ),
+    (
+        "s44-18 P2-14 首次导入的兜底拆掉（搬入失败留半截包进 list_packs）",
+        PKIMP_F,
+        "        try:\n"
+        "            shutil.move(str(tmp_pack), str(dst))\n"
+        "        except Exception:\n"
+        "            if dst.is_dir():\n"
+        "                shutil.rmtree(dst, ignore_errors=True)\n"
+        "            elif dst.exists():\n"
+        "                dst.unlink()\n"
+        "            if dst.exists():\n"
+        "                raise PackImportError(\n"
+        "                    \"导入落盘失败，且未能清干净残骸 —— 请手工删除 \"\n"
+        "                    f\"{dst.name} 后重试（残骸会被当成一个坏包）\")\n"
+        "            raise PackImportError(\"导入落盘失败（残骸已清掉，未留下半截包）—— 请重试；\"\n"
+        "                                  \"反复失败时检查目标磁盘空间与杀毒软件\")\n"
+        "        return False",
+        "        shutil.move(str(tmp_pack), str(dst))   # MUTATED: 无兜无清理\n"
+        "        return False",
+        "tests/test_pack_import.py -k first_import_failure",
+    ),
+    (
+        "s44-19 P2-15 adopted 消费方拆掉（收编的用户包被出厂更新静默覆盖）",
+        PACKSEED_F,
+        '            if stored.get("adopted") and stored.get("local") == local_hash:',
+        '            if False and stored.get("adopted") and stored.get("local") == local_hash:'
+        '   # MUTATED: adopted 没人接',
+        "tests/test_packseed.py -k adopted_user_pack",
+    ),
+    (
+        "s44-20 P2-16 数据损坏闸拆掉（CRC 损坏/加密 zip 逃逸成 500 与裸 traceback）",
+        PKIMP_F,
+        # 2026-10-11 重指：P2-16 闸 10-07 加宽为五类异常（zlib.error/NotImplementedError/OSError 补口），
+        # 旧锚点（两参数版 except）0 匹配导致锚点门必红。new 仍为 ValueError：
+        # BadZipFile/RuntimeError/NotImplementedError/zlib.error/OSError 都不是 ValueError 子类。
+        "            except (zipfile.BadZipFile, RuntimeError, NotImplementedError,\n"
+        "                    zlib.error, OSError) as e:",
+        "            except ValueError as e:   # MUTATED: 闸拆了（BadZipFile/zlib.error 逃逸）",
+        "tests/test_pack_import.py -k corrupt_entry_data",
+    ),
+    (
+        "s44-21 P3 ranks 名次表退回首写覆盖（跨源同键条目与名次两张表对不上）",
+        INTEL_F,
+        "            ranks.setdefault(item_key(r), (i, len(rows)))",
+        "            ranks[item_key(r)] = (i, len(rows))   # MUTATED: 后到源顶掉名次",
+        "tests/test_intel_ranking.py -k first_sources_rank",
+    ),
+    (
+        "s44-22 P3 抓取去重拆掉（同包双飞，同秒快照互相覆盖）",
+        PIPE_F,
+        '        inserted, existing = self.registry.add_if_room_dedup(\n'
+        '            job, MAX_CONCURRENT_INTEL, INTEL_BUSY_STATES,\n'
+        '            same=lambda j: j.kind == "intel" and j.params.get("pack") == pack.dir.name)',
+        '        inserted, existing = self.registry.add_if_room_dedup(\n'
+        '            job, MAX_CONCURRENT_INTEL, INTEL_BUSY_STATES, same=None)'
+        '   # MUTATED: 去重拆掉',
+        "tests/test_intel.py -k rides_the_running_job",
+    ),
+    # ── s45 组（2026-10-11 修复轮）：对应 审查报告-20261011 §3/§4 的三个修复 ──
+    (
+        "s45-1 P2-1 阈值 isfinite 闸拆掉（nan/1e999 字符串形态逃到文案的 int(num) 炸作业）",
+        AI,
+        "            if not math.isfinite(num):",
+        "            if False and math.isfinite(num):"
+        "   # MUTATED: 闸拆了（nan/inf 逃到 int(num)）",
+        "tests/test_ai_tells.py -k thresholds_nan_and_inf",
+    ),
+    (
+        "s45-2 P3-2 _user_modified 大小写折叠装回单向守卫（台账键含大写的反向漏掉）",
+        PKIMP_F,
+        '        lk = name.lower()\n'
+        '        for k, v in rec.items():\n'
+        '            if isinstance(v, dict) and k.lower() == lk:\n'
+        '                stored = v\n'
+        '                break',
+        '        lk = name.lower()\n'
+        '        if lk != name:   # MUTATED: 单向守卫装回（lk == name 时跳过折叠搜索）\n'
+        '            for k, v in rec.items():\n'
+        '                if isinstance(v, dict) and k.lower() == lk:\n'
+        '                    stored = v\n'
+        '                    break',
+        "tests/test_pack_import.py -k reverse",
+    ),
+    (
+        "s45-3 P3-3 复判处退回只读舍入容差（|dev| 落 (round(limit,1), limit] 窗口时「报告合格、反馈催改」换侧复活）",
+        PIPE_F,
+        '        limit = report.get("tolerance_pct_exact")\n'
+        '        if limit is None:\n'
+        '            limit = report.get("tolerance_pct")',
+        '        limit = report.get("tolerance_pct")   # MUTATED: 退回只读舍入键',
+        "tests/test_refine_feedback.py -k unrounded_tolerance",
     ),
 ]
 
@@ -2418,6 +2774,18 @@ MUTATIONS = [
 _only = ""
 if len(sys.argv) >= 3 and sys.argv[1] == "-k":
     _only = sys.argv[2]
+
+# ── -k 匹配守卫（P2-14，2026-10-05）──────────────────────────
+# `-k` 打错一个字（或中文经 shell 被 mangle）会 0 匹配：循环一条都不跑，
+# 结尾照印「共 0 条变异，0 条不合格」并以 0 退出 —— 一份"全部跑过、全部没跑"
+# 的全绿报告。README 记过这起事故，但当时只修了调用方（subprocess 传 list），
+# 工具本身对 0 匹配至今没有守卫。这里补上：0 匹配 = 用法错误 = exit 2。
+# ⚠ 必须放在**拿锁之前**：用法错误连锁都不该拿（否则排查一次手滑要等持锁
+#   进程跑完；这里自己跑自己的子进程测试时也会跟外层的锁相撞）。
+if _only and not any(_only in name for name, _p, _o, _n, _s in MUTATIONS):
+    print(f"🔴 -k {_only!r} 一条都没匹配上（全表 {len(MUTATIONS)} 条）——"
+          "「0 条跑过、0 条不合格」的全绿是假的，直接退出")
+    sys.exit(2)
 
 # ── 崩溃恢复日志 ──────────────────────────────────────────────
 # 变异期间被杀（SIGTERM / 断电 / Ctrl-C 没走到 finally）会在工作区留下一份
@@ -2476,11 +2844,24 @@ def _lock_held_by_living_process() -> bool:
 
 def _acquire_lock() -> None:
     import os
-    if LOCK.exists() and _lock_held_by_living_process():
-        print(f"🔴 另一个变异进程正在跑（PID {LOCK.read_text().strip()}）—— "
-              "并发跑会互相踩文件（实测出过假绿 + 工作区残留），等它跑完再来")
-        sys.exit(2)
-    LOCK.write_text(str(os.getpid()), encoding="utf-8")
+    # P2-16（2026-10-05）：占坑必须**原子**。旧写法"检查→写"两步之间有窗口，
+    # 两个 mutate 同时启动都读到无锁/死 PID、都写入自己的 PID、双双开跑 ——
+    # 这把锁要防的就是这个事故（2026-09-23 实测假绿 + 工作区残留），而入口
+    # 恰恰没原子化。O_CREAT|O_EXCL 把"看坑"与"占坑"合成一步：坑被占着才探活，
+    # 活人拦下，死坑当场清掉重占。
+    while True:
+        try:
+            fd = os.open(LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            if _lock_held_by_living_process():
+                print(f"🔴 另一个变异进程正在跑（PID {LOCK.read_text().strip()}）—— "
+                      "并发跑会互相踩文件（实测出过假绿 + 工作区残留），等它跑完再来")
+                sys.exit(2)
+            LOCK.unlink()   # 死坑：持有进程已经不在，清掉重占（下一圈 O_EXCL 必成）
+            continue
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+        return
 
 
 def _recover() -> None:
@@ -2504,6 +2885,19 @@ def _recover() -> None:
     print("（恢复完成 —— 建议 git status 再确认一遍）")
 
 
+# ── 输出编码检测（P3，2026-10-05）──────────────────────────
+# verify: 组的失败判定要读子进程的 UTF-8 输出（中文 + ❌/✅）。缺省 cp936 环境
+# 下 decode 必花 —— 输出被判成「工具错/基线不绿」，读者会去修"基线"，真相只是
+# 环境变量没带。启动时显式检测，错就给可行动的提示（用法错误连锁都不该拿）。
+def _check_output_encoding() -> None:
+    enc = (getattr(sys.stdout, "encoding", "") or "").lower()
+    if "utf" not in enc.replace("-", ""):
+        print(f"🔴 本工具要读子进程的 UTF-8 输出（中文 + ❌/✅），当前 stdout 编码是 "
+              f"{enc or '未知'} —— 请用 `PYTHONUTF8=1 python _verify/mutate.py …` 再跑")
+        sys.exit(2)
+
+
+_check_output_encoding()
 _acquire_lock()          # 先拿锁再恢复：并发跑的工具互相踩文件比残留更毒
 _recover()
 
@@ -2516,20 +2910,48 @@ _recover()
 _baseline = {}
 
 
-def _run_selector(selector):
-    """跑一次 selector（未变异状态），返回 (输出, 退出码)。"""
+def _selector_cmd(selector):
+    """selector → 子进程命令。⚠ 基线采样与变异执行**必须**跑同一个命令 ——
+    原来是两份手抄（P3 2026-10-05），给一份加参数另一份不跟的话，
+    "基线绿 → 变异必须红"的前提就被悄悄破坏。"""
     if selector.startswith("verify:"):
         kw = selector.split(":", 1)[1].strip()
-        cmd = [str(NODE), str(ROOT / "_verify/verify.js")] + ([kw] if kw else [])
-    elif selector.startswith("node:"):
+        return [str(NODE), str(ROOT / "_verify/verify.js")] + ([kw] if kw else [])
+    if selector.startswith("node:"):
         # node --test 的用例（desktop/*.test.js：打包接线/对话框脱敏）。
         # 退出码在这里是可靠的（没有 pytest 那种收尾清理撞沙箱的问题）。
-        cmd = [str(NODE), "--test", *shlex.split(selector[len("node:"):])]
-    else:
-        cmd = [str(ROOT / ".venv/Scripts/python.exe"), "-m", "pytest", "-q",
-               *shlex.split(selector)]
-    r = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)
+        return [str(NODE), "--test", *shlex.split(selector[len("node:"):])]
+    return [str(ROOT / ".venv/Scripts/python.exe"), "-m", "pytest", "-q",
+            *shlex.split(selector)]
+
+
+def _run_selector(selector):
+    """跑一次 selector（未变异状态），返回 (输出, 退出码)。"""
+    r = _run_cmd(_selector_cmd(selector))
     return (r.stdout or "") + (r.stderr or ""), r.returncode
+
+
+# P2-15（2026-10-05）：两处 subprocess.run 原来都没有超时——pytest 或 verify.js
+# 任意一次挂死（Chrome 僵死 / CDP 半开 / pytest 收尾卡住），整轮变异就无限期
+# 停摆：锁文件里是活 PID（没人能并发接手），journal 里还留着**变异态**的工作区
+# 文件；基线阶段挂死时甚至还没有 journal 兜底。"挂而不死"恰好落在 journal 与
+# 死-PID 探活两个兜底之间。总闸按"工具错"处理，不让它无限等。
+SUBPROC_TIMEOUT = 1800
+
+
+def _run_cmd(cmd, timeout=SUBPROC_TIMEOUT):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT,
+                              timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        class _TimeoutResult:
+            pass
+        r = _TimeoutResult()
+        out = e.stdout
+        r.stdout = out.decode("utf-8", "replace") if isinstance(out, bytes) else (out or "")
+        r.stderr = f"\n[_run_cmd] 命令超过 {timeout}s 总闸被杀 —— 工具错，不是断言红"
+        r.returncode = None
+        return r
 
 
 def _pytest_red(out):
@@ -2648,18 +3070,10 @@ for name, path, old, new, selector in MUTATIONS:
     #                它的 check() 不抛异常，只在最后 exit(1)，所以判据只能是退出码。
     #                界面侧的断言同样要能证伪，否则"新加了一堆 check"只是看着热闹。
     #   其余       → 当成 pytest 的 -k 选择器。
-    if selector.startswith("verify:"):
-        # ⚠ `verify:` 后面那段是分组名，**必须真的传进去**。它以前只是个装饰：
-        #   每条 UI 变异都完整跑一遍整网，7 条累积起来是整轮里最耗时的一段。
-        kw = selector.split(":", 1)[1].strip()
-        cmd = [str(NODE), str(ROOT / "_verify/verify.js")] + ([kw] if kw else [])
-    elif selector.startswith("node:"):
-        cmd = [str(NODE), "--test", *shlex.split(selector[len("node:"):])]
-    else:
-        cmd = [str(ROOT / ".venv/Scripts/python.exe"), "-m", "pytest", "-q",
-               *shlex.split(selector)]
+    kw = selector.split(":", 1)[1].strip() if selector.startswith("verify:") else ""
+    cmd = _selector_cmd(selector)
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)
+        r = _run_cmd(cmd)
         out = (r.stdout or "") + (r.stderr or "")
         if selector.startswith("verify:"):
             # ⚠ **分组真的生效了**才配信这个数：分组参数被无视而跑成整网时，

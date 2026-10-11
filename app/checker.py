@@ -22,8 +22,14 @@ from pathlib import Path
 
 import yaml
 
-# 标点/空白/标注符号（不计入口播字数）
-PUNCT = r'[\s，。、？！：；：""''（）《》〈〉【】…—·～*#|＿_／/,.!?;:-]'
+# 标点/空白/标注符号（不计入口播字数）。⚠ **全站唯一的一份**（2026-10-05 P1-1）：
+# ai_tells._PUNCT 从这里派生，不许再手抄第二份。弯引号（U+2018/2019/201C/201D）
+# 与 ASCII 引号（" '）TTS 都不念，一律不算口播字。
+# ⚠ 这一行的历史教训：原稿把字面弯引号写在单引号 raw 串里，字面量在某个环节被
+#   转成 ASCII 后，那对 '' 恰好成了相邻字符串拼接的定界符——四个引号字符静默
+#   消失、引号被按口播字计（字数虚高），而对账测试的样本里一个引号都没有，
+#   钉不住。所以这里全部用 \u 转义写死，任何编辑器/传输都改不动它。
+PUNCT = "[\\s，。、？！：；：\u201c\u201d\u2018\u2019\u0022\u0027（）《》〈〉【】…—·～*#|＿_／/,.!?;:-]"
 
 # 段落类型 → 配额字段
 SEG_FIELD = {"hook": "hook", "point": "body", "cta": "cta"}
@@ -550,6 +556,9 @@ def check_script(
             "quota": per_point if field == "body" else target.get(field),
         })
 
+    # ⚠ 与 pipeline._compute_timings 同一条公式的前提是**一段=一行**（段内
+    # 换行会各多算 0.5s 停顿，两处就错位）——2026-10-05 P3 记账：102 篇产物
+    # 零例段内换行，前提当前成立但没有代码强制；包产出段内换行时先查这里。
     dev = (sec - duration) / duration * 100 if duration else 0.0
     ok_hard = not hits["hard"]
     limit = (tolerance if tolerance is not None
@@ -565,11 +574,22 @@ def check_script(
         "estimated_seconds": round(sec, 1),
         "duration_target": duration,
         "deviation_pct": round(dev, 1),
+        # P3（2026-10-05）：**未舍入**的偏差随报告外发 —— `_violation_feedback`
+        # 要按 checker 判合格用的同一个数复判；只发舍入值的话，偏差贴着容差
+        # 边界（±0.05pp）时 checker 判不合格、反馈却复判成"没超"，时长条目
+        # 不进反馈块，模型不知道要改长度。UI 仍只读 deviation_pct。
+        "deviation_pct_exact": dev,
         # 本次真正用的容差：短时长档是自适应放宽的（15s→±20%）。
         # 必须随报告外发 —— 修复前 `_violation_feedback` 自己写死 10%，
         # 于是 15 秒档「偏差 15%（合格）」照样被反馈要求改长度，
         # 两处对同一个数说出相反的话（P2-27 的口径只改了一半）。
         "tolerance_pct": round(limit, 1),
+        # P3-3（2026-10-11）：**未舍入**的容差随报告外发 —— `_violation_feedback`
+        # 复判用的是精确偏差（deviation_pct_exact），容差也必须是 checker 判合格
+        # 用的同一个未舍入数；只发舍入值的话，|dev| 落在 (round(limit,1), limit]
+        # 窗口（<0.05pp）时 checker 判合格、反馈拿舍入容差复判成超 ——
+        # 「报告说合格、反馈催你改」换侧复活。UI/桩仍只读舍入的 tolerance_pct。
+        "tolerance_pct_exact": limit,
         "rate": rate,
         "platform": platform,
         "hard_hits": hits["hard"],

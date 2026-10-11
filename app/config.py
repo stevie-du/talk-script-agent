@@ -285,6 +285,11 @@ def _env_num(name: str, fallback, cast):
     try:
         v = cast(raw)
     except (TypeError, ValueError):
+        # P3（2026-10-05）：非法值回退要说一声 —— 文件通道（_num）的同类场景
+        # 有 log.warning，env 通道原来静默，两条通道不同权。`load_config` 的
+        # 注释自己承认"会让 _env_num 静默退回内置默认"，却没留一行日志。
+        log.warning("环境变量 %s=%r 不是合法数字 —— 按默认/文件值 %r 处理",
+                    name, raw, fallback)
         return fallback
     # P2-11：环境变量路径绕过了 server.set_config 的 NUMERIC_BOUNDS 那道闸，
     # TALKSCRIPT_MAX_TOKENS=100 / TALKSCRIPT_RETRIES=999 曾会静默生效

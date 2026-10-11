@@ -310,8 +310,12 @@ def check_base_url(raw: str) -> None:
     # 内部控制字符 / 换行：先单独判，否则后面的报错会指不到根因
     if re.search(r"[\x00-\x1f\x7f]", raw):
         raise BaseUrlError("请求地址含控制字符或换行，请检查是否粘贴错了内容")
-    if re.search(r"\s", url) or url != raw.strip():
-        raise BaseUrlError("请求地址不能含空格")
+    if re.search(r"\s", url) or url != (raw or ""):
+        # ⚠ 第二支判的是**未剥**的原文（P2-7，2026-10-05）：这里原来是
+        # `url != raw.strip()`——url 本身就是 raw.strip()，恒假，首尾空格
+        # 静默放行并原样落盘（落盘侧只 rstrip("/")），下一次生成才在请求层
+        # 炸且报错指不到根因。
+        raise BaseUrlError("请求地址不能含空格 —— 请检查是否粘贴错了内容")
     low = url.lower()
     if low.startswith(("http://", "https://")):
         pass

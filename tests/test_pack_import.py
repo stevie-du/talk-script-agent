@@ -14,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from app.packimport import (IMPORT_MARK, MAX_ENTRIES, PackImportError,
-                            delete_pack, import_pack)
+from app.packimport import (IMPORT_MARK, MANIFEST_NAME, MAX_ENTRIES,
+                            PackImportError, delete_pack, import_pack)
 
 MIN_PACK_YAML = """\
 name: testpack
@@ -436,3 +436,112 @@ def test_delete_route_wiring(tmp_path):
     r = c.delete("/api/packs/%2e%2e")
     assert r.status_code == 400, r.text
     assert not (tmp_path / "pack.yaml").exists(), "穿越名没被拦住"
+
+
+def test_swap_in_first_import_failure_leaves_no_half_pack(tmp_path, monkeypatch):
+    """P2-14（2026-10-05）：**首次导入**（dst 不存在）搬入失败也不许留半截包。
+
+    模块头"失败整体回滚"的承诺原来只对替换路径成立——首次导入的 `shutil.move`
+    无兜无清理：tmp 在 %TEMP%、packs 在另一块盘时退化为 copytree+删除，中途
+    失败（磁盘满/杀软）会留下半截包目录进 list_packs。P2-3 修过的形态在兄弟
+    路径原样存在。没有旧包可还原，能做的是清掉残骸、说实话。
+    """
+    import shutil as _shutil
+    from app.packimport import _swap_in
+
+    dst = tmp_path / "fresh"
+    tmp_pack = tmp_path / ".tmp-fresh"
+    tmp_pack.mkdir()
+    (tmp_pack / "pack.yaml").write_text("name: 新的\n", encoding="utf-8")
+
+    def half_move(src, dst2, *a, **kw):
+        # 与 P2-3 那条同款：模拟跨盘 move 退化形态，半截内容先落到正式位再炸
+        d = Path(dst2)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "pack.yaml").write_text("name: 半截\n", encoding="utf-8")
+        raise OSError("模拟跨盘拷贝中途失败")
+
+    monkeypatch.setattr(_shutil, "move", half_move)
+    with pytest.raises(PackImportError, match="残骸已清掉"):
+        _swap_in(tmp_pack, dst)
+    monkeypatch.undo()
+
+    assert not dst.exists(), "半截新包不许留在 list_packs 的视野里"
+    assert not (tmp_path / ".import-backup-fresh").exists()
+
+
+def test_validate_zip_survives_corrupt_entry_data_with_a_word(tmp_path):
+    """P2-16（2026-10-05）：中央目录完好但**数据损坏**（传输位翻转/截断）的 zip
+    要到 `zf.open` 读数据时才抛 BadZipFile（CRC 在读时校验）——原来只在构造处
+    接，这种形态原样逃逸：服务端导入 500"内部错误"而非 400 人话，
+    `python -m app.packcheck` 给包作者看的是裸 traceback。加密条目（zf.open 抛
+    RuntimeError）同走这一道闸，无法用标准库构造加密 zip，同分支代码路径。"""
+    from app.packimport import validate_zip
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+        zf.writestr("p/pack.yaml", "name: p\nversion: v1\n")
+    raw = bytearray(buf.getvalue())
+    i = bytes(raw).find(b"name: p")
+    assert i > 0, "夹具没找到数据区（zip 结构变了？）"
+    raw[i] ^= 0xFF                      # 翻转数据区一字节：CRC 记录没动 → 读时必炸
+    tmp = tmp_path / "x"
+    tmp.mkdir()
+    with pytest.raises(PackImportError) as ei:
+        validate_zip(bytes(raw), tmp)
+    assert "读不出来" in str(ei.value), str(ei.value)
+
+    # 2026-10-05 复审补口：deflate 流损坏抛的是 **zlib.error**（不是 BadZipFile
+    # 子类）—— 复审实测 60 个翻转点位里 30 个从旧闸逃逸。同一道闸必须接住。
+    # （压缩流里找不回明文，不能用 find：改用 ZipInfo 定位压缩数据区起点，
+    #   翻块头字节 —— BTYPE/BFINAL 位被翻转，zlib 解压当场抛 zlib.error。）
+    buf2 = io.BytesIO()
+    with zipfile.ZipFile(buf2, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("p/pack.yaml", "name: p\nversion: v1\n")
+    raw2 = bytearray(buf2.getvalue())
+    zi2 = zipfile.ZipFile(buf2).getinfo("p/pack.yaml")
+    i2 = zi2.header_offset + 30 + len(zi2.filename.encode("utf-8")) + len(zi2.extra)
+    assert i2 > 0, "夹具没找到压缩数据区（zip 结构变了？）"
+    raw2[i2] ^= 0xFF
+    import zlib as _zlib
+    with pytest.raises(_zlib.error):    # 钉住夹具确实走 zlib.error 这条腿
+        zipfile.ZipFile(io.BytesIO(bytes(raw2))).read("p/pack.yaml")
+    with pytest.raises(PackImportError) as ei2:
+        validate_zip(bytes(raw2), tmp)
+    assert "读不出来" in str(ei2.value), str(ei2.value)
+
+
+def test_user_modified_ledger_lookup_is_case_insensitive(tmp_path):
+    """复审补口（2026-10-05）：NTFS 不分大小写 —— 用户改过 `elevator`（台账键
+    小写），导入包把 name 写成 `Elevator` 时按字面量查台账查 None → 拒导保护
+    被绕过、用户改动被覆盖（数据丢失类）。台账键必须按大小写折叠对账。"""
+    import json as _json
+    from app.packimport import _user_modified
+    (tmp_path / "elevator").mkdir()
+    (tmp_path / "elevator" / "a.md").write_text("用户改过\n", encoding="utf-8")
+    (tmp_path / MANIFEST_NAME).write_text(_json.dumps(
+        {"app_version": "1", "packs": {"elevator": {
+            "version": "1", "bundled": "x", "local": "y"}}}),
+        encoding="utf-8")
+    assert _user_modified(tmp_path, "elevator") is True, "local 与盘上不一致 = 改过"
+    assert _user_modified(tmp_path, "Elevator") is True,         "大小写变体绕过了台账 —— 保护失效（NTFS 上就是同一个目录）"
+
+
+def test_user_modified_ledger_lookup_folds_reverse_direction(tmp_path):
+    """P3-2（2026-10-11）：折叠搜索必须**对称** —— 台账键含大写（`Elevator`）、
+    导入名全小写（`elevator`）时，旧代码的 `if lk != name:` 守卫把折叠搜索整个
+    跳过（lk == name）→ 按字面量查台账查 None → 返回 None → "用户改过内置包
+    拒导入"的保护被绕过（数据丢失类，与上一条测试互为反向）。出厂键当前全
+    小写所以暂不可达，但 `_NAME_RE` 本就允许大写，台账是用户数据不能赌形态。
+    NTFS 上 `tmp_path / "Elevator"` 与小写同名是同一目录 —— 盘上目录与大写键
+    用大写、调用名用小写，正好落在守卫挡住的那一边。"""
+    import json as _json
+    from app.packimport import _user_modified
+    (tmp_path / "Elevator").mkdir()
+    (tmp_path / "Elevator" / "a.md").write_text("用户改过\n", encoding="utf-8")
+    (tmp_path / MANIFEST_NAME).write_text(_json.dumps(
+        {"app_version": "1", "packs": {"Elevator": {
+            "version": "1", "bundled": "x", "local": "y"}}}),
+        encoding="utf-8")
+    assert _user_modified(tmp_path, "elevator") is True, \
+        "台账键大写、导入名小写：折叠命中同一条台账 —— local 与盘上不一致 = 改过"

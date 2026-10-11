@@ -112,6 +112,9 @@ module.exports = async function topics({ evalIn, sleep, check }) {
         return { 页签: left(on.querySelector('.topics-tabs .rt-t')),
                  胶囊: left(on.querySelector('#src-chips .src-pill')),
                  组标题: left(on.querySelector('.kb-group-t')),
+                 // 页级标题区（2026-09-30 重排新增）：h2 左沿必须落在同一条线上，
+                 // 否则"页头 / 页签 / 内容"三段各起一条左边界 —— 正是 §2.8 记过的病。
+                 页头: left(on.querySelector('.topics-hero h2')),
                  条宽: bar ? +bar.getBoundingClientRect().width.toFixed(1) : null,
                  面宽: inner ? +inner.getBoundingClientRect().width.toFixed(1) : null };
       })();
@@ -448,11 +451,12 @@ module.exports = async function topics({ evalIn, sleep, check }) {
         && topicsGeo.pillShape.sampleBg !== "rgba(0, 0, 0, 0)",
       JSON.stringify({ sampleShadow: topicsGeo.pillShape.sampleShadow,
                        sampleBg: topicsGeo.pillShape.sampleBg }));
-    check("页签条与阅读面同档宽，页签文字 / 筛选胶囊 / 组标题三条左边界重合",
+    check("页签条与阅读面同档宽，页签文字 / 筛选胶囊 / 组标题 / 页头标题四条左边界重合",
       Math.abs(topicsGeo.edges.条宽 - topicsGeo.edges.面宽) <= 1
         && Math.abs(topicsGeo.edges.条宽 - streamW) <= 1
         && Math.abs(topicsGeo.edges.页签 - topicsGeo.edges.胶囊) <= 0.6
-        && Math.abs(topicsGeo.edges.胶囊 - topicsGeo.edges.组标题) <= 0.6,
+        && Math.abs(topicsGeo.edges.胶囊 - topicsGeo.edges.组标题) <= 0.6
+        && Math.abs(topicsGeo.edges.组标题 - topicsGeo.edges.页头) <= 0.6,
       JSON.stringify({ e: topicsGeo.edges, stream: streamW }));
     check("左栏 nav 键帽计数 = 今日条目总数（不是「未读数」——那要多存一个状态）",
       topicsGeo.navCount === "8" && /共 8 条/.test(topicsGeo.metaText),
@@ -925,7 +929,30 @@ module.exports = async function topics({ evalIn, sleep, check }) {
       var rows = [...on.querySelectorAll('#rank-root .rank-row')];
       var one = rows[0];
       var sigs = one ? [...one.querySelectorAll('.sig')] : [];
+      // 右栏（2026-09-30 重排）：热点分与三颗动作收进 .rank-side 竖柱。
+      // ⚠ 本段整体是模板字符串：注释里不许出现反引号 —— 写了会把串截断，
+      //   node --check 照样绿，运行时才在标签位置抛 ReferenceError（实测）。
+      // 判据三条：两栏网格、左栏整体在右栏左边（横向不重叠）、右栏比左栏窄
+      // （竖柱不是半屏）。少了任何一条，"底行换行拆按钮"那个病就回来了。
+      var rail = (function () {
+        var row = one;
+        if (!row) return { missing: true };
+        var side = row.querySelector('.rank-side');
+        var main = row.querySelector('.rank-main');
+        if (!side || !main) return { missing: true, hasSide: !!side, hasMain: !!main };
+        var rr = row.getBoundingClientRect();
+        var mr = main.getBoundingClientRect();
+        var sr = side.getBoundingClientRect();
+        // 窄窗（<=1120）是**故意**的另一形态：右栏收成底行通栏。
+        // 断言按当前视口分支，两种形态各自的判据见下面的 check。
+        return { narrow: matchMedia('(max-width: 1120px)').matches,
+                 sideLeft: Math.round(sr.left), mainRight: Math.round(mr.right),
+                 mainLeft: Math.round(mr.left),
+                 sideW: Math.round(sr.width), mainW: Math.round(mr.width),
+                 rowRight: Math.round(rr.right) };
+      })();
       return {
+        rail: rail,
         rowCount: rows.length,
         titles: rows.map(function (r) { return r.querySelector('.card-title').textContent.trim(); }),
         scores: rows.map(function (r) { return r.querySelector('.rank-score').textContent.trim(); }),
@@ -1005,6 +1032,14 @@ module.exports = async function topics({ evalIn, sleep, check }) {
     })();`);
     check("三个面里只有一面可见（共用 .topics-inner 时，多面同显会让探针量到隐藏面）",
       rank.innerVisible === 1, JSON.stringify({ n: rank.innerVisible }));
+    check("排行的分数与动作收在右栏竖柱（宽窗两栏，窄窗退成底行通栏）",
+      (rank.rail.narrow
+        ? Math.abs(rank.rail.sideW - rank.rail.mainW) <= 2
+        : rank.rail.mainRight <= rank.rail.sideLeft
+          && rank.rail.sideW < rank.rail.mainW
+          // 右栏贴住行右缘：行右缘到栏右缘只剩 .page-card 自己的左右内边距（24）。
+          && rank.rail.rowRight - (rank.rail.sideLeft + rank.rail.sideW) <= 25),
+      JSON.stringify(rank.rail));
     check("排行行数 = 下发的事件数，且默认按热点分降序、信号不足的那行压到最后",
       rank.rowCount === 4 && rank.scoreNums[0] === 82 && rank.scoreNums[1] === 71
         && rank.scoreNums[2] === 12 && rank.scoreNums[3] === null
@@ -1156,15 +1191,22 @@ module.exports = async function topics({ evalIn, sleep, check }) {
       hrefs.links.length >= 1 && hrefs.links.every(h => /^https?:\/\//.test(h))
         && hrefs.spans >= 2,
       JSON.stringify(hrefs));
-    // 选题卡：生成 → 卡片出现（含禁用词摘标与幻觉口径固定一行）。
+    // 选题卡：生成中要有行内 in-flight 形态 → 卡片出现（含禁用词摘标与幻觉口径固定一行）
+    // → 另一行完成后「看条目」键跟着改「收起」（refreshBrief 是绕过 wireRank 的
+    // 直接 DOM 写路径，同一不变量必须同权——2026-10-05 P2）。
     const brief = await evalIn(`return (async () => {
       var row = document.querySelector('#rank-root .rank-row');
       var btn = row.querySelector('[data-act="brief"]');
+      window.__briefPending = true;
       btn.click();
-      await new Promise(function (r) { setTimeout(r, 1200); });
+      await new Promise(function (r) { setTimeout(r, 700); });
       var box = row.querySelector('.rank-brief');
+      var inflight = { shown: !box.classList.contains('hidden'),
+                       text: box.textContent.trim() };
+      window.__briefPending = false;
+      await new Promise(function (r) { setTimeout(r, 900); });
       var angles = [...box.querySelectorAll('.brief-angle')];
-      return { calls: (window.__briefCalls || []).length,
+      var done1 = { calls: (window.__briefCalls || []).length,
                hidden: box.classList.contains('hidden'),
                angles: angles.length,
                kinds: angles.map(function (a) { return a.querySelector('.ba-head b').textContent.trim(); }),
@@ -1172,19 +1214,35 @@ module.exports = async function topics({ evalIn, sleep, check }) {
                risks: angles.map(function (a) { return a.querySelector('.ba-meta').textContent.trim(); }),
                titleCount: box.querySelectorAll('.ba-titles p').length,
                useBtns: box.querySelectorAll('[data-act="use"]').length,
-               caveat: (box.querySelector('.brief-caveat') || {}).textContent || '',
-               btnText: btn.textContent.trim() };
+               caveat: (box.querySelector('.brief-caveat') || {}).textContent || '' };
+      // 第二行：从没开过 detail 的行——完成后内容展开、键上必须写「收起」。
+      // （第一行的 detail 在前面的「看条目」场景里已经开着，测不出这个同步。）
+      var row2 = document.querySelectorAll('#rank-root .rank-row')[1];
+      row2.querySelector('[data-act="brief"]').click();
+      await new Promise(function (r) { setTimeout(r, 900); });
+      var after2 = { detailLabel: row2.querySelector('[data-act="detail"]').textContent.trim(),
+                     briefHidden: row2.querySelector('.rank-brief').classList.contains('hidden'),
+                     detailHidden: row2.querySelector('.rank-detail').classList.contains('hidden'),
+                     angles: row2.querySelectorAll('.brief-angle').length };
+      return { inflight: inflight, done: done1, row2: after2 };
     })();`);
     check("「生成选题卡」发一次请求并渲染角度卡（严格 schema 的形状原样上屏）",
-      brief.calls === 1 && brief.hidden === false && brief.angles === 2
-        && brief.kinds.join("|") === "解读|反方" && brief.titleCount >= 4
-        && brief.useBtns === 2,
-      JSON.stringify(brief));
+      brief.done.calls === 1 && brief.done.hidden === false && brief.done.angles === 2
+        && brief.done.kinds.join("|") === "解读|反方" && brief.done.titleCount >= 4
+        && brief.done.useBtns === 2,
+      JSON.stringify(brief.done));
+    check("首次生成有行内 in-flight 形态：「生成中」露出来说话，不写进 hidden 盒",
+      brief.inflight.shown === true && /生成中/.test(brief.inflight.text),
+      JSON.stringify(brief.inflight));
+    check("选题卡完成后「看条目」键同步改「收起」（内容开着、键上不许写还没看过）",
+      brief.row2.detailLabel === "收起" && brief.row2.briefHidden === false
+        && brief.row2.detailHidden === false && brief.row2.angles >= 1,
+      JSON.stringify(brief.row2));
     check("禁用词摘标后写 {{待补}}，风险随卡片说出来（不是把那条角度抹掉）",
-      brief.hooks.some(h => /待补/.test(h)) && brief.risks.some(r => /命中禁用词/.test(r)),
-      JSON.stringify({ hooks: brief.hooks, risks: brief.risks }));
+      brief.done.hooks.some(h => /待补/.test(h)) && brief.done.risks.some(r => /命中禁用词/.test(r)),
+      JSON.stringify({ hooks: brief.done.hooks, risks: brief.done.risks }));
     check("幻觉口径那一行固定在卡片底部（§3.4）",
-      /事实以你核实为准/.test(brief.caveat), JSON.stringify(brief.caveat));
+      /事实以你核实为准/.test(brief.done.caveat), JSON.stringify(brief.done.caveat));
     // 当日重复点击：直接回缓存，**不再起作业**（§3.4 硬约束的可观察面）。
     const cached = await evalIn(`return (async () => {
       window.__briefCached = true;

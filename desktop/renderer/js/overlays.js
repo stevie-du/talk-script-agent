@@ -11,8 +11,22 @@
 
 import { $ } from "./util.js";
 
+// 当前开着的那颗确认框的收尾函数。外部收口（closeOverlays）要靠它把确认框
+// **说完**：Promise resolve、keydown 监听摘掉、焦点还回去 —— 缺了这一步，
+// 确认框开着时按 Ctrl+,（全局快捷键不挡键盘）会让 Promise 永远挂起、监听残留，
+// 残留的那个还会在下一个确认框里抢先执行 done()（把人家的弹层藏掉、绑定清空、
+// 自己那份孤儿 resolve）。2026-10-05 P2。
+let _activeConfirmDone = null;
+
 export function closeOverlays() {
-  document.querySelectorAll(".overlay:not(.hidden)").forEach(o => o.classList.add("hidden"));
+  document.querySelectorAll(".overlay:not(.hidden)").forEach(o => {
+    o.classList.add("hidden");
+    if (o.id === "confirm-dialog" && _activeConfirmDone) {
+      const d = _activeConfirmDone;
+      _activeConfirmDone = null;
+      d(false);          // 被外部收口 = 用户没确认 = 取消语义
+    }
+  });
 }
 
 export function openOverlay(id) { $(id)?.classList.remove("hidden"); }
@@ -31,9 +45,11 @@ export function appConfirm(title, msg) {
       $("cd-yes").onclick = null;
       $("cd-no").onclick = null;
       document.removeEventListener("keydown", onKey, true);
+      _activeConfirmDone = null;
       if (opener && document.contains(opener)) opener.focus();
       resolve(v);
     };
+    _activeConfirmDone = done;
     const onKey = e => {
       // 只在弹层真的可见时接管 Esc。若它被别的路径关掉了（切会话、其它 openOverlay
       // 复位），这里必须放行 —— 否则这个捕获阶段的监听会残留，把全局 Esc

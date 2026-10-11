@@ -34,7 +34,12 @@ import test_intel as T      # noqa: E402  复用它的假 HTTP 与源声明，�
 TOPICS_JS = ROOT / "desktop" / "renderer" / "js" / "topics.js"
 
 # 视图层 / 源分组 / 条目 —— 选题视图读 payload 的三处入口。
-_READ = re.compile(r"\b(?:it|g|data)\.([A-Za-z_][A-Za-z0-9_]*)\b")
+# P3（2026-10-05）：原来只认 it|g|data 三个变量名 —— topics.js 里 `ev.brief_card`、
+# `sc.opportunity` 这些读键路径走的是别的前缀，守卫对未来的写法不设防。扩到
+# ev / sc 两个前缀（它们读的是 today() 的 events 层）；⚠ `snap` 故意**不**收
+# —— 那是 /api/jobs 的作业快照，另一份契约，混进来会误报。events 层键集也
+# 并进夹具（见 engine_keys）。
+_READ = re.compile(r"\b(?:it|g|data|ev|sc)\.([A-Za-z_][A-Za-z0-9_]*)\b")
 _SLICES = (
     ("卡片", "function card(it) {", "\nfunction renderChips"),
     ("源表", "function renderSources() {", "\nfunction doGenerate"),
@@ -73,6 +78,13 @@ def engine_keys() -> set[str]:
     scored = [it for it in view["items"] if isinstance(it.get("score"), dict)]
     assert scored, "没有任何一条带 score 的条目 —— 打分链路的判据会空转"
     assert "opportunity" in set(scored[0]["score"]), sorted(scored[0]["score"])
+    # events 层（排行事件）也是 today() 下发的一层 —— `ev.*` / `sc.*` 的读键
+    # 守卫要吃得到它（2026-10-05 P3）。
+    assert view["events"], "夹具没产出任何事件 —— events 层的判据会空转"
+    for ev in view["events"]:
+        out |= set(ev)
+        if isinstance(ev.get("score"), dict):
+            out |= set(ev["score"])
     return out
 
 

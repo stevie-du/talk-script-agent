@@ -735,6 +735,8 @@ export async function reattachBusyJob(id) {
 
 /** 打开一条历史记录（产物已落盘）。 */
 export async function openRecord(id) {
+  // 打开历史记录时，窗口标题不再说上一条生成的事（与 newChat / onFailed 同账）
+  resetDocTitle();
   let r;
   try {
     r = await api.record(id);
@@ -919,10 +921,11 @@ async function waitRewriteDone(jid, body, vi) {
     // 一个独立结局交回调用方，而不是静默 `return` —— 静默返回在调用方眼里
     // 与「成功」一模一样（P1-2 的两半症状都从这里长出来）。
     if (!document.contains(body)) return "detached";
-    // P2-9：轮询用轻量快照（不含 result 的几十 KB 产物），并每轮刷新进度。
-    // 修复前 api.job(jid, true) 每 700ms 序列化整份产物，且 waitRewriteDone
-    // 全程不调 renderProgress —— 唯一的反馈是 2.2s 就消失的 toast；后端还在跑、
-    // 前端却已抛「重写超时」，两边相反。
+    // P2-9：轮询用轻量快照（不含 result 的几十 KB 产物），避免每 700ms
+    // 序列化整份产物。⚠「每轮刷新进度」这句旧注释说的是假话（2026-10-05 P3
+    // 改口）：重写期间 body 是结果视图、没有 #step-track，renderProgress
+    // 进门就 return —— 重写**没有**进度展示，真实反馈只有 toast。调用保留
+    // 是为将来结果视图挂进度轨时零改动接上，别把它当成已有的功能。
     const snap = await api.job(jid);
     renderProgress(body, snap);
     if (snap.state === "done") {

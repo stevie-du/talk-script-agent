@@ -680,6 +680,25 @@ def test_env_key_override_beats_the_stored_one(tmp_path, monkeypatch):
     assert next(x for x in raw if x["id"] == "m1")["api_key"] == "sk-from-file"
 
 
+def test_base_url_with_surrounding_spaces_is_refused_not_saved(tmp_path):
+    """P2-7（2026-10-05）：check_base_url 里的 `url != raw.strip()` 恒假——url
+    本身就是 raw.strip()，首尾带空格的地址放行并原样落盘（落盘侧只 rstrip("/")），
+    下一次生成才在请求层炸、报错指不到根因。修后：带首尾空格 = 400 人话，
+    且落盘一字不动；与 upsert_model（先 strip 再校验）同一不变量两个入口同权。"""
+    from app.server import BaseUrlError, check_base_url
+    with pytest.raises(BaseUrlError):
+        check_base_url(" https://api.example.com/v1 ")
+    with pytest.raises(BaseUrlError):
+        check_base_url("https://api.example.com/v1\n")
+    _seed_models(tmp_path, {"id": "a", "base_url": "https://a/v1", "model": "a"},
+                 active="a")
+    c = _client(tmp_path, seed=False)
+    r = c.post("/api/config", json={"base_url": " https://x/v1 "})
+    assert r.status_code == 400, f"应 400，实际 {r.status_code}：{r.text}"
+    raw, _ = load_raw_models(tmp_path)
+    assert raw[0]["base_url"] == "https://a/v1", "报错了不许改动任何一条模型"
+
+
 def test_legacy_config_write_needs_an_active_model(tmp_path):
     """**关掉开关后旧写入口不能 500**（2026-09-19 修）。
 

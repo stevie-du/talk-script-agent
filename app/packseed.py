@@ -226,6 +226,21 @@ def seed_bundled_packs(bundled: Path, packs_dir: Path, app_version: str = "") ->
                 # 提示会被点回来）。
                 continue
 
+            if stored.get("adopted") and stored.get("local") == local_hash:
+                # P2-15（2026-10-05）：`adopted` 标记曾经**零消费方**——上面收编
+                # 那次写了 adopted: True 并承诺"保留你的那份，出厂版本没有并进来"，
+                # 但出厂更新一到，下面的更新分支不看它：用户自己拷进来的同名包
+                # （local 未变）被整个换成出厂版，日志还写"你没改过它"。
+                # 收编 ≠ 同意被覆盖：用户没动它也不换（动了走的是下面的冲突路，
+                # 同样不覆盖）。kept 并把 bundled 指纹刷到当前出厂版，下次出厂
+                # 再变时仍走这条 kept 路、话再说一遍（一次就消失的提醒等于没有）。
+                rec[name] = {**stored, "bundled": src_hash, "version": app_version}
+                summary["kept"].append(name)
+                changed = True
+                log.info("行业包 %s 是收编的用户包（adopted）—— 出厂更新不覆盖它；"
+                         "想要新出厂版的内容请手工比对：%s", name, src)
+                continue
+
             if stored.get("local") == local_hash:
                 _copy_pack(src, dst)
                 rec[name] = {"version": app_version, "bundled": src_hash,

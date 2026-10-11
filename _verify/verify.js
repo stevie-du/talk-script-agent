@@ -464,6 +464,22 @@ window.__errs = [];
 addEventListener('error', e => window.__errs.push(String(e.message)));
 addEventListener('unhandledrejection', e => window.__errs.push('rej: ' + String(e.reason)));
 
+// 下载探针（2026-10-05 save-srt 死按钮）：util.download = new Blob(...) + a[download].click。
+// 包一层 Blob 构造器记录每次下载的文本 —— 「页签内那颗按钮是否真的产出文件」
+// 全靠这里可观察（下载本体落进临时 profile，断言等不起）。
+// 必须在任何模块脚本之前装：result.js 在模块加载时才调 download，绑定的
+// 是全局 Blob，包装后照样命中。
+window.__dl = [];
+(function () {
+  var RealBlob = window.Blob;
+  window.Blob = function (parts, opts) {
+    window.__dl.push({ size: (parts || []).join("").length,
+                       text: String((parts || [])[0] || "").slice(0, 160) });
+    return new RealBlob(parts, opts);
+  };
+  window.Blob.prototype = RealBlob.prototype;
+})();
+
 // CSP 违规监听（P2-5）。桩脚本是 <head> 里的阻塞外部脚本，**先于 body 解析**，
 // 所以初始 HTML 里的内联样式/脚本也逃不掉。
 // 用 sessionStorage 累计：每次 Page.navigate 都会重跑本脚本，不这么做就只剩
@@ -763,7 +779,11 @@ window.__addCount = 0;
     for (var si = 0; si < PG_SPLIT.length; si++) {
       s = s.split(PG_SPLIT[si]).join("-");     // 先按引擎口径把分裂码点当分隔符
     }
-    return s.replace(NON_WORD, "-").replace(EDGE_DASH, "");
+    // 2026-10-05 P2-12：引擎 slugify 追加了首部下划线削除 —— 下划线开头的目录名
+    // 会被 list_packs 当内部骨架过滤（隐形包）。点号是非单词字符本来就会折成
+    // 连字符被削掉，这里只需再削首部的下划线；与引擎的跨语言对账测试钉着两边。
+    // （本文件大段是模板字符串：注释里不许出现反引号。）
+    return s.replace(NON_WORD, "-").replace(EDGE_DASH, "").replace(/^_+/, "");
   }
   // 详情里那份文件清单（/api/packs/<name> 的 files）提到外面来：读文件的分支要按
   // **同一份表**回 size —— 两处各写一份就是第二本账（第 8 轮量到：详情说
@@ -2593,8 +2613,41 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check("字幕预览行数与导出的 SRT 一致（所见即所得）",
     subPrev.rows === subPrev.srtLines && subPrev.rows >= 1,
     `预览=${subPrev.rows} 导出=${subPrev.srtLines}`);
+  // 字幕面板里那颗「导出 SRT」必须是**活的**（2026-10-05 P2-5 存量死按钮）：
+  // bindActions 的 body.querySelector 恒命中结果头那颗（DOM 序在前），页内
+  // 按钮点了零反应——而字幕页存在的意义就是导出前能预览。判据：面板那颗
+  // 点下去要产出一次 Blob（stubScript 的下载探针记着），且内容是 SRT 形状；
+  // 结果头那颗（一直是活的）作对照组。
+  const srtBtn = await evalIn(`return (async () => {
+    var before = (window.__dl || []).length;
+    var pane = document.querySelector('.res-pane[data-tab="subs"]:not(.hidden)');
+    var paneBtn = pane && pane.querySelector('[data-act="save-srt"]');
+    if (!paneBtn) return { hasPaneBtn: false };
+    paneBtn.click();
+    await new Promise(function (r) { setTimeout(r, 120); });
+    var paneBlob = (window.__dl || [])[before] || null;
+    var headBtn = document.querySelector('.res-tools [data-act="save-srt"]');
+    headBtn.click();
+    await new Promise(function (r) { setTimeout(r, 120); });
+    return { hasPaneBtn: true, paneFired: (window.__dl || []).length > before,
+             paneText: paneBlob && paneBlob.text || '',
+             headFired: (window.__dl || []).length > before + 1 };
+  })();`);
+  check("字幕面板里的「导出 SRT」也是活的（同名按钮各自都要能产出下载，不是只绑第一颗）",
+    srtBtn.hasPaneBtn && srtBtn.paneFired && srtBtn.paneText.indexOf("-->") >= 0
+      && srtBtn.headFired, JSON.stringify(srtBtn));
   await evalIn(`document.querySelector('[data-tab="script"].res-tab').click(); return true;`);
   check("回炉原因可展开（决策解释）", done.whyBlock === 1, "");
+  // 折叠箭头必须装在**弹性盒**里（2026-10-05 P2-11）：summary 缺 display:flex 时
+  // ::after 是行内盒——transform 对非原子行内盒不生效，展开后箭头永不旋转
+  // （实测字节级证明）。flex 项会被块化（::after display 变 block），
+  // 两个计算值一起钉，少一条都是死回去。
+  const whySum = await evalIn(`var s = document.querySelector('.banner.why > summary');
+    var cs = getComputedStyle(s), pa = getComputedStyle(s, '::after');
+    return { display: cs.display, afterDisplay: pa.display };`);
+  check("决策解释的折叠箭头装在弹性盒里（行内盒的 rotate 不生效——箭头永远不转）",
+    whySum.display === "flex" && whySum.afterDisplay === "block",
+    JSON.stringify(whySum));
   check("单字词被忽略有说明", done.dropBanner, "");
   // 对照组：正常包不该出现配额降级提示（否则提示变成背景噪音）。
   // 对应的正向断言在 12f。
@@ -3211,6 +3264,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     });`);
   // 一气呵成：找目标 → 记下 rel 和点击前的 title → 点 → 等 title 不再是占位 →
   // 返回 {期望的 rel, 实际 title/body} 让断言用「期望 vs 实际」对得上。
+  // 占位串不进 poll 判据（P3-5，2026-10-11）：showPackFile 在任何 await 之前就把
+  // body 置成「载入中…」，点击后 body 只可能是载入中 / 内容 / 读取失败，占位不可
+  // 能再被观察到 —— 旧判据里的排除串「从上方文件分组…」是查无出处的死账，已删；
+  // 占位真残留时由下方 check 的 bodyLen !== bodyBefore.length 对账兜住（假红不假绿）。
   const piLoaded = await evalIn(`return new Promise(function(res){
     var rows = document.querySelectorAll('#pi-groups .kb-item');
     var target = null;
@@ -3229,8 +3286,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
         var body = document.getElementById('pi-file-body').textContent;
         var title = document.getElementById('pi-file-title').textContent;
         if (title && title !== '未选择文件'
-            && body && body !== '载入中…'
-            && body !== '从上方文件分组选择一个文件查看内容。') {
+            && body && body !== '载入中…') {
           return res({
             expectedRel: expectedRel,
             titleBefore: titleBefore,
@@ -5659,7 +5715,15 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   // 与图例的「≥ 60」两套刻度并排（用户无法判断手里这条够不够线）。
   const intelPy = fs.readFileSync(path.join(REPO_ROOT, "app", "intel.py"), "utf8");
   const legendBlock = (htmlSrc.match(/<div class="score-legend">([\s\S]*?)<\/div>/) || ["", ""])[1];
-  const oppTh = (intelPy.match(/elif opp >= ([0-9]+)/) || [])[1];
+  // 2026-10-05 P3 后续：_flags 的 60 已归一到 HOT_QUADRANT_HIGH 常量（四象限
+  // 档线与机会分黄标是同一条线）。提取方式跟着升级：先认字面量，再认常量引用
+  // —— 从**同一份文件**读出常量值，两处照样不能各写各的。
+  const oppTh = (intelPy.match(/elif opp >= ([0-9]+)/) || [])[1]
+    || (() => {
+      const ref = intelPy.match(/elif opp >= ([A-Z_]+)/);
+      const def = ref && intelPy.match(new RegExp("^" + ref[1] + " = ([0-9.]+)", "m"));
+      return def ? String(parseFloat(def[1])) : "";
+    })();
   const sTh = (intelPy.match(/S is not None and S >= ([0-9.]+)/) || [])[1];
   check("图例的机会分阈值就是引擎那条判据（写死两个数会红）",
     !!oppTh && legendBlock.includes(`机会分 ≥ ${oppTh}`),
@@ -5676,6 +5740,16 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
     !/it\.warn/.test(stripJsComments(fs.readFileSync(path.join(JS_DIR, "topics.js"), "utf8")))
       && !/\.warn\b/.test(fs.readFileSync(path.join(REPO_ROOT, "app", "intel.py"), "utf8")),
     "topics.js 还读 it.warn，或 intel.py 开始发条目级 warn —— 两边要一起说清是谁的通道");
+
+  // ── awaitJob 错误 toast 对调用方中性（P3-6，2026-10-11）──────────────
+  // 这一个 catch 供三个调用方共用：doBrief（生成选题卡）/ kickoffIfStale /
+  // btn-refetch 重抓。文案说「作业」不说「抓取」—— 选题卡作业挂了不能把人
+  // 引去查抓取。正向钉住新词（防空转，同上「换一版」的钉法），反向禁掉旧词。
+  const topicsAwaitSrc = stripJsComments(fs.readFileSync(path.join(JS_DIR, "topics.js"), "utf8"));
+  check("awaitJob 错误 toast 说「作业」不说「抓取」（三个调用方共用这一个 catch）",
+    topicsAwaitSrc.includes("作业状态查询失败")
+      && !topicsAwaitSrc.includes("抓取状态查询失败"),
+    "要么丢了「作业状态查询失败」（判据空转），要么又写回「抓取状态查询失败」");
 
   // ── 一名二物与内部黑话（文案线 P1-7 / P1-9）─────────────────────
   // 面板与导航都叫「行业包」，卸载弹窗却写「技能包」（同一个东西两个名字），
@@ -6096,6 +6170,29 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
       && grpDel.删完.slice().sort().join() === grpDel.该组.slice().sort().join()
       && !grpDel.删完.some(id => grpDel.其他.includes(id)),
     JSON.stringify(grpDel));
+  // 外部收口必须把确认框「说完」（2026-10-05 P2）：确认框开着时 closeOverlays
+  //（开设置页第一行就会调）不能只挂 hidden —— Promise 要以「取消」resolve
+  //（否则 await 方永远挂死），keydown 监听要摘掉（否则残留监听在下一个确认框
+  // 里抢先执行 done()，把人家的弹层藏掉、绑定清空）。
+  const orphan = await evalIn(`return (async () => {
+    var O = await import(new URL('./js/overlays.js', document.baseURI).href);
+    var p = O.appConfirm('外部收口测试', '这句话会被 closeOverlays 打断');
+    setTimeout(function () { O.closeOverlays(); }, 80);
+    var v = await Promise.race([p,
+      new Promise(function (r) { setTimeout(function () { r('__HANG__'); }, 1500); })]);
+    var hiddenAfter = document.getElementById('confirm-dialog').classList.contains('hidden');
+    // 残留监听的下一半：收口后再开一颗，点「取消」必须正常 resolve。
+    var p2 = O.appConfirm('收口后第二颗', '正常开合');
+    var done2 = false;
+    p2.then(function () { done2 = true; });
+    await new Promise(function (r) { setTimeout(r, 80); });
+    document.getElementById('cd-no').click();
+    await new Promise(function (r) { setTimeout(r, 150); });
+    return { first: v, hiddenAfter: hiddenAfter, secondResolved: done2 };
+  })();`);
+  check("确认框被外部收口时 Promise 以取消 resolve（挂死=await 方永不恢复），下一颗照常工作",
+    orphan.first === false && orphan.hiddenAfter && orphan.secondResolved,
+    JSON.stringify(orphan));
 
   // 分组标签悬停必须有落点。此前是 `.group-lbl:hover{color:var(--text-2)}` ——
   // 与常态**同一个值**的一条空规则：标签看着就是一行普通文字，
@@ -8736,6 +8833,21 @@ check("取消编辑后回到当前启用的那条，且不留残余输入",
   check("窄窗下首页列与**按来源面**左边界重合（内边距没跟着降档就会错开）",
     Math.abs(narrowAlign.topicsLeft - narrowAlign.chatLeft) <= 1,
     JSON.stringify(narrowAlign));
+  // 窄窗**底边距**降档（§2.8 那条媒体查询里唯一活着的部分）：这条规则曾死于
+  // 源码顺序 —— 媒体块在文件头部、基础规则在后，同特异性后者胜，声明的 12px
+  // 从未生效（computed 恒 24px；s23-3 的注释只认了水平方向是虚的）。
+  // 2026-09-30 搬到基础规则之后才活；这里量 computed 值钉住，死回去立刻红
+  // （变异 s43-1：改回 24 必须红）。`.topics-src-inner` 此刻在隐藏面上，
+  // display:none 的 computed padding 照常取值，两面一起量。
+  const narrowPad = await evalIn(`var s3 = getComputedStyle(document.documentElement)
+      .getPropertyValue('--s3').trim();
+    var inner = getComputedStyle(document.querySelector('#topics-scroll .topics-inner'));
+    var src = getComputedStyle(document.querySelector('#topics-src .topics-src-inner'));
+    return { s3: s3, inner: inner.paddingBottom, src: src.paddingBottom };`);
+  check("窄窗下选题两面的底边距降到 --s3（这条规则曾死于源码顺序，12px 从未生效）",
+    narrowPad.s3 !== "" && narrowPad.inner === narrowPad.s3
+      && narrowPad.src === narrowPad.s3,
+    JSON.stringify(narrowPad));
   await evalIn(`window.__ts.gotoView('chat'); return 1;`);
   await sleep(400);
 

@@ -21,7 +21,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-from .packimport import (PackImportError, validate_dir, validate_zip)
+from .packimport import (PackImportError, _find_pack_root,
+                         validate_dir, validate_zip)
 
 
 def _count_files(pack_root: Path) -> int:
@@ -38,6 +39,10 @@ def check(target: str) -> int:
         if p.is_dir():
             r = validate_dir(p)
             kind = "目录"
+            # P3（2026-10-05）：目录模式也只数**包根**（pack.yaml 所在那一层），
+            # 与 zip 模式同一条口径 —— 旧写法数整棵入参目录，"裹了一层目录 +
+            # 旁边有杂物"的自检会比同一份包打成的 zip 多出文件数。
+            n = _count_files(_find_pack_root(p))
         else:
             data = p.read_bytes()
             # zip 模式：校验要解压，临时目录的生命周期在这里。
@@ -45,8 +50,6 @@ def check(target: str) -> int:
                 r, pack_root = validate_zip(data, Path(td))
                 kind = "zip"
                 n = _count_files(pack_root)
-        if p.is_dir():
-            n = _count_files(p)
     except PackImportError as e:
         print(f"✗ 校验没通过：{e}")
         return 1
